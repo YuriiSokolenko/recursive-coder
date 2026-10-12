@@ -1,52 +1,50 @@
 # Recursive Coder
 
-**Recursive Coder** is a planned autonomous coding agent built with **Kotlin/JVM** and **JetBrains Koog**.
+**Recursive Coder** — самостоятельный open-source агент для разработки программного обеспечения на **Kotlin/JVM + JetBrains Koog**.
 
-> **Status: independent Kotlin/JVM build, canonical session contract v1 and CI scaffold.** The coding agent, observable Koog session controller and GitHub adapter are **not implemented yet**.
+> **Status:** архитектура и базовая сборка. Собственный CI и контрактный модуль уже существуют. Исполняемый агент, планировщик, API и интерфейс пока не реализованы.
 
-## Goal
+## Что мы создаём
 
-Build an observable, controllable and recoverable multi-agent coding system, instead of relying on an opaque third-party agent runtime.
+Не оболочку над чужим CI, а полноценный coding agent, который сам управляет жизненным циклом задачи: получает запрос, изучает проект, декомпозирует работу, создаёт спецификацию и тесты, пишет код, проверяет изменения и сохраняет результат. Его можно запускать локально или интегрировать в другие системы, но для работы ему не нужен внешний GitHub workflow, отдельный диспетчер или сторонний контролирующий сервис.
 
-The intended development pipeline is **SDD → ATDD → TDD → Develop → Independent Review**. Each stage is owned by a separate agent, and decomposition can recurse until tasks are atomic.
+### Рекурсивный процесс
 
-Approved specifications and acceptance/unit tests are protected: the Developer agent cannot modify artifacts authored by SDD/ATDD/TDD. Changes require a separate reviewed process and trusted tool authorization.
+`SDD → ATDD → TDD → Develop → Independent Review`.
 
-## Architecture boundary
+Каждая роль — отдельный агент; сложная задача может рекурсивно делиться на подзадачи до достижения атомарных шагов. Спецификации и тесты, созданные SDD/ATDD/TDD, защищены от изменений Developer; корректировки проходят отдельную авторизованную проверку.
 
-- **GitHub Actions / [social-mcp](https://github.com/YuriiSokolenko/social-mcp)** own global scheduling, issues/PRs, CI, Merge Gate, Reconciler and N150 runners.
-- **Recursive Coder / Koog** owns agent orchestration **inside one GitHub Actions job**, including its subagents, recursion, tools, budgets, checkpoints and trace.
-- **HP Nano** provides the local LLM through an OpenAI-compatible API.
-- Each job starts one logical coding session. A later job attempt may safely resume it when durable state and authorization permit.
-- The existing Pi implementation remains an optional rollback backend throughout migration.
+## Архитектура продукта
 
-**Observable by Design:** record structured, correlated state transitions, model/tool interactions, policy decisions, errors and external side effects. Diagnostic replay uses recorded responses; it does not claim access to private model reasoning.
+- **Task Manager / Scheduler:** собственные задачи, приоритеты, зависимости, управление параллельностью и отменой.
+- **Session Controller:** корневая сессия и вложенные агенты, конечный автомат, бюджеты, ограничения времени.
+- **Agent Graph:** рекурсивная декомпозиция и координация SDD, ATDD, TDD, Developer, Reviewer.
+- **Tool Runtime:** доверенная авторизация, изоляция workspace, инструменты чтения, изменения и валидации.
+- **Model Gateway:** настраиваемые локальные и совместимые LLM API; без привязки к одной модели, хосту или устройству.
+- **Event Journal / Checkpoints:** коррелированные события, диагностика, восстановление и контролируемый повтор внешних действий.
+- **Interfaces:** в первую очередь CLI, затем API и опциональные интеграции.
 
-## Independent project and CI
+Продукт должен управлять **своими** задачами и сессиями. Git используется для работы с кодом; GitHub может стать одним из дополнительных провайдеров, но не обязательной частью runtime.
 
-This repository is independently built and tested. It does **not** use the `social-mcp` CI, N150 runner pool or HP Nano for pull-request checks.
+## Сборка и CI
 
-- **Kotlin/JVM**: Kotlin `2.4.21`, JDK `21`, Gradle `9.8.1` and pinned Koog `1.3.0` dependency. Only a protocol-version admission stub exists; a functional agent is the next milestone.
-- **[Recursive Coder CI](.github/workflows/ci.yml)**: GitHub-hosted PR/push checks for `dev` and `main` plus manual dispatch. Kotlin compilation/unit tests run separately from versioned contract validation.
-- **[Canonical session protocol v1](contracts/README.md)**: JSON Schema, fixtures, independent conformance tests and exact ownership/admission guarantees. `social-mcp` has a historical snapshot and will eventually only consume a pinned version through an adapter.
+Сейчас: Kotlin 2.4.21, JDK 21, Gradle 9.8.1, Koog 1.3.0 (зависимость), unit-тесты и версия протокола `1.0`. Текущий Kotlin-код — только заглушка согласования версии; он не исполняет модель.
 
-Reproduce the first JVM checks locally with JDK 21 and Gradle 9.8.1: `gradle test`. For schema tests, see `contracts/README.md`.
+[Собственный GitHub Actions CI](.github/workflows/ci.yml) на `ubuntu-latest` запускает Kotlin build/test и проверку Session Protocol через Node + JSON Schema Draft 2020-12. Никакой внешний runner, локальная LLM или приватные API для CI не нужны.
 
-No production model requests, GitHub PR publication, Checkpoint/resume or recursive agent execution are implied by a green build yet.
+## Документация
 
-## Documentation
+- [Архитектура и собственный план развития](docs/architecture/ARCHITECTURE.md)
+- [Session Protocol v1](contracts/README.md) — вход/выход, события, checkpoint, политика совместимости
+- [JSON Schema](contracts/v1/session-v1.schema.json) и [тестовые примеры](contracts/v1/session-v1.examples.json)
 
-- **[Agent Runtime Architecture v0.2](docs/architecture/KOOG_AGENT_RUNTIME_ARCHITECTURE_v0.2.md)** — current architectural RFC, including Observability, Controllability and Reproducibility.
-- [Agent Runtime Architecture v0.1](docs/architecture/KOOG_AGENT_RUNTIME_ARCHITECTURE_v0.1.md) — initial historical draft, preserved for context.
+## План реализации
 
-The architecture documents are currently written in Russian. They describe a proposed target design rather than implemented features.
+1. Собственный CLI и `SessionController`; детерминированный fake LLM и наблюдаемый read-only сценарий.
+2. Model Gateway и реальная проверка совместимости LLM API.
+3. Собственный Task Manager, рекурсивный Agent Graph, SDD → ATDD → TDD → Develop → Review.
+4. Доверенные инструменты, защита спецификаций и тестов, sandbox, проверка результатов.
+5. Checkpoints, recovery, идемпотентность, полная диагностика, fault injection.
+6. Публичный API, интеграции, release packaging и измерения качества на независимых тестовых задачах.
 
-## Roadmap and work tracking
-
-The migration work is tracked in the existing project's **[Koog extraction Epic #783](https://github.com/YuriiSokolenko/social-mcp/issues/783)** and tasks [#784–#790](https://github.com/YuriiSokolenko/social-mcp/issues/783). The #784 boundary/contract milestone is merged; the next implementation milestone is #785 (standalone executable Koog session). This repository owns the ongoing contract source and CI.
-
-The old JavaScript `agent-harness` extraction proposal is not a blueprint for mechanically copying all control-plane code here: GitHub-owned control-plane responsibilities remain in `social-mcp`.
-
----
-
-Koog is a JetBrains framework used as a dependency; **Recursive Coder is an independent project** and is not presented as an official JetBrains product.
+**Принцип:** Recursive Coder проектируется и тестируется как отдельный продукт. Внешние инструменты и сервисы — подключаемые адаптеры, а не владельцы его жизненного цикла.
