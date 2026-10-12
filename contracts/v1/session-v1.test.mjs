@@ -83,7 +83,7 @@ test('major mismatch and ambiguous or unknown top-level contract fields fail clo
   unknownField.implicitWritePermission = true;
   rejected(unknownField, 'unknown top-level authorization');
   const missing = copy(fixtures.freshRequest);
-  delete missing.repository.baselineSha;
+  delete missing.workspace.baselineSha;
   rejected(missing, 'mandatory repository baseline');
 });
 
@@ -105,10 +105,10 @@ test('fresh/resume requires immutable reference and a stronger fencing generatio
   resumeWithoutCheckpoint.resume.checkpoint = null;
   rejected(resumeWithoutCheckpoint, 'resume requires hashed reference');
   assert.equal(fixtures.resumeRequest.sessionId, fixtures.freshRequest.sessionId);
-  assert.equal(fixtures.resumeRequest.run.runId, fixtures.freshRequest.run.runId);
-  assert.ok(fixtures.resumeRequest.run.attempt > fixtures.freshRequest.run.attempt);
+  assert.equal(fixtures.resumeRequest.invocation.invocationId, fixtures.freshRequest.invocation.invocationId);
+  assert.ok(fixtures.resumeRequest.invocation.attempt > fixtures.freshRequest.invocation.attempt);
   assert.ok(fixtures.resumeRequest.resume.fenceGeneration > fixtures.checkpoint.fenceGeneration);
-  assert.equal(fixtures.checkpoint.repository.baselineSha, fixtures.resumeRequest.repository.baselineSha);
+  assert.equal(fixtures.checkpoint.workspace.baselineSha, fixtures.resumeRequest.workspace.baselineSha);
   assert.equal(fixtures.checkpoint.policySha256, fixtures.resumeRequest.toolPolicy.policySha256);
 });
 
@@ -123,7 +123,7 @@ test('terminal states require structured errors on failures and none on success'
   secretInline.model.credentialRef = 'Bearer secret';
   rejected(secretInline, 'must reference an env variable, not a secret value');
   const pathTraversal = copy(fixtures.freshRequest);
-  pathTraversal.outputs.resultPath = '/evidence/koog/../escape.json';
+  pathTraversal.outputs.resultPath = '/tmp/recursive-coder/../escape.json';
   rejected(pathTraversal, 'artifact traversal');
 });
 
@@ -132,7 +132,7 @@ test('journal correlation, child and tool IDs, checkpoint and results are linkab
   assert.equal(event.sessionId, checkpoint.sessionId);
   assert.equal(event.traceId, successResult.traceId);
   assert.equal(successResult.requestId, resumeRequest.requestId);
-  assert.equal(event.causationId, 'evt-770-4');
+  assert.equal(event.causationId, 'evt-demo-4');
   assert.ok(event.sequence > checkpoint.sequence);
   assert.ok(successResult.lastEventSeq >= event.sequence);
   assert.equal(successResult.provenance.fenceGeneration, resumeRequest.resume.fenceGeneration);
@@ -140,21 +140,21 @@ test('journal correlation, child and tool IDs, checkpoint and results are linkab
   assert.equal(checkpoint.status, 'durable');
   assert.equal(checkpoint.lastEventSeq, checkpoint.sequence);
   assert.equal(checkpoint.activeChildSessionIds.length, 1);
-  assert.equal(successResult.provenance.baselineSha, freshRequest.repository.baselineSha);
+  assert.equal(successResult.provenance.baselineSha, freshRequest.workspace.baselineSha);
   const malformed = copy(event);
   malformed.actor.toolExecutionId = 42;
   rejected(malformed, 'tool IDs must be correlated strings or null');
 });
 
-test('not a substitute for adapter-side capability, checksum, path or lease enforcement', () => {
-  // These are cross-record invariants (trusted adapter responsibilities), not
+test('runtime authorization remains stronger than JSON schema shape checks', () => {
+  // These are cross-record invariants (trusted runtime responsibilities), not
   // independent JSON-schema checks. Changing fixture examples must not break
   // the documented model/tool authorization or rollback expectations.
   const {freshRequest, resumeRequest} = fixtures;
   assert.deepEqual(freshRequest.requiredCapabilities, resumeRequest.requiredCapabilities);
   assert.deepEqual(freshRequest.toolPolicy, resumeRequest.toolPolicy);
   assert.equal(freshRequest.model.baseUrl, resumeRequest.model.baseUrl);
-  assert.ok(freshRequest.toolPolicy.deniedTools.includes('github_write'));
+  assert.ok(freshRequest.toolPolicy.deniedTools.includes('publish_remote'));
   assert.equal(freshRequest.toolPolicy.mode, 'scoped-write');
 });
 
@@ -184,4 +184,13 @@ test('fixture validator fails closed when schema introduces an unsupported keywo
     }
   };
   visit(schema);
+});
+
+test('session admission does not require any external CI provider', () => {
+  assert.equal(fixtures.freshRequest.invocation.source, 'cli');
+  const unknownSource = copy(fixtures.freshRequest);
+  unknownSource.invocation.source = 'remote-workflow';
+  rejected(unknownSource, 'only explicit native invocation modes are supported');
+  assert.ok(fixtures.freshRequest.workspace.rootPath.startsWith('/tmp/recursive-coder/'));
+  assert.equal(fixtures.freshRequest.workspace.workspaceId, fixtures.checkpoint.workspace.workspaceId);
 });

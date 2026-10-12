@@ -11,7 +11,7 @@ kotlin {
 
 dependencies {
     // A pinned Koog API on the compilation classpath. Runtime integration
-    // and observable sessions are implemented separately in #785.
+    // and observable sessions belong to a future independent milestone.
     implementation("ai.koog:koog-agents:1.3.0")
     testImplementation(kotlin("test-junit5"))
     testRuntimeOnly("org.junit.jupiter:junit-jupiter-engine:5.12.2")
