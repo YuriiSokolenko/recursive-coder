@@ -45,7 +45,37 @@ jobs:
             --ro-bind /lib /lib --ro-bind /lib64 /lib64 \
             -- /usr/bin/true
       - name: Compile and test standalone JVM project
-        run: ./gradlew --no-daemon test --info --stacktrace
+        env:
+          CI: 'true'
+        run: ./gradlew --no-daemon test --stacktrace
+      - name: Confirm sandbox integration test was not skipped
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from xml.etree import ElementTree as ET
+
+          files = list(Path("build/test-results/test").glob("TEST-*.xml"))
+          cases = [
+              case
+              for path in files
+              for case in ET.parse(path).iter("testcase")
+              if case.get("name", "").startswith(
+                  "realSeparatelyExecutedSandboxedTestPassesIfHostSupportsUserNamespaces"
+              )
+          ]
+          if len(cases) != 1 or any(
+              case.find(tag) is not None for case in cases for tag in ("skipped", "failure", "error")
+          ):
+              raise SystemExit("Sandbox integration MUST run and pass exactly once in CI")
+          print("Verified sandbox integration executed and passed (0 skips).")
+          PY
+      - name: Publish Kotlin JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recursive-coder-junit-results
+          path: build/test-results/test/TEST-*.xml
+          if-no-files-found: error
 
       - uses: actions/setup-python@v5
         with:
