@@ -228,7 +228,7 @@ class WorkspaceManager private constructor(
         }
 
         private fun configuredLockDirectory(): Path =
-            System.getProperty("recursiveCoder.lockDirectory")?.let(Path::of)
+            System.getProperty("recursiveCoder.lockDirectory")?.let { Path.of(it) }
                 ?: Path.of(System.getProperty("user.home"), ".recursive-coder", "locks")
 
         /** PATH and JVM properties are trusted host settings, not model-call arguments. */
