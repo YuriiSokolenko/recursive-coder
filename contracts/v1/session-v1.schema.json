@@ -927,6 +927,7 @@
             "session.resumed",
             "agent.started",
             "agent.completed",
+            "llm.capabilities",
             "llm.request",
             "llm.response",
             "tool.started",
