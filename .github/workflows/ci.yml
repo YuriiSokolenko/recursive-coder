@@ -28,8 +28,54 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.8.1'
+      - name: Install isolated-check sandbox
+        run: sudo apt-get update -qq && sudo apt-get install -y bubblewrap
+      # This is a disposable GitHub runner, not a production sandbox host.
+      # Ubuntu 24.04 AppArmor otherwise forbids creating network namespaces.
+      - name: Enable namespaces on disposable runner
+        run: |
+          if [ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+      - name: Verify bubblewrap isolation is executable
+        run: |
+          /usr/bin/bwrap --die-with-parent --new-session --unshare-all \
+            --tmpfs / --proc /proc --dev /dev \
+            --ro-bind /usr /usr --ro-bind /bin /bin \
+            --ro-bind /lib /lib --ro-bind /lib64 /lib64 \
+            -- /usr/bin/true
       - name: Compile and test standalone JVM project
+        env:
+          CI: 'true'
         run: ./gradlew --no-daemon test --stacktrace
+      - name: Confirm sandbox integration test was not skipped
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from xml.etree import ElementTree as ET
+
+          files = list(Path("build/test-results/test").glob("TEST-*.xml"))
+          cases = [
+              case
+              for path in files
+              for case in ET.parse(path).iter("testcase")
+              if case.get("name", "").startswith(
+                  "realSeparatelyExecutedSandboxedTestPassesIfHostSupportsUserNamespaces"
+              )
+          ]
+          if len(cases) != 1 or any(
+              case.find(tag) is not None for case in cases for tag in ("skipped", "failure", "error")
+          ):
+              raise SystemExit("Sandbox integration MUST run and pass exactly once in CI")
+          print("Verified sandbox integration executed and passed (0 skips).")
+          PY
+      - name: Publish Kotlin JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recursive-coder-junit-results
+          path: build/test-results/test/TEST-*.xml
+          if-no-files-found: error
 
       - uses: actions/setup-python@v5
         with:
