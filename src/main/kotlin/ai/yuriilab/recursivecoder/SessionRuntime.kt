@@ -383,7 +383,10 @@ class SessionController(
                 journal.append("llm.request", "started", started = modelStart,
                     extra = buildJsonObject { put("provider", config.provider); put("turn", turn + 1) })
                 val response = try {
-                    model.next(config, request.taskPath, observed, cancellation, deadline, turn == 0)
+                    model.next(config, request.taskPath, observed, cancellation, deadline,
+                        turn == 0 && (request.budgets["maxModelRequests"]?.let {
+                            request.budgets.longAt("maxModelRequests")
+                        } ?: Long.MAX_VALUE) > 2)
                 }
                 catch (_: InterruptedException) { cancellation.check(deadline); throw Stopped(false) }
                 cancellation.check(deadline)
