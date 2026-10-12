@@ -229,6 +229,23 @@ class WorkspaceManagerTest {
             assertTrue(manager.execute(WorkspaceTool.Read("task.md")).permitted)
         }
         assertEquals("succeeded", SessionController(logical).run()["status"]!!.jsonPrimitive.content)
+
+        // A canonical output path inside the same workspace must never bypass an aliased root.
+        val inside = root.resolve("forbidden-output")
+        val previousOutputs = logical.outputs
+        val escapedOutputs = buildJsonObject {
+            put("rootDir", inside.toString())
+            put("resultPath", inside.resolve("result.json").toString())
+            put("eventsPath", inside.resolve("events.jsonl").toString())
+            put("checkpointDir", inside.resolve("checkpoints").toString())
+            put("diagnosticsPath", inside.resolve("diagnostics.json").toString())
+        }
+        assertNotEquals(previousOutputs, escapedOutputs)
+        val unsafe = SessionRequest.parse(JsonObject(logical.raw +
+            ("outputs" to escapedOutputs)).toString())
+        assertEquals("UNSAFE_OUTPUT_PATH",
+            assertFailsWith<Refused> { SessionController(unsafe).run() }.code)
+        assertFalse(Files.exists(inside), "Unsafe output directory must not be created")
     }
 
     @Test fun searchSkipsBinaryOversizedAndDeletedFilesAndTruncatesLargeTrees() {
