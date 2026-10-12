@@ -260,6 +260,13 @@ class WorkspaceManagerTest {
             assertFailsWith<Refused> { open(request) }.code)
     }
 
+    @Test fun executableGitFilterConfigurationIsRefusedAtAdmission() {
+        val (root, request) = fixture()
+        git(root, "config", "filter.suspicious.clean", "sh -c 'exit 1'")
+        assertEquals("UNSAFE_GIT_CONFIGURATION",
+            assertFailsWith<Refused> { open(request) }.code)
+    }
+
     @Test fun unsupportedModeAndLargeFilesFailClosed() {
         val (_, unsafe) = fixture(mode = "scoped-write")
         assertEquals("UNSUPPORTED_TOOL_POLICY",
