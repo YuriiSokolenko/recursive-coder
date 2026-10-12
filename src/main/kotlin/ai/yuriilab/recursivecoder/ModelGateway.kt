@@ -1,5 +1,6 @@
 package ai.yuriilab.recursivecoder
 
+import java.io.IOException
 import java.net.URI
 import java.net.URLEncoder
 import java.net.http.HttpClient
@@ -9,6 +10,7 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.Path
 import java.time.Duration
 import java.time.Instant
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.serialization.json.*
 
 /** The gateway has no authority to execute tools: it may only propose a decision. */
@@ -119,17 +121,21 @@ class FakeModel(private val delayMs: Long = 0) : ModelGateway {
  * This extension is intentionally documented because OpenAI-compatible servers
  * do not have a universal capability-discovery schema.
  */
-class OpenAICompatibleGateway : ModelGateway {
+class OpenAICompatibleGateway(
+    private val lookupCredential: (String) -> String? = System::getenv
+) : ModelGateway {
+    private val clients = ConcurrentHashMap<Long, HttpClient>()
     private val supported = setOf("tool_calls", "tool_choice", "streaming",
         "structured_outputs", "usage_metadata", "error_metadata")
     private val limitBytes = 1_048_576
 
     override fun negotiate(config: ModelConfig, cancellation: Cancellation, deadline: Instant): GatewayCapabilities {
+        if (config.modelId in setOf(".", ".."))
+            throw Refused("UNSUPPORTED_MODEL", "provider", "Invalid model identifier")
         if (config.provider != "openai-compatible" || "tool_calls" !in config.features ||
             !supported.containsAll(config.features) || config.maxOutputTokens >= config.contextTokens)
             throw Refused("UNSUPPORTED_MODEL", "provider", "Unsupported model feature selection")
-        val client = client(config)
-        val response = send(client, request(config, "models/" + encode(config.modelId), "GET", null),
+        val response = send(client(config), request(config, "models/" + encode(config.modelId), "GET", null),
             config, cancellation, deadline, retryable = true)
         val record = parseObject(response.body)
         if (record["id"]?.jsonPrimitive?.content != config.modelId)
@@ -157,7 +163,7 @@ class OpenAICompatibleGateway : ModelGateway {
             config, cancellation, deadline, retryable = allowRetry && observed == null)
         val parsed = if (stream) parseStream(response.body) else parseCompletion(response.body)
         val decision = parseDecision(parsed, task, observed)
-        if ("usage_metadata" in config.features && parsed.usage == null) throw unsupported()
+        if ("usage_metadata" in config.features && parsed.usage == null) throw invalidResponse()
         cancellation.check(deadline)
         return ModelTurn(decision, parsed.usage, response.attempts, response.status)
     }
@@ -165,17 +171,23 @@ class OpenAICompatibleGateway : ModelGateway {
     private fun unsupported() =
         Refused("MODEL_CAPABILITY_UNSUPPORTED", "provider", "Required model capability is unavailable")
 
-    private fun client(config: ModelConfig) = HttpClient.newBuilder()
-        .connectTimeout(Duration.ofMillis(config.connectTimeoutMs))
-        .followRedirects(HttpClient.Redirect.NEVER)
-        .build()
+    private fun invalidResponse() =
+        Refused("MODEL_INVALID_RESPONSE", "provider", "Invalid model response")
+
+    private fun client(config: ModelConfig) = clients.computeIfAbsent(config.connectTimeoutMs) { timeout ->
+        HttpClient.newBuilder()
+            .connectTimeout(Duration.ofMillis(timeout))
+            .followRedirects(HttpClient.Redirect.NEVER)
+            .build()
+    }
 
     private fun encode(value: String) = URLEncoder.encode(value, StandardCharsets.UTF_8)
         .replace("+", "%20")
 
     private fun uri(config: ModelConfig, suffix: String): URI {
         val root = try { URI(config.baseUrl.trimEnd('/') + "/") } catch (_: Exception) { throw unsupported() }
-        if (root.userInfo != null || root.rawQuery != null || root.fragment != null ||
+        if (config.modelId in setOf(".", "..") ||
+            root.userInfo != null || root.rawQuery != null || root.fragment != null ||
             root.host == null || root.scheme !in setOf("http", "https"))
             throw unsupported()
         if (root.scheme == "http" && root.host !in setOf("localhost", "127.0.0.1", "::1", "[::1]"))
@@ -189,7 +201,7 @@ class OpenAICompatibleGateway : ModelGateway {
             .timeout(Duration.ofMillis(config.requestTimeoutMs))
             .header("Accept", "application/json, text/event-stream")
         val envKey = config.credentialRef.removePrefix("env:")
-        val secret = System.getenv(envKey)?.takeIf { it.isNotBlank() }
+        val secret = lookupCredential(envKey)?.takeIf { it.isNotBlank() }
         if (secret == null && destination.scheme == "https")
             throw Refused("MODEL_CREDENTIAL_UNAVAILABLE", "provider", "Model credential is unavailable")
         if (secret != null) builder.header("Authorization", "Bearer $secret")
@@ -200,6 +212,7 @@ class OpenAICompatibleGateway : ModelGateway {
 
     private data class Reply(val body: String, val attempts: Int, val status: Int)
 
+    /** Bound request retries to at most two wire attempts before any trusted tool runs. */
     private fun send(
         client: HttpClient, request: HttpRequest, config: ModelConfig,
         cancellation: Cancellation, deadline: Instant, retryable: Boolean
@@ -207,44 +220,55 @@ class OpenAICompatibleGateway : ModelGateway {
         val maxAttempts = if (retryable) 2 else 1
         for (attempt in 1..maxAttempts) {
             cancellation.check(deadline)
-            val response = try {
-                client.send(request, HttpResponse.BodyHandlers.ofInputStream())
+            var retryDelay: Long? = null
+            var readingBody = false
+            try {
+                val response = client.send(request, HttpResponse.BodyHandlers.ofInputStream())
+                response.body().use { input ->
+                    val code = response.statusCode()
+                    if (code == 401 || code == 403)
+                        throw Refused("MODEL_AUTH_FAILED", "provider", "Model authentication failed")
+                    if (code in 300..399)
+                        throw Refused("MODEL_REDIRECT_DENIED", "provider", "Model redirect denied")
+                    if (code == 429 || code in 500..599) {
+                        if (attempt == maxAttempts)
+                            throw Refused("MODEL_RETRY_EXHAUSTED", "provider", "Model temporarily unavailable")
+                        val seconds = response.headers().firstValue("Retry-After").orElse("0")
+                            .toLongOrNull()?.coerceIn(0, 1) ?: 0L
+                        retryDelay = if (seconds == 0L) 100L else seconds * 1000L
+                    } else {
+                        if (code !in 200..299)
+                            throw Refused("MODEL_HTTP_ERROR", "provider", "Model request rejected")
+                        readingBody = true
+                        val bytes = input.readNBytes(limitBytes + 1)
+                        cancellation.check(deadline)
+                        if (bytes.size > limitBytes)
+                            throw Refused("MODEL_RESPONSE_TOO_LARGE", "provider", "Model response exceeds size limit")
+                        return Reply(String(bytes, StandardCharsets.UTF_8), attempt, code)
+                    }
+                }
             } catch (_: InterruptedException) {
                 cancellation.check(deadline)
                 Thread.currentThread().interrupt()
                 throw Stopped(false)
+            } catch (_: IOException) {
+                cancellation.check(deadline)
+                if (attempt == maxAttempts)
+                    throw Refused(
+                        if (readingBody) "MODEL_STREAM_INCOMPLETE" else "MODEL_TRANSPORT_FAILED",
+                        "provider", "Model transport failed"
+                    )
+                retryDelay = 100L
+            } catch (e: Refused) {
+                throw e
             } catch (_: Exception) {
                 cancellation.check(deadline)
                 throw Refused("MODEL_TRANSPORT_FAILED", "provider", "Model transport failed")
             }
-            var retryDelay: Long? = null
-            response.body().use { input ->
-                val code = response.statusCode()
-                if (code == 401 || code == 403)
-                    throw Refused("MODEL_AUTH_FAILED", "provider", "Model authentication failed")
-                if (code in 300..399)
-                    throw Refused("MODEL_REDIRECT_DENIED", "provider", "Model redirect denied")
-                if (code == 429 || code in 500..599) {
-                    if (attempt == maxAttempts)
-                        throw Refused("MODEL_RETRY_EXHAUSTED", "provider", "Model temporarily unavailable")
-                    val seconds = response.headers().firstValue("Retry-After").orElse("0")
-                        .toLongOrNull()?.coerceIn(0, 1) ?: 0L
-                    retryDelay = if (seconds == 0L) 100L else seconds * 1000L
-                } else {
-                    if (code !in 200..299)
-                        throw Refused("MODEL_HTTP_ERROR", "provider", "Model request rejected")
-                    val bytes = try { input.readNBytes(limitBytes + 1) } catch (_: Exception) {
-                        cancellation.check(deadline)
-                        throw Refused("MODEL_STREAM_INCOMPLETE", "provider", "Model response interrupted")
-                    }
-                    cancellation.check(deadline)
-                    if (bytes.size > limitBytes)
-                        throw Refused("MODEL_RESPONSE_TOO_LARGE", "provider", "Model response exceeds size limit")
-                    return Reply(String(bytes, StandardCharsets.UTF_8), attempt, code)
-                }
-            }
             val delay = retryDelay ?: break
-            try { Thread.sleep(delay) } catch (_: InterruptedException) {
+            try {
+                Thread.sleep(delay)
+            } catch (_: InterruptedException) {
                 cancellation.check(deadline)
                 throw Stopped(false)
             }
@@ -328,19 +352,19 @@ class OpenAICompatibleGateway : ModelGateway {
         val item = obj["usage"] as? JsonObject ?: return null
         val input = item["prompt_tokens"]?.jsonPrimitive?.longOrNull ?: return null
         val output = item["completion_tokens"]?.jsonPrimitive?.longOrNull ?: return null
-        if (input < 0 || output < 0) throw unsupported()
+        if (input < 0 || output < 0) throw invalidResponse()
         return ModelUsage(input, output)
     }
 
     private fun parseCompletion(raw: String): Completion {
         val obj = parseObject(raw)
-        val choice = (obj["choices"] as? JsonArray)?.singleOrNull() as? JsonObject ?: throw unsupported()
-        val message = choice["message"] as? JsonObject ?: throw unsupported()
+        val choice = (obj["choices"] as? JsonArray)?.singleOrNull() as? JsonObject ?: throw invalidResponse()
+        val message = choice["message"] as? JsonObject ?: throw invalidResponse()
         val calls = message["tool_calls"] as? JsonArray
-        if (calls != null && calls.size != 1) throw unsupported()
+        if (calls != null && calls.size != 1) throw invalidResponse()
         val function = (calls?.singleOrNull() as? JsonObject)?.get("function") as? JsonObject
         return Completion(
-            choice["finish_reason"]?.jsonPrimitive?.content ?: throw unsupported(),
+            choice["finish_reason"]?.jsonPrimitive?.content ?: throw invalidResponse(),
             (message["content"] as? JsonPrimitive)?.contentOrNull ?: "",
             function?.get("name")?.jsonPrimitive?.contentOrNull,
             function?.get("arguments")?.jsonPrimitive?.contentOrNull,
@@ -365,20 +389,20 @@ class OpenAICompatibleGateway : ModelGateway {
             if (data == "[DONE]") { done = true; break }
             val obj = parseObject(data)
             usage(obj)?.let { reportedUsage = it }
-            val choices = obj["choices"] as? JsonArray ?: throw unsupported()
+            val choices = obj["choices"] as? JsonArray ?: throw invalidResponse()
             if (choices.isEmpty()) continue
-            val choice = choices.singleOrNull() as? JsonObject ?: throw unsupported()
+            val choice = choices.singleOrNull() as? JsonObject ?: throw invalidResponse()
             choice["finish_reason"]?.takeUnless { it == JsonNull }?.let {
                 finish = it.jsonPrimitive.content
             }
-            val delta = choice["delta"] as? JsonObject ?: throw unsupported()
+            val delta = choice["delta"] as? JsonObject ?: throw invalidResponse()
             val text = delta["content"] as? JsonPrimitive
             if (text != null && text != JsonNull) content.append(text.content)
             if (delta["refusal"] != null && delta["refusal"] != JsonNull) refused = true
             val calls = delta["tool_calls"] as? JsonArray
             calls?.forEach { element ->
-                val call = element as? JsonObject ?: throw unsupported()
-                if (call["index"]?.jsonPrimitive?.intOrNull != 0) throw unsupported()
+                val call = element as? JsonObject ?: throw invalidResponse()
+                if (call["index"]?.jsonPrimitive?.intOrNull != 0) throw invalidResponse()
                 val function = call["function"] as? JsonObject ?: return@forEach
                 function["name"]?.jsonPrimitive?.contentOrNull?.let { name = it }
                 function["arguments"]?.jsonPrimitive?.contentOrNull?.let { arguments.append(it) }
@@ -394,20 +418,20 @@ class OpenAICompatibleGateway : ModelGateway {
         if (parsed.refusal) return ModelDecision.Refusal
         if (observed == null) {
             if (parsed.finish != "tool_calls" || parsed.toolName != "read_task" ||
-                parsed.toolArguments == null) throw unsupported()
+                parsed.toolArguments == null) throw invalidResponse()
             val args = parseObject(parsed.toolArguments)
-            if (args.keys != setOf("path")) throw unsupported()
-            val path = args["path"]?.jsonPrimitive?.contentOrNull ?: throw unsupported()
-            val parsedPath = try { Path.of(path) } catch (_: Exception) { throw unsupported() }
-            if (parsedPath != task) throw unsupported()
+            if (args.keys != setOf("path")) throw invalidResponse()
+            val path = args["path"]?.jsonPrimitive?.contentOrNull ?: throw invalidResponse()
+            val parsedPath = try { Path.of(path) } catch (_: Exception) { throw invalidResponse() }
+            if (parsedPath != task) throw invalidResponse()
             return ModelDecision.Read(parsedPath)
         }
-        if (parsed.finish != "stop" || parsed.toolName != null) throw unsupported()
+        if (parsed.finish != "stop" || parsed.toolName != null) throw invalidResponse()
         val result = parseObject(parsed.content)
-        if (result.keys != setOf("bytes", "sha256")) throw unsupported()
-        val bytes = result["bytes"]?.jsonPrimitive?.intOrNull ?: throw unsupported()
-        val sha = result["sha256"]?.jsonPrimitive?.contentOrNull ?: throw unsupported()
-        if (bytes < 0 || !Regex("[a-f0-9]{64}").matches(sha)) throw unsupported()
+        if (result.keys != setOf("bytes", "sha256")) throw invalidResponse()
+        val bytes = result["bytes"]?.jsonPrimitive?.intOrNull ?: throw invalidResponse()
+        val sha = result["sha256"]?.jsonPrimitive?.contentOrNull ?: throw invalidResponse()
+        if (bytes < 0 || !Regex("[a-f0-9]{64}").matches(sha)) throw invalidResponse()
         return ModelDecision.Done(bytes, sha)
     }
 }
