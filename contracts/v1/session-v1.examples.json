@@ -1,0 +1,523 @@
+{
+  "freshRequest": {
+    "kind": "session-request",
+    "version": "1.0",
+    "requestId": "req-770-1",
+    "sessionId": "sess-770-e2e",
+    "traceId": "trace-770-e2e",
+    "run": {
+      "platform": "github-actions",
+      "workflow": "pi-issue-agent.yml",
+      "runId": "38087632442",
+      "attempt": 1,
+      "jobId": "114317353975"
+    },
+    "repository": {
+      "fullName": "YuriiSokolenko/social-mcp",
+      "worktreeId": "wt-770",
+      "worktreePath": "/runner/_work/issue-770",
+      "controlCheckoutPath": "/runner/_work/social-mcp",
+      "baselineSha": "136806fb6d5c98d7040d84c1e72007dc4e224d3e",
+      "headSha": "136806fb6d5c98d7040d84c1e72007dc4e224d3e",
+      "baseBranch": "dev"
+    },
+    "task": {
+      "stage": "implementation",
+      "role": "implementer",
+      "taskId": "issue-770",
+      "taskInputRef": {
+        "path": "/evidence/koog/38087632442/issue-770/issue-context.json",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "parentAgentId": null
+    },
+    "model": {
+      "provider": "openai-compatible",
+      "modelId": "Qwen3.8-Flash-Next-NVFP4",
+      "baseUrl": "http://127.0.0.1:4001/v1",
+      "credentialRef": "env:OPENAI_API_KEY",
+      "contextTokens": 262144,
+      "maxOutputTokens": 16384,
+      "features": [
+        "tool_calls",
+        "structured_output"
+      ],
+      "temperature": 0.4
+    },
+    "toolPolicy": {
+      "mode": "scoped-write",
+      "allowedTools": [
+        "read",
+        "repo_search",
+        "safe_edit",
+        "run_check",
+        "submit_result"
+      ],
+      "deniedTools": [
+        "github_write",
+        "push",
+        "merge"
+      ],
+      "protectedPaths": [
+        ".github/**",
+        "scripts/pi-common/**",
+        ".agent-harness.json",
+        "tests/acceptance_probes/**"
+      ],
+      "writablePaths": [
+        "examples/workflow-smoke/pack-20261011-rerun4/weather/**",
+        "tests/workflow_smoke/test_pack_20261011_rerun4_weather.py"
+      ],
+      "immutableInputs": [
+        {
+          "path": "/evidence/koog/38087632442/issue-770/acceptance-spec.md",
+          "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      ],
+      "policySha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "budgets": {
+      "deadlineAt": "2026-10-11T05:00:00Z",
+      "maxWallTimeMs": 14400000,
+      "maxTotalTokens": 1200000,
+      "maxToolCalls": 150,
+      "maxChildAgents": 16,
+      "maxDepth": 8,
+      "maxModelRequests": 200
+    },
+    "outputs": {
+      "rootDir": "/evidence/koog/38087632442/issue-770",
+      "resultPath": "/evidence/koog/38087632442/issue-770/result.json",
+      "eventsPath": "/evidence/koog/38087632442/issue-770/events.jsonl",
+      "checkpointDir": "/evidence/koog/38087632442/issue-770/checkpoints",
+      "diagnosticsPath": "/evidence/koog/38087632442/issue-770/diagnostics.json"
+    },
+    "resume": {
+      "mode": "fresh",
+      "fenceGeneration": 1,
+      "checkpoint": null
+    },
+    "requiredCapabilities": [
+      "session-events-v1",
+      "durable-checkpoints-v1",
+      "scoped-worktree-write-v1"
+    ]
+  },
+  "resumeRequest": {
+    "kind": "session-request",
+    "version": "1.0",
+    "requestId": "req-770-2",
+    "sessionId": "sess-770-e2e",
+    "traceId": "trace-770-e2e",
+    "run": {
+      "platform": "github-actions",
+      "workflow": "pi-issue-agent.yml",
+      "runId": "38087632442",
+      "attempt": 2,
+      "jobId": "114317353976"
+    },
+    "repository": {
+      "fullName": "YuriiSokolenko/social-mcp",
+      "worktreeId": "wt-770",
+      "worktreePath": "/runner/_work/issue-770",
+      "controlCheckoutPath": "/runner/_work/social-mcp",
+      "baselineSha": "136806fb6d5c98d7040d84c1e72007dc4e224d3e",
+      "headSha": "136806fb6d5c98d7040d84c1e72007dc4e224d3e",
+      "baseBranch": "dev"
+    },
+    "task": {
+      "stage": "implementation",
+      "role": "implementer",
+      "taskId": "issue-770",
+      "taskInputRef": {
+        "path": "/evidence/koog/38087632442/issue-770/issue-context.json",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "parentAgentId": null
+    },
+    "model": {
+      "provider": "openai-compatible",
+      "modelId": "Qwen3.8-Flash-Next-NVFP4",
+      "baseUrl": "http://127.0.0.1:4001/v1",
+      "credentialRef": "env:OPENAI_API_KEY",
+      "contextTokens": 262144,
+      "maxOutputTokens": 16384,
+      "features": [
+        "tool_calls",
+        "structured_output"
+      ],
+      "temperature": 0.4
+    },
+    "toolPolicy": {
+      "mode": "scoped-write",
+      "allowedTools": [
+        "read",
+        "repo_search",
+        "safe_edit",
+        "run_check",
+        "submit_result"
+      ],
+      "deniedTools": [
+        "github_write",
+        "push",
+        "merge"
+      ],
+      "protectedPaths": [
+        ".github/**",
+        "scripts/pi-common/**",
+        ".agent-harness.json",
+        "tests/acceptance_probes/**"
+      ],
+      "writablePaths": [
+        "examples/workflow-smoke/pack-20261011-rerun4/weather/**",
+        "tests/workflow_smoke/test_pack_20261011_rerun4_weather.py"
+      ],
+      "immutableInputs": [
+        {
+          "path": "/evidence/koog/38087632442/issue-770/acceptance-spec.md",
+          "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      ],
+      "policySha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "budgets": {
+      "deadlineAt": "2026-10-11T05:00:00Z",
+      "maxWallTimeMs": 14400000,
+      "maxTotalTokens": 1200000,
+      "maxToolCalls": 150,
+      "maxChildAgents": 16,
+      "maxDepth": 8,
+      "maxModelRequests": 200
+    },
+    "outputs": {
+      "rootDir": "/evidence/koog/38087632442/issue-770",
+      "resultPath": "/evidence/koog/38087632442/issue-770/result.json",
+      "eventsPath": "/evidence/koog/38087632442/issue-770/events.jsonl",
+      "checkpointDir": "/evidence/koog/38087632442/issue-770/checkpoints",
+      "diagnosticsPath": "/evidence/koog/38087632442/issue-770/diagnostics.json"
+    },
+    "resume": {
+      "mode": "resume",
+      "fenceGeneration": 2,
+      "checkpoint": {
+        "path": "/evidence/koog/38087632442/issue-770/checkpoints/cp-770-seq-4.json",
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      }
+    },
+    "requiredCapabilities": [
+      "session-events-v1",
+      "durable-checkpoints-v1",
+      "scoped-worktree-write-v1"
+    ]
+  },
+  "successResult": {
+    "kind": "session-result",
+    "version": "1.0",
+    "sessionId": "sess-770-e2e",
+    "traceId": "trace-770-e2e",
+    "requestId": "req-770-2",
+    "run": {
+      "platform": "github-actions",
+      "workflow": "pi-issue-agent.yml",
+      "runId": "38087632442",
+      "attempt": 2,
+      "jobId": "114317353976"
+    },
+    "status": "succeeded",
+    "startedAt": "2026-10-11T02:48:00Z",
+    "finishedAt": "2026-10-11T02:58:00Z",
+    "durationMs": 600000,
+    "lastEventSeq": 18,
+    "provenance": {
+      "worktreeId": "wt-770",
+      "baselineSha": "136806fb6d5c98d7040d84c1e72007dc4e224d3e",
+      "policySha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "fenceGeneration": 2
+    },
+    "outputs": {
+      "eventLog": {
+        "path": "/evidence/koog/38087632442/issue-770/events.jsonl",
+        "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      },
+      "diagnostics": {
+        "path": "/evidence/koog/38087632442/issue-770/diagnostics.json",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "terminalReceipt": {
+        "path": "/evidence/koog/38087632442/issue-770/terminal-receipt.json",
+        "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      },
+      "changeManifest": {
+        "path": "/evidence/koog/38087632442/issue-770/changed-paths.json",
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      },
+      "checkpoint": {
+        "path": "/evidence/koog/38087632442/issue-770/checkpoints/cp-770-seq-4.json",
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      }
+    },
+    "error": null,
+    "usage": {
+      "inputTokens": 20000,
+      "outputTokens": 2500,
+      "cacheReadTokens": 85000,
+      "cacheWriteTokens": 0,
+      "totalTokens": 107500,
+      "completeness": "incomplete"
+    }
+  },
+  "failureResult": {
+    "kind": "session-result",
+    "version": "1.0",
+    "sessionId": "sess-770-e2e",
+    "traceId": "trace-770-e2e",
+    "requestId": "req-770-2",
+    "run": {
+      "platform": "github-actions",
+      "workflow": "pi-issue-agent.yml",
+      "runId": "38087632442",
+      "attempt": 2,
+      "jobId": "114317353976"
+    },
+    "status": "timed_out",
+    "startedAt": "2026-10-11T02:48:00Z",
+    "finishedAt": "2026-10-11T02:58:00Z",
+    "durationMs": 600000,
+    "lastEventSeq": 19,
+    "provenance": {
+      "worktreeId": "wt-770",
+      "baselineSha": "136806fb6d5c98d7040d84c1e72007dc4e224d3e",
+      "policySha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "fenceGeneration": 2
+    },
+    "outputs": {
+      "eventLog": {
+        "path": "/evidence/koog/38087632442/issue-770/events.jsonl",
+        "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      },
+      "diagnostics": {
+        "path": "/evidence/koog/38087632442/issue-770/diagnostics.json",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "terminalReceipt": null,
+      "changeManifest": null,
+      "checkpoint": {
+        "path": "/evidence/koog/38087632442/issue-770/checkpoints/cp-770-seq-4.json",
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      }
+    },
+    "error": {
+      "code": "SESSION_DEADLINE_EXCEEDED",
+      "category": "timeout",
+      "retryable": true,
+      "safeMessage": "Session deadline elapsed; durable checkpoint available.",
+      "relatedEventId": "evt-770-19",
+      "toolExecutionId": null
+    },
+    "usage": {
+      "inputTokens": 20000,
+      "outputTokens": 2600,
+      "cacheReadTokens": 85000,
+      "cacheWriteTokens": 0,
+      "totalTokens": 107600,
+      "completeness": "incomplete"
+    }
+  },
+  "event": {
+    "kind": "session-event",
+    "version": "1.0",
+    "sessionId": "sess-770-e2e",
+    "traceId": "trace-770-e2e",
+    "eventId": "evt-770-5",
+    "sequence": 5,
+    "timestamp": "2026-10-11T02:48:00Z",
+    "type": "session.resumed",
+    "status": "completed",
+    "correlationId": "corr-770-resume",
+    "causationId": "evt-770-4",
+    "actor": {
+      "agentId": "agent-implementer",
+      "parentAgentId": null,
+      "childAgentId": null,
+      "toolExecutionId": null,
+      "childSessionId": null
+    },
+    "transition": {
+      "from": "paused",
+      "to": "resuming"
+    },
+    "timing": {
+      "startedAt": "2026-10-11T02:48:00Z",
+      "durationMs": 45
+    },
+    "redaction": {
+      "mode": "metadata-only",
+      "removedFields": [
+        "credentialRef",
+        "rawPrompt",
+        "authorizationHeader"
+      ]
+    },
+    "metadata": {
+      "checkpointId": "cp-770-seq-4",
+      "attempt": 2
+    }
+  },
+  "checkpoint": {
+    "kind": "session-checkpoint",
+    "version": "1.0",
+    "sessionId": "sess-770-e2e",
+    "traceId": "trace-770-e2e",
+    "requestId": "req-770-1",
+    "checkpointId": "cp-770-seq-4",
+    "sequence": 4,
+    "createdAt": "2026-10-11T02:45:00Z",
+    "state": "paused",
+    "fenceGeneration": 1,
+    "repository": {
+      "worktreeId": "wt-770",
+      "baselineSha": "136806fb6d5c98d7040d84c1e72007dc4e224d3e",
+      "worktreeDigestSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "policySha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "journalSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "activeAgentIds": [
+      "agent-implementer"
+    ],
+    "pendingToolExecutionIds": [],
+    "unresolvedSideEffectIds": [],
+    "snapshots": {
+      "agentGraph": {
+        "path": "/evidence/koog/38087632442/issue-770/checkpoints/graph.json",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "modelState": {
+        "path": "/evidence/koog/38087632442/issue-770/checkpoints/model.json",
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "toolJournal": {
+        "path": "/evidence/koog/38087632442/issue-770/checkpoints/tool-journal.json",
+        "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      }
+    },
+    "correlationId": "corr-770-checkpoint",
+    "causationId": "evt-770-3",
+    "parentSessionId": null,
+    "activeChildSessionIds": [
+      "child-770-planner"
+    ],
+    "persistedAt": "2026-10-11T02:45:01Z",
+    "writeDurationMs": 1200,
+    "lastEventSeq": 4,
+    "status": "durable"
+  },
+  "forwardMinorRequest": {
+    "kind": "session-request",
+    "version": "1.1",
+    "requestId": "req-770-1",
+    "sessionId": "sess-770-e2e",
+    "traceId": "trace-770-e2e",
+    "run": {
+      "platform": "github-actions",
+      "workflow": "pi-issue-agent.yml",
+      "runId": "38087632442",
+      "attempt": 1,
+      "jobId": "114317353975"
+    },
+    "repository": {
+      "fullName": "YuriiSokolenko/social-mcp",
+      "worktreeId": "wt-770",
+      "worktreePath": "/runner/_work/issue-770",
+      "controlCheckoutPath": "/runner/_work/social-mcp",
+      "baselineSha": "136806fb6d5c98d7040d84c1e72007dc4e224d3e",
+      "headSha": "136806fb6d5c98d7040d84c1e72007dc4e224d3e",
+      "baseBranch": "dev"
+    },
+    "task": {
+      "stage": "implementation",
+      "role": "implementer",
+      "taskId": "issue-770",
+      "taskInputRef": {
+        "path": "/evidence/koog/38087632442/issue-770/issue-context.json",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "parentAgentId": null
+    },
+    "model": {
+      "provider": "openai-compatible",
+      "modelId": "Qwen3.8-Flash-Next-NVFP4",
+      "baseUrl": "http://127.0.0.1:4001/v1",
+      "credentialRef": "env:OPENAI_API_KEY",
+      "contextTokens": 262144,
+      "maxOutputTokens": 16384,
+      "features": [
+        "tool_calls",
+        "structured_output"
+      ],
+      "temperature": 0.4
+    },
+    "toolPolicy": {
+      "mode": "scoped-write",
+      "allowedTools": [
+        "read",
+        "repo_search",
+        "safe_edit",
+        "run_check",
+        "submit_result"
+      ],
+      "deniedTools": [
+        "github_write",
+        "push",
+        "merge"
+      ],
+      "protectedPaths": [
+        ".github/**",
+        "scripts/pi-common/**",
+        ".agent-harness.json",
+        "tests/acceptance_probes/**"
+      ],
+      "writablePaths": [
+        "examples/workflow-smoke/pack-20261011-rerun4/weather/**",
+        "tests/workflow_smoke/test_pack_20261011_rerun4_weather.py"
+      ],
+      "immutableInputs": [
+        {
+          "path": "/evidence/koog/38087632442/issue-770/acceptance-spec.md",
+          "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      ],
+      "policySha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "budgets": {
+      "deadlineAt": "2026-10-11T05:00:00Z",
+      "maxWallTimeMs": 14400000,
+      "maxTotalTokens": 1200000,
+      "maxToolCalls": 150,
+      "maxChildAgents": 16,
+      "maxDepth": 8,
+      "maxModelRequests": 200
+    },
+    "outputs": {
+      "rootDir": "/evidence/koog/38087632442/issue-770",
+      "resultPath": "/evidence/koog/38087632442/issue-770/result.json",
+      "eventsPath": "/evidence/koog/38087632442/issue-770/events.jsonl",
+      "checkpointDir": "/evidence/koog/38087632442/issue-770/checkpoints",
+      "diagnosticsPath": "/evidence/koog/38087632442/issue-770/diagnostics.json"
+    },
+    "resume": {
+      "mode": "fresh",
+      "fenceGeneration": 1,
+      "checkpoint": null
+    },
+    "requiredCapabilities": [
+      "session-events-v1",
+      "durable-checkpoints-v1",
+      "scoped-worktree-write-v1"
+    ],
+    "extensions": {
+      "x-runtime-hints": {
+        "priority": "normal"
+      }
+    }
+  }
+}
