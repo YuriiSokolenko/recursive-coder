@@ -24,7 +24,12 @@ fun main(args: Array<String>) {
         System.err.println("Invalid SessionRequest v1 JSON or input path")
         exitProcess(2)
     }
-    val controller = SessionController(request, FakeModel(delayMs))
+    val provider = ModelConfig.from(request.model).provider
+    if (provider != "fake" && delayMs != 0L) {
+        System.err.println("--fake-delay-ms is supported only for the fake provider")
+        exitProcess(2)
+    }
+    val controller = SessionController(request, ModelGateways.create(provider, delayMs))
     val hook = Thread {
         controller.cancellation.cancel()
         controller.awaitFinished(3000)

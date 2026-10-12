@@ -185,4 +185,157 @@ class SessionRuntimeTest {
         assertEquals("rejected", status(run(request)))
         assertTrue(events().none { it["type"]!!.jsonPrimitive.content == "llm.request" })
     }
+    @Test fun openaiGatewayRunsThroughTrustedReadAndRedactsModelPayloads() {
+        val taskText = "PRIVATE_TASK_CONTENT_NEVER_IN_DIAGNOSTICS"
+        val request = fixture(taskText)
+        val taskPath = request["task"]!!.jsonObject["taskInputRef"]!!.jsonObject["path"]!!.jsonPrimitive.content
+        val taskHash = hash(taskText.toByteArray())
+        val calls = java.util.concurrent.atomic.AtomicInteger()
+        val http = com.sun.net.httpserver.HttpServer.create(
+            java.net.InetSocketAddress("127.0.0.1", 0), 0)
+        fun answer(exchange: com.sun.net.httpserver.HttpExchange, text: String) {
+            val bytes = text.toByteArray()
+            exchange.responseHeaders.add("Content-Type", "application/json")
+            exchange.sendResponseHeaders(200, bytes.size.toLong())
+            exchange.responseBody.use { it.write(bytes) }
+        }
+        http.createContext("/v1/models/demo") { exchange ->
+            answer(exchange, """{"id":"demo","context_length":8192,"max_output_tokens":512,"capabilities":{"tool_calls":true,"usage_metadata":true}}""")
+        }
+        http.createContext("/v1/chat/completions") { exchange ->
+            exchange.requestBody.use { it.readAllBytes() }
+            val index = calls.incrementAndGet()
+            val content = if (index == 1) {
+                buildJsonObject {
+                    put("choices", buildJsonArray {
+                        add(buildJsonObject {
+                            put("finish_reason", "tool_calls")
+                            put("message", buildJsonObject {
+                                put("tool_calls", buildJsonArray {
+                                    add(buildJsonObject {
+                                        put("function", buildJsonObject {
+                                            put("name", "read_task")
+                                            put("arguments", buildJsonObject { put("path", taskPath) }.toString())
+                                        })
+                                    })
+                                })
+                            })
+                        })
+                    })
+                    put("usage", buildJsonObject {
+                        put("prompt_tokens", 11); put("completion_tokens", 5)
+                    })
+                }.toString()
+            } else {
+                buildJsonObject {
+                    put("choices", buildJsonArray {
+                        add(buildJsonObject {
+                            put("finish_reason", "stop")
+                            put("message", buildJsonObject {
+                                put("content", buildJsonObject {
+                                    put("bytes", taskText.toByteArray().size)
+                                    put("sha256", taskHash)
+                                }.toString())
+                            })
+                        })
+                    })
+                    put("usage", buildJsonObject {
+                        put("prompt_tokens", 19); put("completion_tokens", 6)
+                    })
+                }.toString()
+            }
+            answer(exchange, content)
+        }
+        http.start()
+        try {
+            val options = JsonObject(request["model"]!!.jsonObject +
+                mapOf(
+                    "provider" to JsonPrimitive("openai-compatible"),
+                    "modelId" to JsonPrimitive("demo"),
+                    "baseUrl" to JsonPrimitive("http://127.0.0.1:${http.address.port}/v1"),
+                    "features" to buildJsonArray { add("tool_calls"); add("usage_metadata") }
+                ))
+            val live = request.change("model", options)
+                .change("requiredCapabilities", buildJsonArray {
+                    add("session-events-v1")
+                    add("read-only-tools-v1")
+                    add("model-gateway-v1")
+                })
+            val result = SessionController(SessionRequest.parse(live.toString()),
+                OpenAICompatibleGateway()).run()
+            assertEquals("succeeded", status(result))
+            assertEquals(2, calls.get())
+            assertEquals(41, result["usage"]!!.jsonObject["totalTokens"]!!.jsonPrimitive.int)
+            assertEquals("complete", result["usage"]!!.jsonObject["completeness"]!!.jsonPrimitive.content)
+            assertTrue(events().any { it["type"]!!.jsonPrimitive.content == "llm.capabilities" })
+            assertEquals(1, events().count { it["type"]!!.jsonPrimitive.content == "tool.completed" })
+            listOf("events.jsonl", "diagnostics.json", "result.json").forEach { filename ->
+                val text = Files.readString(temp.resolve("out").resolve(filename))
+                assertFalse(text.contains(taskText))
+                assertFalse(text.contains("FAKE_TOKEN"))
+                assertFalse(text.contains(taskPath))
+            }
+        } finally {
+            http.stop(0)
+        }
+    }
+
+    private fun countedGateway(
+        firstAttempts: Int,
+        firstUsage: ModelUsage = ModelUsage(1L, 1L),
+        onFirstRetryDecision: (Boolean) -> Unit = {}
+    ): ModelGateway = object : ModelGateway {
+        override fun negotiate(
+            config: ModelConfig, cancellation: Cancellation, deadline: Instant
+        ): GatewayCapabilities =
+            GatewayCapabilities(setOf("tool_calls"), config.contextTokens, config.maxOutputTokens)
+
+        override fun next(
+            config: ModelConfig, task: Path, observed: Pair<Int, String>?,
+            cancellation: Cancellation, deadline: Instant, allowRetry: Boolean
+        ): ModelTurn = if (observed == null) {
+            onFirstRetryDecision(allowRetry)
+            ModelTurn(ModelDecision.Read(task), firstUsage, attempts = firstAttempts)
+        } else ModelTurn(
+            ModelDecision.Done(observed.first, observed.second),
+            ModelUsage(1L, 1L)
+        )
+    }
+
+    @Test fun wireRetriesAreCountedAndFinalModelTurnIsReserved() {
+        val request = fixture().changeChild("budgets", "maxModelRequests", JsonPrimitive(3))
+        var retryAllowed = false
+        val gateway = countedGateway(firstAttempts = 2) { retryAllowed = it }
+        val result = SessionController(SessionRequest.parse(request.toString()), gateway).run()
+        assertEquals("succeeded", status(result))
+        assertTrue(retryAllowed, "The initial turn may retry only if budget reserves the final turn")
+        val modelEvents = events().filter { it["type"]!!.jsonPrimitive.content == "llm.response" }
+        assertEquals(2, modelEvents.size)
+        assertEquals(2, modelEvents.first()["metadata"]!!.jsonObject["attempts"]!!.jsonPrimitive.int)
+        assertEquals(1, modelEvents.last()["metadata"]!!.jsonObject["attempts"]!!.jsonPrimitive.int)
+        assertEquals(1, events().count { it["type"]!!.jsonPrimitive.content == "tool.completed" })
+    }
+
+    @Test fun exhaustedModelRequestBudgetRejectsUnreportedRetryBeforeTrustedTool() {
+        val request = fixture() // maxModelRequests = 2, one POST for each turn
+        var retryAllowed = true
+        val gateway = countedGateway(firstAttempts = 2) { retryAllowed = it }
+        val result = SessionController(SessionRequest.parse(request.toString()), gateway).run()
+        assertFalse(retryAllowed, "The final turn's reserved request must not fund a retry")
+        assertEquals("failed", status(result))
+        assertEquals("MODEL_REQUEST_BUDGET_EXCEEDED",
+            result["error"]!!.jsonObject["code"]!!.jsonPrimitive.content)
+        assertEquals(0, events().count { it["type"]!!.jsonPrimitive.content == "tool.completed" })
+    }
+
+    @Test fun tokenBudgetExceededBeforeWorkspaceRead() {
+        val request = fixture().changeChild("budgets", "maxTotalTokens", JsonPrimitive(2))
+        val gateway = countedGateway(firstAttempts = 1, firstUsage = ModelUsage(20L, 10L))
+        val result = SessionController(SessionRequest.parse(request.toString()), gateway).run()
+        assertEquals("failed", status(result))
+        assertEquals("TOKEN_BUDGET_EXCEEDED",
+            result["error"]!!.jsonObject["code"]!!.jsonPrimitive.content)
+        assertEquals(0, events().count { it["type"]!!.jsonPrimitive.content == "tool.completed" })
+    }
+
 }

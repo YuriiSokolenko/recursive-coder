@@ -160,6 +160,16 @@
           "type": "number",
           "minimum": 0,
           "maximum": 2
+        },
+        "connectTimeoutMs": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 120000
+        },
+        "requestTimeoutMs": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 120000
         }
       }
     },
@@ -917,6 +927,7 @@
             "session.resumed",
             "agent.started",
             "agent.completed",
+            "llm.capabilities",
             "llm.request",
             "llm.response",
             "tool.started",
