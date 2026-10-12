@@ -1,5 +1,7 @@
 package ai.yuriilab.recursivecoder
 
+import org.junit.jupiter.api.Tag
+
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
 import java.net.InetSocketAddress
@@ -18,6 +20,7 @@ import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 
 /** No inference server, internet, credentials, or external model is used by these tests. */
+@Tag("integration")
 class ModelGatewayTest {
     private lateinit var server: HttpServer
     private val posts = Collections.synchronizedList(mutableListOf<String>())
