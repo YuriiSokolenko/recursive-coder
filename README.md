@@ -2,7 +2,7 @@
 
 **Recursive Coder** is a standalone open-source software engineering agent built with **Kotlin/JVM and JetBrains Koog**.
 
-> **Current status:** The first executable command-line session engine includes `SessionController`, a trusted read-only workspace, a deterministic FakeModel, and an injectable OpenAI-compatible Model Gateway with explicit capability checks. Full Koog agent execution, task scheduling, recursive development, and trusted code changes are **not yet implemented**.
+> **Current status:** The first executable command-line session engine includes `SessionController`, a trusted read-only workspace, a deterministic FakeModel, and an injectable OpenAI-compatible Model Gateway with explicit capability checks. Native local task scheduling is implemented; full Koog agent execution, recursive development, and trusted code changes are **not yet implemented**.
 
 ## What we are building
 
@@ -32,7 +32,7 @@ Recursive Coder itself owns its tasks and sessions. Git can manage source worksp
 
 The current foundation uses Kotlin 2.4.21, JDK 21, Gradle 9.8.1, Koog 1.3.0, and Session Protocol `1.0`.
 
-The project includes an offline deterministic fake-model CLI, a trusted read-only workspace boundary, and an optional user-configured HTTP model adapter. CI uses only the fake model and deterministic mock HTTP servers. For setup, supported features, sample execution, and known limitations, see **[First executable session](docs/architecture/FIRST_SESSION.md)**.
+The project includes an offline deterministic fake-model CLI, a native durable task scheduler, a trusted read-only workspace boundary, and an optional user-configured HTTP model adapter. CI uses only the fake model and deterministic mock HTTP servers. For setup, supported features, sample execution, and known limitations, see **[First executable session](docs/architecture/FIRST_SESSION.md)**.
 
 With Gradle 9.8.1 and JDK 21 installed:
 
@@ -46,6 +46,7 @@ The independent [GitHub Actions CI](.github/workflows/ci.yml) runs JVM and proto
 
 - [Architecture and engineering roadmap](docs/architecture/ARCHITECTURE.md)
 - [First executable CLI session](docs/architecture/FIRST_SESSION.md)
+- [Native Task Manager and local scheduling](docs/architecture/TASK_MANAGER.md)
 - [Workspace security and read-only tools](docs/architecture/WORKSPACE.md)
 - [Model Gateway configuration and capability discovery](docs/architecture/MODEL_GATEWAY.md)
 - [Session Protocol v1](contracts/README.md)
@@ -57,7 +58,7 @@ The independent [GitHub Actions CI](.github/workflows/ci.yml) runs JVM and proto
 
 ## Implementation roadmap
 
-1. **Session Engine:** executable CLI, `SessionController`, deterministic FakeModel, observed read-only session.
+1. **Session Engine:** executable CLI, `SessionController`, deterministic FakeModel, observed read-only session, native durable Task Manager and scheduler.
 2. **Workspace and Model Gateway:** trusted workspace boundaries and a capability-negotiated real model adapter.
 3. **Task Manager and recursive Agent Graph:** first-party scheduling and SDD → ATDD → TDD → Develop → Independent Review.
 4. **Trusted Tooling:** immutable specs/tests, sandboxed writes and validation, independent evidence, and policy tests.
