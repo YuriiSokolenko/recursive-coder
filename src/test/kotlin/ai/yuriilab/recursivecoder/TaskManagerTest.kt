@@ -381,4 +381,171 @@ class TaskManagerTest {
         assertEquals(TaskState.SUCCEEDED, TaskService(TaskStore(dir)).show("cli").state)
     }
 
+    @Test fun retryDuringPauseJoinsBehindAlreadyReadyTasks() {
+        val service = service()
+        service.enqueue(request("older"), priority = 50)
+        val first = service.claim()!!
+        service.finish(first.id, first.sessionId!!, "failed")
+        service.enqueue(request("waiting"), priority = 50)
+        service.pause()
+        service.retry("older")
+        assertEquals(TaskState.PAUSED, service.show("older").state)
+        service.resume()
+        assertEquals("waiting", service.claim()!!.id)
+        assertTrue(service.show("older").queueOrder > service.show("waiting").queueOrder)
+    }
+
+    @Test fun pausePreservesOrderOfAlreadyReadyTaskButNotNewArrival() {
+        val service = service()
+        service.enqueue(request("waiting"), priority = 50)
+        val originalOrder = service.show("waiting").queueOrder
+        service.pause()
+        service.enqueue(request("newcomer"), priority = 50)
+        service.resume()
+        assertEquals(originalOrder, service.show("waiting").queueOrder)
+        assertTrue(service.show("newcomer").queueOrder > originalOrder)
+        assertEquals("waiting", service.claim()!!.id)
+    }
+
+    @Test fun dependencyAttentionMustBeResolvedThroughItsParent() {
+        val service = service()
+        service.enqueue(request("parent"))
+        service.enqueue(request("child"), dependencies = listOf("parent"))
+        service.cancel("parent")
+        assertFailsWith<IllegalArgumentException> { service.retry("child") }
+        assertEquals(TaskState.NEEDS_ATTENTION, service.show("child").state)
+        service.retry("parent")
+        assertEquals(TaskState.BLOCKED, service.show("child").state)
+    }
+
+    @Test fun cancelledAttemptCannotBeOverwrittenByImmediateRetryWhileWorkerIsAlive() {
+        val service = service()
+        service.enqueue(request("one"), priority = 50)
+        val firstStarted = CountDownLatch(1)
+        val releaseOld = CountDownLatch(1)
+        val starts = AtomicInteger()
+        val activeCount = AtomicInteger()
+        val peak = AtomicInteger()
+        val scheduler = thread {
+            TaskScheduler(service, TaskRunner { request, _ ->
+                starts.incrementAndGet()
+                val current = activeCount.incrementAndGet()
+                peak.accumulateAndGet(current, ::maxOf)
+                try {
+                    if (request.invocation.getValue("attempt").jsonPrimitive.int == 1) {
+                        firstStarted.countDown()
+                        // Deliberately ignore interruption to exercise a slow provider shutdown.
+                        while (releaseOld.count > 0) {
+                            try { releaseOld.await(25, TimeUnit.MILLISECONDS) }
+                            catch (_: InterruptedException) { }
+                        }
+                    }
+                    "succeeded"
+                } finally {
+                    activeCount.decrementAndGet()
+                }
+            }, pollMillis = 10).runUntilIdle(concurrency = 2)
+        }
+        try {
+            assertTrue(firstStarted.await(5, TimeUnit.SECONDS))
+            service.cancel("one")
+            service.retry("one")
+            Thread.sleep(150)
+            assertEquals(1, starts.get(), "The second attempt must wait for the old worker")
+            assertEquals(1, peak.get())
+        } finally {
+            releaseOld.countDown()
+            scheduler.join(5000)
+        }
+        assertFalse(scheduler.isAlive)
+        assertEquals(2, starts.get())
+        assertEquals(1, peak.get())
+        assertEquals(2, service.show("one").attempt)
+        assertEquals(TaskState.SUCCEEDED, service.show("one").state)
+        assertEquals("session-one-2", service.show("one").sessionId)
+    }
+
+    @Test fun schedulerStopMarksInterruptedTaskNeedsAttentionNotCancelled() {
+        val service = service()
+        service.enqueue(request("one"))
+        val started = CountDownLatch(1)
+        val scheduler = TaskScheduler(service, TaskRunner { _, _ ->
+            started.countDown()
+            try { Thread.sleep(30000) } catch (_: InterruptedException) { }
+            "cancelled"
+        }, pollMillis = 10)
+        val worker = thread { scheduler.runUntilIdle() }
+        try {
+            assertTrue(started.await(5, TimeUnit.SECONDS))
+            scheduler.requestStop()
+        } finally {
+            worker.join(5000)
+        }
+        assertFalse(worker.isAlive)
+        assertEquals(TaskState.NEEDS_ATTENTION, service.show("one").state)
+        assertTrue(service.show("one").reason!!.startsWith("scheduler stopped:"))
+    }
+
+    @Test fun unexpectedWorkerCrashStillMarksAttemptNeedsAttention() {
+        val service = service()
+        service.enqueue(request("one"))
+        assertFailsWith<java.util.concurrent.ExecutionException> {
+            TaskScheduler(service, TaskRunner { _, _ ->
+                throw AssertionError("Simulated fatal agent failure")
+            }).runUntilIdle()
+        }
+        assertEquals(TaskState.NEEDS_ATTENTION, service.show("one").state)
+    }
+
+    @Test fun idleClaimDoesNotRewriteDurableStoreSnapshot() {
+        val service = service()
+        service.enqueue(request("one"))
+        val task = service.claim()!!
+        service.finish(task.id, task.sessionId!!, "succeeded")
+        val file = temp.resolve("store/tasks.json")
+        val before = Files.getLastModifiedTime(file)
+        Thread.sleep(80)
+        repeat(8) { assertNull(service.claim()) }
+        assertEquals(before, Files.getLastModifiedTime(file))
+    }
+
+    @Test fun transitionHistoryIsBoundedAndRecordsPrunedCount() {
+        val service = service()
+        service.enqueue(request("one"))
+        repeat(70) {
+            service.pause()
+            service.resume()
+        }
+        val stored = service().show("one")
+        assertEquals(128, stored.transitions.size)
+        assertTrue(stored.prunedTransitions > 0)
+        assertEquals(TaskState.READY, stored.state)
+        assertEquals(stored.prunedTransitions.toInt(),
+            stored.toPublicJson().getValue("prunedTransitions").jsonPrimitive.int)
+    }
+
+    @Test fun iterativeGraphHandlesLargeDependencyChainsAndCycles() {
+        val tasks = (0 until 12000).map { index ->
+            Task(id = "node-" + index, requestTemplate = "{}", priority = 50,
+                dependencies = if (index == 0) emptyList() else listOf("node-" + (index - 1)))
+        }
+        val order = validateGraph(tasks)
+        assertEquals(12000, order.size)
+        assertEquals("node-0", order.first())
+        assertEquals("node-11999", order.last())
+        val cycle = tasks.toMutableList()
+        cycle[0] = cycle[0].copy(dependencies = listOf("node-11999"))
+        assertFailsWith<IllegalStateException> { validateGraph(cycle) }
+    }
+
+    @Test fun invalidCliPriorityAndConcurrencyReturnUsageError() {
+        val path = temp.resolve("request.json")
+        Files.writeString(path, request("valid"))
+        val directory = temp.resolve("cli-data")
+        val prefix = listOf("--store", directory.toString())
+        assertEquals(2, TaskCli.execute(prefix + listOf("enqueue", path.toString(), "--priority", "NaN")))
+        assertEquals(2, TaskCli.execute(prefix + listOf("run", "--concurrency", "NaN")))
+        assertTrue(TaskService(TaskStore(directory)).list().isEmpty())
+    }
+
 }
