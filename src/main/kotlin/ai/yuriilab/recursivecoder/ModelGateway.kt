@@ -154,7 +154,7 @@ class OpenAICompatibleGateway : ModelGateway {
         val stream = "streaming" in config.features
         val body = completionRequest(config, task, observed, stream)
         val response = send(client(config), request(config, "chat/completions", "POST", body),
-            config, cancellation, deadline, retryable = allowRetry)
+            config, cancellation, deadline, retryable = allowRetry && observed == null)
         val parsed = if (stream) parseStream(response.body) else parseCompletion(response.body)
         val decision = parseDecision(parsed, task, observed)
         if ("usage_metadata" in config.features && parsed.usage == null) throw unsupported()
