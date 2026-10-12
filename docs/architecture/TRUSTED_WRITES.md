@@ -43,7 +43,9 @@ platform-independent. Read-only CLI support is unchanged.
 All path components are traversed descriptor-relative with NOFOLLOW_LINKS;
 parent directories must already exist. Preflight checks optimistic hashes,
 ignored Git paths, case-folded path aliases (including existing names), NUL
-bytes, content size and multi-file collisions before any write. A preflight
+bytes, content size and multi-file collisions before any write. Git trees
+containing paths that differ only by case or Unicode normalization are rejected
+at admission with PATH_CASE_COLLISION, even on case-sensitive Linux. A preflight
 denial does **not** poison the session. An I/O failure after mutation begins
 does poison it, rather than claiming transactional rollback. Protected Git
 metadata and policy files are denied, but ordinary Kotlin package directories
@@ -69,15 +71,30 @@ The sandboxed check test also verifies that the checkout is read-only, the
 scratch directory is writable, external network send is denied, and large
 output returns CHECK_OUTPUT_LIMIT rather than CHECK_TIMEOUT. The GitHub-hosted
 Linux CI enables user namespaces on its disposable runner, probes bubblewrap,
-and requires the real sandboxed test to execute. On independently managed
-Linux systems where bubblewrap or namespaces are missing, check failure is
-non-success; the runtime never falls back to unsandboxed execution.
+and **fails** when the real sandboxed test cannot run. The test treats missing
+bubblewrap or namespaces as a failure when CI=true (or GITHUB_ACTIONS=true),
+but may skip on local Linux systems without these capabilities. The CI job
+also independently checks the JUnit XML to require exactly one executed,
+non-skipped successful sandbox integration case, and publishes the XML for
+review. On independently managed Linux systems where bubblewrap or
+namespaces are missing, check failure is non-success; the runtime never
+falls back to unsandboxed execution.
 
 For **Developer**, the built-in git_diff_check is necessary but **never**
-sufficient to finish: the host must configure and require at least one
-independently executed, sandboxed test. This is enforced even when the host
-uses the default check policy (git_diff_check only), in which case finish
-returns TEST_CHECK_REQUIRED. SDD/ATDD/TDD may finish with only Git validation.
+sufficient to finish: the trusted host must configure and require at least
+one additional sandboxed check. A Developer policy that does not require both
+git_diff_check and an additional allowlisted check is rejected by open()
+with TEST_CHECK_REQUIRED, before a workspace lease or any write. The default
+required-check policy (git_diff_check only) is therefore intentionally
+invalid for Developer. SDD/ATDD/TDD may finish with only Git validation.
+
+**Important trust boundary:** the runtime guarantees that a host-allowlisted
+command ran in isolation and exited successfully; it does **not** determine
+whether the command tests relevant behavior. In particular, a host-configured
+command such as /usr/bin/true satisfies the structural requirement while
+providing no evidence of software correctness. The trusted caller must select
+meaningful checks with assertions, and protect their definitions and inputs
+from model modification.
 
 A passed check returns an HMAC-SHA256 receipt bound to the session, policy,
 baseline HEAD, check ID and accepted manifest. The signing key lives only
