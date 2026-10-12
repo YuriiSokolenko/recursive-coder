@@ -53,7 +53,7 @@ jobs:
           python-version: '3.12'
       - name: Enforce English-only repository documentation
         run: |
-          if LC_ALL=C.UTF-8 grep -nP '[\\p{Cyrillic}]' README.md CONTRIBUTING.md contracts/README.md docs/architecture/*.md; then
+          if LC_ALL=C.UTF-8 grep -nP '[\p{Cyrillic}]' README.md CONTRIBUTING.md contracts/README.md docs/architecture/*.md; then
             echo 'Documentation must use English only'
             exit 1
           fi
