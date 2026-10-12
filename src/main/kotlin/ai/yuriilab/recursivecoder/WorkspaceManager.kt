@@ -117,6 +117,18 @@ class WorkspaceManager private constructor(
             if (Path.of(checkedRoot).toRealPath() != root ||
                 Path.of(checkedGitDir).toRealPath() != root.resolve(".git").toRealPath())
                 throw Refused("UNSUPPORTED_WORKSPACE", "policy", "Nested, bare or linked worktrees are not supported")
+            // Git read-only commands can otherwise invoke repository-defined clean/process filters.
+            // Treat any local command-capable Git configuration as unsupported for this milestone.
+            val localConfig = git.text(256 * 1024, "config", "--local", "--list")
+            if (localConfig.lineSequence().map { it.substringBefore('=').lowercase() }.any { key ->
+                    key.startsWith("filter.") || key.startsWith("include.") ||
+                        key.startsWith("includeif.") || key.startsWith("core.fsmonitor") ||
+                        key.startsWith("core.hookspath") || key.startsWith("diff.external") ||
+                        key.matches(Regex("diff\\..*\\.command")) ||
+                        key.matches(Regex("diff\\..*\\.textconv"))
+                })
+                throw Refused("UNSAFE_GIT_CONFIGURATION", "policy",
+                    "Repository Git configuration may execute external commands")
             val head = git.text(4096, "rev-parse", "HEAD")
             val currentBranch = git.text(4096, "branch", "--show-current")
             if (head != request.workspace["baselineSha"]!!.jsonPrimitive.content ||
