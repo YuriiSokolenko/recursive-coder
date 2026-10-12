@@ -6,6 +6,8 @@ import java.net.InetSocketAddress
 import java.nio.file.Path
 import java.time.Instant
 import java.util.Collections
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
@@ -19,6 +21,7 @@ import org.junit.jupiter.api.Test
 class ModelGatewayTest {
     private lateinit var server: HttpServer
     private val posts = Collections.synchronizedList(mutableListOf<String>())
+    private val authorizationHeaders = Collections.synchronizedList(mutableListOf<String?>())
     private val getCount = AtomicInteger()
     private val postCount = AtomicInteger()
     private val postHandler = AtomicReference<(Int, JsonObject) -> MockReply> { index, _ ->
@@ -29,11 +32,14 @@ class ModelGatewayTest {
     private data class MockReply(
         val status: Int, val body: String,
         val contentType: String = "application/json",
-        val retryAfter: String? = null
+        val retryAfter: String? = null,
+        val headersReady: CountDownLatch? = null,
+        val bodyGate: CountDownLatch? = null
     )
 
     @BeforeEach fun start() {
         posts.clear()
+        authorizationHeaders.clear()
         postCount.set(0)
         getCount.set(0)
         postHandler.set { index, _ ->
@@ -48,6 +54,7 @@ class ModelGatewayTest {
         server.createContext("/v1/chat/completions") { exchange ->
             val body = exchange.requestBody.bufferedReader().use { it.readText() }
             posts.add(body)
+            authorizationHeaders.add(exchange.requestHeaders.getFirst("Authorization"))
             val index = postCount.incrementAndGet()
             respond(exchange, postHandler.get()(index, Json.parseToJsonElement(body).jsonObject))
         }
@@ -62,7 +69,11 @@ class ModelGatewayTest {
         val bytes = reply.body.toByteArray()
         try {
             exchange.sendResponseHeaders(reply.status, bytes.size.toLong())
-            exchange.responseBody.use { it.write(bytes) }
+            exchange.responseBody.use { stream ->
+                reply.headersReady?.countDown()
+                reply.bodyGate?.await(10, TimeUnit.SECONDS)
+                stream.write(bytes)
+            }
         } catch (_: Exception) {
             exchange.close()
         }
@@ -193,7 +204,7 @@ class ModelGatewayTest {
         }.code)
         postHandler.set { _, _ -> MockReply(200,
             toolCall().replace("/safe/task.md", "/outside/task.md")) }
-        assertEquals("MODEL_CAPABILITY_UNSUPPORTED", assertFailsWith<Refused> {
+        assertEquals("MODEL_INVALID_RESPONSE", assertFailsWith<Refused> {
             gateway().next(config(), task, null, Cancellation(), deadline(), true)
         }.code)
     }
@@ -224,11 +235,45 @@ class ModelGatewayTest {
         assertEquals(3, postCount.get(), "An observed tool result must not be sent twice")
     }
 
-    @Test fun cancellationInterruptsBlockedRequest() {
-        val entered = java.util.concurrent.CountDownLatch(1)
+    @Test fun cancellationInterruptsStalledSseBodyBeforeServerReleases() {
+        // Headers have been delivered; the body cannot finish until we release the gate.
+        // A completion-only cancellation check would hang for 10 seconds and fail this test.
+        val headersReady = CountDownLatch(1)
+        val releaseBody = CountDownLatch(1)
+        postHandler.set { _, _ -> MockReply(
+            200, sse("""{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}""", "[DONE]"),
+            contentType = "text/event-stream", headersReady = headersReady, bodyGate = releaseBody
+        ) }
+        val cancellation = Cancellation()
+        val failure = AtomicReference<Throwable>()
+        val worker = thread {
+            cancellation.bind()
+            try {
+                gateway().next(config("streaming"), task, null, cancellation, deadline(), true)
+            } catch (e: Throwable) { failure.set(e) }
+        }
+        try {
+            assertTrue(headersReady.await(3, TimeUnit.SECONDS), "The server must send headers before cancellation")
+            val started = System.nanoTime()
+            cancellation.cancel()
+            worker.join(1000)
+            val elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
+            assertFalse(worker.isAlive, "Blocked response body did not stop on interrupt")
+            assertTrue(elapsedMs < 1000, "Cancellation must not wait for the server body")
+            assertIs<Stopped>(failure.get())
+        } finally {
+            releaseBody.countDown()
+            cancellation.cancel()
+            worker.join(2000)
+        }
+    }
+
+    @Test fun cancellationInterruptsStalledHeaders() {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
         postHandler.set { _, _ ->
             entered.countDown()
-            Thread.sleep(1500)
+            release.await(10, TimeUnit.SECONDS)
             MockReply(200, toolCall())
         }
         val cancellation = Cancellation()
@@ -238,11 +283,60 @@ class ModelGatewayTest {
             try { gateway().next(config(), task, null, cancellation, deadline(), true) }
             catch (e: Throwable) { failure.set(e) }
         }
-        assertTrue(entered.await(2, java.util.concurrent.TimeUnit.SECONDS))
-        cancellation.cancel()
-        worker.join(3000)
-        assertFalse(worker.isAlive)
-        assertIs<Stopped>(failure.get())
+        try {
+            assertTrue(entered.await(3, TimeUnit.SECONDS))
+            cancellation.cancel()
+            worker.join(1000)
+            assertFalse(worker.isAlive, "The blocked header request was not interrupted")
+            assertIs<Stopped>(failure.get())
+        } finally {
+            release.countDown()
+            cancellation.cancel()
+            worker.join(2000)
+        }
+    }
+
+    @Test fun invalidToolNameAndMissingUsageHaveDistinctCodes() {
+        postHandler.set { _, _ -> MockReply(200, toolCall().replace("read_task", "wrong_tool")) }
+        assertEquals("MODEL_INVALID_RESPONSE", assertFailsWith<Refused> {
+            gateway().next(config(), task, null, Cancellation(), deadline(), false)
+        }.code)
+        postHandler.set { _, _ -> MockReply(200, toolCall().replace(
+            ""","usage":{"prompt_tokens":10,"completion_tokens":5}""", ""
+        )) }
+        assertEquals("MODEL_INVALID_RESPONSE", assertFailsWith<Refused> {
+            gateway().next(config("usage_metadata"), task, null, Cancellation(), deadline(), false)
+        }.code)
+    }
+
+    @Test fun credentialsAreInjectedAndNotPersistedInResponses() {
+        val token = "TOP_SECRET_PROVIDER_TOKEN"
+        val model = OpenAICompatibleGateway { key ->
+            if (key == "TEST_PROVIDER_TOKEN") token else null
+        }
+        val config = config().copy(credentialRef = "env:TEST_PROVIDER_TOKEN")
+        val turn = model.next(config, task, null, Cancellation(), deadline(), false)
+        assertEquals(ModelDecision.Read(task), turn.decision)
+        assertEquals(listOf("Bearer $token"), authorizationHeaders.toList())
+        assertFalse(turn.toString().contains(token))
+        assertFalse(turn.toString().contains("TEST_PROVIDER_TOKEN"))
+    }
+
+    @Test fun oversizedResponseFailsWithSafeError() {
+        postHandler.set { _, _ -> MockReply(200, "X".repeat(1_048_577)) }
+        assertEquals("MODEL_RESPONSE_TOO_LARGE", assertFailsWith<Refused> {
+            gateway().next(config(), task, null, Cancellation(), deadline(), false)
+        }.code)
+    }
+
+    @Test fun optionalOutputControlsAreAbsentWhenUnadvertised() {
+        val c = config()
+        gateway().next(c, task, null, Cancellation(), deadline(), false)
+        gateway().next(c, task, observation, Cancellation(), deadline(), false)
+        val first = Json.parseToJsonElement(posts[0]).jsonObject
+        val second = Json.parseToJsonElement(posts[1]).jsonObject
+        assertFalse("tool_choice" in first)
+        assertFalse("response_format" in second)
     }
 
     @Test fun plaintextRemoteEndpointAndUnknownFeaturesFailClosed() {
