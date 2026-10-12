@@ -236,6 +236,18 @@ class TrustedWriteRuntimeTest {
         }
     }
 
+    @Test fun assumeUnchangedIndexFlagCannotHideProtectedEdits() {
+        val f = fixture()
+        open(f).use { runtime ->
+            assertTrue(runtime.apply(listOf(
+                WriteOperation.Create("src/main/Okay.kt", "okay\n"))).permitted)
+            val receipt = runtime.runCheck("git_diff_check").receipt!!
+            git(f.root, "update-index", "--assume-unchanged", "src/test/FeatureTest.kt")
+            Files.writeString(f.root.resolve("src/test/FeatureTest.kt"), "tampered")
+            assertEquals("INDEX_MUTATION_DENIED", runtime.finish(listOf(receipt)).deniedCode)
+        }
+    }
+
     @Test fun ignoredUntrackedFileCannotHideFromFinalVerification() {
         val f = fixture()
         open(f).use { runtime ->
