@@ -44,6 +44,7 @@ class TrustedWriteRuntimeTest {
             "specs/Feature.md" to "product contract\n"
         )
         files.forEach { (path, content) -> Files.writeString(root.resolve(path), content) }
+        Files.writeString(root.resolve(".gitignore"), "src/main/ignored/\n")
         git(root, "add", ".")
         git(root, "commit", "-m", "immutable baseline")
         val approvedPaths = setOf("src/test/FeatureTest.kt",
@@ -232,6 +233,18 @@ class TrustedWriteRuntimeTest {
             assertTrue(attack.deniedCode in setOf("UNAUTHORIZED_GIT_CHANGE", "UNSAFE_PATH_COMPONENT"))
             Files.delete(f.root.resolve("src/main/shortcut"))
             assertTrue(runtime.apply(listOf(WriteOperation.Create(receiptPath, "safe\n"))).permitted)
+        }
+    }
+
+    @Test fun ignoredUntrackedFileCannotHideFromFinalVerification() {
+        val f = fixture()
+        open(f).use { runtime ->
+            assertTrue(runtime.apply(listOf(
+                WriteOperation.Create("src/main/Okay.kt", "okay\n"))).permitted)
+            val checked = runtime.runCheck("git_diff_check").receipt!!
+            Files.createDirectories(f.root.resolve("src/main/ignored"))
+            Files.writeString(f.root.resolve("src/main/ignored/Injected.kt"), "unapproved")
+            assertFalse(runtime.finish(listOf(checked)).successful)
         }
     }
 
