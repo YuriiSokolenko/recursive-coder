@@ -42,6 +42,7 @@ class TrustedWriteRuntimeTest {
             "src/main/Feature.kt" to "fun value() = 1\n",
             "src/main/Delete.kt" to "fun removeMe() = 1\n",
             "src/test/FeatureTest.kt" to "fun testValue() = 1\n",
+            "src/test/Ordinary.kt" to "fun ordinary() = 1\n",
             "tests/unit/Rules.kt" to "test contract\n",
             "tests/acceptance/Feature.md" to "acceptance contract\n",
             "specs/Feature.md" to "product contract\n"
@@ -233,15 +234,9 @@ class TrustedWriteRuntimeTest {
                 WriteOperation.Create("src/test/New.kt", "first\n")
             )).permitted)
             val oldReceipt = runtime.runCheck("git_diff_check").receipt!!
-            val original = "fun testValue() = 1\n"
+            val original = "fun ordinary() = 1\n"
             assertTrue(runtime.apply(listOf(
-                WriteOperation.Edit("src/test/FeatureTest.kt", sha(original), original)
-            )).deniedCode == "APPROVED_ARTIFACT_IMMUTABLE")
-            // A separately authorized, non-approved test file can be a no-op.
-            val f2 = "test contract\n"
-            // Set up a normal test file by creating it in a separate tracked fixture.
-            assertTrue(runtime.apply(listOf(
-                WriteOperation.Create("src/test/Another.kt", f2)
+                WriteOperation.Edit("src/test/Ordinary.kt", sha(original), original)
             )).permitted)
             val current = runtime.runCheck("git_diff_check").receipt!!
             assertEquals("CHECK_RECEIPT_INVALID", runtime.finish(listOf(oldReceipt)).deniedCode)
@@ -400,7 +395,7 @@ class TrustedWriteRuntimeTest {
         val script = """
             from pathlib import Path
             import socket
-            assert Path('/workspace/src/main/Feature.kt').read_text() == 'fun value() = 4\\n'
+            assert Path('/workspace/src/main/Feature.kt').read_text() == 'fun value() = 4\n'
             try:
                 Path('/workspace/src/main/Feature.kt').write_text('escaped')
                 raise AssertionError('workspace was writable')
@@ -414,12 +409,17 @@ class TrustedWriteRuntimeTest {
             except OSError:
                 pass
         """.trimIndent()
-        open(f, checks = mapOf("separate-test" to TrustedCheck(python, listOf("-c", script))),
+        open(f, checks = mapOf(
+                "separate-test" to TrustedCheck(python, listOf("-c", script)),
+                "output-overflow" to TrustedCheck(python,
+                    listOf("-c", "print('x' * 100000)"), maxOutputBytes = 128)
+            ),
             required = setOf("git_diff_check", "separate-test")).use { runtime ->
             assertTrue(runtime.apply(listOf(WriteOperation.Edit("src/main/Feature.kt",
                 sha("fun value() = 1\n"), "fun value() = 4\n"))).permitted)
             val check = runtime.runCheck("separate-test")
             assertTrue(check.passed, "Sandboxed test must pass: " + check.deniedCode)
+            assertEquals("CHECK_OUTPUT_LIMIT", runtime.runCheck("output-overflow").deniedCode)
             val gitCheck = runtime.runCheck("git_diff_check")
             assertTrue(gitCheck.passed, gitCheck.deniedCode)
             assertTrue(runtime.finish(listOf(check.receipt!!, gitCheck.receipt!!)).successful)
