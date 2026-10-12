@@ -233,7 +233,7 @@ class TrustedWriteRuntime private constructor(
 
         private fun gitStatus(git: RestrictedGit): Map<String, String> {
             val records = git.text(1024 * 1024, "status", "--porcelain=v1", "-z",
-                "--untracked-files=all", "--ignore-submodules=none").split('\u0000')
+                "--untracked-files=all", "--ignored=matching", "--ignore-submodules=none").split('\u0000')
             val found = linkedMapOf<String, String>()
             var index = 0
             while (index < records.size) {
@@ -297,7 +297,7 @@ class TrustedWriteRuntime private constructor(
         if (!allowed) fail("ROLE_NOT_AUTHORIZED")
         if (policy.role == EngineeringRole.DEVELOPER &&
             (parts.any { it in setOf("test", "tests", "spec", "specs", "acceptance") } ||
-                parts.last().matches(Regex(".*(Test|Spec)\\.[A-Za-z0-9]+"))))
+                parts.last().matches(Regex(".*(test|spec)\\.[a-z0-9]+"))))
             fail("PROTECTED_PATH")
         if (tracked.any { (p, mode) -> mode == "160000" && path.startsWith(p + "/") })
             fail("SUBMODULE_BOUNDARY")
@@ -391,7 +391,9 @@ class TrustedWriteRuntime private constructor(
         for ((path, expected) in policy.approvedArtifacts) {
             val current = readFile(path)?.let(::sha)
             if (path in (policy.reviewedChange?.paths ?: emptySet())) {
-                if (path !in accepted || accepted[path] != current) fail("APPROVED_ARTIFACT_CHANGED")
+                if (path in accepted) {
+                    if (accepted[path] != current) fail("APPROVED_ARTIFACT_CHANGED")
+                } else if (current != expected) fail("APPROVED_ARTIFACT_CHANGED")
             } else if (current != expected) fail("APPROVED_ARTIFACT_CHANGED")
         }
         return sha(accepted.toSortedMap().entries.joinToString("\u0000") {
@@ -527,7 +529,9 @@ class TrustedWriteRuntime private constructor(
                 reader.shutdownNow()
             }
         } finally {
-            Files.deleteIfExists(temp)
+            Files.walk(temp).use { paths ->
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
         }
     }
 
