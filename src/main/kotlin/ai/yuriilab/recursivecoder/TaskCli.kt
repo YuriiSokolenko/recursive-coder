@@ -53,7 +53,8 @@ The store defaults to ~/.recursive-coder/tasks.
                             "--priority" -> {
                                 require(!prioritySet) { "Duplicate priority option" }
                                 prioritySet = true
-                                priority = value.toInt()
+                                priority = value.toIntOrNull()
+                                    ?: throw IllegalArgumentException("Priority must be an integer from 0 to 100")
                             }
                             "--depends-on" -> {
                                 require(!dependenciesSet) { "Duplicate dependency option" }
@@ -101,9 +102,21 @@ The store defaults to ~/.recursive-coder/tasks.
                 "run" -> {
                     val concurrency = if (arguments.isEmpty()) 1 else {
                         require(arguments.size == 2 && arguments[0] == "--concurrency") { HELP }
-                        arguments[1].toInt()
+                        arguments[1].toIntOrNull()
+                            ?: throw IllegalArgumentException("Concurrency must be an integer from 1 to 32")
                     }
-                    val report = TaskScheduler(service).runUntilIdle(concurrency)
+                    val scheduler = TaskScheduler(service)
+                    val hook = Thread({ scheduler.requestStop() }, "task-scheduler-shutdown")
+                    Runtime.getRuntime().addShutdownHook(hook)
+                    val report = try {
+                        scheduler.runUntilIdle(concurrency)
+                    } finally {
+                        try {
+                            Runtime.getRuntime().removeShutdownHook(hook)
+                        } catch (_: IllegalStateException) {
+                            // The JVM is already executing shutdown hooks.
+                        }
+                    }
                     println(buildJsonObject {
                         put("launched", report.launched)
                         put("completed", report.completed)
