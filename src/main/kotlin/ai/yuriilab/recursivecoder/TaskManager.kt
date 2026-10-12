@@ -555,7 +555,9 @@ class TaskScheduler(
                             val future = pool.submit {
                                 cancellation.bind()
                                 val status = try {
-                                    if (service.show(task.id).state == TaskState.CANCELLED) "cancelled"
+                                    val current = service.show(task.id)
+                                    if (current.sessionId != sessionId ||
+                                        current.state == TaskState.CANCELLED || stopping.get()) "cancelled"
                                     else runner.execute(service.requestFor(task), cancellation)
                                 } catch (_: InterruptedException) {
                                     "cancelled"
@@ -580,7 +582,7 @@ class TaskScheduler(
                         val states = service.list().associateBy { it.id }
                         active.forEach { (sessionId, attempt) ->
                             val task = states[attempt.taskId]
-                            if (task?.state == TaskState.CANCELLED && task.sessionId == sessionId)
+                            if (task?.state == TaskState.CANCELLED || task?.sessionId != sessionId)
                                 attempt.cancellation.cancel()
                         }
                         val finishedIds = active.entries.filter { it.value.future.isDone }.map { it.key }
