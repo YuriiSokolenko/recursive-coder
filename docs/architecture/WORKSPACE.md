@@ -50,8 +50,11 @@ Every call is checked independently:
    session's `maxToolCalls` applies to **attempts**, including denials.
 7. Git inspection calls are fixed verbs, no shell, no external diff/textconv,
    with a sanitized environment, bounded output and a three-second deadline.
-   Git status excludes untracked files and filters all returned names through
-   the same tracked-file and protected-path policy.
+   Executable Git filters, config includes and command-capable diff drivers
+   cause admission refusal. Changes to the local Git configuration during the
+   session are detected before tools proceed; repositories relying on Git LFS
+   filter drivers are not yet supported. Git status excludes untracked files
+   and filters all returned names through the tracked/protected-path policy.
 
 Each attempted call receives an engine-generated `tool-<sessionId>-<sequence>`
 receipt ID. Claimed execution IDs are rejected. The journal records metadata
