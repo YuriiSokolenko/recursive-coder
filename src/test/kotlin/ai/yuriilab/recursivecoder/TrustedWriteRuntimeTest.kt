@@ -196,6 +196,17 @@ class TrustedWriteRuntimeTest {
         }
     }
 
+    @Test fun caseFoldedTrackedPathsAreRejectedAtAdmission() {
+        val f = fixture()
+        Files.writeString(f.root.resolve("src/main/feature.kt"), "fun ambiguous() = true\n")
+        git(f.root, "add", "src/main/feature.kt")
+        git(f.root, "commit", "-m", "case-colliding tracked path")
+        val next = f.copy(head = git(f.root, "rev-parse", "HEAD"))
+        assertEquals("PATH_CASE_COLLISION", assertFailsWith<Refused> {
+            open(next)
+        }.code)
+    }
+
     @Test fun preflightRejectsIgnoredContentNulAndCaseCollisionsWithoutPoisoning() {
         val f = fixture()
         open(f).use { runtime ->
