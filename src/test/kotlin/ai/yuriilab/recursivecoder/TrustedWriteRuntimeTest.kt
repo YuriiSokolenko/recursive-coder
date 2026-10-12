@@ -62,14 +62,21 @@ class TrustedWriteRuntimeTest {
         role: EngineeringRole = EngineeringRole.DEVELOPER,
         reviewed: ReviewedChange? = null,
         checks: Map<String, TrustedCheck> = emptyMap(),
-        required: Set<String> = setOf("git_diff_check")
-    ) = TrustedWritePolicy("issue8-session", f.root, f.head, "dev", role,
-        f.approved, reviewed, checks, required)
+        required: Set<String>? = null
+    ): TrustedWritePolicy {
+        val defaults = if (role == EngineeringRole.DEVELOPER && required == null)
+            mapOf("separate-test" to TrustedCheck(Path.of("/usr/bin/true"), emptyList()))
+        else emptyMap()
+        val requiredChecks = required ?: if (role == EngineeringRole.DEVELOPER)
+            setOf("git_diff_check", "separate-test") else setOf("git_diff_check")
+        return TrustedWritePolicy("issue8-session", f.root, f.head, "dev", role,
+            f.approved, reviewed, defaults + checks, requiredChecks)
+    }
 
     private fun open(f: Fixture, role: EngineeringRole = EngineeringRole.DEVELOPER,
                      reviewed: ReviewedChange? = null,
                      checks: Map<String, TrustedCheck> = emptyMap(),
-                     required: Set<String> = setOf("git_diff_check"),
+                     required: Set<String>? = null,
                      audit: (String, String, String?) -> Unit = { _, _, _ -> }
     ) = TrustedWriteRuntime.open(policy(f, role, reviewed, checks, required),
         lockDirectory = temp.resolve("leases"), audit = audit)
@@ -90,7 +97,7 @@ class TrustedWriteRuntimeTest {
             val check = runtime.runCheck("git_diff_check")
             assertTrue(check.passed, check.deniedCode)
             assertNotNull(check.receipt)
-            assertEquals("TEST_CHECK_REQUIRED", runtime.finish(listOf(check.receipt)).deniedCode)
+            assertEquals("REQUIRED_CHECK_MISSING", runtime.finish(listOf(check.receipt)).deniedCode)
             assertEquals("tool-issue8-session-1", result.toolId)
             assertEquals("tool-issue8-session-2", check.toolId)
             assertTrue(audits.all { it.third == null })
@@ -110,7 +117,7 @@ class TrustedWriteRuntimeTest {
                 assertTrue(runtime.apply(listOf(WriteOperation.Create(path, "independent content\n"))).permitted)
                 val result = runtime.finish(listOf(runtime.runCheck("git_diff_check").receipt!!))
                 if (role == EngineeringRole.DEVELOPER) {
-                    assertEquals("TEST_CHECK_REQUIRED", result.deniedCode)
+                    assertEquals("REQUIRED_CHECK_MISSING", result.deniedCode)
                 } else {
                     assertTrue(result.successful, result.deniedCode)
                 }
@@ -184,7 +191,7 @@ class TrustedWriteRuntimeTest {
             assertTrue(runtime.apply(listOf(
                 WriteOperation.Create("src/main/AfterRevert.kt", "fun healthy() = true\n")
             )).permitted)
-            assertEquals("TEST_CHECK_REQUIRED",
+            assertEquals("REQUIRED_CHECK_MISSING",
                 runtime.finish(listOf(runtime.runCheck("git_diff_check").receipt!!)).deniedCode)
         }
     }
@@ -369,11 +376,41 @@ class TrustedWriteRuntimeTest {
         }
     }
 
+    /**
+     * Local Linux development inside restricted containers can skip this one test.
+     * GitHub CI must fail if bwrap or user namespaces disappear: no green skipped E2E.
+     */
+    private fun requireSandbox(available: Boolean, reason: String) {
+        val ci = System.getenv("CI").equals("true", ignoreCase = true) ||
+            System.getenv("GITHUB_ACTIONS").equals("true", ignoreCase = true)
+        if (ci) assertTrue(available, reason) else Assumptions.assumeTrue(available, reason)
+    }
+
+    @Test fun developerMustDeclareGitAndIndependentTestBeforeAdmission() {
+        val f = fixture()
+        val gitOnly = policy(f, required = setOf("git_diff_check"))
+        assertEquals("TEST_CHECK_REQUIRED", assertFailsWith<Refused> {
+            TrustedWriteRuntime.open(gitOnly, lockDirectory = temp.resolve("leases"))
+        }.code)
+        val testOnly = policy(f, required = setOf("separate-test"),
+            checks = mapOf("separate-test" to TrustedCheck(Path.of("/usr/bin/true"), emptyList())))
+        assertEquals("TEST_CHECK_REQUIRED", assertFailsWith<Refused> {
+            TrustedWriteRuntime.open(testOnly, lockDirectory = temp.resolve("leases"))
+        }.code)
+        // Bad policy admission is side-effect-free; valid policy can still acquire the lock.
+        assertFalse(Files.exists(temp.resolve("leases")))
+        open(f).use { runtime ->
+            assertTrue(runtime.apply(listOf(
+                WriteOperation.Create("src/main/AfterAdmission.kt", "fun admitted() = true\n")
+            )).permitted)
+        }
+    }
+
     @Test fun realSeparatelyExecutedSandboxedTestPassesIfHostSupportsUserNamespaces() {
         val f = fixture()
         val python = Path.of("/usr/bin/python3")
         val sandbox = Path.of("/usr/bin/bwrap")
-        Assumptions.assumeTrue(Files.isExecutable(python) && Files.isExecutable(sandbox),
+        requireSandbox(Files.isExecutable(python) && Files.isExecutable(sandbox),
             "Sandbox prerequisites not installed")
         // Probe kernel namespace support independently of the runtime. This
         // runner may forbid configuring loopback in a private network namespace.
@@ -390,7 +427,7 @@ class TrustedWriteRuntimeTest {
         val supported = probe.waitFor(5, java.util.concurrent.TimeUnit.SECONDS) &&
             probe.exitValue() == 0
         if (probe.isAlive) probe.destroyForcibly()
-        Assumptions.assumeTrue(supported,
+        requireSandbox(supported,
             "Host does not permit the isolated network namespace required by runCheck")
         val checks = mapOf(
             "smoke" to TrustedCheck(Path.of("/usr/bin/true"), emptyList()),
