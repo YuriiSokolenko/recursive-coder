@@ -30,14 +30,8 @@ jobs:
           gradle-version: '9.8.1'
       - name: Install isolated-check sandbox
         run: sudo apt-get update -qq && sudo apt-get install -y bubblewrap
-      - name: Diagnose bubblewrap namespace availability
-        continue-on-error: true
-        run: |
-          /usr/bin/bwrap --version
-          cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns || true
-          /usr/bin/bwrap --die-with-parent --new-session --unshare-all --tmpfs / --proc /proc --dev /dev --ro-bind /usr /usr --ro-bind /bin /bin --ro-bind /lib /lib --ro-bind /lib64 /lib64 -- /usr/bin/true
       - name: Compile and test standalone JVM project
-        run: ./gradlew --no-daemon test --info --stacktrace
+        run: ./gradlew --no-daemon test --stacktrace
 
       - uses: actions/setup-python@v5
         with:
