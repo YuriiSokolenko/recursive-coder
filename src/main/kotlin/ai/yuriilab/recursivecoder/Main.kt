@@ -6,6 +6,7 @@ import kotlin.system.exitProcess
 
 /** Execute one first-party SessionRequest v1, with an offline deterministic model. */
 fun main(args: Array<String>) {
+    if (args.firstOrNull() == "tasks") exitProcess(TaskCli.execute(args.drop(1)))
     if (args.size !in 2..4 || args[0] != "run" || args[1].startsWith("-") ||
         (args.size > 2 && (args.size != 4 || args[2] != "--fake-delay-ms"))) {
         System.err.println("Usage: recursive-coder run /absolute/request.json [--fake-delay-ms N]")
