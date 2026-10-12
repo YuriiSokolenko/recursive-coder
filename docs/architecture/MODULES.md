@@ -51,3 +51,12 @@ Shared Kotlin/JVM 21 and JUnit settings live in the `build-logic` included build
 ## Deliberately deferred
 
 The current code does not justify empty `:agent:runtime` or `:infra:tools` modules. When recursive Koog orchestration and an independently owned tool execution layer exist, those modules can be extracted with focused boundary tests. Until then the trusted write/check implementation remains alongside restricted Git in `:infra:workspace`.
+
+
+## Verified architecture and test tiers (issue #25)
+
+The root `checkArchitecture` task enforces the project dependency directions in the table above for every Gradle configuration, including test-only edges and future fixtures. It also detects project cycles and rejects direct core dependencies on common CLI/Koog/HTTP frameworks. CI includes deliberately illegal dependency and test-cycle regressions. A new module requires an intentional allowlist update.
+
+The JVM `unitTest` target contains only tagged pure tests; `integrationTest` runs tagged local filesystem, Git and mock-HTTP cases; `e2eTest` selects tagged sandbox checks. The existing `test` target remains **unfiltered**, preserving all existing coverage and the `./gradlew test installDist` workflow. CI retains the sandbox execution assertion, installed CLI E2E and independent protocol tests.
+
+The current file-backed TaskStore in `:core:tasks` and physical journal in `:core:session` are explicitly deferred internal extraction work (#27 and #29), **not** cross-module dependency exemptions. See [Test tiers and architecture guardrails](TEST_SUITES.md) for detailed classification, commands and exceptions.
