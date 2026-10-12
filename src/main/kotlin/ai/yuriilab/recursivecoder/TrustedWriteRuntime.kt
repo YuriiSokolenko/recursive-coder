@@ -102,6 +102,7 @@ class TrustedWriteRuntime private constructor(
     private val gitKey: Any,
     private val git: RestrictedGit,
     private val configHash: String,
+    private val indexHash: String,
     private val tracked: Map<String, String>,
     private val leaseChannel: FileChannel,
     private val lease: FileLock,
@@ -205,7 +206,7 @@ class TrustedWriteRuntime private constructor(
                     policy.reviewedChange.toString(), policy.requiredChecks.sorted().toString(),
                     policy.checks.toSortedMap().toString()).joinToString("\u0000").toByteArray())
                 val runtime = TrustedWriteRuntime(policy, root, rootKey, gitKey, git,
-                    sha(config.toByteArray()), tracked, channel, lock, policyHash, audit)
+                    sha(config.toByteArray()), indexFingerprint(git), tracked, channel, lock, policyHash, audit)
                 for ((path, expected) in policy.approvedArtifacts) {
                     if (sha(runtime.readFile(path) ?: fail("APPROVED_ARTIFACT_MISSING")) != expected)
                         fail("APPROVED_ARTIFACT_CHANGED")
@@ -230,6 +231,14 @@ class TrustedWriteRuntime private constructor(
                 it.isNotEmpty() && it != "." && it != ".." &&
                     it.none { char -> char.code < 32 || char.code == 127 }
             }
+
+        private fun indexFingerprint(git: RestrictedGit): String {
+            val flags = git.text(4 * 1024 * 1024, "ls-files", "-v", "-z")
+            if (flags.split('\u0000').filter(String::isNotEmpty).any { !it.startsWith("H ") })
+                fail("UNSAFE_GIT_INDEX")
+            val staged = git.text(4 * 1024 * 1024, "ls-files", "--stage", "-z")
+            return sha((flags + "\u0000" + staged).toByteArray())
+        }
 
         private fun gitStatus(git: RestrictedGit): Map<String, String> {
             val records = git.text(1024 * 1024, "status", "--porcelain=v1", "-z",
@@ -273,6 +282,7 @@ class TrustedWriteRuntime private constructor(
             fail("WORKSPACE_BASELINE_MISMATCH")
         if (sha(git.text(256 * 1024, "config", "--local", "--list").toByteArray()) != configHash)
             fail("GIT_CONFIGURATION_CHANGED")
+        if (indexFingerprint(git) != indexHash) fail("INDEX_MUTATION_DENIED")
     }
 
     private fun authorized(path: String) {
