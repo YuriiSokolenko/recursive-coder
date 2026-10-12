@@ -5,7 +5,7 @@ package ai.yuriilab.recursivecoder
  *
  * The JSON Schema accepts forward-compatible 1.x envelopes, but a runtime
  * must explicitly opt into a version before it can process a session.
- * Until #785 implements capability negotiation, only 1.0 is supported.
+ * Until native capability negotiation is implemented, only 1.0 is supported.
  */
 object SessionProtocol {
     const val VERSION: String = "1.0"
