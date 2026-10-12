@@ -132,7 +132,7 @@ test('journal correlation, child and tool IDs, checkpoint and results are linkab
   assert.equal(event.sessionId, checkpoint.sessionId);
   assert.equal(event.traceId, successResult.traceId);
   assert.equal(successResult.requestId, resumeRequest.requestId);
-  assert.equal(event.causationId, 'evt-770-4');
+  assert.equal(event.causationId, 'evt-demo-4');
   assert.ok(event.sequence > checkpoint.sequence);
   assert.ok(successResult.lastEventSeq >= event.sequence);
   assert.equal(successResult.provenance.fenceGeneration, resumeRequest.resume.fenceGeneration);
