@@ -272,7 +272,7 @@ class SessionRuntimeTest {
             listOf("events.jsonl", "diagnostics.json", "result.json").forEach { filename ->
                 val text = Files.readString(temp.resolve("out").resolve(filename))
                 assertFalse(text.contains(taskText))
-                assertFalse(text.contains("UNSET_TEST_MODEL_CREDENTIAL"))
+                assertFalse(text.contains("FAKE_TOKEN"))
                 assertFalse(text.contains(taskPath))
             }
         } finally {
