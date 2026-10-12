@@ -280,4 +280,62 @@ class SessionRuntimeTest {
         }
     }
 
+    private fun countedGateway(
+        firstAttempts: Int,
+        firstUsage: ModelUsage = ModelUsage(1L, 1L),
+        onFirstRetryDecision: (Boolean) -> Unit = {}
+    ): ModelGateway = object : ModelGateway {
+        override fun negotiate(
+            config: ModelConfig, cancellation: Cancellation, deadline: Instant
+        ): GatewayCapabilities =
+            GatewayCapabilities(setOf("tool_calls"), config.contextTokens, config.maxOutputTokens)
+
+        override fun next(
+            config: ModelConfig, task: Path, observed: Pair<Int, String>?,
+            cancellation: Cancellation, deadline: Instant, allowRetry: Boolean
+        ): ModelTurn = if (observed == null) {
+            onFirstRetryDecision(allowRetry)
+            ModelTurn(ModelDecision.Read(task), firstUsage, attempts = firstAttempts)
+        } else ModelTurn(
+            ModelDecision.Done(observed.first, observed.second),
+            ModelUsage(1L, 1L)
+        )
+    }
+
+    @Test fun wireRetriesAreCountedAndFinalModelTurnIsReserved() {
+        val request = fixture().changeChild("budgets", "maxModelRequests", JsonPrimitive(3))
+        var retryAllowed = false
+        val gateway = countedGateway(firstAttempts = 2) { retryAllowed = it }
+        val result = SessionController(SessionRequest.parse(request.toString()), gateway).run()
+        assertEquals("succeeded", status(result))
+        assertTrue(retryAllowed, "The initial turn may retry only if budget reserves the final turn")
+        val modelEvents = events().filter { it["type"]!!.jsonPrimitive.content == "llm.response" }
+        assertEquals(2, modelEvents.size)
+        assertEquals(2, modelEvents.first()["metadata"]!!.jsonObject["attempts"]!!.jsonPrimitive.int)
+        assertEquals(1, modelEvents.last()["metadata"]!!.jsonObject["attempts"]!!.jsonPrimitive.int)
+        assertEquals(1, events().count { it["type"]!!.jsonPrimitive.content == "tool.completed" })
+    }
+
+    @Test fun exhaustedModelRequestBudgetRejectsUnreportedRetryBeforeTrustedTool() {
+        val request = fixture() // maxModelRequests = 2, one POST for each turn
+        var retryAllowed = true
+        val gateway = countedGateway(firstAttempts = 2) { retryAllowed = it }
+        val result = SessionController(SessionRequest.parse(request.toString()), gateway).run()
+        assertFalse(retryAllowed, "The final turn's reserved request must not fund a retry")
+        assertEquals("failed", status(result))
+        assertEquals("MODEL_REQUEST_BUDGET_EXCEEDED",
+            result["error"]!!.jsonObject["code"]!!.jsonPrimitive.content)
+        assertEquals(0, events().count { it["type"]!!.jsonPrimitive.content == "tool.completed" })
+    }
+
+    @Test fun tokenBudgetExceededBeforeWorkspaceRead() {
+        val request = fixture().changeChild("budgets", "maxTotalTokens", JsonPrimitive(2))
+        val gateway = countedGateway(firstAttempts = 1, firstUsage = ModelUsage(20L, 10L))
+        val result = SessionController(SessionRequest.parse(request.toString()), gateway).run()
+        assertEquals("failed", status(result))
+        assertEquals("TOKEN_BUDGET_EXCEEDED",
+            result["error"]!!.jsonObject["code"]!!.jsonPrimitive.content)
+        assertEquals(0, events().count { it["type"]!!.jsonPrimitive.content == "tool.completed" })
+    }
+
 }
