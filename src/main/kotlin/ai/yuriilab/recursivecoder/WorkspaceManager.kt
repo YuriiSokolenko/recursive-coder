@@ -32,7 +32,8 @@ sealed interface WorkspaceTool {
 sealed interface ToolData {
     data class FileText(val path: String, val text: String, val bytes: Int, val sha256: String) : ToolData
     data class Paths(val paths: List<String>) : ToolData
-    data class Matches(val matches: List<Match>) : ToolData
+    data class Matches(val matches: List<Match>, val skippedFiles: Int = 0,
+                       val truncated: Boolean = false) : ToolData
     data class Match(val path: String, val line: Int, val excerpt: String)
     data class Status(val entries: List<StatusEntry>) : ToolData
     data class StatusEntry(val path: String, val index: Char, val worktree: Char)
@@ -46,7 +47,8 @@ data class ToolOutcome(val receiptId: String, val tool: String, val data: ToolDa
 
 /** Metadata-only audit: neither arguments, file contents nor search results are persisted. */
 data class ToolAudit(val receiptId: String, val tool: String, val started: Instant,
-                     val permitted: Boolean, val code: String?, val outputBytes: Int)
+                     val permitted: Boolean, val code: String?, val outputBytes: Int,
+                     val sha256: String? = null)
 
 /**
  * A per-process read-only Git workspace boundary.
@@ -424,26 +426,49 @@ class WorkspaceManager private constructor(
                     val query = tool.literal
                     if (query.isBlank() || query.length > 128 || query.any { it.code < 32 })
                         deny("INVALID_SEARCH_QUERY")
-                    val candidates = tree.keys.filter(::permittedPath).sorted()
-                    if (candidates.size > 256) deny("SEARCH_SCOPE_EXCEEDED")
+                    val candidates = tree.keys.asSequence().filter(::permittedPath).sorted().toList()
                     val found = mutableListOf<ToolData.Match>()
+                    var skipped = 0
                     var scanned = 0
-                    for (path in candidates) {
-                        val bytes = secureRead(path)
+                    var examined = 0
+                    var truncated = false
+                    val skippable = setOf("UNSAFE_FILE", "UNSAFE_PATH_COMPONENT",
+                        "READ_LIMIT_EXCEEDED", "BINARY_FILE_DENIED")
+                    scan@ for (path in candidates) {
+                        if (examined >= 256 || scanned >= 1024 * 1024) {
+                            truncated = true
+                            break
+                        }
+                        examined++
+                        val bytes = try {
+                            secureRead(path)
+                        } catch (e: Refused) {
+                            if (e.code !in skippable) throw e
+                            skipped++
+                            continue@scan
+                        }
                         scanned += bytes.size
-                        if (scanned > 1024 * 1024) deny("SEARCH_SCOPE_EXCEEDED")
-                        val text = decode(bytes)
-                        text.lineSequence().forEachIndexed { i, line ->
+                        val text = try {
+                            decode(bytes)
+                        } catch (e: Refused) {
+                            if (e.code != "BINARY_FILE_DENIED") throw e
+                            skipped++
+                            continue@scan
+                        }
+                        for ((lineNumber, line) in text.lineSequence().withIndex()) {
                             if (line.contains(query, ignoreCase = true)) {
-                                if (found.size >= 100) deny("RESULT_LIMIT_EXCEEDED")
-                                found += ToolData.Match(path, i + 1, line.take(160))
+                                if (found.size == 100) {
+                                    truncated = true
+                                    break@scan
+                                }
+                                found += ToolData.Match(path, lineNumber + 1, line.take(160))
                             }
                         }
                     }
-                    ToolData.Matches(found)
+                    ToolData.Matches(found, skipped, truncated)
                 }
                 WorkspaceTool.GitStatus -> {
-                    val raw = git.text(256 * 1024, "status", "--porcelain=v1", "-z", "--untracked-files=no")
+                    val raw = git.text(256 * 1024, "status", "--ignore-submodules=all", "--porcelain=v1", "-z", "--untracked-files=no")
                     val tokens = raw.split('\u0000')
                     val entries = mutableListOf<ToolData.StatusEntry>()
                     var i = 0
@@ -463,7 +488,7 @@ class WorkspaceManager private constructor(
                 is WorkspaceTool.GitDiff -> {
                     val path = relative(tool.path)
                     authorized(path)
-                    val patch = git.text(maxToolOutputBytes, "diff", "--no-ext-diff", "--no-textconv",
+                    val patch = git.text(maxToolOutputBytes, "diff", "--ignore-submodules=all", "--no-ext-diff", "--no-textconv",
                         "--", ":(literal)$path")
                     ToolData.Diff(path, patch)
                 }
@@ -473,7 +498,7 @@ class WorkspaceManager private constructor(
             size = when (val value = data) {
                 is ToolData.FileText -> value.bytes
                 is ToolData.Paths -> value.paths.sumOf { it.toByteArray().size }
-                is ToolData.Matches -> value.matches.sumOf { it.path.toByteArray().size + it.excerpt.toByteArray().size }
+                is ToolData.Matches -> value.matches.sumOf { it.path.toByteArray().size + it.excerpt.toByteArray().size } + 32
                 is ToolData.Status -> value.entries.sumOf { it.path.toByteArray().size + 2 }
                 is ToolData.Diff -> value.patch.toByteArray().size
                 null -> 0
@@ -490,7 +515,8 @@ class WorkspaceManager private constructor(
             data = null
             size = 0
         }
-        onAudit(ToolAudit(receipt, tool.name, started, error == null, error, size))
+        onAudit(ToolAudit(receipt, tool.name, started, error == null, error, size,
+            (data as? ToolData.FileText)?.sha256))
         return ToolOutcome(receipt, tool.name, data, error)
     }
 
