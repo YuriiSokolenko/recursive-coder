@@ -6,6 +6,10 @@ import java.nio.channels.FileChannel
 import java.nio.channels.FileLock
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
+import java.text.Normalizer
+import java.util.Locale
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.atomic.AtomicBoolean
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.NoSuchFileException
@@ -110,7 +114,10 @@ class TrustedWriteRuntime private constructor(
     private val audit: (String, String, String?) -> Unit
 ) : AutoCloseable {
     private val secret = ByteArray(32).also(SecureRandom()::nextBytes)
+    /** Current effective diff, not the history of successful writes. */
     private val accepted = linkedMapOf<String, String?>()
+    /** HEAD content at the first authorized mutation; retained across rollback/no-op edits. */
+    private val baselineDigests = mutableMapOf<String, String?>()
     private val issued = mutableMapOf<String, TrustedCheckReceipt>()
     private var sequence = 0
     private var poisoned = false
@@ -134,6 +141,10 @@ class TrustedWriteRuntime private constructor(
             gitExecutable: Path = discoverGit(),
             audit: (String, String, String?) -> Unit = { _, _, _ -> }
         ): TrustedWriteRuntime {
+            // SecureDirectoryStream is unavailable on the standard macOS provider.
+            // Never silently downgrade to path-based or followable filesystem operations.
+            if (!System.getProperty("os.name").startsWith("Linux"))
+                fail("SANDBOX_UNAVAILABLE")
             if (!idPattern.matches(policy.sessionId) || !gitPattern.matches(policy.baselineHead) ||
                 policy.branch.isBlank() || policy.maxToolCalls !in 1..10_000 ||
                 policy.requiredChecks.isEmpty() ||
@@ -232,6 +243,9 @@ class TrustedWriteRuntime private constructor(
                     it.none { char -> char.code < 32 || char.code == 127 }
             }
 
+        private fun folded(path: String): String =
+            Normalizer.normalize(path, Normalizer.Form.NFC).lowercase(Locale.ROOT)
+
         private fun indexFingerprint(git: RestrictedGit): String {
             val flags = git.text(4 * 1024 * 1024, "ls-files", "-v", "-z")
             if (flags.split('\u0000').filter(String::isNotEmpty).any { !it.startsWith("H ") })
@@ -290,9 +304,8 @@ class TrustedWriteRuntime private constructor(
     private fun authorized(path: String) {
         if (!validPath(path)) fail("INVALID_TOOL_PATH")
         val parts = path.lowercase().split('/')
-        if (parts.any { it == ".git" || it == ".github" || it == "gradle" ||
-                it == "build" || it == ".gradle" || it == ".env" ||
-                it == "secrets" || it == "credentials" } ||
+        if (parts.any { it in setOf(".git", ".github", ".gradle", ".env",
+                    "secrets", "credentials") } ||
             parts.last().startsWith(".env") ||
             parts.last().endsWith(".key") || parts.last().endsWith(".pem") ||
             parts.last().endsWith(".p12") || parts.last().endsWith(".jks") ||
@@ -308,8 +321,7 @@ class TrustedWriteRuntime private constructor(
         }
         if (!allowed) fail("ROLE_NOT_AUTHORIZED")
         if (policy.role == EngineeringRole.DEVELOPER &&
-            (parts.any { it in setOf("test", "tests", "spec", "specs", "acceptance") } ||
-                parts.last().matches(Regex(".*(test|spec)\\.[a-z0-9]+"))))
+            parts.last().matches(Regex(".*(test|spec)\\.[a-z0-9]+")))
             fail("PROTECTED_PATH")
         if (tracked.any { (p, mode) -> mode == "160000" && path.startsWith(p + "/") })
             fail("SUBMODULE_BOUNDARY")
@@ -334,13 +346,22 @@ class TrustedWriteRuntime private constructor(
             try {
                 val parts = path.split('/')
                 for (part in parts.dropLast(1)) {
+                    // On case-insensitive volumes, merely asking for a differently cased
+                    // component may resolve the wrong directory. Require exact spelling.
+                    if (cursor.none { it.fileName.toString() == part })
+                        fail("UNSAFE_PATH_COMPONENT")
                     val next = try {
                         cursor.newDirectoryStream(Path.of(part), LinkOption.NOFOLLOW_LINKS)
                     } catch (_: Exception) { fail("UNSAFE_PATH_COMPONENT") }
                     opened.add(next)
                     cursor = next
                 }
-                return operation(cursor, Path.of(parts.last()))
+                val leaf = parts.last()
+                if (cursor.any { candidate ->
+                        val actual = candidate.fileName.toString()
+                        actual != leaf && folded(actual) == folded(leaf)
+                    }) fail("PATH_CASE_COLLISION")
+                return operation(cursor, Path.of(leaf))
             } finally {
                 opened.asReversed().forEach { it.close() }
             }
@@ -427,14 +448,27 @@ class TrustedWriteRuntime private constructor(
             if (claimedToolId != null) fail("FORGED_TOOL_ID")
             if (sequence > policy.maxToolCalls) fail("TOOL_QUOTA_EXCEEDED")
             if (operations.isEmpty() || operations.size > 8 ||
-                operations.map { it.path }.distinct().size != operations.size) fail("INVALID_WRITE_BATCH")
+                operations.map { folded(it.path) }.distinct().size != operations.size)
+                fail("INVALID_WRITE_BATCH")
             verifyState()
+            val prior = linkedMapOf<String, String?>()
             for (op in operations) {
                 authorized(op.path)
+                // Repositories may originate on case-sensitive media and be opened on
+                // case-insensitive media. Disallow any ambiguous tracked spelling.
+                if (tracked.keys.any { it != op.path && folded(it) == folded(op.path) })
+                    fail("PATH_CASE_COLLISION")
                 val before = readFile(op.path)
+                prior[op.path] = before?.let(::sha)
                 when (op) {
                     is WriteOperation.Create -> {
                         if (before != null || op.path in tracked) fail("CREATE_CONFLICT")
+                        // A successful create must be visible to the final Git status,
+                        // so ignored paths must be denied *before* writing.
+                        val (exit, _) = git.inspect(4096, "check-ignore", "--no-index", "--", op.path)
+                        if (exit == 0) fail("GIT_IGNORED_PATH")
+                        if (exit != 1) fail("GIT_IGNORE_INSPECTION_DENIED")
+                        if ('\u0000' in op.content) fail("BINARY_FILE_DENIED")
                         if (op.content.toByteArray(StandardCharsets.UTF_8).size > MAX_FILE_BYTES)
                             fail("FILE_SIZE_LIMIT")
                     }
@@ -442,6 +476,7 @@ class TrustedWriteRuntime private constructor(
                         if (before == null || op.path !in tracked ||
                             !shaPattern.matches(op.expectedSha256) ||
                             sha(before) != op.expectedSha256) fail("EDIT_PRECONDITION_FAILED")
+                        if ('\u0000' in op.content) fail("BINARY_FILE_DENIED")
                         if (op.content.toByteArray(StandardCharsets.UTF_8).size > MAX_FILE_BYTES)
                             fail("FILE_SIZE_LIMIT")
                     }
@@ -451,6 +486,9 @@ class TrustedWriteRuntime private constructor(
                             sha(before) != op.expectedSha256) fail("DELETE_PRECONDITION_FAILED")
                     }
                 }
+            }
+            for ((path, hash) in prior) {
+                if (path !in baselineDigests) baselineDigests[path] = hash
             }
             var startedMutation = false
             try {
@@ -463,11 +501,16 @@ class TrustedWriteRuntime private constructor(
                             try { dir.deleteFile(name) } catch (_: Exception) { fail("WRITE_IO_DENIED") }
                         }
                     }
-                    accepted[op.path] = when (op) {
+                    val current = when (op) {
                         is WriteOperation.Delete -> null
                         is WriteOperation.Create -> sha(op.content.toByteArray(StandardCharsets.UTF_8))
                         is WriteOperation.Edit -> sha(op.content.toByteArray(StandardCharsets.UTF_8))
                     }
+                    // A no-op edit and a rollback to HEAD are successful mutations
+                    // but not entries in the *current* diff. The receipt epoch still
+                    // advances, and previously issued receipts are always invalidated.
+                    if (current == baselineDigests[op.path]) accepted.remove(op.path)
+                    else accepted[op.path] = current
                 }
                 verifyState()
             } catch (e: Exception) {
@@ -517,6 +560,7 @@ class TrustedWriteRuntime private constructor(
             val reader = Executors.newSingleThreadExecutor {
                 Thread(it, "trusted-check-output").apply { isDaemon = true }
             }
+            val exceeded = AtomicBoolean(false)
             val future = reader.submit<Int> {
                 process.inputStream.use { stream ->
                     val buffer = ByteArray(4096)
@@ -525,15 +569,30 @@ class TrustedWriteRuntime private constructor(
                         val n = stream.read(buffer)
                         if (n < 0) break
                         total += n
-                        if (total > check.maxOutputBytes) fail("CHECK_OUTPUT_LIMIT")
+                        if (total > check.maxOutputBytes) {
+                            exceeded.set(true)
+                            process.destroyForcibly()
+                            fail("CHECK_OUTPUT_LIMIT")
+                        }
                     }
                     total
                 }
             }
             try {
                 val completed = process.waitFor(check.timeoutMs, TimeUnit.MILLISECONDS)
-                if (!completed) fail("CHECK_TIMEOUT")
-                try { future.get(1, TimeUnit.SECONDS) } catch (_: Exception) { fail("CHECK_OUTPUT_LIMIT") }
+                if (!completed) {
+                    if (exceeded.get()) fail("CHECK_OUTPUT_LIMIT")
+                    fail("CHECK_TIMEOUT")
+                }
+                try {
+                    future.get(1, TimeUnit.SECONDS)
+                } catch (e: ExecutionException) {
+                    if (e.cause is Refused) throw e.cause as Refused
+                    fail("CHECK_OUTPUT_UNAVAILABLE")
+                } catch (_: java.util.concurrent.TimeoutException) {
+                    fail("CHECK_OUTPUT_UNAVAILABLE")
+                }
+                if (exceeded.get()) fail("CHECK_OUTPUT_LIMIT")
                 if (process.exitValue() != 0) fail("CHECK_FAILED_OR_SANDBOX_UNAVAILABLE")
             } finally {
                 if (process.isAlive) process.destroyForcibly()
@@ -601,6 +660,10 @@ class TrustedWriteRuntime private constructor(
     fun finish(receipts: List<TrustedCheckReceipt>): FinalWriteVerification = try {
         val manifest = verifyState()
         if (accepted.isEmpty()) fail("NO_ACCEPTED_MUTATIONS")
+        if (policy.role == EngineeringRole.DEVELOPER &&
+            ("git_diff_check" !in policy.requiredChecks ||
+                policy.requiredChecks.none { it != "git_diff_check" }))
+            fail("TEST_CHECK_REQUIRED")
         if (receipts.map { it.check }.toSet() != policy.requiredChecks ||
             receipts.size != policy.requiredChecks.size) fail("REQUIRED_CHECK_MISSING")
         for (receipt in receipts) {
