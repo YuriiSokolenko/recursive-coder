@@ -48,6 +48,21 @@ private fun absolute(value: String): Path {
     ) refuse("Invalid absolute path")
     return path
 }
+/** Resolve an output destination's existing ancestor before creating any directories. */
+private fun canonicalDestination(path: Path): Path {
+    val missing = ArrayDeque<Path>()
+    var ancestor = path
+    while (!Files.exists(ancestor, LinkOption.NOFOLLOW_LINKS)) {
+        val name = ancestor.fileName ?: refuse("Invalid output path")
+        missing.addFirst(name)
+        ancestor = ancestor.parent ?: refuse("Invalid output path")
+    }
+    val realAncestor = try { ancestor.toRealPath() } catch (_: Exception) {
+        throw Refused("UNSAFE_OUTPUT_PATH", "policy", "Cannot resolve output directory")
+    }
+    return missing.fold(realAncestor) { parent, part -> parent.resolve(part) }
+}
+
 private fun digest(bytes: ByteArray): String =
     MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 private fun digestFile(path: Path): String = digest(Files.readAllBytes(path))
@@ -300,7 +315,11 @@ class SessionController(
         val started = Instant.now()
         // Never open or truncate existing output files. A later recovery milestone owns replay.
         val outputRoot = request.outputRoot
-        if (outputRoot.startsWith(request.rootPath) || Files.isSymbolicLink(outputRoot))
+        val workspaceCanonical = try { request.rootPath.toRealPath() } catch (_: Exception) {
+            throw Refused("INVALID_WORKSPACE", "policy", "Cannot resolve workspace")
+        }
+        if (canonicalDestination(outputRoot).startsWith(workspaceCanonical) ||
+            Files.isSymbolicLink(outputRoot))
             throw Refused("UNSAFE_OUTPUT_PATH", "policy", "Session output must be outside the workspace")
         Files.createDirectories(outputRoot)
         val targetPaths = listOf("eventsPath", "resultPath", "diagnosticsPath").map { request.output(it) }
