@@ -198,6 +198,10 @@ class TrustedWriteRuntime private constructor(
                     entry.substring(tab + 1) to header[0]
                 }
             if (tracked.size > 50_000 || gitStatus(git).isNotEmpty()) fail("DIRTY_WORKSPACE")
+            // Linux can track both variants, but a later checkout on a case-insensitive
+            // filesystem cannot represent them unambiguously. Reject at admission.
+            if (tracked.keys.groupBy(::folded).any { (_, paths) -> paths.size > 1 })
+                fail("PATH_CASE_COLLISION")
             val rootKey = Files.readAttributes(root, BasicFileAttributes::class.java).fileKey()
                 ?: fail("SANDBOX_UNAVAILABLE")
             val gitKey = Files.readAttributes(root.resolve(".git"), BasicFileAttributes::class.java).fileKey()
