@@ -301,9 +301,7 @@ class ModelGatewayTest {
         assertEquals("MODEL_INVALID_RESPONSE", assertFailsWith<Refused> {
             gateway().next(config(), task, null, Cancellation(), deadline(), false)
         }.code)
-        postHandler.set { _, _ -> MockReply(200, toolCall().replace(
-            ""","usage":{"prompt_tokens":10,"completion_tokens":5}""", ""
-        )) }
+        postHandler.set { _, _ -> MockReply(200, toolCall().substringBefore(",\"usage\":") + "}") }
         assertEquals("MODEL_INVALID_RESPONSE", assertFailsWith<Refused> {
             gateway().next(config("usage_metadata"), task, null, Cancellation(), deadline(), false)
         }.code)
