@@ -69,8 +69,8 @@ class WorkspaceManagerTest {
             })
             put("toolPolicy", buildJsonObject {
                 put("mode", mode)
-                put("allowedTools", buildJsonArray { allowed.forEach(::add) })
-                put("deniedTools", buildJsonArray { denied.forEach(::add) })
+                put("allowedTools", buildJsonArray { allowed.forEach { add(it) } })
+                put("deniedTools", buildJsonArray { denied.forEach { add(it) } })
                 put("protectedPaths", buildJsonArray { add("protected/**") })
                 put("writablePaths", buildJsonArray {})
                 put("policySha256", "b".repeat(64))
@@ -241,7 +241,9 @@ class WorkspaceManagerTest {
     }
 
     private fun fixtureForFreshTest(): Pair<Path, SessionRequest> {
-        Files.walk(temp.resolve("workspace")).sorted(Comparator.reverseOrder()).forEach(Files::delete)
+        Files.walk(temp.resolve("workspace")).use { paths ->
+            paths.sorted(Comparator.reverseOrder()).forEach { Files.delete(it) }
+        }
         return fixture()
     }
 }
