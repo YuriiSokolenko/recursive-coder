@@ -2,7 +2,7 @@
 
 **Recursive Coder** is a standalone open-source software engineering agent built with **Kotlin/JVM and JetBrains Koog**.
 
-> **Current status:** The standalone Kotlin/Koog build, repository CI, and versioned Session Protocol v1 are available on `dev`. The first executable offline CLI session is under review in [PR #14](https://github.com/YuriiSokolenko/recursive-coder/pull/14), not yet merged. Production Koog model execution, task scheduling, recursive development, and trusted code changes remain future milestones.
+> **Current status:** The first executable command-line session engine is implemented in PR #14: `SessionController`, a read-only sample agent, an observable deterministic FakeModel, and Session Protocol v1. Production Koog-based model execution, task scheduling, recursive development, and trusted code changes are planned but **not yet implemented**.
 
 ## What we are building
 
@@ -32,12 +32,12 @@ Recursive Coder itself owns its tasks and sessions. Git can manage source worksp
 
 The current foundation uses Kotlin 2.4.21, JDK 21, Gradle 9.8.1, Koog 1.3.0, and Session Protocol `1.0`.
 
-The first read-only fake-model CLI is being reviewed in [PR #14](https://github.com/YuriiSokolenko/recursive-coder/pull/14). Its executable and operator guide are not part of `dev` yet.
+The current PR adds a local, offline-only fake-model CLI. For setup, supported features, sample execution, and known limitations, see **[First executable session](docs/architecture/FIRST_SESSION.md)**.
 
 With Gradle 9.8.1 and JDK 21 installed:
 
 ```bash
-gradle --no-daemon test
+./gradlew test installDist
 ```
 
 The independent [GitHub Actions CI](.github/workflows/ci.yml) runs JVM and protocol checks on GitHub-hosted runners. The fake-model integration tests do not require a network model endpoint, personal hardware, secrets, or an external runner. Optional live-model checks will be separately gated.
@@ -45,6 +45,7 @@ The independent [GitHub Actions CI](.github/workflows/ci.yml) runs JVM and proto
 ## Documentation
 
 - [Architecture and engineering roadmap](docs/architecture/ARCHITECTURE.md)
+- [First executable CLI session](docs/architecture/FIRST_SESSION.md)
 - [Session Protocol v1](contracts/README.md)
 - [Canonical JSON Schema](contracts/v1/session-v1.schema.json)
 - [Versioned protocol examples](contracts/v1/session-v1.examples.json)
