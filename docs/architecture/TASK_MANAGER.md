@@ -31,10 +31,11 @@ command that dispatches until no runnable tasks remain or the queue is paused.
 For each attempt the scheduler derives `session-<taskId>-<attempt>` and
 `request-<taskId>-<attempt>`, sets invocation source to `scheduler`, and
 uses a fresh output directory beneath `<store>/runs/<taskId>/attempt-N`.
-The request template is validated and snapshotted at enqueue time, so editing
-the input JSON file later cannot alter queued task configuration.
-SessionController still enforces its normal workspace, model, budget,
-deadline, and read-only tool admission. Store the queue **outside** the
+The request template is parsed and **shape-validated** at enqueue time and
+snapshotted, so editing the input JSON file later cannot change the queued
+configuration. Workspace existence, capability negotiation, credentials,
+model availability, effective budgets and read-only tool policy are checked
+by SessionController **at dispatch**, not promised at enqueue. Store the queue **outside** the
 working Git repository so its session outputs cannot mutate the workspace.
 
 ## State transitions
@@ -51,15 +52,20 @@ working Git repository so its session outputs cannot mutate the workspace.
   When the prerequisite is manually retried, dependency-derived attention
   clears and descendants return to `blocked` or `ready`.
 - Global `pause` maps queued tasks to `paused`. Running sessions are
-  allowed to complete. `resume` recomputes readiness.
+  allowed to complete. `resume` recomputes readiness, preserving positions
+  only for tasks already ready when paused; tasks made runnable during the
+  pause (including retries) join after existing ready tasks.
 - `cancel` and `cancel-all` persist cancellation immediately.
   A foreground scheduler polls the store and requests cooperative cancellation
   of any active session. A late successful result cannot overwrite a
   cancelled task. `cancel-all` also pauses future launches.
 - `retry` is explicit for failed, cancelled, or attention-required tasks.
-  Each new claim gets a new session identity; no session output is reused.
-  Complete history (transitions, attempts, timestamps, session IDs, reasons)
-  is kept in the task snapshot, while `list` and `show` omit request bodies.
+  Attention caused by an unsuccessful dependency cannot be retried directly;
+  the prerequisite must be resolved first. Each new claim gets a fresh session
+  identity; no session output is reused. The snapshot retains the most recent
+  128 structured transitions per task, plus the number pruned, while `list`
+  and `show` omit request bodies. Previous attempt outputs remain in their
+  separate attempt directories.
 
 ## Ordering, durability, and recovery
 
@@ -68,14 +74,20 @@ The scheduler runs at most 1–32 local sessions concurrently. On seven of every
 Every eighth dispatch selects the oldest ready task regardless of priority.
 A waiting task also gains one turn whenever another task is claimed. This
 persistent FIFO quota prevents starvation even if all tasks entered the
-queue together with unequal priorities. Dependency unblocking and manual retries re-enter the queue
-with fresh order; pause/resume keeps existing waiting credit.
+queue together with unequal priorities. Dependency unblocking and manual retries
+re-enter the queue with fresh order, even when they become ready during a
+global pause. Only tasks already ready before a pause preserve queue order
+and waiting credit on resume. An active old attempt keeps consuming its
+concurrency slot after cancel/retry until the worker actually exits; attempts
+are tracked by session ID rather than task ID.
 
 All queue mutations are serialized with both a JVM mutex and an OS file lock.
-State is written to an fsynced temporary snapshot and atomically renamed
-over `tasks.json`. A second scheduler cannot obtain the long-lived
-`.scheduler.lock`; ordinary CLI operations retain separate short transaction
-locks. A corrupt store is rejected without being overwritten.
+Changed state is written to an fsynced temporary snapshot and atomically renamed
+over `tasks.json`; read-only and no-op transactions do not rewrite it.
+A second scheduler cannot obtain the long-lived `.scheduler.lock`;
+ordinary CLI operations retain separate short transaction locks. The lock
+remains held until all local workers terminate, including on shutdown.
+A corrupt store is rejected without being overwritten.
 
 After a scheduler process exits abruptly, its OS lock is released. A newly
 started scheduler changes residual `running` tasks to `needs-attention`
@@ -85,7 +97,8 @@ last atomic `tasks.json` is authoritative. This is task-store recovery,
 **not** session checkpoint replay or fencing of external effects.
 
 Dependencies are validated as a directed acyclic graph with known,
-non-duplicated task IDs. The TaskService also exposes a guarded
+non-duplicated task IDs using iterative traversal (so long chains do not
+overflow the JVM stack). The TaskService also exposes a guarded
 `replaceDependencies` operation for future API clients, only before the
 affected task's first attempt. Invalid graph edits roll back as a single
 transaction.
@@ -94,10 +107,15 @@ transaction.
 
 The scheduler is intentionally foreground, with no permanent daemon,
 remote workers, or replay of partially completed sessions. A task that
-has been claimed but interrupted needs operator attention. Cancellation
-is cooperative: an unresponsive provider can keep a worker alive until
-SessionController enforces its deadline. Per-workspace locks may serialize
-sessions even when the global concurrency limit is greater than one.
+has been claimed but interrupted needs operator attention. The `tasks run`
+CLI installs a shutdown hook for SIGTERM/normal JVM shutdown: it requests
+cooperative cancellation and records unfinished attempts as `needs-attention`
+rather than pretending the user cancelled the task. Unexpected scheduler
+failures follow the same rule. SIGKILL/power loss cannot execute JVM hooks;
+a later scheduler detects stranded running tasks on startup.
+Cancellation is cooperative: an unresponsive provider can keep a worker alive
+until SessionController enforces its deadline. Per-workspace locks may
+serialize sessions even when the global concurrency limit exceeds one.
 
 The current SessionController still implements the read-only bootstrap
 engine; full Koog coding workflows, write tools, and checkpoint recovery
