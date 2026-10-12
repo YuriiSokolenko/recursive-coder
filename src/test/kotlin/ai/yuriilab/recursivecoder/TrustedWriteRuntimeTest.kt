@@ -395,7 +395,7 @@ class TrustedWriteRuntimeTest {
         val checks = mapOf(
             "smoke" to TrustedCheck(Path.of("/usr/bin/true"), emptyList()),
             "separate-test" to TrustedCheck(python, listOf("-c",
-                "from pathlib import Path; assert Path('/workspace/src/main/Feature.kt').read_text() == 'fun value() = 4\n'"
+                "from pathlib import Path; assert Path('/workspace/src/main/Feature.kt').read_text() == 'fun value() = 4\\n'"
             )),
             "readonly" to TrustedCheck(python, listOf("-c", """
                 from pathlib import Path
