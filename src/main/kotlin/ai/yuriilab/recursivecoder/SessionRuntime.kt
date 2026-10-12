@@ -9,6 +9,7 @@ import java.security.MessageDigest
 import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.serialization.json.*
@@ -235,12 +236,14 @@ private fun git(root: Path, vararg args: String): String? = try {
 
 class Cancellation {
     private val requested = AtomicBoolean()
+    private val expired = AtomicBoolean()
     @Volatile private var worker: Thread? = null
     fun bind() { worker = Thread.currentThread(); if (requested.get()) worker?.interrupt() }
     fun cancel() { requested.set(true); worker?.interrupt() }
+    fun expire() { expired.set(true); worker?.interrupt() }
     fun check(deadline: Instant) {
+        if (expired.get() || !Instant.now().isBefore(deadline)) throw Stopped(true)
         if (requested.get()) throw Stopped(false)
-        if (!Instant.now().isBefore(deadline)) throw Stopped(true)
     }
 }
 
@@ -332,6 +335,11 @@ class SessionController(
         var error: JsonElement = JsonNull
         val maxWall = request.budgets.longAt("maxWallTimeMs")
         val deadline = minOf(request.deadline, started.plusMillis(maxWall))
+        val watchdog = Executors.newSingleThreadScheduledExecutor { task ->
+            Thread(task, "session-deadline").apply { isDaemon = true }
+        }
+        watchdog.schedule({ cancellation.expire() },
+            Duration.between(Instant.now(), deadline).toMillis().coerceAtLeast(0), TimeUnit.MILLISECONDS)
         fun transition(to: String, eventStatus: String = "completed") {
             journal.append("session.transition", eventStatus, state to to)
             state = to
@@ -397,6 +405,7 @@ class SessionController(
             journal.append("session.error", "failed")
             transition("failed", "failed")
         } finally {
+            watchdog.shutdownNow()
             journal.close()
         }
         try {
