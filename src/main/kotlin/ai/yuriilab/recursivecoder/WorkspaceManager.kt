@@ -73,10 +73,12 @@ class WorkspaceManager private constructor(
     private val lockChannel: FileChannel,
     private val lock: FileLock,
     private val sessionId: String,
-    private val onAudit: (ToolAudit) -> Unit
+    private val declaredRoot: Path,
+    private val onAudit: (ToolAudit) -> Unit,
+    private val onStart: (String, String, Instant) -> Unit
 ) : AutoCloseable {
     private var calls = 0
-    private var closed = false
+    @Volatile private var closed = false
     private var totalBytes = 0
 
     companion object {
@@ -89,8 +91,9 @@ class WorkspaceManager private constructor(
         fun open(
             request: SessionRequest,
             onAudit: (ToolAudit) -> Unit = {},
-            lockDirectory: Path = Path.of(System.getProperty("user.home"), ".recursive-coder", "locks"),
-            gitExecutable: Path = Path.of("/usr/bin/git")
+            onStart: (String, String, Instant) -> Unit = { _, _, _ -> },
+            lockDirectory: Path = configuredLockDirectory(),
+            gitExecutable: Path = discoverGit()
         ): WorkspaceManager {
             val mode = request.policy["mode"]!!.jsonPrimitive.content
             val allowed = request.policy["allowedTools"]!!.jsonArray.map { it.jsonPrimitive.content }
@@ -169,7 +172,7 @@ class WorkspaceManager private constructor(
                 }
             if (tree.size > 50000) throw Refused("WORKSPACE_TOO_LARGE", "policy", "Git tree exceeds the supported limit")
             val policyWithoutClaim = JsonObject(request.policy.filterKeys { it != "policySha256" })
-            val policyHash = sha256(policyWithoutClaim.toString().toByteArray(StandardCharsets.UTF_8))
+            val policyHash = sha256(canonicalJson(policyWithoutClaim).toByteArray(StandardCharsets.UTF_8))
             val locks = try {
                 if (!lockDirectory.isAbsolute || lockDirectory.normalize().startsWith(root))
                     throw IllegalArgumentException()
@@ -198,7 +201,7 @@ class WorkspaceManager private constructor(
                     head, currentBranch, policyHash, allowed.toSet(), denied.toSet(), patterns, tree,
                     request.budgets["maxToolCalls"]!!.jsonPrimitive.int, git,
                     sha256(localConfig.toByteArray(StandardCharsets.UTF_8)), rootKey, gitKey,
-                    channel, lease, request.sessionId, onAudit)
+                    channel, lease, request.sessionId, request.rootPath, onAudit, onStart)
                 manager.checkCurrent()
                 return manager
             } catch (e: Exception) {
@@ -212,6 +215,29 @@ class WorkspaceManager private constructor(
                     it.isNotEmpty() && it != "." && it != ".." &&
                         it.none { char -> char.code < 32 || char.code == 127 }
                 }
+
+        /** Canonical order independent of JSON object insertion order. Arrays preserve order. */
+        private fun canonicalJson(value: JsonElement): String = when (value) {
+            is JsonObject -> value.entries.sortedBy { it.key }.joinToString(",", "{", "}") {
+                JsonPrimitive(it.key).toString() + ":" + canonicalJson(it.value)
+            }
+            is JsonArray -> value.joinToString(",", "[", "]", ::canonicalJson)
+            else -> value.toString()
+        }
+
+        private fun configuredLockDirectory(): Path =
+            System.getProperty("recursiveCoder.lockDirectory")?.let(Path::of)
+                ?: Path.of(System.getProperty("user.home"), ".recursive-coder", "locks")
+
+        /** PATH and JVM properties are trusted host settings, not model-call arguments. */
+        private fun discoverGit(): Path {
+            val configured = System.getProperty("recursiveCoder.gitExecutable")
+            if (configured != null) return Path.of(configured)
+            val search = System.getenv("PATH").orEmpty().split(java.io.File.pathSeparatorChar)
+            return search.asSequence().filter { it.isNotEmpty() }.map { Path.of(it).resolve("git") }
+                .firstOrNull { it.isAbsolute && Files.isRegularFile(it) && Files.isExecutable(it) }
+                ?: throw Refused("GIT_UNAVAILABLE", "policy", "Git binary was not found on host PATH")
+        }
 
         private fun sha256(bytes: ByteArray): String =
             MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
@@ -331,10 +357,25 @@ class WorkspaceManager private constructor(
     catch (_: Exception) { deny("BINARY_FILE_DENIED") }
 
     /** Internal admission check. This does not consume the model's tool-call allowance. */
+    /**
+     * Accept a logical path beneath the declared root (e.g. macOS /var -> /private/var)
+     * or the canonical root. Never resolve an in-workspace symlink before descriptor traversal.
+     */
+    fun taskRelativePath(path: Path): String {
+        if (!path.isAbsolute) deny("INVALID_TASK_PATH")
+        val normalized = path.normalize()
+        val ancestor = when {
+            normalized.startsWith(declaredRoot) -> declaredRoot
+            normalized.startsWith(root) -> root
+            else -> deny("INVALID_TASK_PATH")
+        }
+        val suffix = ancestor.relativize(normalized).toString().replace('\\', '/')
+        return relative(suffix)
+    }
+
     fun verifyTask(path: Path, expectedSha: String) {
         checkCurrent()
-        if (!path.isAbsolute || !path.normalize().startsWith(root)) deny("INVALID_TASK_PATH")
-        val rel = relative(root.relativize(path.normalize()).toString().replace('\\', '/'))
+        val rel = taskRelativePath(path)
         if ("read" !in allowed || "read" in denied) deny("READ_NOT_AUTHORIZED")
         if (sha256(secureRead(rel)) != expectedSha) deny("TASK_DIGEST_MISMATCH")
     }
@@ -344,6 +385,7 @@ class WorkspaceManager private constructor(
     fun execute(tool: WorkspaceTool, claimedExecutionId: String? = null): ToolOutcome {
         val started = Instant.now()
         val receipt = "tool-$sessionId-${++calls}"
+        onStart(receipt, tool.name, started)
         var error: String? = null
         var data: ToolData? = null
         var size = 0
@@ -452,6 +494,7 @@ class WorkspaceManager private constructor(
         return ToolOutcome(receipt, tool.name, data, error)
     }
 
+    @Synchronized
     override fun close() {
         if (!closed) {
             closed = true
