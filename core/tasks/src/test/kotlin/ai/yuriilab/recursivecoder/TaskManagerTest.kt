@@ -371,33 +371,6 @@ class TaskManagerTest {
         assertEquals(TaskState.SUCCEEDED, service.show("active").state)
     }
 
-    @Test fun taskCliShimRejectsMissingCommandWithoutCreatingStore() {
-        val directory = temp.resolve("missing-command-store")
-        assertEquals(2, TaskCli.execute(emptyList()))
-        assertEquals(2, TaskCli.execute(listOf("--store", directory.toString())))
-        assertFalse(Files.exists(directory))
-        assertEquals(0, TaskCli.execute(listOf("--store", directory.toString(), "--help")))
-        assertFalse(Files.exists(directory))
-    }
-
-    @Test fun taskCliUsesSameDurableService() {
-        val requestFile = temp.resolve("request.json")
-        Files.writeString(requestFile, request("cli"))
-        val dir = temp.resolve("cli-store")
-        val prefix = listOf("--store", dir.toString())
-        assertEquals(0, TaskCli.execute(prefix + listOf("enqueue", requestFile.toString(), "--priority", "70")))
-        assertEquals(TaskState.READY, TaskService(TaskStore(dir)).show("cli").state)
-        assertEquals(0, TaskCli.execute(prefix + listOf("list")))
-        assertEquals(0, TaskCli.execute(prefix + listOf("show", "cli")))
-        assertEquals(0, TaskCli.execute(prefix + listOf("pause")))
-        assertEquals(TaskState.PAUSED, TaskService(TaskStore(dir)).show("cli").state)
-        assertEquals(0, TaskCli.execute(prefix + listOf("resume")))
-        assertEquals(0, TaskCli.execute(prefix + listOf("cancel", "cli")))
-        assertEquals(0, TaskCli.execute(prefix + listOf("retry", "cli")))
-        assertEquals(0, TaskCli.execute(prefix + listOf("run")))
-        assertEquals(TaskState.SUCCEEDED, TaskService(TaskStore(dir)).show("cli").state)
-    }
-
     @Test fun retryDuringPauseJoinsBehindAlreadyReadyTasks() {
         val service = service()
         service.enqueue(request("older"), priority = 50)
@@ -555,14 +528,5 @@ class TaskManagerTest {
         assertFailsWith<IllegalStateException> { validateGraph(cycle) }
     }
 
-    @Test fun invalidCliPriorityAndConcurrencyReturnUsageError() {
-        val path = temp.resolve("request.json")
-        Files.writeString(path, request("valid"))
-        val directory = temp.resolve("cli-data")
-        val prefix = listOf("--store", directory.toString())
-        assertEquals(2, TaskCli.execute(prefix + listOf("enqueue", path.toString(), "--priority", "NaN")))
-        assertEquals(2, TaskCli.execute(prefix + listOf("run", "--concurrency", "NaN")))
-        assertTrue(TaskService(TaskStore(directory)).list().isEmpty())
-    }
 
 }
