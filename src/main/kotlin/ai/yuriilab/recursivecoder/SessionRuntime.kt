@@ -211,7 +211,9 @@ class SessionRequest private constructor(val raw: JsonObject) {
             throw Refused("UNSUPPORTED_CAPABILITY", "protocol", "Required capability is unavailable")
         val provider = model.textAt("provider")
         if (provider !in setOf("fake", "openai-compatible") ||
-            (provider == "fake" && (model.textAt("modelId") != "fake-v1" ||
+            (provider == "fake" && ("fake-model-v1" !in raw.stringsAt("requiredCapabilities") ||
+                "model-gateway-v1" in raw.stringsAt("requiredCapabilities") ||
+                model.textAt("modelId") != "fake-v1" ||
                 model.stringsAt("features").toSet() != setOf("tool_calls"))) ||
             (provider == "openai-compatible" && ("model-gateway-v1" !in raw.stringsAt("requiredCapabilities") ||
                 "fake-model-v1" in raw.stringsAt("requiredCapabilities"))))
@@ -391,10 +393,13 @@ class SessionController(
                 catch (_: InterruptedException) { cancellation.check(deadline); throw Stopped(false) }
                 cancellation.check(deadline)
                 response.usage?.let {
+                    val maxTokens = request.budgets.longAt("maxTotalTokens")
+                    val alreadyUsed = inputTokens + outputTokens
+                    if (it.input > maxTokens - alreadyUsed ||
+                        it.output > maxTokens - alreadyUsed - it.input)
+                        throw Refused("TOKEN_BUDGET_EXCEEDED", "policy", "Model token budget exceeded")
                     inputTokens += it.input
                     outputTokens += it.output
-                    if (inputTokens + outputTokens > request.budgets.longAt("maxTotalTokens"))
-                        throw Refused("TOKEN_BUDGET_EXCEEDED", "policy", "Model token budget exceeded")
                 } ?: run { completeUsage = false }
                 journal.append("llm.response", "completed", started = modelStart,
                     extra = buildJsonObject {
