@@ -82,7 +82,13 @@ class SessionV1ContractTest(unittest.TestCase):
         request["outputs"]["resultPath"] = "/tmp/../private"
         self.assert_contract_rejected(request)
         request = copy.deepcopy(EXAMPLES["freshRequest"])
-        del request["repository"]["baselineSha"]
+        del request["workspace"]["baselineSha"]
+        self.assert_contract_rejected(request)
+
+    def test_native_invocation_is_not_tied_to_external_orchestration(self):
+        request = copy.deepcopy(EXAMPLES["freshRequest"])
+        self.assertEqual(request["invocation"]["source"], "cli")
+        request["invocation"]["source"] = "unknown"
         self.assert_contract_rejected(request)
 
     def test_canonical_schema_source(self):
