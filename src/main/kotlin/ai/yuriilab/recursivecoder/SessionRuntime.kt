@@ -340,8 +340,14 @@ class SessionController(
         }
         watchdog.schedule({ cancellation.expire() },
             Duration.between(Instant.now(), deadline).toMillis().coerceAtLeast(0), TimeUnit.MILLISECONDS)
+        fun wireState(state: String): String = when (state) {
+            "admitted" -> "accepted"
+            "cancelling" -> "cancelled"
+            "completed" -> "succeeded"
+            else -> state
+        }
         fun transition(to: String, eventStatus: String = "completed") {
-            journal.append("session.transition", eventStatus, state to to)
+            journal.append("session.transition", eventStatus, wireState(state) to wireState(to))
             state = to
         }
         try {
