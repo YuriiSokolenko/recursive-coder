@@ -379,19 +379,32 @@ class SessionController(
             transition("running")
             journal.append("agent.started", "started")
             var observed: Pair<Int, String>? = null
+            // maxModelRequests counts actual Chat Completion HTTP POSTs, including retries;
+            // capability-discovery GETs are not inference requests.
+            val maxModelRequests = request.budgets["maxModelRequests"]?.let {
+                request.budgets.longAt("maxModelRequests")
+            } ?: Long.MAX_VALUE
+            var modelRequestsMade = 0L
             repeat(2) { turn ->
                 cancellation.check(deadline)
+                val requestsRemaining = maxModelRequests - modelRequestsMade
+                val turnsRemaining = (2 - turn).toLong()
+                if (requestsRemaining < turnsRemaining)
+                    throw Refused("MODEL_REQUEST_BUDGET_EXCEEDED", "policy", "Model request budget exhausted")
+                // Reserve one request for the final confirmation before allowing a first-turn retry.
+                val allowPreToolRetry = turn == 0 && requestsRemaining > turnsRemaining
                 val modelStart = Instant.now()
                 journal.append("llm.request", "started", started = modelStart,
                     extra = buildJsonObject { put("provider", config.provider); put("turn", turn + 1) })
                 val response = try {
-                    model.next(config, request.taskPath, observed, cancellation, deadline,
-                        turn == 0 && (request.budgets["maxModelRequests"]?.let {
-                            request.budgets.longAt("maxModelRequests")
-                        } ?: Long.MAX_VALUE) > 2)
-                }
-                catch (_: InterruptedException) { cancellation.check(deadline); throw Stopped(false) }
+                    model.next(config, request.taskPath, observed, cancellation, deadline, allowPreToolRetry)
+                } catch (_: InterruptedException) { cancellation.check(deadline); throw Stopped(false) }
                 cancellation.check(deadline)
+                // Reject faulty provider adapters before any tool side effects occur.
+                if (response.attempts !in 1..(if (allowPreToolRetry) 2 else 1) ||
+                    response.attempts.toLong() > requestsRemaining)
+                    throw Refused("MODEL_REQUEST_BUDGET_EXCEEDED", "policy", "Model request budget exceeded")
+                modelRequestsMade += response.attempts
                 response.usage?.let {
                     val maxTokens = request.budgets.longAt("maxTotalTokens")
                     val alreadyUsed = inputTokens + outputTokens
