@@ -178,7 +178,8 @@ class SessionRequest private constructor(val raw: JsonObject) {
         }
     }
 
-    fun admit(onAudit: (ToolAudit) -> Unit = {}): WorkspaceManager {
+    fun admit(onAudit: (ToolAudit) -> Unit = {},
+              onStart: (String, String, Instant) -> Unit = { _, _, _ -> }): WorkspaceManager {
         if (!SessionProtocol.supports(raw.textAt("version")))
             throw Refused("UNSUPPORTED_PROTOCOL", "protocol", "Unsupported protocol version")
         if (invocation.textAt("source") != "cli" || invocation.longAt("attempt") != 1L)
@@ -195,7 +196,6 @@ class SessionRequest private constructor(val raw: JsonObject) {
             throw Refused("UNSUPPORTED_MODEL", "provider", "Only the deterministic fake tool-call model is available")
         if (policy.textAt("mode") != "read-only" ||
             ("read" !in policy.stringsAt("allowedTools") || "read" in policy.stringsAt("deniedTools")) ||
-            "read" in policy.stringsAt("deniedTools") ||
             policy.stringsAt("writablePaths").isNotEmpty() ||
             (policy["immutableInputs"] as? JsonArray)?.isNotEmpty() == true)
             throw Refused("UNSUPPORTED_TOOL_POLICY", "policy", "Only read-only task access is supported")
@@ -203,7 +203,7 @@ class SessionRequest private constructor(val raw: JsonObject) {
                 budgets.longAt("maxModelRequests")
             } ?: Long.MAX_VALUE) < 2)
             throw Refused("INSUFFICIENT_BUDGET", "policy", "Two model turns and one read are required")
-        val manager = WorkspaceManager.open(this, onAudit)
+        val manager = WorkspaceManager.open(this, onAudit, onStart)
         try {
             manager.verifyTask(taskPath, task.objectAt("taskInputRef").textAt("sha256"))
             return manager
@@ -332,19 +332,24 @@ class SessionController(
         }
         var workspaceManager: WorkspaceManager? = null
         try {
-            workspaceManager = request.admit { audit ->
-                journal.append("tool.started", "started", toolId = audit.receiptId, started = audit.started,
-                    extra = buildJsonObject { put("tool", audit.tool) })
-                journal.append(if (audit.permitted) "tool.completed" else "policy.denied",
-                    if (audit.permitted) "completed" else "denied",
-                    toolId = audit.receiptId, started = audit.started,
-                    extra = buildJsonObject {
-                        put("tool", audit.tool)
-                        put("receiptId", audit.receiptId)
-                        put("bytes", audit.outputBytes)
-                        audit.code?.let { put("deniedCode", it) }
-                    })
-            }
+            workspaceManager = request.admit(
+                onAudit = { audit ->
+                    journal.append(if (audit.permitted) "tool.completed" else "policy.denied",
+                        if (audit.permitted) "completed" else "denied",
+                        toolId = audit.receiptId, started = audit.started,
+                        extra = buildJsonObject {
+                            put("tool", audit.tool)
+                            put("receiptId", audit.receiptId)
+                            put("bytes", audit.outputBytes)
+                            audit.code?.let { put("deniedCode", it) }
+                            audit.sha256?.let { put("sha256", it) }
+                        })
+                },
+                onStart = { receipt, tool, startedAt ->
+                    journal.append("tool.started", "started", toolId = receipt, started = startedAt,
+                        extra = buildJsonObject { put("tool", tool); put("receiptId", receipt) })
+                }
+            )
             cancellation.check(deadline)
             transition("admitted")
             transition("running")
@@ -364,7 +369,7 @@ class SessionController(
                     is FakeDecision.Read -> {
                         if (turn != 0 || decision.path != request.taskPath) refuse("Unexpected fake tool call")
                         cancellation.check(deadline)
-                        val relative = workspaceManager!!.root.relativize(decision.path).toString()
+                        val relative = workspaceManager!!.taskRelativePath(decision.path)
                         val outcome = workspaceManager.execute(WorkspaceTool.Read(relative))
                         if (!outcome.permitted)
                             throw Refused(outcome.deniedCode!!, "policy", "Read-only tool denied")
