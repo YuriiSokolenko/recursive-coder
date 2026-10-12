@@ -298,4 +298,87 @@ class TaskManagerTest {
             Json.parseToJsonElement(Files.readString(result)).jsonObject["sessionId"]!!.jsonPrimitive.content)
         assertTrue(Files.isRegularFile(temp.resolve("store/runs/readtask/attempt-1/events.jsonl")))
     }
+    @Test fun retryRequeuesBehindAlreadyWaitingPeer() {
+        val service = service()
+        service.enqueue(request("first"), priority = 50)
+        service.enqueue(request("second"), priority = 50)
+        val first = service.claim()!!
+        assertEquals("first", first.id)
+        service.finish(first.id, first.sessionId!!, "failed")
+        service.retry("first")
+        val second = service.claim()!!
+        assertEquals("second", second.id)
+        service.finish(second.id, second.sessionId!!, "succeeded")
+        val retried = service.claim()!!
+        assertEquals("first", retried.id)
+        assertEquals(2, retried.attempt)
+        assertNotEquals(first.sessionId, retried.sessionId)
+    }
+
+    @Test fun globalCancelInterruptsRunningSessionAndRejectsLateSuccess() {
+        val service = service()
+        service.enqueue(request("active"))
+        val started = CountDownLatch(1)
+        val scheduler = thread {
+            TaskScheduler(service, TaskRunner { _, _ ->
+                started.countDown()
+                Thread.sleep(30000)
+                "succeeded"
+            }).runUntilIdle()
+        }
+        try {
+            assertTrue(started.await(5, TimeUnit.SECONDS))
+            service.cancelAll()
+        } finally {
+            scheduler.join(5000)
+        }
+        assertFalse(scheduler.isAlive)
+        assertEquals(TaskState.CANCELLED, service.show("active").state)
+        assertEquals(0, service.show("active").transitions.count { it.to == TaskState.SUCCEEDED })
+    }
+
+    @Test fun anotherSchedulerCannotRecoverLiveTasksOrClaimConcurrently() {
+        val service = service()
+        service.enqueue(request("active"))
+        val started = CountDownLatch(1)
+        val gate = CountDownLatch(1)
+        val scheduler = thread {
+            TaskScheduler(service, TaskRunner { _, _ ->
+                started.countDown()
+                gate.await(5, TimeUnit.SECONDS)
+                "succeeded"
+            }).runUntilIdle()
+        }
+        try {
+            assertTrue(started.await(5, TimeUnit.SECONDS))
+            assertFailsWith<IllegalStateException> {
+                TaskScheduler(service()).runUntilIdle()
+            }
+            assertEquals(TaskState.RUNNING, service.show("active").state)
+        } finally {
+            gate.countDown()
+            scheduler.join(5000)
+        }
+        assertFalse(scheduler.isAlive)
+        assertEquals(TaskState.SUCCEEDED, service.show("active").state)
+    }
+
+    @Test fun taskCliUsesSameDurableService() {
+        val requestFile = temp.resolve("request.json")
+        Files.writeString(requestFile, request("cli"))
+        val dir = temp.resolve("cli-store")
+        val prefix = listOf("--store", dir.toString())
+        assertEquals(0, TaskCli.execute(prefix + listOf("enqueue", requestFile.toString(), "--priority", "70")))
+        assertEquals(TaskState.READY, TaskService(TaskStore(dir)).show("cli").state)
+        assertEquals(0, TaskCli.execute(prefix + listOf("list")))
+        assertEquals(0, TaskCli.execute(prefix + listOf("show", "cli")))
+        assertEquals(0, TaskCli.execute(prefix + listOf("pause")))
+        assertEquals(TaskState.PAUSED, TaskService(TaskStore(dir)).show("cli").state)
+        assertEquals(0, TaskCli.execute(prefix + listOf("resume")))
+        assertEquals(0, TaskCli.execute(prefix + listOf("cancel", "cli")))
+        assertEquals(0, TaskCli.execute(prefix + listOf("retry", "cli")))
+        assertEquals(0, TaskCli.execute(prefix + listOf("run")))
+        assertEquals(TaskState.SUCCEEDED, TaskService(TaskStore(dir)).show("cli").state)
+    }
+
 }
