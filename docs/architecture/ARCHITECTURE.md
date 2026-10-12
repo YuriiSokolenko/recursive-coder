@@ -135,4 +135,4 @@ Every new engine module must ship with relevant tests. Live model behavior does 
 | Durability | Event Journal, checkpoints, fenced resume, and fail-closed recovery |
 | Product | First-party task scheduling, optional daemon/API and integrations, diagnostics UI, and releases |
 
-**Implementation status:** the foundation is present and issue #4 implements the first offline fake-model session. Production Koog execution, real model adapters, recursive multi-agent workflows, writable tools, and crash recovery are not yet available. This architecture describes requirements rather than claiming those future capabilities are implemented.
+**Implementation status:** the foundation, first offline fake-model session, trusted read-only workspace, and strict injectable OpenAI-compatible Model Gateway are present. Production Koog agent orchestration, recursive multi-agent workflows, writable tools, and crash recovery are not yet available. This architecture describes requirements rather than claiming those future capabilities are implemented.
