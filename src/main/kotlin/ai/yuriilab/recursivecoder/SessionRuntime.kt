@@ -371,7 +371,7 @@ class SessionController(
             journal.append("llm.capabilities", "completed", extra = buildJsonObject {
                 put("contextTokens", capabilities.contextTokens)
                 put("maxOutputTokens", capabilities.maxOutputTokens)
-                put("features", buildJsonArray { capabilities.features.sorted().forEach { add(it) } })
+                put("features", capabilities.features.sorted().joinToString(","))
             })
             transition("admitted")
             transition("running")
