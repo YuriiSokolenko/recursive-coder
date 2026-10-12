@@ -205,16 +205,16 @@ class SessionRequest private constructor(val raw: JsonObject) {
         val root = rootPath.toRealPath()
         if (!Files.isDirectory(root) || Files.isSymbolicLink(rootPath))
             throw Refused("INVALID_WORKSPACE", "policy", "Workspace is not a real directory")
-        val task = taskPath.toRealPath()
-        if (!task.startsWith(root) || task.toString().split('/').contains(".git") ||
-            Files.isSymbolicLink(taskPath) || !Files.isRegularFile(task) || Files.size(task) > 65536)
+        val taskFile = taskPath.toRealPath()
+        if (!taskFile.startsWith(root) || taskFile.toString().split('/').contains(".git") ||
+            Files.isSymbolicLink(taskPath) || !Files.isRegularFile(taskFile) || Files.size(taskFile) > 65536)
             throw Refused("INVALID_TASK_PATH", "policy", "Task must be a bounded regular file in the workspace")
-        val relative = root.relativize(task)
+        val relative = root.relativize(taskFile)
         if (policy.stringsAt("protectedPaths").any { pattern ->
                 try { root.fileSystem.getPathMatcher("glob:" + pattern).matches(relative) }
                 catch (_: Exception) { true }
             }) throw Refused("PROTECTED_TASK", "policy", "Task input is protected")
-        if (digestFile(task) != task.objectAt("taskInputRef").textAt("sha256"))
+        if (digestFile(taskFile) != this.task.objectAt("taskInputRef").textAt("sha256"))
             throw Refused("TASK_DIGEST_MISMATCH", "validation", "Task digest does not match")
         val gitHead = git(root, "rev-parse", "HEAD")
         if (gitHead == null || gitHead != workspace.textAt("headSha") ||
