@@ -223,7 +223,7 @@ class WorkspaceManager private constructor(
             is JsonObject -> value.entries.sortedBy { it.key }.joinToString(",", "{", "}") {
                 JsonPrimitive(it.key).toString() + ":" + canonicalJson(it.value)
             }
-            is JsonArray -> value.joinToString(",", "[", "]", ::canonicalJson)
+            is JsonArray -> value.joinToString(separator = ",", prefix = "[", postfix = "]", transform = ::canonicalJson)
             else -> value.toString()
         }
 
