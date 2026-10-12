@@ -79,6 +79,7 @@ data class Task(
 internal data class TaskDatabase(
     var paused: Boolean = false,
     var nextOrder: Long = 0,
+    var dispatches: Long = 0,
     val tasks: MutableList<Task> = mutableListOf()
 )
 
@@ -155,6 +156,7 @@ class TaskStore(directory: Path) {
             TaskDatabase(
                 paused = obj.getValue("paused").jsonPrimitive.boolean,
                 nextOrder = obj.getValue("nextOrder").jsonPrimitive.long,
+                dispatches = obj["dispatches"]?.jsonPrimitive?.long ?: 0,
                 tasks = tasks.toMutableList()
             )
         } catch (e: Exception) {
@@ -166,6 +168,7 @@ class TaskStore(directory: Path) {
         require(!Files.isSymbolicLink(temp)) { "Unsafe temporary task store path" }
         val payload = buildJsonObject {
             put("version", 1); put("paused", database.paused); put("nextOrder", database.nextOrder)
+            put("dispatches", database.dispatches)
             put("tasks", buildJsonArray {
                 database.tasks.forEach { task ->
                     add(buildJsonObject {
@@ -310,11 +313,14 @@ class TaskService(val store: TaskStore, private val clock: Clock = Clock.systemU
         reconcile(db)
         if (db.paused) return@transaction null
         val eligible = db.tasks.withIndex().filter { it.value.state == TaskState.READY }
-        val selected = eligible.maxWithOrNull(
-            compareBy<IndexedValue<Task>> {
+        val selected = if (db.dispatches % 8L == 7L) {
+            eligible.minByOrNull { it.value.queueOrder }
+        } else {
+            eligible.maxWithOrNull(compareBy<IndexedValue<Task>> {
                 it.value.priority.toLong() + (it.value.waitTurns.coerceAtMost(1000L) * 10L)
-            }.thenBy { -it.value.queueOrder }
-        ) ?: return@transaction null
+            }.thenBy { -it.value.queueOrder })
+        } ?: return@transaction null
+        db.dispatches++
         db.tasks.indices.forEach { index ->
             if (index != selected.index && db.tasks[index].state == TaskState.READY)
                 db.tasks[index] = db.tasks[index].copy(waitTurns =
@@ -461,12 +467,15 @@ class TaskScheduler(
                             val task = service.claim() ?: break
                             val cancellation = Cancellation()
                             val future = pool.submit {
+                                cancellation.bind()
                                 val status = try {
                                     if (service.show(task.id).state == TaskState.CANCELLED) "cancelled"
                                     else runner.execute(service.requestFor(task), cancellation)
                                 } catch (_: Exception) {
                                     "failed"
                                 }
+                                // File locks must be obtained with a cleared interrupt flag.
+                                Thread.interrupted()
                                 service.finish(task.id, task.sessionId!!, status)
                             }
                             active[task.id] = Active(cancellation, future)
