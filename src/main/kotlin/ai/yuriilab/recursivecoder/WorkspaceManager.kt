@@ -127,6 +127,8 @@ class WorkspaceManager private constructor(
                 throw Refused("WORKSPACE_BRANCH_MISMATCH", "policy", "Workspace branch is unavailable or changed")
             val rootKey = Files.readAttributes(root, BasicFileAttributes::class.java).fileKey()
             val gitKey = Files.readAttributes(root.resolve(".git"), BasicFileAttributes::class.java).fileKey()
+            if (rootKey == null || gitKey == null)
+                throw Refused("SANDBOX_UNAVAILABLE", "policy", "Filesystem identity is unavailable")
             // Test descriptor-based traversal support before admitting a session.
             Files.newDirectoryStream(root).use {
                 if (it !is SecureDirectoryStream<*>)
@@ -260,6 +262,9 @@ class WorkspaceManager private constructor(
         Files.newDirectoryStream(root).use { initial ->
             @Suppress("UNCHECKED_CAST")
             var cursor = initial as? SecureDirectoryStream<Path> ?: deny("SANDBOX_UNAVAILABLE")
+            if (cursor.getFileAttributeView(BasicFileAttributeView::class.java)
+                    .readAttributes().fileKey() != rootKey)
+                deny("WORKSPACE_REPLACED")
             val descendants = mutableListOf<SecureDirectoryStream<Path>>()
             try {
                 val parts = path.split('/')
@@ -404,6 +409,8 @@ class WorkspaceManager private constructor(
                     ToolData.Diff(path, patch)
                 }
             }
+            // Never return a successful result if the repository drifted during this operation.
+            checkCurrent()
             size = when (val value = data) {
                 is ToolData.FileText -> value.bytes
                 is ToolData.Paths -> value.paths.sumOf { it.toByteArray().size }
