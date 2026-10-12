@@ -63,7 +63,9 @@ This example uses a loopback address **only as illustrative configuration**;
 no default network address is embedded in code.
 For a remote endpoint, use HTTPS and supply the named environment variable
 with its bearer token. For local loopback services, an unset token reference
-means an unauthenticated connection. No raw secret belongs in request JSON.
+means an unauthenticated connection. No raw secret belongs in request JSON. For a remote provider the first prompt
+currently discloses the absolute local task-file path (not its contents);
+choose trusted endpoints and consider workspace path privacy.
 Redirects are denied to prevent credential forwarding. Timeouts are optional
 integers from 100 through 120000 milliseconds.
 
@@ -79,7 +81,9 @@ features fail closed.
 `structured_outputs` requests `json_schema` for the final confirmation.
 `streaming` requests SSE on both turns and requires a final `[DONE]` and
 `finish_reason`. Partial tool argument and content deltas are assembled
-with a response size cap. `usage_metadata` requires token-usage data on
+with a response size cap. SSE events are currently assembled **after the
+bounded body is read in full**; there are no incremental progress callbacks.
+`usage_metadata` requires token-usage data on
 each response; otherwise usage remains explicitly `unknown` for the run.
 `error_metadata` can be negotiated, but provider errors are normalized to
 safe codes rather than persisting arbitrary error bodies.
@@ -91,10 +95,14 @@ path. The trusted workspace manager verifies the file and digest. The second
 turn must confirm the observed byte count and SHA-256; arbitrary model output
 cannot substitute for a trusted receipt.
 
-Temporary 429/5xx failures can be retried **once on capability discovery or
-on the first model turn only**, with a bounded `Retry-After` delay.
+Temporary 429/5xx failures and transport disconnects/timeouts may be retried
+**once on capability discovery or on the first model turn only**. The provider
+limits `Retry-After` to a maximum of one second and accepts its integer-seconds
+form; HTTP-date hints currently fall back to a 100 ms delay.
 The gateway never automatically retries a completion after a trusted tool
-operation. Timeouts, interruption, malformed or incomplete streams,
+operation. `maxModelRequests` counts actual Chat Completions POST attempts,
+including retries, and reserves one POST for the final verification turn.
+Capability-discovery GETs do not count as model inference requests. Timeouts, interruption, malformed or incomplete streams,
 redirects, bad authentication, missing metadata and unexpected tool calls
 produce explicit, sanitized errors. No response bodies, prompts, raw tool
 outputs, authorization headers or private model reasoning are logged.
