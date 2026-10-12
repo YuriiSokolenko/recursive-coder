@@ -67,6 +67,7 @@ class WorkspaceManager private constructor(
     private val tree: Map<String, String>,
     private val maxCalls: Int,
     private val git: RestrictedGit,
+    private val gitConfigHash: String,
     private val rootKey: Any?,
     private val gitKey: Any?,
     private val lockChannel: FileChannel,
@@ -195,7 +196,8 @@ class WorkspaceManager private constructor(
             try {
                 val manager = WorkspaceManager(root, request.workspace["workspaceId"]!!.jsonPrimitive.content,
                     head, currentBranch, policyHash, allowed.toSet(), denied.toSet(), patterns, tree,
-                    request.budgets["maxToolCalls"]!!.jsonPrimitive.int, git, rootKey, gitKey,
+                    request.budgets["maxToolCalls"]!!.jsonPrimitive.int, git,
+                    sha256(localConfig.toByteArray(StandardCharsets.UTF_8)), rootKey, gitKey,
                     channel, lease, request.sessionId, onAudit)
                 manager.checkCurrent()
                 return manager
@@ -217,6 +219,9 @@ class WorkspaceManager private constructor(
 
     private fun checkCurrent() {
         if (closed || !lock.isValid) deny("WORKSPACE_LOCK_LOST")
+        if (sha256(git.text(256 * 1024, "config", "--local", "--list")
+                .toByteArray(StandardCharsets.UTF_8)) != gitConfigHash)
+            deny("GIT_CONFIGURATION_CHANGED")
         if (Files.readAttributes(root, BasicFileAttributes::class.java).fileKey() != rootKey ||
             Files.readAttributes(root.resolve(".git"), BasicFileAttributes::class.java).fileKey() != gitKey)
             deny("WORKSPACE_REPLACED")
