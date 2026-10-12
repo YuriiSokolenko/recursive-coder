@@ -1,33 +1,39 @@
-# Session protocol v1 — canonical owner: Recursive Coder
+# Recursive Coder Session Protocol v1
 
-This repository owns the **canonical, language-neutral GitHub ↔ agent runtime wire contract**. The initial definition was reviewed in [social-mcp PR #791](https://github.com/YuriiSokolenko/social-mcp/pull/791) (issue #784) and imported here with its version unchanged. The former schema/fixtures in `social-mcp/docs/agent-harness/contracts/` are **legacy snapshots**, not a second independent version authority.
+**Canonical contract of the standalone Recursive Coder runtime.** These definitions are **pre-release**: version `1.0` describes the currently reviewed wire shape; no released client compatibility is claimed yet. The engine, CLI and public API will use the same versioned envelopes.
 
-## Files
+## Files and envelopes
 
-- [session-v1.schema.json](v1/session-v1.schema.json): JSON Schema draft 2020-12, envelopes selected by `kind`. `SessionRequest`, `SessionResult`, `SessionEvent`, `SessionCheckpoint`; structured `SessionError` nested in the result/event.
-- [session-v1.examples.json](v1/session-v1.examples.json): reproducible syntactic fixtures for fresh/resume, success/failure, event, checkpoint and a forward-compatible minor version. **Synthetic example IDs, paths and endpoints are not proof of a historical Koog execution.**
-- [session-v1.test.mjs](v1/session-v1.test.mjs): inherited fixture/negative/regression cases and an explicit supported-keyword guard.
-- [tests/test_contract_v1.py](../tests/test_contract_v1.py): **full** JSON Schema 2020-12 validation with `jsonschema` including format checking. This is the authoritative schema conformance check in CI, not the limited Node fixture helper.
+- [session-v1.schema.json](v1/session-v1.schema.json) — Draft 2020-12 JSON Schema with `SessionRequest`, `SessionResult`, `SessionEvent` and `SessionCheckpoint` selected by `kind`.
+- [session-v1.examples.json](v1/session-v1.examples.json) — synthetic CLI session examples (fresh/resume, success/failure, event, checkpoint and compatible minor version). No IDs, outputs or timestamps are evidence of actual executions.
+- [session-v1.test.mjs](v1/session-v1.test.mjs) — lightweight fixture regression checks plus an unsupported-schema-keyword guard.
+- [Full schema conformance tests](../tests/test_contract_v1.py) — Python `jsonschema` validating Draft 2020-12, formats, negative cases and examples. CI runs both.
 
-## Contract policy
+## Ownership and execution
 
-- Schema version `MAJOR.MINOR`, starting at `1.0`. Breaking changes require a new major; minor versions preserve required fields and safety meanings. The schema accepts compatible `1.x` wire syntax, but a runtime **must explicitly negotiate/allow the exact version and required capabilities**. `SessionProtocol.supports()` intentionally permits **only 1.0** until protocol/capability negotiation is implemented in #785.
-- `model.credentialRef` grammar: **`env:VARIABLE_NAME`**, with `VARIABLE_NAME` matching `[A-Z][A-Z0-9_]*`. Example: `env:OPENAI_API_KEY`. The string is a reference only; never place a credential value in JSON, events, logs or artifacts. Resolution is by trusted runtime credentials binding.
-- **JSON Schema defines shape, not authorization.** No schema property authorizes network destinations, GitHub tokens or tools. Adapter + runtime admission must reject denied tool names even when `allowedTools` also contains them; enforce an explicit trusted allowlist for `model.baseUrl`, `requiredCapabilities`, actual maximum depth/children/tokens/time, worktree path containment and canonical/symlink-safe protected/writable paths. An empty `deniedTools` list is **not** a permission grant. These are implementation requirements for #785 and #787 and must be enforced before the first tool call. The admission layer fails closed on unsupported values.
-- The current baseline, `worktreeId`, policy hash, checkpoint hash and strictly greater fencing generation must be verified by the trusted caller on resume. A resumed job attempts the *same logical session*, not a second concurrent root. Unknown side effects block replay; a failed backend cannot grant PR/CI/Merge Gate permission.
-- GitHub control plane remains the owner of worktrees, publication and global state in `social-mcp`. Recursive Coder owns the session-internal model/tool/child-agent graph, events and checkpoints. The full inventory and control-plane rules remain documented in [social-mcp's Koog boundary](https://github.com/YuriiSokolenko/social-mcp/blob/dev/docs/agent-harness/KOOG_BOUNDARY.md); this copy is the canonical **wire contract** only.
+**Recursive Coder owns the complete task/session lifecycle.** Sessions start via its own CLI (`invocation.source=cli`), future HTTP API (`api`) or internal scheduler (`scheduler`). The engine creates and validates an isolated workspace, allocates task and child-agent budgets, enforces tool policy, writes events, checkpoints and final result. An external system may invoke a public interface but has no mandatory role or privileged control over the internal execution.
 
-## Independent verification
+The `workspace` object identifies a trusted, engine-managed Git workspace and its baseline/head SHA, independent of remote hosting. A local directory with no Git baseline is a future capability and must be explicitly versioned; never silently fake a SHA.
 
-From this repository, with Java 21, Gradle 9.8.1, Node 22 and Python 3.12:
+`invocationId` stays stable across retries of the same entrypoint request; `invocation.attempt` increases on each attempt. `sessionId` remains stable during a legitimate resume, while `requestId` changes. An engine-owned exclusive lease and increasing `resume.fenceGeneration` are required before accepting a checkpoint. A broken/missing checkpoint produces a rejected or failed session, not a fresh run against partially modified files.
+
+## Compatibility and security
+
+- Versions are `MAJOR.MINOR`. An unknown major fails closed. Compatible minor changes may use `extensions.x-*`, but the runtime must explicitly support the version and all `requiredCapabilities` before running tools. The current `SessionProtocol.supports()` permits only `1.0`.
+- `model.credentialRef` is an **environment-variable reference**, grammar `env:[A-Z][A-Z0-9_]*` (example `env:MODEL_API_KEY`). No credential values in requests, logs, events or artifacts. Model endpoints must be allowlisted by runtime configuration.
+- **The schema is shape validation, never tool authorization.** The runtime must enforce deny precedence for tools, canonical/symlink-safe path containment, protected spec/test artifacts, workspace baseline, secret and endpoint restrictions, maximum recursion/tokens/tools/deadline and capability negotiation. Unknown permissions, unexpected paths or uncontrolled side effects fail closed.
+- Checkpoints record hashes of agent graph, model state and side-effect journal. Replay requires verifying hashes, workspace digest, policy and exclusive generation fencing; uncertain writes block automatic replay.
+- Events are append-only, redacted and correlated with `sessionId`, agent/child IDs, `correlationId`, `causationId`, time and optional usage completeness. No raw secrets or hidden reasoning are implied by event logging.
+- Session successes require independently verified tool/check evidence and immutable output references. A model's final prose alone is not an authoritative result.
+
+These are **design requirements**, not implemented runtime guarantees yet. Security implementation and fault-injection testing are part of the agent's own roadmap.
+
+## Tests
 
 ```bash
-gradle test
 node --test contracts/v1/session-v1.test.mjs
 python -m pip install jsonschema==4.25.1
 python -m unittest discover -s tests -p 'test_contract*.py' -v
 ```
 
-The [CI workflow](../.github/workflows/ci.yml) runs all three checks on **GitHub-hosted `ubuntu-latest`** runners for PRs and pushes targeting `dev`/`main`, plus manual dispatch. It does **not** use the N150 runner or HP Nano and does not attempt live model calls, CI merges, issue transitions or PR publication.
-
-Koog agent execution, secure admission, model compatibility verification and durable replay are **not implemented** by these contract fixtures; they belong to #785–#789. Do not weaken this distinction to claim a working agent prematurely.
+The independent [CI workflow](../.github/workflows/ci.yml) also runs `gradle test` on JDK 21. All checks use repository-local fixtures and require no model provider or remote service.
