@@ -11,6 +11,7 @@ import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
 import java.time.Clock
 import java.time.Instant
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
@@ -53,12 +54,15 @@ data class Task(
     val reason: String? = null,
     val queueOrder: Long = 0,
     val waitTurns: Long = 0,
+    val preserveOrderOnResume: Boolean = false,
+    val prunedTransitions: Long = 0,
     val transitions: List<TaskTransition> = emptyList()
 ) {
     fun toPublicJson(): JsonObject = buildJsonObject {
         put("taskId", id); put("state", state.wire); put("priority", priority)
         put("dependencies", buildJsonArray { dependencies.forEach { add(it) } })
         put("attempt", attempt)
+        put("prunedTransitions", prunedTransitions)
         put("sessionId", sessionId?.let(::JsonPrimitive) ?: JsonNull)
         put("lastResultStatus", lastResultStatus?.let(::JsonPrimitive) ?: JsonNull)
         put("reason", reason?.let(::JsonPrimitive) ?: JsonNull)
@@ -107,8 +111,9 @@ class TaskStore(directory: Path) {
             FileChannel.open(guardFile, StandardOpenOption.CREATE, StandardOpenOption.WRITE).use { channel ->
                 channel.lock().use {
                     val database = load()
+                    val original = if (write) database.copy(tasks = database.tasks.toMutableList()) else null
                     val value = operation(database)
-                    if (write) save(database)
+                    if (write && database != original) save(database)
                     value
                 }
             }
@@ -146,12 +151,15 @@ class TaskStore(directory: Path) {
                     reason = item.optionalText("reason"),
                     queueOrder = item.getValue("queueOrder").jsonPrimitive.long,
                     waitTurns = item.getValue("waitTurns").jsonPrimitive.long,
+                    preserveOrderOnResume = item["preserveOrderOnResume"]?.jsonPrimitive?.boolean ?: false,
+                    prunedTransitions = item["prunedTransitions"]?.jsonPrimitive?.long ?: 0,
                     transitions = transitions
                 )
             }
             require(tasks.map { it.id }.toSet().size == tasks.size)
             require(tasks.all { safeTaskId.matches(it.id) && it.priority in 0..100 &&
-                it.attempt >= 0 && it.waitTurns >= 0 && it.queueOrder >= 0 })
+                it.attempt >= 0 && it.waitTurns >= 0 && it.queueOrder >= 0 &&
+                it.prunedTransitions >= 0 })
             validateGraph(tasks)
             TaskDatabase(
                 paused = obj.getValue("paused").jsonPrimitive.boolean,
@@ -180,6 +188,8 @@ class TaskStore(directory: Path) {
                         put("lastResultStatus", task.lastResultStatus?.let(::JsonPrimitive) ?: JsonNull)
                         put("reason", task.reason?.let(::JsonPrimitive) ?: JsonNull)
                         put("queueOrder", task.queueOrder); put("waitTurns", task.waitTurns)
+                        put("preserveOrderOnResume", task.preserveOrderOnResume)
+                        put("prunedTransitions", task.prunedTransitions)
                         put("transitions", buildJsonArray {
                             task.transitions.forEach { step ->
                                 add(buildJsonObject {
@@ -217,24 +227,40 @@ private val safeTaskId = Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 private fun JsonObject.optionalText(field: String): String? =
     this[field]?.takeUnless { it == JsonNull }?.jsonPrimitive?.content
 
-/** Validate all edges and return parents-before-children topological order. */
-private fun validateGraph(tasks: List<Task>): List<String> {
+/** Iterative DFS avoids stack overflows for large dependency chains. */
+internal fun validateGraph(tasks: List<Task>): List<String> {
     val byId = tasks.associateBy { it.id }
+    require(byId.size == tasks.size) { "Duplicate task ID" }
     val marks = mutableMapOf<String, Int>()
-    val order = mutableListOf<String>()
-    fun visit(id: String) {
-        when (marks[id]) {
-            1 -> error("Dependency cycle detected")
-            2 -> return
+    val order = ArrayList<String>(tasks.size)
+    // An explicit frame stores the next dependency to visit.
+    val stack = ArrayDeque<Pair<String, Int>>()
+    for (task in tasks) {
+        if (marks[task.id] == 2) continue
+        stack.addLast(task.id to 0)
+        while (stack.isNotEmpty()) {
+            val (id, offset) = stack.removeLast()
+            if (marks[id] == 2) continue
+            val dependencies = byId.getValue(id).dependencies
+            if (offset == 0) {
+                require(dependencies.size == dependencies.toSet().size) { "Duplicate dependency" }
+                marks[id] = 1
+            }
+            if (offset == dependencies.size) {
+                marks[id] = 2
+                order.add(id)
+                continue
+            }
+            stack.addLast(id to (offset + 1))
+            val child = dependencies[offset]
+            require(byId.containsKey(child)) { "Unknown dependency: " + child }
+            when (marks[child]) {
+                1 -> error("Dependency cycle detected")
+                2 -> Unit
+                else -> stack.addLast(child to 0)
+            }
         }
-        marks[id] = 1
-        val task = byId[id] ?: error("Unknown dependency: " + id)
-        require(task.dependencies.distinct().size == task.dependencies.size) { "Duplicate dependency" }
-        task.dependencies.forEach(::visit)
-        marks[id] = 2
-        order.add(id)
     }
-    tasks.forEach { visit(it.id) }
     return order
 }
 
@@ -302,6 +328,10 @@ class TaskService(val store: TaskStore, private val clock: Clock = Clock.systemU
         val index = db.index(id)
         require(db.tasks[index].state in setOf(TaskState.FAILED, TaskState.CANCELLED,
             TaskState.NEEDS_ATTENTION)) { "Only terminal/attention tasks can be retried" }
+        require(db.tasks[index].state != TaskState.NEEDS_ATTENTION ||
+            db.tasks[index].reason?.startsWith("dependency:") != true) {
+            "Retry the failed prerequisite first; this task is blocked by a dependency"
+        }
         // Previous attempt/session remain in history. A retry receives a fresh session ID.
         db.tasks[index] = db.tasks[index].copy(sessionId = null)
         transition(db, index, TaskState.BLOCKED, "manual retry")
@@ -309,10 +339,12 @@ class TaskService(val store: TaskStore, private val clock: Clock = Clock.systemU
         db.find(id)
     }
 
-    internal fun claim(): Task? = store.transaction { db ->
+    internal fun claim(excludedTaskIds: Set<String> = emptySet()): Task? = store.transaction { db ->
         reconcile(db)
         if (db.paused) return@transaction null
-        val eligible = db.tasks.withIndex().filter { it.value.state == TaskState.READY }
+        val eligible = db.tasks.withIndex().filter {
+            it.value.state == TaskState.READY && it.value.id !in excludedTaskIds
+        }
         val selected = if (db.dispatches % 8L == 7L) {
             eligible.minByOrNull { it.value.queueOrder }
         } else {
@@ -349,6 +381,18 @@ class TaskService(val store: TaskStore, private val clock: Clock = Clock.systemU
         }
         db.find(id)
     }
+
+    /** Stop/recovery of a known attempt is not a user-requested task cancellation. */
+    internal fun interruptAttempt(id: String, sessionId: String, reason: String): Task =
+        store.transaction { db ->
+            val index = db.index(id)
+            val task = db.tasks[index]
+            if (task.state == TaskState.RUNNING && task.sessionId == sessionId) {
+                transition(db, index, TaskState.NEEDS_ATTENTION, reason)
+                reconcile(db)
+            }
+            db.find(id)
+        }
 
     /** Called only with the exclusive process-wide scheduler lock held. Never silently replay effects. */
     internal fun recoverInterrupted() = store.transaction { db ->
@@ -387,20 +431,22 @@ class TaskService(val store: TaskStore, private val clock: Clock = Clock.systemU
 
     private fun reconcile(db: TaskDatabase) {
         val order = validateGraph(db.tasks)
+        val indexById = db.tasks.indices.associateBy { db.tasks[it].id }
         for (id in order) {
-            val index = db.index(id)
+            val index = indexById.getValue(id)
             val task = db.tasks[index]
             if (task.state in setOf(TaskState.RUNNING, TaskState.SUCCEEDED,
                     TaskState.FAILED, TaskState.CANCELLED)) continue
             if (task.state == TaskState.NEEDS_ATTENTION &&
                 task.reason?.startsWith("dependency:") != true) continue
-            val missing = task.dependencies.map { dependency -> db.find(dependency) }.firstOrNull {
+            val prerequisites = task.dependencies.map { db.tasks[indexById.getValue(it)] }
+            val missing = prerequisites.firstOrNull {
                 it.state in setOf(TaskState.FAILED, TaskState.CANCELLED, TaskState.NEEDS_ATTENTION)
             }
             val next = when {
                 missing != null -> TaskState.NEEDS_ATTENTION
                 db.paused -> TaskState.PAUSED
-                task.dependencies.all { db.find(it).state == TaskState.SUCCEEDED } -> TaskState.READY
+                prerequisites.all { it.state == TaskState.SUCCEEDED } -> TaskState.READY
                 else -> TaskState.BLOCKED
             }
             val reason = if (missing == null) null else "dependency:" + missing.id + ":" + missing.state.wire
@@ -411,15 +457,26 @@ class TaskService(val store: TaskStore, private val clock: Clock = Clock.systemU
     private fun transition(db: TaskDatabase, index: Int, state: TaskState, reason: String?) {
         val current = db.tasks[index]
         if (current.state == state && current.reason == reason) return
-        val becameReady = state == TaskState.READY &&
-            current.state !in setOf(TaskState.READY, TaskState.PAUSED)
+        val becameReady = state == TaskState.READY && current.state != TaskState.READY &&
+            (current.state != TaskState.PAUSED || !current.preserveOrderOnResume)
+        val events = current.transitions + TaskTransition(current.state, state,
+            clock.instant().toString(), current.attempt, current.sessionId, reason)
+        val removed = (events.size - MAX_TRANSITIONS).coerceAtLeast(0)
         db.tasks[index] = current.copy(
             state = state, reason = reason,
             queueOrder = if (becameReady) ++db.nextOrder else current.queueOrder,
             waitTurns = if (becameReady) 0 else current.waitTurns,
-            transitions = current.transitions + TaskTransition(current.state, state,
-                clock.instant().toString(), current.attempt, current.sessionId, reason)
+            preserveOrderOnResume = when (state) {
+                TaskState.PAUSED -> current.state == TaskState.READY
+                else -> false
+            },
+            prunedTransitions = current.prunedTransitions + removed,
+            transitions = events.drop(removed)
         )
+    }
+
+    private companion object {
+        const val MAX_TRANSITIONS = 128
     }
 
     private fun TaskDatabase.index(id: String): Int =
