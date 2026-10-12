@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/YuriiSokolenko/recursive-coder/dev/contracts/v1/session-v1.schema.json",
-  "title": "GitHub–Koog session protocol v1",
-  "description": "Versioned transport envelopes; credentials and authoritative GitHub state are outside this protocol.",
+  "title": "Recursive Coder standalone session protocol v1",
+  "description": "Versioned, host-agnostic session envelopes for the Recursive Coder engine; runtime owns execution, policy, artifacts and recovery.",
   "oneOf": [
     {
       "$ref": "#/$defs/SessionRequest"
@@ -40,92 +40,6 @@
       "type": "string",
       "minLength": 2,
       "pattern": "^/(?!.*(?:/\\.{1,2})(?:/|$))[^\\u0000]+$"
-    },
-    "GitHubRun": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "platform",
-        "workflow",
-        "runId",
-        "attempt",
-        "jobId"
-      ],
-      "properties": {
-        "platform": {
-          "const": "github-actions"
-        },
-        "workflow": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 160,
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
-        },
-        "runId": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 160,
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
-        },
-        "attempt": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "jobId": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 160,
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
-        }
-      }
-    },
-    "Repository": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "fullName",
-        "worktreeId",
-        "worktreePath",
-        "controlCheckoutPath",
-        "baselineSha",
-        "headSha",
-        "baseBranch"
-      ],
-      "properties": {
-        "fullName": {
-          "type": "string",
-          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
-        },
-        "worktreeId": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 160,
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
-        },
-        "worktreePath": {
-          "type": "string",
-          "minLength": 2,
-          "pattern": "^/(?!.*(?:/\\.{1,2})(?:/|$))[^\\u0000]+$"
-        },
-        "controlCheckoutPath": {
-          "type": "string",
-          "minLength": 2,
-          "pattern": "^/(?!.*(?:/\\.{1,2})(?:/|$))[^\\u0000]+$"
-        },
-        "baselineSha": {
-          "type": "string",
-          "pattern": "^[a-f0-9]{40}$"
-        },
-        "headSha": {
-          "type": "string",
-          "pattern": "^[a-f0-9]{40}$"
-        },
-        "baseBranch": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 128
-        }
-      }
     },
     "Role": {
       "type": "object",
@@ -436,8 +350,8 @@
         "requestId",
         "sessionId",
         "traceId",
-        "run",
-        "repository",
+        "invocation",
+        "workspace",
         "task",
         "model",
         "toolPolicy",
@@ -481,12 +395,6 @@
           },
           "additionalProperties": false
         },
-        "run": {
-          "$ref": "#/$defs/GitHubRun"
-        },
-        "repository": {
-          "$ref": "#/$defs/Repository"
-        },
         "task": {
           "$ref": "#/$defs/Role"
         },
@@ -514,6 +422,12 @@
             "maxLength": 160,
             "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
           }
+        },
+        "invocation": {
+          "$ref": "#/$defs/Invocation"
+        },
+        "workspace": {
+          "$ref": "#/$defs/Workspace"
         }
       },
       "allOf": [
@@ -639,7 +553,7 @@
         "sessionId",
         "traceId",
         "requestId",
-        "run",
+        "invocation",
         "status",
         "startedAt",
         "finishedAt",
@@ -685,9 +599,6 @@
           "maxLength": 160,
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
         },
-        "run": {
-          "$ref": "#/$defs/GitHubRun"
-        },
         "status": {
           "type": "string",
           "enum": [
@@ -718,18 +629,12 @@
           "type": "object",
           "additionalProperties": false,
           "required": [
-            "worktreeId",
+            "workspaceId",
             "baselineSha",
             "policySha256",
             "fenceGeneration"
           ],
           "properties": {
-            "worktreeId": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 160,
-              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
-            },
             "baselineSha": {
               "type": "string",
               "pattern": "^[a-f0-9]{40}$"
@@ -741,6 +646,12 @@
             "fenceGeneration": {
               "type": "integer",
               "minimum": 1
+            },
+            "workspaceId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
             }
           }
         },
@@ -819,6 +730,9 @@
         },
         "usage": {
           "$ref": "#/$defs/Usage"
+        },
+        "invocation": {
+          "$ref": "#/$defs/Invocation"
         }
       },
       "allOf": [
@@ -1192,7 +1106,7 @@
         "createdAt",
         "state",
         "fenceGeneration",
-        "repository",
+        "workspace",
         "policySha256",
         "journalSha256",
         "activeAgentIds",
@@ -1268,31 +1182,6 @@
         "fenceGeneration": {
           "type": "integer",
           "minimum": 1
-        },
-        "repository": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "worktreeId",
-            "baselineSha",
-            "worktreeDigestSha256"
-          ],
-          "properties": {
-            "worktreeId": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 160,
-              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
-            },
-            "baselineSha": {
-              "type": "string",
-              "pattern": "^[a-f0-9]{40}$"
-            },
-            "worktreeDigestSha256": {
-              "type": "string",
-              "pattern": "^[a-f0-9]{64}$"
-            }
-          }
         },
         "policySha256": {
           "type": "string",
@@ -1395,6 +1284,31 @@
         },
         "status": {
           "const": "durable"
+        },
+        "workspace": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "workspaceId",
+            "baselineSha",
+            "workspaceDigestSha256"
+          ],
+          "properties": {
+            "baselineSha": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{40}$"
+            },
+            "workspaceId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+            },
+            "workspaceDigestSha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          }
         }
       }
     },
@@ -1436,6 +1350,70 @@
             "incomplete",
             "unknown"
           ]
+        }
+      }
+    },
+    "Invocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "invocationId",
+        "attempt"
+      ],
+      "properties": {
+        "source": {
+          "enum": [
+            "cli",
+            "api",
+            "scheduler"
+          ]
+        },
+        "invocationId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "Workspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workspaceId",
+        "rootPath",
+        "baselineSha",
+        "headSha"
+      ],
+      "properties": {
+        "workspaceId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "rootPath": {
+          "type": "string",
+          "minLength": 2,
+          "pattern": "^/(?!.*(?:/\\.{1,2})(?:/|$))[^\\u0000]+$"
+        },
+        "baselineSha": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40}$"
+        },
+        "headSha": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40}$"
+        },
+        "branch": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
         }
       }
     }
