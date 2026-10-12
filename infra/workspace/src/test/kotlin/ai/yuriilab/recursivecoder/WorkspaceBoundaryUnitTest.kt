@@ -19,9 +19,9 @@ class WorkspaceBoundaryUnitTest {
 
     private fun git(root: Path, vararg args: String): String {
         // Do not inherit signing, hooks, templates or Git settings from the developer machine.
-        val home = temp.resolve("git-home").also(Files::createDirectories)
-        val hooks = temp.resolve("empty-git-hooks").also(Files::createDirectories)
-        val templates = temp.resolve("empty-git-templates").also(Files::createDirectories)
+        val home = temp.resolve("git-home").also { Files.createDirectories(it) }
+        val hooks = temp.resolve("empty-git-hooks").also { Files.createDirectories(it) }
+        val templates = temp.resolve("empty-git-templates").also { Files.createDirectories(it) }
         val processBuilder = ProcessBuilder(
             listOf("git", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=$hooks") + args
         ).directory(root.toFile()).redirectErrorStream(true)
