@@ -13,13 +13,8 @@ import kotlin.test.*
 import kotlinx.serialization.json.*
 import org.junit.jupiter.api.io.TempDir
 
-private val schedulerTestRunner = TaskRunner { request, cancellation ->
-    val gateway = ModelGateways.create(ModelConfig.from(request.model).provider)
-    SessionController(request, gateway, cancellation,
-        WorkspaceOpener { workspaceRequest, audit, start ->
-            WorkspaceManager.open(workspaceRequest, audit, start)
-        }).run().getValue("status").jsonPrimitive.content
-}
+// Scheduler unit tests use an injected, deterministic runner; cross-module execution is tested in :app:cli.
+private val schedulerTestRunner = TaskRunner { _, _ -> "succeeded" }
 
 class TaskManagerTest {
     @TempDir lateinit var temp: Path
@@ -294,18 +289,6 @@ class TaskManagerTest {
         assertEquals("{broken", Files.readString(path))
     }
 
-    @Test fun actualFakeSessionIsDispatchedThroughInjectedRunner() {
-        val service = service()
-        service.enqueue(request("readtask"))
-        val report = TaskScheduler(service, schedulerTestRunner).runUntilIdle()
-        assertEquals(1, report.launched)
-        assertEquals(TaskState.SUCCEEDED, service.show("readtask").state)
-        assertEquals("succeeded", service.show("readtask").lastResultStatus)
-        val result = temp.resolve("store/runs/readtask/attempt-1/result.json")
-        assertEquals("session-readtask-1",
-            Json.parseToJsonElement(Files.readString(result)).jsonObject["sessionId"]!!.jsonPrimitive.content)
-        assertTrue(Files.isRegularFile(temp.resolve("store/runs/readtask/attempt-1/events.jsonl")))
-    }
     @Test fun retryRequeuesBehindAlreadyWaitingPeer() {
         val service = service()
         service.enqueue(request("first"), priority = 50)

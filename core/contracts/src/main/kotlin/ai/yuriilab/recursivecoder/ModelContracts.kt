@@ -1,16 +1,7 @@
 package ai.yuriilab.recursivecoder
 
-import java.io.IOException
-import java.net.URI
-import java.net.URLEncoder
-import java.net.http.HttpClient
-import java.net.http.HttpRequest
-import java.net.http.HttpResponse
-import java.nio.charset.StandardCharsets
 import java.nio.file.Path
-import java.time.Duration
 import java.time.Instant
-import java.util.concurrent.ConcurrentHashMap
 import kotlinx.serialization.json.*
 
 /** The gateway has no authority to execute tools: it may only propose a decision. */

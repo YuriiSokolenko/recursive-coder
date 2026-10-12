@@ -141,4 +141,22 @@ class TaskCliTest {
         assertTrue(TaskService(TaskStore(directory)).list().isEmpty())
     }
 
+
+    @Test fun actualFakeSessionIsDispatchedThroughCliComposition() {
+        val requestFile = temp.resolve("fake-request.json")
+        Files.writeString(requestFile, request("readtask"))
+        val store = temp.resolve("store")
+        val prefix = listOf("--store", store.toString())
+        assertEquals(0, TaskCli.execute(prefix + listOf("enqueue", requestFile.toString())))
+        assertEquals(0, TaskCli.execute(prefix + listOf("run")))
+        val task = TaskService(TaskStore(store)).show("readtask")
+        assertEquals(TaskState.SUCCEEDED, task.state)
+        assertEquals("succeeded", task.lastResultStatus)
+        val output = store.resolve("runs/readtask/attempt-1")
+        assertEquals("session-readtask-1",
+            Json.parseToJsonElement(Files.readString(output.resolve("result.json")))
+                .jsonObject.getValue("sessionId").jsonPrimitive.content)
+        assertTrue(Files.isRegularFile(output.resolve("events.jsonl")))
+    }
+
 }
