@@ -1,5 +1,7 @@
 package ai.yuriilab.recursivecoder
 
+import org.junit.jupiter.api.Tag
+
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
@@ -13,6 +15,7 @@ import kotlin.test.*
 import kotlinx.serialization.json.*
 import org.junit.jupiter.api.io.TempDir
 
+@Tag("integration")
 class TaskCliTest {
     @TempDir lateinit var temp: Path
 
