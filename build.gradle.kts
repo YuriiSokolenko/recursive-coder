@@ -27,7 +27,9 @@ tasks.register("checkArchitecture") {
     group = "verification"
     description = "Reject forbidden production/test Gradle dependency edges and cycles."
     doLast {
-        val modules = rootProject.allprojects.filter { it != rootProject }.sortedBy { it.path }
+        val modules = rootProject.allprojects.filter {
+            it != rootProject && (it.childProjects.isEmpty() || it.buildFile.isFile)
+        }.sortedBy { it.path }
         val problems = mutableListOf<String>()
         val edges = modules.associate { it.path to mutableSetOf<String>() }
 
