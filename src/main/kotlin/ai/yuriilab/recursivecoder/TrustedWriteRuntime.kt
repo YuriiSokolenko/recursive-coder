@@ -151,6 +151,12 @@ class TrustedWriteRuntime private constructor(
                 policy.requiredChecks.any { it != "git_diff_check" && it !in policy.checks } ||
                 policy.checks.keys.any { !idPattern.matches(it) || it == "git_diff_check" })
                 fail("INVALID_WRITE_POLICY")
+            // Reject unwinnable Developer sessions before taking a workspace lease
+            // or changing files. The trusted host, not the model, chooses test checks.
+            if (policy.role == EngineeringRole.DEVELOPER &&
+                ("git_diff_check" !in policy.requiredChecks ||
+                    policy.requiredChecks.none { it != "git_diff_check" }))
+                fail("TEST_CHECK_REQUIRED")
             val review = policy.reviewedChange
             if (review != null && (!idPattern.matches(review.changeRequestId) ||
                 review.requestedBy.isBlank() || review.reviewedBy.isBlank() ||
@@ -660,10 +666,6 @@ class TrustedWriteRuntime private constructor(
     fun finish(receipts: List<TrustedCheckReceipt>): FinalWriteVerification = try {
         val manifest = verifyState()
         if (accepted.isEmpty()) fail("NO_ACCEPTED_MUTATIONS")
-        if (policy.role == EngineeringRole.DEVELOPER &&
-            ("git_diff_check" !in policy.requiredChecks ||
-                policy.requiredChecks.none { it != "git_diff_check" }))
-            fail("TEST_CHECK_REQUIRED")
         if (receipts.map { it.check }.toSet() != policy.requiredChecks ||
             receipts.size != policy.requiredChecks.size) fail("REQUIRED_CHECK_MISSING")
         for (receipt in receipts) {
