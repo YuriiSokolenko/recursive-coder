@@ -15,8 +15,41 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  architecture:
+    name: Architecture boundaries and pure unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.8.1'
+      - name: Verify architecture and run pure unit tests
+        run: ./gradlew --no-daemon checkArchitecture unitTest --stacktrace
+      - name: Reject deliberately illegal and cyclic test edges
+        run: python3 -m unittest discover -s tests -p 'test_architecture_gradle.py' -v
+      - name: Ensure the pure unit suite actually executed
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from xml.etree import ElementTree as ET
+
+          files = list(Path(".").glob("**/build/test-results/unitTest/TEST-*.xml"))
+          cases = [case for path in files for case in ET.parse(path).iter("testcase")]
+          if not cases or any(
+              case.find(tag) is not None for case in cases
+              for tag in ("skipped", "failure", "error")
+          ):
+              raise SystemExit("Pure unit suite must run and pass without skips")
+          print(f"Verified {len(cases)} passing pure unit tests")
+          PY
+
   kotlin:
-    name: Kotlin JVM multi-module build
+    name: Full JVM integration and sandbox E2E
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
