@@ -2,7 +2,7 @@
 
 **Recursive Coder** — самостоятельный open-source агент для разработки программного обеспечения на **Kotlin/JVM + JetBrains Koog**.
 
-> **Status:** архитектура и базовая сборка. Собственный CI и контрактный модуль уже существуют. Исполняемый агент, планировщик, API и интерфейс пока не реализованы.
+> **Status:** первый исполняемый CLI с `SessionController`, read-only sample agent и детерминированным FakeModel. Реальные провайдеры, полноценный Koog агент, планировщик, рекурсия и безопасные изменения кода пока не реализованы.
 
 ## Что мы создаём
 
@@ -28,13 +28,14 @@
 
 ## Сборка и CI
 
-Сейчас: Kotlin 2.4.21, JDK 21, Gradle 9.8.1, Koog 1.3.0 (зависимость), unit-тесты и версия протокола `1.0`. Текущий Kotlin-код — только заглушка согласования версии; он не исполняет модель.
+Сейчас: Kotlin 2.4.21, JDK 21, Gradle 9.8.1, Koog 1.3.0 (зависимость), unit-тесты и версия протокола `1.0`. CLI исполняет локальную read-only fake-модель, пишет SessionResult и коррелированный журнал. Реальные LLM и Koog integration — отдельные задачи.
 
 [Собственный GitHub Actions CI](.github/workflows/ci.yml) на `ubuntu-latest` запускает Kotlin build/test и проверку Session Protocol через Node + JSON Schema Draft 2020-12. Никакой внешний runner, локальная LLM или приватные API для CI не нужны.
 
 ## Документация
 
 - [Архитектура и собственный план развития](docs/architecture/ARCHITECTURE.md)
+- [Первый исполняемый CLI](docs/architecture/FIRST_SESSION.md) — запуск, fake-модель, ограничения и тесты
 - [Session Protocol v1](contracts/README.md) — вход/выход, события, checkpoint, политика совместимости
 - [JSON Schema](contracts/v1/session-v1.schema.json) и [тестовые примеры](contracts/v1/session-v1.examples.json)
 
