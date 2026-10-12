@@ -96,7 +96,7 @@ The engine creates and owns `invocationId` and `sessionId`. These identifiers ar
 
 **API later.** The same task and session services may be exposed through a versioned HTTP/gRPC interface. Remote user interfaces and integrations use this API; they cannot directly invoke privileged tools.
 
-**Scheduler/daemon later.** Internal scheduling can handle many tasks subject to local model capacity, bounded concurrency, and fairness. This responsibility stays inside the product, not in external workflows.
+**Local scheduler implemented; daemon later.** The foreground internal scheduler handles tasks subject to local model capacity, bounded concurrency, and fairness. This responsibility stays inside the product, not in external workflows.
 
 Git-host integrations (PR creation, reviews, webhooks), IDE extensions, and task-system adapters are independent opt-in plugins with narrowly scoped permissions. They do not belong in the trusted session core.
 
@@ -135,4 +135,4 @@ Every new engine module must ship with relevant tests. Live model behavior does 
 | Durability | Event Journal, checkpoints, fenced resume, and fail-closed recovery |
 | Product | First-party task scheduling, optional daemon/API and integrations, diagnostics UI, and releases |
 
-**Implementation status:** the foundation, first offline fake-model session, trusted read-only workspace, and strict injectable OpenAI-compatible Model Gateway are present. Production Koog agent orchestration, recursive multi-agent workflows, writable tools, and crash recovery are not yet available. This architecture describes requirements rather than claiming those future capabilities are implemented.
+**Implementation status:** the foundation, first offline fake-model session, trusted read-only workspace, and strict injectable OpenAI-compatible Model Gateway are present. The native Task Manager supports local DAG scheduling and safe interrupted-task reconciliation. Production Koog agent orchestration, recursive multi-agent workflows, writable tools, and session checkpoint replay are not yet available. This architecture describes requirements rather than claiming those future capabilities are implemented.
