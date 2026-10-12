@@ -30,7 +30,11 @@ Recursive Coder itself owns its tasks and sessions. Git can manage source worksp
 
 ## Build and test
 
-The current foundation uses Kotlin 2.4.21, JDK 21, Gradle 9.8.1, Koog 1.3.0, and Session Protocol `1.0`.
+The current foundation uses Kotlin 2.4.21, JDK 21, Gradle 9.8.1, and Session Protocol `1.0`. Koog execution remains planned; the existing core does not link a Koog runtime.
+
+The Gradle build has six modules with explicit boundaries. The **CLI is the only application module**; core session/task logic has no production dependency on Koog or HTTP model adapters. See [Gradle module ownership](docs/architecture/MODULES.md).
+
+The installed distribution remains at `build/install/recursive-coder/bin/recursive-coder`, preserving the existing CLI smoke-test path.
 
 The project includes an offline deterministic fake-model CLI, a native durable task scheduler, a trusted read-only workspace boundary, and an optional user-configured HTTP model adapter. CI uses only the fake model and deterministic mock HTTP servers. For setup, supported features, sample execution, and known limitations, see **[First executable session](docs/architecture/FIRST_SESSION.md)**.
 
@@ -45,6 +49,7 @@ The independent [GitHub Actions CI](.github/workflows/ci.yml) runs JVM and proto
 ## Documentation
 
 - [Architecture and engineering roadmap](docs/architecture/ARCHITECTURE.md)
+- [Gradle modules and dependency rules](docs/architecture/MODULES.md)
 - [First executable CLI session](docs/architecture/FIRST_SESSION.md)
 - [Native Task Manager and local scheduling](docs/architecture/TASK_MANAGER.md)
 - [Workspace security and read-only tools](docs/architecture/WORKSPACE.md)

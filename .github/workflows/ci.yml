@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   kotlin:
-    name: Kotlin JVM / Koog dependencies
+    name: Kotlin JVM multi-module build
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -44,17 +44,17 @@ jobs:
             --ro-bind /usr /usr --ro-bind /bin /bin \
             --ro-bind /lib /lib --ro-bind /lib64 /lib64 \
             -- /usr/bin/true
-      - name: Compile and test standalone JVM project
+      - name: Compile and test standalone Gradle modules and distribution
         env:
           CI: 'true'
-        run: ./gradlew --no-daemon test --stacktrace
+        run: ./gradlew --no-daemon clean test installDist --stacktrace
       - name: Confirm sandbox integration test was not skipped
         run: |
           python3 - <<'PY'
           from pathlib import Path
           from xml.etree import ElementTree as ET
 
-          files = list(Path("build/test-results/test").glob("TEST-*.xml"))
+          files = list(Path(".").glob("**/build/test-results/test/TEST-*.xml"))
           cases = [
               case
               for path in files
@@ -74,7 +74,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: recursive-coder-junit-results
-          path: build/test-results/test/TEST-*.xml
+          path: '**/build/test-results/test/TEST-*.xml'
           if-no-files-found: error
 
       - uses: actions/setup-python@v5
