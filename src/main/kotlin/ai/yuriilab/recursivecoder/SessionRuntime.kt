@@ -181,10 +181,10 @@ class SessionRequest private constructor(val raw: JsonObject) {
     fun admit() {
         if (!SessionProtocol.supports(raw.textAt("version")))
             throw Refused("UNSUPPORTED_PROTOCOL", "protocol", "Unsupported protocol version")
-        if (invocation.textAt("source") != "cli" || invocation.longAt("attempt") != 1)
+        if (invocation.textAt("source") != "cli" || invocation.longAt("attempt") != 1L)
             throw Refused("UNSUPPORTED_INVOCATION", "protocol", "Only fresh CLI invocations are supported")
         if (raw.objectAt("resume").textAt("mode") != "fresh" ||
-            raw.objectAt("resume").longAt("fenceGeneration") != 1)
+            raw.objectAt("resume").longAt("fenceGeneration") != 1L)
             throw Refused("UNSUPPORTED_RESUME", "checkpoint", "Resume is not supported")
         val supported = setOf("session-events-v1", "fake-model-v1", "read-only-tools-v1")
         if (!supported.containsAll(raw.stringsAt("requiredCapabilities")) ||
