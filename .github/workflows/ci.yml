@@ -45,7 +45,7 @@ jobs:
             --ro-bind /lib /lib --ro-bind /lib64 /lib64 \
             -- /usr/bin/true
       - name: Compile and test standalone JVM project
-        run: ./gradlew --no-daemon test --stacktrace
+        run: ./gradlew --no-daemon test --info --stacktrace
 
       - uses: actions/setup-python@v5
         with:
