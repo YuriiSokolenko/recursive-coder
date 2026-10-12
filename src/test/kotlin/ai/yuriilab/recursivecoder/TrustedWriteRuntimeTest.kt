@@ -399,11 +399,12 @@ class TrustedWriteRuntimeTest {
             )),
             "readonly" to TrustedCheck(python, listOf("-c", """
                 from pathlib import Path
+                import errno
                 try:
                     Path('/workspace/src/main/Feature.kt').write_text('escaped')
                     raise AssertionError('workspace was writable')
-                except PermissionError:
-                    pass
+                except OSError as error:
+                    assert error.errno in (errno.EROFS, errno.EACCES, errno.EPERM)
             """.trimIndent())),
             "scratch" to TrustedCheck(python, listOf("-c",
                 "from pathlib import Path; Path('/scratch/allowed.txt').write_text('ok')"
