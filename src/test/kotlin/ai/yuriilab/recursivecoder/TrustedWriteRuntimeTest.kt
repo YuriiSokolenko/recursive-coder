@@ -392,37 +392,48 @@ class TrustedWriteRuntimeTest {
         if (probe.isAlive) probe.destroyForcibly()
         Assumptions.assumeTrue(supported,
             "Host does not permit the isolated network namespace required by runCheck")
-        val script = """
-            from pathlib import Path
-            import socket
-            assert Path('/workspace/src/main/Feature.kt').read_text() == 'fun value() = 4\n'
-            try:
-                Path('/workspace/src/main/Feature.kt').write_text('escaped')
-                raise AssertionError('workspace was writable')
-            except PermissionError:
-                pass
-            Path('/scratch/allowed.txt').write_text('ok')
-            try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                s.sendto(b'x', ('198.51.100.1', 53))
-                raise AssertionError('outside network was writable')
-            except OSError:
-                pass
-        """.trimIndent()
-        open(f, checks = mapOf(
-                "separate-test" to TrustedCheck(python, listOf("-c", script)),
-                "output-overflow" to TrustedCheck(python,
-                    listOf("-c", "print('x' * 100000)"), maxOutputBytes = 128)
-            ),
-            required = setOf("git_diff_check", "separate-test")).use { runtime ->
+        val checks = mapOf(
+            "smoke" to TrustedCheck(Path.of("/usr/bin/true"), emptyList()),
+            "separate-test" to TrustedCheck(python, listOf("-c",
+                "from pathlib import Path; assert Path('/workspace/src/main/Feature.kt').read_text() == 'fun value() = 4\n'"
+            )),
+            "readonly" to TrustedCheck(python, listOf("-c", """
+                from pathlib import Path
+                try:
+                    Path('/workspace/src/main/Feature.kt').write_text('escaped')
+                    raise AssertionError('workspace was writable')
+                except PermissionError:
+                    pass
+            """.trimIndent())),
+            "scratch" to TrustedCheck(python, listOf("-c",
+                "from pathlib import Path; Path('/scratch/allowed.txt').write_text('ok')"
+            )),
+            "network" to TrustedCheck(python, listOf("-c", """
+                import socket
+                try:
+                    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    s.sendto(b'x', ('198.51.100.1', 53))
+                    raise AssertionError('outside network was writable')
+                except OSError:
+                    pass
+            """.trimIndent())),
+            "output-overflow" to TrustedCheck(python,
+                listOf("-c", "print('x' * 100000)"), maxOutputBytes = 128)
+        )
+        open(f, checks = checks, required = setOf("git_diff_check", "separate-test")).use { runtime ->
             assertTrue(runtime.apply(listOf(WriteOperation.Edit("src/main/Feature.kt",
                 sha("fun value() = 1\n"), "fun value() = 4\n"))).permitted)
-            val check = runtime.runCheck("separate-test")
-            assertTrue(check.passed, "Sandboxed test must pass: " + check.deniedCode)
+            val receipts = mutableListOf<TrustedCheckReceipt>()
+            for (id in listOf("smoke", "separate-test", "readonly", "scratch", "network")) {
+                val result = runtime.runCheck(id)
+                assertTrue(result.passed, "Sandbox phase $id failed: ${result.deniedCode}")
+                if (id == "separate-test") receipts += result.receipt!!
+            }
             assertEquals("CHECK_OUTPUT_LIMIT", runtime.runCheck("output-overflow").deniedCode)
             val gitCheck = runtime.runCheck("git_diff_check")
             assertTrue(gitCheck.passed, gitCheck.deniedCode)
-            assertTrue(runtime.finish(listOf(check.receipt!!, gitCheck.receipt!!)).successful)
+            receipts += gitCheck.receipt!!
+            assertTrue(runtime.finish(receipts).successful)
         }
     }
 }
