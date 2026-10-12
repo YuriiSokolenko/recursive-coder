@@ -130,7 +130,7 @@ class TaskManagerTest {
         assertFailsWith<IllegalArgumentException> {
             service.enqueue(request("third"), dependencies = listOf("missing"))
         }
-        assertFailsWith<IllegalArgumentException> {
+        assertFailsWith<IllegalStateException> {
             service.replaceDependencies("first", listOf("first"))
         }
         assertEquals(2, service.list().size)
