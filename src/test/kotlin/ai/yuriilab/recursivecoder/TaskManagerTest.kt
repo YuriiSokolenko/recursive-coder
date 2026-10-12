@@ -363,6 +363,15 @@ class TaskManagerTest {
         assertEquals(TaskState.SUCCEEDED, service.show("active").state)
     }
 
+    @Test fun taskCliShimRejectsMissingCommandWithoutCreatingStore() {
+        val directory = temp.resolve("missing-command-store")
+        assertEquals(2, TaskCli.execute(emptyList()))
+        assertEquals(2, TaskCli.execute(listOf("--store", directory.toString())))
+        assertFalse(Files.exists(directory))
+        assertEquals(0, TaskCli.execute(listOf("--store", directory.toString(), "--help")))
+        assertFalse(Files.exists(directory))
+    }
+
     @Test fun taskCliUsesSameDurableService() {
         val requestFile = temp.resolve("request.json")
         Files.writeString(requestFile, request("cli"))

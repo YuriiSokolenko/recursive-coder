@@ -69,6 +69,136 @@ class CliContractTest(unittest.TestCase):
             "requiredCapabilities": ["session-events-v1", "fake-model-v1", "read-only-tools-v1"],
         }
 
+    def test_clikt_missing_subcommand_is_usage_error(self):
+        """Missing root/task subcommands must not be interpreted as --help."""
+        self.assertTrue(CLI.exists(), "Build the CLI distribution first")
+        with tempfile.TemporaryDirectory() as dirname:
+            store = Path(dirname) / "missing-command-store"
+            for args in ((), ("tasks",), ("tasks", "--store", str(store))):
+                with self.subTest(args=args):
+                    cp = command(str(CLI), *args)
+                    self.assertEqual(cp.returncode, 2, cp.stdout + cp.stderr)
+                    self.assertEqual(cp.stdout, "")
+                    self.assertIn("Error:", cp.stderr)
+                    self.assertIn("command is required", cp.stderr)
+                    self.assertFalse(store.exists())
+            for args in (("--help",), ("tasks", "--help"),
+                         ("tasks", "--store", str(store), "--help")):
+                with self.subTest(args=args):
+                    cp = command(str(CLI), *args)
+                    self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+                    self.assertIn("Usage:", cp.stdout)
+                    self.assertEqual(cp.stderr, "")
+                    self.assertFalse(store.exists())
+
+    def test_clikt_help_is_read_only_and_successful(self):
+        self.assertTrue(CLI.exists(), "Build the CLI distribution first")
+        with tempfile.TemporaryDirectory() as dirname:
+            store = Path(dirname) / "uncreated-store"
+            for args, expected in (
+                (("--help",), "tasks"),
+                (("run", "--help"), "--fake-delay-ms"),
+                (("tasks", "--help"), "enqueue"),
+                (("tasks", "--store", str(store), "enqueue", "--help"), "--priority"),
+                (("tasks", "--store", str(store), "run", "--help"), "--concurrency"),
+            ):
+                with self.subTest(args=args):
+                    cp = command(str(CLI), *args)
+                    self.assertEqual(cp.returncode, 0, cp.stderr)
+                    self.assertIn(expected, cp.stdout)
+                    self.assertEqual(cp.stderr, "")
+                    self.assertFalse(store.exists())
+
+    def test_clikt_rejects_bad_task_syntax_before_creating_store(self):
+        self.assertTrue(CLI.exists(), "Build the CLI distribution first")
+        with tempfile.TemporaryDirectory() as dirname:
+            temp = Path(dirname)
+            store = temp / "uncreated-store"
+            request_path = temp / "request.json"
+            request_path.write_text("{}")
+            prefix = ("tasks", "--store", str(store))
+            invalid = (
+                ("enqueue",),
+                ("enqueue", str(request_path), "--priority"),
+                ("enqueue", str(request_path), "--priority", "abc"),
+                ("enqueue", str(request_path), "--priority", "1.5"),
+                ("enqueue", str(request_path), "--priority", "1", "--priority", "2"),
+                ("enqueue", str(request_path), "--depends-on", "first,,second"),
+                ("enqueue", str(request_path), "--depends-on", ""),
+                ("enqueue", str(request_path), "--depends-on", "one", "--depends-on", "two"),
+                ("run", "--concurrency"),
+                ("run", "--concurrency", "two"),
+                ("run", "--concurrency", "1", "--concurrency", "2"),
+                ("cancel",),
+                ("show", "one", "two"),
+                ("list", "--unknown"),
+                ("list", "--store", str(store)),
+                ("does-not-exist",),
+            )
+            for args in invalid:
+                with self.subTest(args=args):
+                    cp = command(str(CLI), *prefix, *args)
+                    self.assertEqual(cp.returncode, 2, cp.stdout + cp.stderr)
+                    self.assertEqual(cp.stdout, "")
+                    self.assertTrue(cp.stderr.strip())
+                    self.assertFalse(store.exists(), "Parser created a store on invalid syntax")
+
+    def test_clikt_rejects_bad_session_syntax_without_output(self):
+        self.assertTrue(CLI.exists(), "Build the CLI distribution first")
+        with tempfile.TemporaryDirectory() as dirname:
+            temp = Path(dirname)
+            request = self.request(temp)
+            source = temp / "request.json"
+            source.write_text(json.dumps(request))
+            for args in (
+                ("run",),
+                ("run", str(source), "--unknown"),
+                ("run", str(source), "--fake-delay-ms"),
+                ("run", str(source), "--fake-delay-ms", "nan"),
+                ("run", str(source), "--fake-delay-ms", "2", "--fake-delay-ms", "3"),
+                ("run", str(source), "--fake-delay-ms", "60001"),
+                ("run", str(source), "extra"),
+                ("no-such-command",),
+            ):
+                with self.subTest(args=args):
+                    cp = command(str(CLI), *args)
+                    self.assertEqual(cp.returncode, 2, cp.stdout + cp.stderr)
+                    self.assertEqual(cp.stdout, "")
+                    self.assertTrue(cp.stderr.strip())
+                    self.assertFalse(Path(request["outputs"]["rootDir"]).exists(),
+                                     "Malformed CLI started a session")
+
+    def test_clikt_enqueue_options_and_defaults(self):
+        self.assertTrue(CLI.exists(), "Build the CLI distribution first")
+        with tempfile.TemporaryDirectory() as dirname:
+            temp = Path(dirname)
+            request = self.request(temp)
+            source = temp / "request.json"
+            source.write_text(json.dumps(request))
+            store = temp / "queue"
+            prefix = ("tasks", "--store", str(store))
+            first = command(str(CLI), *prefix, "enqueue", str(source), "--priority", "70")
+            self.assertEqual(first.returncode, 0, first.stderr)
+            task = json.loads(first.stdout)
+            self.assertEqual(task["priority"], 70)
+            self.assertEqual(task["dependencies"], [])
+            # The second task depends on the existing native task ID.
+            second = json.loads(source.read_text())
+            second["task"]["taskId"] = "other-task"
+            second["sessionId"] = "session-other-task"
+            second["requestId"] = "request-other-task"
+            second["traceId"] = "trace-other-task"
+            second_source = temp / "second.json"
+            second_source.write_text(json.dumps(second))
+            cp = command(str(CLI), *prefix, "enqueue", str(second_source),
+                         "--depends-on", task["taskId"])
+            self.assertEqual(cp.returncode, 0, cp.stderr)
+            self.assertEqual(json.loads(cp.stdout)["priority"], 50)
+            self.assertEqual(json.loads(cp.stdout)["dependencies"], [task["taskId"]])
+            listed = command(str(CLI), *prefix, "list")
+            self.assertEqual(listed.returncode, 0, listed.stderr)
+            self.assertEqual(len(json.loads(listed.stdout)), 2)
+
     def test_real_cli_produces_canonical_result_and_events(self):
         self.assertTrue(CLI.exists(), "Build the CLI distribution first")
         with tempfile.TemporaryDirectory() as dirname:
