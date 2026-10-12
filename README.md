@@ -2,7 +2,7 @@
 
 **Recursive Coder** is a planned autonomous coding agent built with **Kotlin/JVM** and **JetBrains Koog**.
 
-> **Status: architecture / RFC.** The coding agent is not implemented yet. This repository currently contains design documents.
+> **Status: independent Kotlin/JVM build, canonical session contract v1 and CI scaffold.** The coding agent, observable Koog session controller and GitHub adapter are **not implemented yet**.
 
 ## Goal
 
@@ -22,6 +22,18 @@ Approved specifications and acceptance/unit tests are protected: the Developer a
 
 **Observable by Design:** record structured, correlated state transitions, model/tool interactions, policy decisions, errors and external side effects. Diagnostic replay uses recorded responses; it does not claim access to private model reasoning.
 
+## Independent project and CI
+
+This repository is independently built and tested. It does **not** use the `social-mcp` CI, N150 runner pool or HP Nano for pull-request checks.
+
+- **Kotlin/JVM**: Kotlin `2.4.21`, JDK `21`, Gradle `9.8.1` and pinned Koog `1.3.0` dependency. Only a protocol-version admission stub exists; a functional agent is the next milestone.
+- **[Recursive Coder CI](.github/workflows/ci.yml)**: GitHub-hosted PR/push checks for `dev` and `main` plus manual dispatch. Kotlin compilation/unit tests run separately from versioned contract validation.
+- **[Canonical session protocol v1](contracts/README.md)**: JSON Schema, fixtures, independent conformance tests and exact ownership/admission guarantees. `social-mcp` has a historical snapshot and will eventually only consume a pinned version through an adapter.
+
+Reproduce the first JVM checks locally with JDK 21 and Gradle 9.8.1: `gradle test`. For schema tests, see `contracts/README.md`.
+
+No production model requests, GitHub PR publication, Checkpoint/resume or recursive agent execution are implied by a green build yet.
+
 ## Documentation
 
 - **[Agent Runtime Architecture v0.2](docs/architecture/KOOG_AGENT_RUNTIME_ARCHITECTURE_v0.2.md)** — current architectural RFC, including Observability, Controllability and Reproducibility.
@@ -31,7 +43,7 @@ The architecture documents are currently written in Russian. They describe a pro
 
 ## Roadmap and work tracking
 
-The migration work is tracked in the existing project's **[Koog extraction Epic #783](https://github.com/YuriiSokolenko/social-mcp/issues/783)** and tasks [#784–#790](https://github.com/YuriiSokolenko/social-mcp/issues/783). The first task is to define the ownership boundary and versioned session contracts.
+The migration work is tracked in the existing project's **[Koog extraction Epic #783](https://github.com/YuriiSokolenko/social-mcp/issues/783)** and tasks [#784–#790](https://github.com/YuriiSokolenko/social-mcp/issues/783). The #784 boundary/contract milestone is merged; the next implementation milestone is #785 (standalone executable Koog session). This repository owns the ongoing contract source and CI.
 
 The old JavaScript `agent-harness` extraction proposal is not a blueprint for mechanically copying all control-plane code here: GitHub-owned control-plane responsibilities remain in `social-mcp`.
 
