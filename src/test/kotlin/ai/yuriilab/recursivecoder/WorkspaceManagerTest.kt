@@ -210,6 +210,48 @@ class WorkspaceManagerTest {
         return SessionRequest.parse(JsonObject(request.raw + ("workspace" to next)).toString())
     }
 
+    @Test fun logicalRootWithSymlinkedAncestorIsAcceptedLikeMacOsVar() {
+        val (root, request) = fixture()
+        val aliasParent = temp.resolve("linked-parent")
+        Files.createSymbolicLink(aliasParent, temp)
+        val logicalRoot = aliasParent.resolve(root.fileName)
+        assertFalse(Files.isSymbolicLink(logicalRoot))
+        assertEquals(root.toRealPath(), logicalRoot.toRealPath())
+        val workspace = JsonObject(request.workspace + ("rootPath" to JsonPrimitive(logicalRoot.toString())))
+        val ref = request.task["taskInputRef"]!!.jsonObject
+        val task = JsonObject(request.task + ("taskInputRef" to
+            JsonObject(ref + ("path" to JsonPrimitive(logicalRoot.resolve("task.md").toString()))))
+        val logical = SessionRequest.parse(JsonObject(request.raw +
+            mapOf("workspace" to workspace, "task" to task)).toString())
+        open(logical).use { manager ->
+            manager.verifyTask(logical.taskPath, hash("Implement the workspace guard"))
+            assertEquals("task.md", manager.taskRelativePath(logical.taskPath))
+            assertTrue(manager.execute(WorkspaceTool.Read("task.md")).permitted)
+        }
+        assertEquals("succeeded", SessionController(logical).run()["status"]!!.jsonPrimitive.content)
+    }
+
+    @Test fun searchSkipsBinaryOversizedAndDeletedFilesAndTruncatesLargeTrees() {
+        val (root, request) = fixture(quota = 5)
+        Files.write(root.resolve("src/binary.bin"), byteArrayOf(0, 65, 0, 66))
+        Files.writeString(root.resolve("src/large.txt"), "a".repeat(40_000))
+        repeat(270) { i ->
+            Files.writeString(root.resolve("src/z%03d.txt".format(i)), "quiet file $i")
+        }
+        git(root, "add", ".")
+        git(root, "commit", "-m", "mixed tracked files")
+        Files.delete(root.resolve("src/z000.txt"))
+        val next = fixtureForSameRoot(root, request)
+        open(next).use { manager ->
+            val outcome = manager.execute(WorkspaceTool.Search("hello"))
+            assertTrue(outcome.permitted, outcome.deniedCode ?: "")
+            val found = assertIs<ToolData.Matches>(outcome.data)
+            assertEquals(listOf("src/code.kt"), found.matches.map { it.path })
+            assertTrue(found.skippedFiles >= 3, "Binary, oversized and deleted files must be skipped")
+            assertTrue(found.truncated, "More than 256 files must yield bounded partial matches")
+        }
+    }
+
     @Test fun symlinkSwapRaceNeverExposesDataOutsideWorkspace() {
         val (root, request) = fixture(quota = 220)
         val outside = temp.resolve("escape")
