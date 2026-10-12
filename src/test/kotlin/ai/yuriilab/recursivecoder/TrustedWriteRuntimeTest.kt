@@ -288,8 +288,7 @@ class TrustedWriteRuntimeTest {
             assertTrue(runtime.apply(listOf(WriteOperation.Edit("src/main/Feature.kt",
                 sha("fun value() = 1\n"), "fun value() = 4\n"))).permitted)
             val check = runtime.runCheck("separate-test")
-            Assumptions.assumeTrue(check.passed,
-                "User namespaces or bubblewrap bind mounts unavailable on this host")
+            assertTrue(check.passed, "Sandboxed test must pass: " + check.deniedCode)
             assertTrue(runtime.finish(listOf(check.receipt!!)).successful)
         }
     }
