@@ -48,6 +48,21 @@ private fun absolute(value: String): Path {
     ) refuse("Invalid absolute path")
     return path
 }
+/** Resolve an output destination's existing ancestor before creating any directories. */
+private fun canonicalDestination(path: Path): Path {
+    val missing = ArrayDeque<Path>()
+    var ancestor = path
+    while (!Files.exists(ancestor, LinkOption.NOFOLLOW_LINKS)) {
+        val name = ancestor.fileName ?: refuse("Invalid output path")
+        missing.addFirst(name)
+        ancestor = ancestor.parent ?: refuse("Invalid output path")
+    }
+    val realAncestor = try { ancestor.toRealPath() } catch (_: Exception) {
+        throw Refused("UNSAFE_OUTPUT_PATH", "policy", "Cannot resolve output directory")
+    }
+    return missing.fold(realAncestor) { parent, part -> parent.resolve(part) }
+}
+
 private fun digest(bytes: ByteArray): String =
     MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 private fun digestFile(path: Path): String = digest(Files.readAllBytes(path))
@@ -178,7 +193,8 @@ class SessionRequest private constructor(val raw: JsonObject) {
         }
     }
 
-    fun admit() {
+    fun admit(onAudit: (ToolAudit) -> Unit = {},
+              onStart: (String, String, Instant) -> Unit = { _, _, _ -> }): WorkspaceManager {
         if (!SessionProtocol.supports(raw.textAt("version")))
             throw Refused("UNSUPPORTED_PROTOCOL", "protocol", "Unsupported protocol version")
         if (invocation.textAt("source") != "cli" || invocation.longAt("attempt") != 1L)
@@ -194,8 +210,7 @@ class SessionRequest private constructor(val raw: JsonObject) {
             model.stringsAt("features").toSet() != setOf("tool_calls"))
             throw Refused("UNSUPPORTED_MODEL", "provider", "Only the deterministic fake tool-call model is available")
         if (policy.textAt("mode") != "read-only" ||
-            policy.stringsAt("allowedTools").toSet() != setOf("read") ||
-            "read" in policy.stringsAt("deniedTools") ||
+            ("read" !in policy.stringsAt("allowedTools") || "read" in policy.stringsAt("deniedTools")) ||
             policy.stringsAt("writablePaths").isNotEmpty() ||
             (policy["immutableInputs"] as? JsonArray)?.isNotEmpty() == true)
             throw Refused("UNSUPPORTED_TOOL_POLICY", "policy", "Only read-only task access is supported")
@@ -203,36 +218,16 @@ class SessionRequest private constructor(val raw: JsonObject) {
                 budgets.longAt("maxModelRequests")
             } ?: Long.MAX_VALUE) < 2)
             throw Refused("INSUFFICIENT_BUDGET", "policy", "Two model turns and one read are required")
-        val root = rootPath.toRealPath()
-        if (!Files.isDirectory(root) || Files.isSymbolicLink(rootPath))
-            throw Refused("INVALID_WORKSPACE", "policy", "Workspace is not a real directory")
-        val taskFile = taskPath.toRealPath()
-        if (!taskFile.startsWith(root) || taskFile.toString().split('/').contains(".git") ||
-            Files.isSymbolicLink(taskPath) || !Files.isRegularFile(taskFile) || Files.size(taskFile) > 65536)
-            throw Refused("INVALID_TASK_PATH", "policy", "Task must be a bounded regular file in the workspace")
-        val relative = root.relativize(taskFile)
-        if (policy.stringsAt("protectedPaths").any { pattern ->
-                try { root.fileSystem.getPathMatcher("glob:" + pattern).matches(relative) }
-                catch (_: Exception) { true }
-            }) throw Refused("PROTECTED_TASK", "policy", "Task input is protected")
-        if (digestFile(taskFile) != this.task.objectAt("taskInputRef").textAt("sha256"))
-            throw Refused("TASK_DIGEST_MISMATCH", "validation", "Task digest does not match")
-        val gitHead = git(root, "rev-parse", "HEAD")
-        if (gitHead == null || gitHead != workspace.textAt("headSha") ||
-            gitHead != workspace.textAt("baselineSha"))
-            throw Refused("WORKSPACE_BASELINE_MISMATCH", "policy", "Workspace baseline is not current HEAD")
-        workspace.stringOrNull("branch")?.let { branch ->
-            if (git(root, "branch", "--show-current") != branch)
-                throw Refused("WORKSPACE_BRANCH_MISMATCH", "policy", "Workspace branch changed")
+        val manager = WorkspaceManager.open(this, onAudit, onStart)
+        try {
+            manager.verifyTask(taskPath, task.objectAt("taskInputRef").textAt("sha256"))
+            return manager
+        } catch (e: Exception) {
+            manager.close()
+            throw e
         }
     }
 }
-
-private fun git(root: Path, vararg args: String): String? = try {
-    val p = ProcessBuilder(listOf("git", "-C", root.toString()) + args).redirectErrorStream(true).start()
-    if (!p.waitFor(3, TimeUnit.SECONDS)) { p.destroyForcibly(); null }
-    else if (p.exitValue() == 0) p.inputStream.bufferedReader().use { it.readText().trim() } else null
-} catch (_: Exception) { null }
 
 class Cancellation {
     private val requested = AtomicBoolean()
@@ -320,7 +315,11 @@ class SessionController(
         val started = Instant.now()
         // Never open or truncate existing output files. A later recovery milestone owns replay.
         val outputRoot = request.outputRoot
-        if (outputRoot.startsWith(request.rootPath) || Files.isSymbolicLink(outputRoot))
+        val workspaceCanonical = try { request.rootPath.toRealPath() } catch (_: Exception) {
+            throw Refused("INVALID_WORKSPACE", "policy", "Cannot resolve workspace")
+        }
+        if (canonicalDestination(outputRoot).startsWith(workspaceCanonical) ||
+            Files.isSymbolicLink(outputRoot))
             throw Refused("UNSAFE_OUTPUT_PATH", "policy", "Session output must be outside the workspace")
         Files.createDirectories(outputRoot)
         val targetPaths = listOf("eventsPath", "resultPath", "diagnosticsPath").map { request.output(it) }
@@ -350,8 +349,26 @@ class SessionController(
             journal.append("session.transition", eventStatus, wireState(state) to wireState(to))
             state = to
         }
+        var workspaceManager: WorkspaceManager? = null
         try {
-            request.admit()
+            workspaceManager = request.admit(
+                onAudit = { audit ->
+                    journal.append(if (audit.permitted) "tool.completed" else "policy.denied",
+                        if (audit.permitted) "completed" else "denied",
+                        toolId = audit.receiptId, started = audit.started,
+                        extra = buildJsonObject {
+                            put("tool", audit.tool)
+                            put("receiptId", audit.receiptId)
+                            put("bytes", audit.outputBytes)
+                            audit.code?.let { put("deniedCode", it) }
+                            audit.sha256?.let { put("sha256", it) }
+                        })
+                },
+                onStart = { receipt, tool, startedAt ->
+                    journal.append("tool.started", "started", toolId = receipt, started = startedAt,
+                        extra = buildJsonObject { put("tool", tool); put("receiptId", receipt) })
+                }
+            )
             cancellation.check(deadline)
             transition("admitted")
             transition("running")
@@ -370,17 +387,16 @@ class SessionController(
                 when (decision) {
                     is FakeDecision.Read -> {
                         if (turn != 0 || decision.path != request.taskPath) refuse("Unexpected fake tool call")
-                        val toolId = "tool-" + request.sessionId + "-1"
-                        val readStarted = Instant.now()
-                        journal.append("tool.started", "started", toolId = toolId, started = readStarted,
-                            extra = buildJsonObject { put("tool", "read") })
                         cancellation.check(deadline)
-                        val bytes = Files.readAllBytes(decision.path)
-                        if (bytes.size > 65536 || digest(bytes) != request.task.objectAt("taskInputRef").textAt("sha256"))
+                        val relative = workspaceManager!!.taskRelativePath(decision.path)
+                        val outcome = workspaceManager.execute(WorkspaceTool.Read(relative))
+                        if (!outcome.permitted)
+                            throw Refused(outcome.deniedCode!!, "policy", "Read-only tool denied")
+                        val read = outcome.data as? ToolData.FileText
+                            ?: throw Refused("TOOL_RESULT_INVALID", "policy", "Unexpected tool result")
+                        if (read.sha256 != request.task.objectAt("taskInputRef").textAt("sha256"))
                             throw Refused("TASK_CHANGED", "policy", "Task changed during execution")
-                        observed = bytes.size to digest(bytes)
-                        journal.append("tool.completed", "completed", toolId = toolId, started = readStarted,
-                            extra = buildJsonObject { put("tool", "read"); put("bytes", bytes.size); put("sha256", digest(bytes)) })
+                        observed = read.bytes to read.sha256
                     }
                     is FakeDecision.Done -> {
                         if (turn != 1 || observed != (decision.bytes to decision.sha256))
@@ -411,6 +427,7 @@ class SessionController(
             journal.append("session.error", "failed")
             transition("failed", "failed")
         } finally {
+            workspaceManager?.close()
             watchdog.shutdownNow()
             journal.close()
         }
