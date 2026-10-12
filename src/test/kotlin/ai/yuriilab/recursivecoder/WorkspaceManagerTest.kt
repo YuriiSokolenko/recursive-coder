@@ -234,7 +234,7 @@ class WorkspaceManagerTest {
                 repeat(160) {
                     val result = workspace.execute(WorkspaceTool.Read("src/code.kt"))
                     if (result.permitted) {
-                        assertEquals("fun hello() = 7\\n", assertIs<ToolData.FileText>(result.data).text)
+                        assertEquals("fun hello() = 7\n", assertIs<ToolData.FileText>(result.data).text)
                     } else {
                         assertNull(result.data)
                     }
