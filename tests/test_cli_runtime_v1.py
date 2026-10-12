@@ -69,6 +69,28 @@ class CliContractTest(unittest.TestCase):
             "requiredCapabilities": ["session-events-v1", "fake-model-v1", "read-only-tools-v1"],
         }
 
+    def test_clikt_missing_subcommand_is_usage_error(self):
+        """Missing root/task subcommands must not be interpreted as --help."""
+        self.assertTrue(CLI.exists(), "Build the CLI distribution first")
+        with tempfile.TemporaryDirectory() as dirname:
+            store = Path(dirname) / "missing-command-store"
+            for args in ((), ("tasks",), ("tasks", "--store", str(store))):
+                with self.subTest(args=args):
+                    cp = command(str(CLI), *args)
+                    self.assertEqual(cp.returncode, 2, cp.stdout + cp.stderr)
+                    self.assertEqual(cp.stdout, "")
+                    self.assertIn("Error:", cp.stderr)
+                    self.assertIn("command is required", cp.stderr)
+                    self.assertFalse(store.exists())
+            for args in (("--help",), ("tasks", "--help"),
+                         ("tasks", "--store", str(store), "--help")):
+                with self.subTest(args=args):
+                    cp = command(str(CLI), *args)
+                    self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+                    self.assertIn("Usage:", cp.stdout)
+                    self.assertEqual(cp.stderr, "")
+                    self.assertFalse(store.exists())
+
     def test_clikt_help_is_read_only_and_successful(self):
         self.assertTrue(CLI.exists(), "Build the CLI distribution first")
         with tempfile.TemporaryDirectory() as dirname:

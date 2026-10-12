@@ -18,11 +18,11 @@ internal fun executeCli(args: List<String>): Int {
         root.parse(args)
         0
     } catch (error: CliktError) {
-        if (error !is ProgramResult) root.echoFormattedHelp(error)
+        if (error !is ProgramResult && error !is Abort) root.echoFormattedHelp(error)
         when {
+            error is ProgramResult || error is Abort -> error.statusCode
             error.statusCode == 0 -> 0
-            error is ProgramResult -> error.statusCode
-            else -> 2 // Preserve the CLI's invalid-input exit status.
+            else -> 2 // Map only CLI usage errors to the legacy invalid-input exit status.
         }
     } catch (error: Exception) {
         System.err.println(error.message ?: "Command failed")
@@ -36,11 +36,16 @@ private fun <T> once(values: List<T>, flag: String, default: T): T {
 }
 
 private class RecursiveCoderCommand : CliktCommand(name = "recursive-coder") {
+    override val invokeWithoutSubcommand = true
     override fun help(context: Context) = "Run a coding session or manage local tasks."
 
     init { subcommands(RunSessionCommand(), TasksCommand()) }
 
-    override fun run() = Unit
+    override fun run() {
+        if (currentContext.invokedSubcommand == null) {
+            throw UsageError("A command is required")
+        }
+    }
 }
 
 private class RunSessionCommand : CliktCommand(name = "run") {
@@ -60,6 +65,7 @@ private class RunSessionCommand : CliktCommand(name = "run") {
 }
 
 private class TasksCommand : CliktCommand(name = "tasks") {
+    override val invokeWithoutSubcommand = true
     override fun help(context: Context) =
         "Manage native tasks. Store defaults to ~/.recursive-coder/tasks. " +
             "The run scheduler stays in the foreground."
@@ -78,6 +84,9 @@ private class TasksCommand : CliktCommand(name = "tasks") {
     }
 
     override fun run() {
+        if (currentContext.invokedSubcommand == null) {
+            throw UsageError("A task command is required")
+        }
         storeDirectory = once(
             storeOptions, "--store",
             Path.of(System.getProperty("user.home"), ".recursive-coder", "tasks")

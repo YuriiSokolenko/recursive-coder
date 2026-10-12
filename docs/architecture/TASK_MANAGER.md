@@ -29,7 +29,14 @@ Invalid command names, unknown options, missing values, malformed integer values
 repeated single-value options, and empty entries in `--depends-on` fail with
 exit code 2 before task store initialization or session execution. Successful
 `--help` exits 0. Standard JSON responses remain on stdout, while errors and
-session summaries remain on stderr. Service-level validation is unchanged.
+session summaries remain on stderr. Invoking only `recursive-coder`,
+`recursive-coder tasks`, or `recursive-coder tasks --store PATH` without a
+subcommand is a usage error (stderr, exit 2), not an implicit successful help
+request. Path and syntax validation messages are formatted by Clikt and may
+appear in a different order than in the previous parser (for example, an
+invalid `--store` is reported before an invalid enqueue request path).
+Neither parser-level failure creates task state. Service-level validation is
+unchanged.
 
 Omit `--store` to use `~/.recursive-coder/tasks`. The JSON request's
 `task.taskId` is the native task identity. Dependencies must already be
