@@ -89,7 +89,7 @@ class CliContractTest(unittest.TestCase):
                 VALIDATOR.validate(event)
                 self.assertEqual(event["kind"], "session-event")
             self.assertEqual([e["sequence"] for e in events], list(range(1, len(events) + 1)))
-            self.assertEqual(events[-1]["transition"]["to"], "completed")
+            self.assertEqual(events[-1]["transition"]["to"], "succeeded")
             self.assertEqual(result["lastEventSeq"], len(events))
             self.assertEqual(sum(e["type"] == "tool.completed" for e in events), 1)
             self.assertNotIn("TOP_SECRET_FIXTURE_DATA", Path(request["outputs"]["eventsPath"]).read_text())
