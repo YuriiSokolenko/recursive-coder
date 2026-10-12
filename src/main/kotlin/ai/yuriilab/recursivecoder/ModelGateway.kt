@@ -207,6 +207,7 @@ class OpenAICompatibleGateway : ModelGateway {
                 cancellation.check(deadline)
                 throw Refused("MODEL_TRANSPORT_FAILED", "provider", "Model transport failed")
             }
+            var retryDelay: Long? = null
             response.body().use { input ->
                 val code = response.statusCode()
                 if (code == 401 || code == 403)
@@ -214,28 +215,28 @@ class OpenAICompatibleGateway : ModelGateway {
                 if (code in 300..399)
                     throw Refused("MODEL_REDIRECT_DENIED", "provider", "Model redirect denied")
                 if (code == 429 || code in 500..599) {
-                    if (attempt < maxAttempts) {
-                        val seconds = response.headers().firstValue("Retry-After").orElse("0")
-                            .toLongOrNull()?.coerceIn(0, 1) ?: 0L
-                        val delay = if (seconds == 0L) 100L else seconds * 1000
-                        try { Thread.sleep(delay) } catch (_: InterruptedException) {
-                            cancellation.check(deadline)
-                            throw Stopped(false)
-                        }
-                        continue
+                    if (attempt == maxAttempts)
+                        throw Refused("MODEL_RETRY_EXHAUSTED", "provider", "Model temporarily unavailable")
+                    val seconds = response.headers().firstValue("Retry-After").orElse("0")
+                        .toLongOrNull()?.coerceIn(0, 1) ?: 0L
+                    retryDelay = if (seconds == 0L) 100L else seconds * 1000L
+                } else {
+                    if (code !in 200..299)
+                        throw Refused("MODEL_HTTP_ERROR", "provider", "Model request rejected")
+                    val bytes = try { input.readNBytes(limitBytes + 1) } catch (_: Exception) {
+                        cancellation.check(deadline)
+                        throw Refused("MODEL_STREAM_INCOMPLETE", "provider", "Model response interrupted")
                     }
-                    throw Refused("MODEL_RETRY_EXHAUSTED", "provider", "Model temporarily unavailable")
-                }
-                if (code !in 200..299)
-                    throw Refused("MODEL_HTTP_ERROR", "provider", "Model request rejected")
-                val bytes = try { input.readNBytes(limitBytes + 1) } catch (_: Exception) {
                     cancellation.check(deadline)
-                    throw Refused("MODEL_STREAM_INCOMPLETE", "provider", "Model response interrupted")
+                    if (bytes.size > limitBytes)
+                        throw Refused("MODEL_RESPONSE_TOO_LARGE", "provider", "Model response exceeds size limit")
+                    return Reply(String(bytes, StandardCharsets.UTF_8), attempt, code)
                 }
+            }
+            val delay = retryDelay ?: break
+            try { Thread.sleep(delay) } catch (_: InterruptedException) {
                 cancellation.check(deadline)
-                if (bytes.size > limitBytes)
-                    throw Refused("MODEL_RESPONSE_TOO_LARGE", "provider", "Model response exceeds size limit")
-                return Reply(String(bytes, StandardCharsets.UTF_8), attempt, code)
+                throw Stopped(false)
             }
         }
         throw Refused("MODEL_RETRY_EXHAUSTED", "provider", "Model temporarily unavailable")
@@ -344,7 +345,7 @@ class OpenAICompatibleGateway : ModelGateway {
         var name: String? = null
         var finish: String? = null
         var refused = false
-        var usage: ModelUsage? = null
+        var reportedUsage: ModelUsage? = null
         var done = false
         val events = raw.replace("\r\n", "\n").split("\n\n")
         for (event in events) {
@@ -353,7 +354,7 @@ class OpenAICompatibleGateway : ModelGateway {
             if (data.isEmpty()) continue
             if (data == "[DONE]") { done = true; break }
             val obj = parseObject(data)
-            usage(obj)?.let { usage = it }
+            usage(obj)?.let { reportedUsage = it }
             val choices = obj["choices"] as? JsonArray ?: throw unsupported()
             if (choices.isEmpty()) continue
             val choice = choices.singleOrNull() as? JsonObject ?: throw unsupported()
@@ -376,7 +377,7 @@ class OpenAICompatibleGateway : ModelGateway {
         if (!done || finish == null)
             throw Refused("MODEL_STREAM_INCOMPLETE", "provider", "Model stream ended before completion")
         return Completion(finish!!, content.toString(), name,
-            if (name != null) arguments.toString() else null, refused, usage)
+            if (name != null) arguments.toString() else null, refused, reportedUsage)
     }
 
     private fun parseDecision(parsed: Completion, task: Path, observed: Pair<Int, String>?): ModelDecision {
