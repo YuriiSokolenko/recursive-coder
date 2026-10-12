@@ -208,14 +208,16 @@ class SessionControllerUnitTest {
     @Test fun unsupportedProtocolIsRejectedBeforeOpeningWorkspaceOrCallingModel() {
         val request = withField(fixture(), "version", JsonPrimitive("1.1"))
         val model = StubGateway()
-        val workspace = StubWorkspace(request, "Read the isolated task")
+        val forbiddenOpener = WorkspaceOpener { _, _, _ ->
+            throw AssertionError("WorkspaceOpener must not be called for unsupported protocol")
+        }
 
-        val result = run(request, model, workspace)
+        val result = SessionController(
+            request, model, workspaceOpener = forbiddenOpener
+        ).run()
 
         assertEquals("rejected", result.value("status"))
         assertEquals("UNSUPPORTED_PROTOCOL", result.getValue("error").jsonObject.value("code"))
-        assertEquals(0, workspace.verificationCount)
-        assertFalse(workspace.closed)
         assertEquals(0, model.negotiations)
         assertEquals(0, model.turns)
     }
