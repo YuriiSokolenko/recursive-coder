@@ -219,7 +219,7 @@ class ModelGatewayTest {
         assertEquals(2, postCount.get())
         postHandler.set { _, _ -> MockReply(503, "unavailable", retryAfter = "0") }
         assertEquals("MODEL_RETRY_EXHAUSTED", assertFailsWith<Refused> {
-            gateway().next(c, task, observation, Cancellation(), deadline(), false)
+            gateway().next(c, task, observation, Cancellation(), deadline(), true)
         }.code)
         assertEquals(3, postCount.get(), "An observed tool result must not be sent twice")
     }
