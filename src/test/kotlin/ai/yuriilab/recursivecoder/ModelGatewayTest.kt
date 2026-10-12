@@ -86,8 +86,8 @@ class ModelGatewayTest {
         "\"tool_calls\":true,\"tool_choice\":true,\"streaming\":true,\"structured_outputs\":true,\"usage_metadata\":true,\"error_metadata\":true"
     ) = """{"id":"demo","context_length":$context,"max_output_tokens":$output,"capabilities":{$features}}"""
 
-    private fun toolCall() = """{"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_task","arguments":"{\\"path\\":\\"/safe/task.md\\"}"}}]}}],"usage":{"prompt_tokens":10,"completion_tokens":5}}"""
-    private fun confirmation() = """{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"{\\"bytes\\":42,\\"sha256\\":\\"${"a".repeat(64)}\\"}"}}],"usage":{"prompt_tokens":20,"completion_tokens":6}}"""
+    private fun toolCall() = """{"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_task","arguments":"{\"path\":\"/safe/task.md\"}"}}]}}],"usage":{"prompt_tokens":10,"completion_tokens":5}}"""
+    private fun confirmation() = """{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"{\"bytes\":42,\"sha256\":\"${"a".repeat(64)}\"}"}}],"usage":{"prompt_tokens":20,"completion_tokens":6}}"""
     private fun refusal() = """{"choices":[{"finish_reason":"stop","message":{"refusal":"No, do not execute","content":null}}]}"""
     private fun sse(vararg lines: String) =
         lines.joinToString("\n\n") { "data: $it" } + "\n\n"
@@ -142,15 +142,15 @@ class ModelGatewayTest {
     @Test fun partialSseFunctionArgumentsAndResponseAreAssembled() {
         val c = config("streaming", "usage_metadata")
         val first = sse(
-            """{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"read_task","arguments":"{\\"path\\":"}}]},"finish_reason":null}]}""",
-            """{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"/safe/task.md\\"}"}}]},"finish_reason":null}]}""",
+            """{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"read_task","arguments":"{\"path\":"}}]},"finish_reason":null}]}""",
+            """{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"/safe/task.md\"}"}}]},"finish_reason":null}]}""",
             """{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}""",
             """{"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":3}}""",
             "[DONE]"
         )
         val second = sse(
-            """{"choices":[{"delta":{"content":"{\\"bytes\\":42,\\"sha256\\":\\""},"finish_reason":null}]}""",
-            """{"choices":[{"delta":{"content":"${"a".repeat(64)}\\"}"},"finish_reason":null}]}""",
+            """{"choices":[{"delta":{"content":"{\"bytes\":42,\"sha256\":\""},"finish_reason":null}]}""",
+            """{"choices":[{"delta":{"content":"${"a".repeat(64)}\"}"},"finish_reason":null}]}""",
             """{"choices":[{"delta":{},"finish_reason":"stop"}]}""",
             """{"choices":[],"usage":{"prompt_tokens":15,"completion_tokens":7}}""",
             "[DONE]"
