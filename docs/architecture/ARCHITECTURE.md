@@ -33,6 +33,10 @@ This project is not a plugin for another orchestration platform. Cloud providers
        Event Journal / Checkpoints
 ```
 
+### Current Gradle module boundaries
+
+The implemented compile-time module graph is documented in [Gradle modules](MODULES.md). The CLI alone assembles session, task, model and workspace implementations; both core engines compile against shared contracts and do not import HTTP or Koog adapters. Future recursive-agent and trusted-tool modules are intentionally not created yet.
+
 ### Task Manager
 
 Owns the local task queue, dependencies, priorities, readiness, pause/resume, cancellation, and concurrency. Each task has a first-party `taskId`. Neither creating child tasks nor scheduling their execution requires externally hosted issues or CI jobs.
