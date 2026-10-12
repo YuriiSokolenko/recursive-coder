@@ -4,6 +4,8 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
 import java.time.Instant
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.concurrent.thread
 import kotlin.test.*
 import kotlinx.serialization.json.*
 import org.junit.jupiter.api.Test
@@ -206,6 +208,40 @@ class WorkspaceManagerTest {
         val next = JsonObject(workspace + mapOf(
             "headSha" to JsonPrimitive(head), "baselineSha" to JsonPrimitive(head)))
         return SessionRequest.parse(JsonObject(request.raw + ("workspace" to next)).toString())
+    }
+
+    @Test fun symlinkSwapRaceNeverExposesDataOutsideWorkspace() {
+        val (root, request) = fixture(quota = 220)
+        val outside = temp.resolve("escape")
+        Files.createDirectories(outside)
+        Files.writeString(outside.resolve("code.kt"), "EXTERNAL_SECRET_NEVER_VISIBLE")
+        val normal = root.resolve("src")
+        val parked = root.resolve("src-parked")
+        val failure = AtomicReference<Throwable?>()
+        open(request).use { workspace ->
+            val attacker = thread {
+                try {
+                    repeat(40) {
+                        Files.move(normal, parked)
+                        Files.createSymbolicLink(normal, outside)
+                        Thread.yield()
+                        Files.delete(normal)
+                        Files.move(parked, normal)
+                    }
+                } catch (e: Throwable) { failure.set(e) }
+            }
+            try {
+                repeat(160) {
+                    val result = workspace.execute(WorkspaceTool.Read("src/code.kt"))
+                    if (result.permitted) {
+                        assertEquals("fun hello() = 7\\n", assertIs<ToolData.FileText>(result.data).text)
+                    } else {
+                        assertNull(result.data)
+                    }
+                }
+            } finally { attacker.join() }
+            failure.get()?.let { throw AssertionError("Concurrent swap fixture failed", it) }
+        }
     }
 
     @Test fun lockIsExclusiveAndBaselineChangesAreRejected() {
