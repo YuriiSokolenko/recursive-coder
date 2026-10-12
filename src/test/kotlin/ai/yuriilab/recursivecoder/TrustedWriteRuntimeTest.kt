@@ -7,7 +7,10 @@ import kotlin.test.*
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.Assumptions
 import org.junit.jupiter.api.io.TempDir
+import org.junit.jupiter.api.condition.EnabledOnOs
+import org.junit.jupiter.api.condition.OS
 
+@EnabledOnOs(OS.LINUX)
 class TrustedWriteRuntimeTest {
     @TempDir lateinit var temp: Path
 
@@ -44,7 +47,7 @@ class TrustedWriteRuntimeTest {
             "specs/Feature.md" to "product contract\n"
         )
         files.forEach { (path, content) -> Files.writeString(root.resolve(path), content) }
-        Files.writeString(root.resolve(".gitignore"), "src/main/ignored/\n")
+        Files.writeString(root.resolve(".gitignore"), "src/main/ignored/\nsrc/main/*Blocked.kt\n")
         git(root, "add", ".")
         git(root, "commit", "-m", "immutable baseline")
         val approvedPaths = setOf("src/test/FeatureTest.kt",
@@ -70,7 +73,7 @@ class TrustedWriteRuntimeTest {
     ) = TrustedWriteRuntime.open(policy(f, role, reviewed, checks, required),
         lockDirectory = temp.resolve("leases"), audit = audit)
 
-    @Test fun independentGitCheckAndTrustedDiffReceiptPermitImplementation() {
+    @Test fun gitDiffOnlyDoesNotCertifyDeveloperImplementation() {
         val f = fixture()
         val audits = mutableListOf<Triple<String, String, String?>>()
         open(f, audit = { id, tool, denied -> audits += Triple(id, tool, denied) }).use { runtime ->
@@ -86,7 +89,7 @@ class TrustedWriteRuntimeTest {
             val check = runtime.runCheck("git_diff_check")
             assertTrue(check.passed, check.deniedCode)
             assertNotNull(check.receipt)
-            assertTrue(runtime.finish(listOf(check.receipt)).successful)
+            assertEquals("TEST_CHECK_REQUIRED", runtime.finish(listOf(check.receipt)).deniedCode)
             assertEquals("tool-issue8-session-1", result.toolId)
             assertEquals("tool-issue8-session-2", check.toolId)
             assertTrue(audits.all { it.third == null })
@@ -104,7 +107,12 @@ class TrustedWriteRuntimeTest {
             val f = fixture()
             open(f, role).use { runtime ->
                 assertTrue(runtime.apply(listOf(WriteOperation.Create(path, "independent content\n"))).permitted)
-                assertTrue(runtime.finish(listOf(runtime.runCheck("git_diff_check").receipt!!)).successful)
+                val result = runtime.finish(listOf(runtime.runCheck("git_diff_check").receipt!!))
+                if (role == EngineeringRole.DEVELOPER) {
+                    assertEquals("TEST_CHECK_REQUIRED", result.deniedCode)
+                } else {
+                    assertTrue(result.successful, result.deniedCode)
+                }
             }
             // JUnit's @TempDir is shared in the same test, so clear the disposable fixture.
             f.root.toFile().deleteRecursively()
@@ -122,7 +130,7 @@ class TrustedWriteRuntimeTest {
             val forbidden = listOf(
                 "src/test/FeatureTest.kt", "tests/unit/Rules.kt",
                 "tests/acceptance/Feature.md", "specs/Feature.md",
-                ".github/workflows/ci.yml", "src/main/Test/Injected.kt",
+                ".github/workflows/ci.yml",
                 "src/main/FeatureTest.kt", "src/main/.env", "src/main/../test/Feature.kt",
                 "src/main/../../outside.txt", "/etc/passwd", ".git/index"
             )
@@ -155,6 +163,92 @@ class TrustedWriteRuntimeTest {
         }
     }
 
+    @Test fun reversingAnEditAndNoOpEditsAreNotPoisonous() {
+        val f = fixture()
+        val head = "fun value() = 1\n"
+        val other = "fun value() = 2\n"
+        open(f).use { runtime ->
+            assertTrue(runtime.apply(listOf(
+                WriteOperation.Edit("src/main/Feature.kt", sha(head), other)
+            )).permitted)
+            assertTrue(runtime.apply(listOf(
+                WriteOperation.Edit("src/main/Feature.kt", sha(other), head)
+            )).permitted)
+            assertEquals("NO_ACCEPTED_MUTATIONS",
+                runtime.finish(listOf(runtime.runCheck("git_diff_check").receipt!!)).deniedCode)
+            assertTrue(runtime.apply(listOf(
+                WriteOperation.Edit("src/main/Feature.kt", sha(head), head)
+            )).permitted)
+            // Reverting to HEAD and then editing without changes must remain recoverable.
+            assertTrue(runtime.apply(listOf(
+                WriteOperation.Create("src/main/AfterRevert.kt", "fun healthy() = true\n")
+            )).permitted)
+            assertEquals("TEST_CHECK_REQUIRED",
+                runtime.finish(listOf(runtime.runCheck("git_diff_check").receipt!!)).deniedCode)
+        }
+    }
+
+    @Test fun preflightRejectsIgnoredContentNulAndCaseCollisionsWithoutPoisoning() {
+        val f = fixture()
+        open(f).use { runtime ->
+            assertEquals("GIT_IGNORED_PATH", runtime.apply(listOf(
+                WriteOperation.Create("src/main/NotAllowedBlocked.kt", "ignored")
+            )).deniedCode)
+            assertEquals("BINARY_FILE_DENIED", runtime.apply(listOf(
+                WriteOperation.Edit("src/main/Feature.kt", sha("fun value() = 1\n"), "a\u0000b")
+            )).deniedCode)
+            assertEquals("INVALID_WRITE_BATCH", runtime.apply(listOf(
+                WriteOperation.Create("src/main/FeatureExtra.kt", "a"),
+                WriteOperation.Create("src/main/featureextra.kt", "b")
+            )).deniedCode)
+            assertEquals("PATH_CASE_COLLISION", runtime.apply(listOf(
+                WriteOperation.Create("src/main/feature.kt", "wrong case")
+            )).deniedCode)
+            assertTrue(runtime.apply(listOf(
+                WriteOperation.Create("src/main/Healthy.kt", "fun okay() = 1\n")
+            )).permitted)
+            assertFalse(Files.exists(f.root.resolve("src/main/NotAllowedBlocked.kt")))
+            assertEquals("fun value() = 1\n", Files.readString(f.root.resolve("src/main/Feature.kt")))
+        }
+    }
+
+    @Test fun legitimateBuildGradleAndTestPackageNamesAreWritable() {
+        val f = fixture()
+        for (part in listOf("build", "gradle", "test")) {
+            Files.createDirectories(f.root.resolve("src/main/$part"))
+        }
+        open(f).use { runtime ->
+            assertTrue(runtime.apply(listOf(
+                WriteOperation.Create("src/main/build/Module.kt", "fun buildModule() = 1\n"),
+                WriteOperation.Create("src/main/gradle/Module.kt", "fun gradleModule() = 1\n"),
+                WriteOperation.Create("src/main/test/Module.kt", "fun testModule() = 1\n")
+            )).permitted)
+        }
+    }
+
+    @Test fun receiptsInvalidateEvenWhenLaterMutationIsNoOp() {
+        val f = fixture()
+        open(f, EngineeringRole.TDD).use { runtime ->
+            assertTrue(runtime.apply(listOf(
+                WriteOperation.Create("src/test/New.kt", "first\n")
+            )).permitted)
+            val oldReceipt = runtime.runCheck("git_diff_check").receipt!!
+            val original = "fun testValue() = 1\n"
+            assertTrue(runtime.apply(listOf(
+                WriteOperation.Edit("src/test/FeatureTest.kt", sha(original), original)
+            )).deniedCode == "APPROVED_ARTIFACT_IMMUTABLE")
+            // A separately authorized, non-approved test file can be a no-op.
+            val f2 = "test contract\n"
+            // Set up a normal test file by creating it in a separate tracked fixture.
+            assertTrue(runtime.apply(listOf(
+                WriteOperation.Create("src/test/Another.kt", f2)
+            )).permitted)
+            val current = runtime.runCheck("git_diff_check").receipt!!
+            assertEquals("CHECK_RECEIPT_INVALID", runtime.finish(listOf(oldReceipt)).deniedCode)
+            assertTrue(runtime.finish(listOf(current)).successful)
+        }
+    }
+
     @Test fun preflightRejectsBroadBatchesAndWrongHashesWithoutPartialWrites() {
         val f = fixture()
         open(f).use { runtime ->
@@ -173,17 +267,17 @@ class TrustedWriteRuntimeTest {
 
     @Test fun forgeryAndStaleReceiptsCannotSatisfyFinalVerification() {
         val f = fixture()
-        open(f).use { runtime ->
+        open(f, EngineeringRole.TDD).use { runtime ->
             assertEquals("FORGED_TOOL_ID", runtime.apply(listOf(
-                WriteOperation.Create("src/main/Reject.kt", "bad")
+                WriteOperation.Create("src/test/Reject.kt", "bad")
             ), claimedToolId = "tool-issue8-session-1").deniedCode)
             assertTrue(runtime.apply(listOf(
-                WriteOperation.Create("src/main/Okay.kt", "good\n"))).permitted)
+                WriteOperation.Create("src/test/Okay.kt", "good\n"))).permitted)
             val receipt = runtime.runCheck("git_diff_check").receipt!!
             assertFalse(runtime.finish(listOf(receipt.copy(mac = "0".repeat(64)))).successful)
             assertFalse(runtime.finish(listOf(receipt.copy(manifestHash = "0".repeat(64)))).successful)
             assertTrue(runtime.apply(listOf(
-                WriteOperation.Create("src/main/Also.kt", "also good\n"))).permitted)
+                WriteOperation.Create("src/test/Also.kt", "also good\n"))).permitted)
             assertEquals("CHECK_RECEIPT_INVALID", runtime.finish(listOf(receipt)).deniedCode)
             assertTrue(runtime.finish(listOf(runtime.runCheck("git_diff_check").receipt!!)).successful)
         }
@@ -218,21 +312,24 @@ class TrustedWriteRuntimeTest {
         }
     }
 
-    @Test fun symlinkEscapeIsNotFollowedAndFinalDiffDetectsIt() {
+    @Test fun trackedSymlinkParentReachesNoFollowDescriptorGuard() {
         val f = fixture()
         val outside = temp.resolve("outside")
         Files.createDirectories(outside)
-        open(f).use { runtime ->
-            val receiptPath = "src/main/Extra.kt"
-            Files.createSymbolicLink(f.root.resolve("src/main/shortcut"), outside)
+        Files.createSymbolicLink(f.root.resolve("src/main/shortcut"), outside)
+        git(f.root, "add", "src/main/shortcut")
+        git(f.root, "commit", "-m", "tracked symlink parent")
+        val updated = f.copy(head = git(f.root, "rev-parse", "HEAD"))
+        open(updated).use { runtime ->
             val attack = runtime.apply(listOf(
                 WriteOperation.Create("src/main/shortcut/escaped.kt", "out of scope")
             ))
-            assertFalse(attack.permitted)
+            assertEquals("UNSAFE_PATH_COMPONENT", attack.deniedCode)
             assertFalse(Files.exists(outside.resolve("escaped.kt")))
-            assertTrue(attack.deniedCode in setOf("UNAUTHORIZED_GIT_CHANGE", "UNSAFE_PATH_COMPONENT"))
-            Files.delete(f.root.resolve("src/main/shortcut"))
-            assertTrue(runtime.apply(listOf(WriteOperation.Create(receiptPath, "safe\n"))).permitted)
+            // The failed descriptor preflight did not mutate or poison the workspace.
+            assertTrue(runtime.apply(listOf(
+                WriteOperation.Create("src/main/Safe.kt", "fun safe() = 1\n")
+            )).permitted)
         }
     }
 
@@ -262,7 +359,7 @@ class TrustedWriteRuntimeTest {
 
     @Test fun checkMustBeAllowlistedAndCannotFallbackWhenSandboxIsUnavailable() {
         val f = fixture()
-        open(f, required = setOf("separate-test"),
+        open(f, required = setOf("git_diff_check", "separate-test"),
             checks = mapOf("separate-test" to TrustedCheck(Path.of("/usr/bin/true"), emptyList()))).use { runtime ->
             assertTrue(runtime.apply(listOf(WriteOperation.Create("src/main/Okay.kt", "fine\n"))).permitted)
             assertEquals("CHECK_NOT_ALLOWLISTED", runtime.runCheck("anything").deniedCode)
@@ -271,7 +368,8 @@ class TrustedWriteRuntimeTest {
                 assertNull(attempt.receipt)
                 assertEquals("REQUIRED_CHECK_MISSING", runtime.finish(emptyList()).deniedCode)
             } else {
-                assertTrue(runtime.finish(listOf(attempt.receipt!!)).successful)
+                assertTrue(runtime.finish(listOf(
+                    runtime.runCheck("git_diff_check").receipt!!, attempt.receipt!!)).successful)
             }
         }
     }
@@ -299,14 +397,32 @@ class TrustedWriteRuntimeTest {
         if (probe.isAlive) probe.destroyForcibly()
         Assumptions.assumeTrue(supported,
             "Host does not permit the isolated network namespace required by runCheck")
-        val script = "from pathlib import Path; assert Path('/workspace/src/main/Feature.kt').read_text() == 'fun value() = 4\\n'"
+        val script = """
+            from pathlib import Path
+            import socket
+            assert Path('/workspace/src/main/Feature.kt').read_text() == 'fun value() = 4\\n'
+            try:
+                Path('/workspace/src/main/Feature.kt').write_text('escaped')
+                raise AssertionError('workspace was writable')
+            except PermissionError:
+                pass
+            Path('/scratch/allowed.txt').write_text('ok')
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.sendto(b'x', ('198.51.100.1', 53))
+                raise AssertionError('outside network was writable')
+            except OSError:
+                pass
+        """.trimIndent()
         open(f, checks = mapOf("separate-test" to TrustedCheck(python, listOf("-c", script))),
-            required = setOf("separate-test")).use { runtime ->
+            required = setOf("git_diff_check", "separate-test")).use { runtime ->
             assertTrue(runtime.apply(listOf(WriteOperation.Edit("src/main/Feature.kt",
                 sha("fun value() = 1\n"), "fun value() = 4\n"))).permitted)
             val check = runtime.runCheck("separate-test")
             assertTrue(check.passed, "Sandboxed test must pass: " + check.deniedCode)
-            assertTrue(runtime.finish(listOf(check.receipt!!)).successful)
+            val gitCheck = runtime.runCheck("git_diff_check")
+            assertTrue(gitCheck.passed, gitCheck.deniedCode)
+            assertTrue(runtime.finish(listOf(check.receipt!!, gitCheck.receipt!!)).successful)
         }
     }
 }
