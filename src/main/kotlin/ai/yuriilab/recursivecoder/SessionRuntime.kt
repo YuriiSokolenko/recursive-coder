@@ -130,13 +130,16 @@ class SessionRequest private constructor(val raw: JsonObject) {
         hash(ref.textAt("sha256"))
 
         model.fields(setOf("provider", "modelId", "baseUrl", "credentialRef",
-            "contextTokens", "maxOutputTokens", "features"), setOf("temperature"))
+            "contextTokens", "maxOutputTokens", "features"), setOf("temperature", "connectTimeoutMs", "requestTimeoutMs"))
         identifier(model.textAt("provider"))
         if (model.textAt("modelId").isBlank() || model.textAt("modelId").length > 256) refuse("Invalid model")
         if (!Regex("https?://[^\\s?#]+/?").matches(model.textAt("baseUrl"))) refuse("Invalid model URL")
         if (!Regex("env:[A-Z][A-Z0-9_]*").matches(model.textAt("credentialRef"))) refuse("Invalid credential reference")
         if (model.longAt("contextTokens") < 1 || model.longAt("maxOutputTokens") < 1) refuse("Invalid model limits")
         model.stringsAt("features")
+        listOf("connectTimeoutMs", "requestTimeoutMs").forEach { key ->
+            model[key]?.let { if (model.longAt(key) !in 100..120000) refuse("Invalid model timeout") }
+        }
         model["temperature"]?.let {
             val n = (it as? JsonPrimitive)?.takeIf { p -> !p.isString }?.doubleOrNull
             if (n == null || !n.isFinite() || n < 0) refuse("Invalid temperature")
@@ -202,13 +205,17 @@ class SessionRequest private constructor(val raw: JsonObject) {
         if (raw.objectAt("resume").textAt("mode") != "fresh" ||
             raw.objectAt("resume").longAt("fenceGeneration") != 1L)
             throw Refused("UNSUPPORTED_RESUME", "checkpoint", "Resume is not supported")
-        val supported = setOf("session-events-v1", "fake-model-v1", "read-only-tools-v1")
+        val supported = setOf("session-events-v1", "fake-model-v1", "model-gateway-v1", "read-only-tools-v1")
         if (!supported.containsAll(raw.stringsAt("requiredCapabilities")) ||
             "session-events-v1" !in raw.stringsAt("requiredCapabilities"))
             throw Refused("UNSUPPORTED_CAPABILITY", "protocol", "Required capability is unavailable")
-        if (model.textAt("provider") != "fake" || model.textAt("modelId") != "fake-v1" ||
-            model.stringsAt("features").toSet() != setOf("tool_calls"))
-            throw Refused("UNSUPPORTED_MODEL", "provider", "Only the deterministic fake tool-call model is available")
+        val provider = model.textAt("provider")
+        if (provider !in setOf("fake", "openai-compatible") ||
+            (provider == "fake" && (model.textAt("modelId") != "fake-v1" ||
+                model.stringsAt("features").toSet() != setOf("tool_calls"))) ||
+            (provider == "openai-compatible" && ("model-gateway-v1" !in raw.stringsAt("requiredCapabilities") ||
+                "fake-model-v1" in raw.stringsAt("requiredCapabilities"))))
+            throw Refused("UNSUPPORTED_MODEL", "provider", "Unsupported model provider or configuration")
         if (policy.textAt("mode") != "read-only" ||
             ("read" !in policy.stringsAt("allowedTools") || "read" in policy.stringsAt("deniedTools")) ||
             policy.stringsAt("writablePaths").isNotEmpty() ||
@@ -239,20 +246,6 @@ class Cancellation {
     fun check(deadline: Instant) {
         if (expired.get() || !Instant.now().isBefore(deadline)) throw Stopped(true)
         if (requested.get()) throw Stopped(false)
-    }
-}
-
-sealed interface FakeDecision {
-    data class Read(val path: Path) : FakeDecision
-    data class Done(val bytes: Int, val sha256: String) : FakeDecision
-}
-
-/** Offline deterministic fake with two *observed* model turns, not a magic-success stub. */
-class FakeModel(private val delayMs: Long = 0) {
-    fun next(task: Path, observed: Pair<Int, String>?): FakeDecision {
-        if (delayMs > 0) Thread.sleep(delayMs)
-        return if (observed == null) FakeDecision.Read(task)
-        else FakeDecision.Done(observed.first, observed.second)
     }
 }
 
@@ -304,7 +297,7 @@ private class EventJournal(private val request: SessionRequest) : AutoCloseable 
 
 class SessionController(
     private val request: SessionRequest,
-    private val model: FakeModel = FakeModel(),
+    private val model: ModelGateway = ModelGateways.create(request.model.textAt("provider")),
     val cancellation: Cancellation = Cancellation()
 ) {
     private val finished = CountDownLatch(1)
@@ -350,6 +343,10 @@ class SessionController(
             state = to
         }
         var workspaceManager: WorkspaceManager? = null
+        val config = ModelConfig.from(request.model)
+        var inputTokens = 0L
+        var outputTokens = 0L
+        var completeUsage = true
         try {
             workspaceManager = request.admit(
                 onAudit = { audit ->
@@ -370,6 +367,12 @@ class SessionController(
                 }
             )
             cancellation.check(deadline)
+            val capabilities = model.negotiate(config, cancellation, deadline)
+            journal.append("llm.capabilities", "completed", extra = buildJsonObject {
+                put("contextTokens", capabilities.contextTokens)
+                put("maxOutputTokens", capabilities.maxOutputTokens)
+                put("features", buildJsonArray { capabilities.features.sorted().forEach { add(it) } })
+            })
             transition("admitted")
             transition("running")
             journal.append("agent.started", "started")
@@ -378,14 +381,31 @@ class SessionController(
                 cancellation.check(deadline)
                 val modelStart = Instant.now()
                 journal.append("llm.request", "started", started = modelStart,
-                    extra = buildJsonObject { put("modelId", "fake-v1"); put("turn", turn + 1) })
-                val decision = try { model.next(request.taskPath, observed) }
+                    extra = buildJsonObject { put("provider", config.provider); put("turn", turn + 1) })
+                val response = try {
+                    model.next(config, request.taskPath, observed, cancellation, deadline, turn == 0)
+                }
                 catch (_: InterruptedException) { cancellation.check(deadline); throw Stopped(false) }
                 cancellation.check(deadline)
+                response.usage?.let {
+                    inputTokens += it.input
+                    outputTokens += it.output
+                    if (inputTokens + outputTokens > request.budgets.longAt("maxTotalTokens"))
+                        throw Refused("TOKEN_BUDGET_EXCEEDED", "policy", "Model token budget exceeded")
+                } ?: run { completeUsage = false }
                 journal.append("llm.response", "completed", started = modelStart,
-                    extra = buildJsonObject { put("modelId", "fake-v1"); put("turn", turn + 1) })
-                when (decision) {
-                    is FakeDecision.Read -> {
+                    extra = buildJsonObject {
+                        put("provider", config.provider)
+                        put("turn", turn + 1)
+                        put("attempts", response.attempts)
+                        response.statusCode?.let { put("httpStatus", it) }
+                        response.usage?.let {
+                            put("inputTokens", it.input)
+                            put("outputTokens", it.output)
+                        }
+                    })
+                when (val decision = response.decision) {
+                    is ModelDecision.Read -> {
                         if (turn != 0 || decision.path != request.taskPath) refuse("Unexpected fake tool call")
                         cancellation.check(deadline)
                         val relative = workspaceManager!!.taskRelativePath(decision.path)
@@ -398,10 +418,12 @@ class SessionController(
                             throw Refused("TASK_CHANGED", "policy", "Task changed during execution")
                         observed = read.bytes to read.sha256
                     }
-                    is FakeDecision.Done -> {
+                    is ModelDecision.Done -> {
                         if (turn != 1 || observed != (decision.bytes to decision.sha256))
-                            refuse("Unexpected fake completion")
+                            throw Refused("MODEL_INVALID_COMPLETION", "provider", "Model completion did not match trusted observation")
                     }
+                    ModelDecision.Refusal ->
+                        throw Refused("MODEL_REFUSAL", "provider", "Model declined the request")
                 }
             }
             cancellation.check(deadline)
@@ -437,7 +459,7 @@ class SessionController(
                 put("sessionId", request.sessionId); put("status", status)
                 put("events", journal.sequence)
                 put("summary", when (status) {
-                    "succeeded" -> "Read-only fake-model session completed"
+                    "succeeded" -> "Read-only model session completed"
                     "cancelled" -> "Session cancelled"
                     "timed_out" -> "Session deadline exceeded"
                     "rejected" -> "Session rejected before model invocation"
@@ -467,9 +489,10 @@ class SessionController(
                 })
                 put("error", error)
                 put("usage", buildJsonObject {
-                    put("inputTokens", 0); put("outputTokens", 0)
+                    put("inputTokens", inputTokens); put("outputTokens", outputTokens)
                     put("cacheReadTokens", 0); put("cacheWriteTokens", 0)
-                    put("totalTokens", 0); put("completeness", "unknown")
+                    put("totalTokens", inputTokens + outputTokens)
+                    put("completeness", if (completeUsage) "complete" else "unknown")
                 })
                 put("invocation", request.invocation)
             }
