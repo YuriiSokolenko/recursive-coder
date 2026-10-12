@@ -38,7 +38,13 @@ With JDK 21 and Gradle 9.8.1 installed, run from the repository root:
 python -m unittest discover -s tests -p 'test_cli_runtime_v1.py' -v
 ```
 
-Each core/infra library tests its own contract or implementation without depending on other concrete modules; all cross-module integration tests (Session Controller + FakeModel + Workspace Manager and CLI scheduler) run under `:app:cli`. This eliminates cycles in both production and test project dependencies. Core production classpaths remain adapter-free. No live inference service or private hardware is needed. The CLI installation path and executable name remain `build/install/recursive-coder/bin/recursive-coder`, and arguments, exit codes, and on-disk protocol formats are unchanged.
+Module-local unit tests can be run separately with `./gradlew :core:session:test :infra:workspace:test`:
+
+- `:core:session` owns fast Session Controller tests with in-module `ModelGateway` and `WorkspaceSession` fakes. These cover admission, trusted observations, token/request budgets, errors, and event ordering without loading concrete adapters.
+- `:infra:workspace` owns write-tool schema validation and direct Workspace Manager policy/adapter tests. They use only `:core:contracts` types; the small Git fixture stays inside the infrastructure module.
+- `:app:cli` retains the real Session Controller + FakeModel + Workspace Manager integration tests, CLI scheduler tests, and sandbox E2E. These are intentionally not copied into the unit-test modules.
+
+Both the production and test project dependency graphs stay acyclic: `:core:session` and `:infra:workspace` depend only on `:core:contracts`, while `:app:cli` is the sole cross-module composition root. Core production classpaths remain adapter-free. No live inference service or private hardware is needed. The CLI installation path and executable name remain `build/install/recursive-coder/bin/recursive-coder`, and arguments, exit codes, and on-disk protocol formats are unchanged.
 
 Shared Kotlin/JVM 21 and JUnit settings live in the `build-logic` included build as the `recursivecoder.jvm` convention plugin. The Kotlin plugin and Kotlin JUnit integration versions are both sourced from `build-logic/gradle/libs.versions.toml`, which the root and included build consume. Third-party dependencies remain declared at their owner. `gradlew` is still the repository's pre-release delegation script; replacing it with a self-contained wrapper is tracked separately in issue #12.
 
