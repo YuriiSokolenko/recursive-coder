@@ -219,8 +219,9 @@ class WorkspaceManagerTest {
         assertEquals(root.toRealPath(), logicalRoot.toRealPath())
         val workspace = JsonObject(request.workspace + ("rootPath" to JsonPrimitive(logicalRoot.toString())))
         val ref = request.task["taskInputRef"]!!.jsonObject
-        val task = JsonObject(request.task + ("taskInputRef" to
-            JsonObject(ref + ("path" to JsonPrimitive(logicalRoot.resolve("task.md").toString()))))
+        val aliasedRef = JsonObject(ref +
+            ("path" to JsonPrimitive(logicalRoot.resolve("task.md").toString())))
+        val task = JsonObject(request.task + ("taskInputRef" to aliasedRef))
         val logical = SessionRequest.parse(JsonObject(request.raw +
             mapOf("workspace" to workspace, "task" to task)).toString())
         open(logical).use { manager ->
