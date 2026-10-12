@@ -491,9 +491,9 @@ fun interface TaskRunner {
 data class SchedulerReport(val launched: Int, val completed: Int, val paused: Boolean)
 
 /**
- * The scheduler lock permits exactly one process to recover and dispatch tasks.
- * Store mutations use independent short file-lock transactions, so other CLIs can
- * cancel running work; cancelled session results cannot overwrite cancellation.
+ * A process-wide scheduler lock protects recovery and dispatch. Active attempts
+ * are keyed by session ID, not task ID: a user may retry a cancelled task while
+ * its previous worker is still shutting down. Both generations consume slots.
  */
 class TaskScheduler(
     private val service: TaskService,
@@ -503,6 +503,29 @@ class TaskScheduler(
     },
     private val pollMillis: Long = 30
 ) {
+    private data class RunningAttempt(
+        val taskId: String,
+        val cancellation: Cancellation,
+        val future: Future<*>
+    )
+    private val stopping = AtomicBoolean(false)
+    private val active = ConcurrentHashMap<String, RunningAttempt>()
+
+    /**
+     * A scheduler stop is NOT equivalent to a user task cancellation.
+     * In-flight attempts enter needs-attention, never silently become cancelled.
+     * Suitable for JVM shutdown hooks as well as an exception-exit path.
+     */
+    fun requestStop() {
+        stopping.set(true)
+        val inFlight = active.entries.toList()
+        inFlight.forEach { it.value.cancellation.cancel() }
+        inFlight.forEach { (sessionId, attempt) ->
+            service.interruptAttempt(attempt.taskId, sessionId,
+                "scheduler stopped: reconcile unfinished attempt before retry")
+        }
+    }
+
     fun runUntilIdle(concurrency: Int = 1): SchedulerReport {
         require(concurrency in 1..32) { "Concurrency must be 1..32" }
         require(pollMillis in 1..1000)
@@ -512,39 +535,58 @@ class TaskScheduler(
             val lock = try { channel.tryLock() } catch (_: OverlappingFileLockException) { null }
             check(lock != null) { "Another scheduler is active" }
             lock.use {
+                if (stopping.get()) return SchedulerReport(0, 0, service.isPaused())
                 service.recoverInterrupted()
                 val pool = Executors.newFixedThreadPool(concurrency)
-                data class Active(val cancellation: Cancellation, val future: Future<*>)
-                val active = linkedMapOf<String, Active>()
                 var launched = 0
                 var completed = 0
                 try {
-                    while (true) {
-                        while (active.size < concurrency) {
-                            val task = service.claim() ?: break
+                    while (!stopping.get()) {
+                        while (!stopping.get() && active.size < concurrency) {
+                            val occupiedTaskIds = active.values.mapTo(mutableSetOf()) { it.taskId }
+                            val task = service.claim(occupiedTaskIds) ?: break
+                            val sessionId = task.sessionId!!
+                            if (stopping.get()) {
+                                service.interruptAttempt(task.id, sessionId,
+                                    "scheduler stopped before session started")
+                                break
+                            }
                             val cancellation = Cancellation()
                             val future = pool.submit {
                                 cancellation.bind()
                                 val status = try {
                                     if (service.show(task.id).state == TaskState.CANCELLED) "cancelled"
                                     else runner.execute(service.requestFor(task), cancellation)
+                                } catch (_: InterruptedException) {
+                                    "cancelled"
                                 } catch (_: Exception) {
                                     "failed"
                                 }
-                                // File locks must be obtained with a cleared interrupt flag.
+                                // Clear worker interruption before locking the durable store.
                                 Thread.interrupted()
-                                service.finish(task.id, task.sessionId!!, status)
+                                if (stopping.get()) {
+                                    service.interruptAttempt(task.id, sessionId,
+                                        "scheduler stopped: reconcile unfinished attempt before retry")
+                                } else {
+                                    service.finish(task.id, sessionId, status)
+                                }
                             }
-                            active[task.id] = Active(cancellation, future)
+                            active[sessionId] = RunningAttempt(task.id, cancellation, future)
                             launched++
+                            // A concurrent shutdown hook may have fired after the earlier check.
+                            if (stopping.get()) requestStop()
                         }
+                        if (stopping.get()) break
                         val states = service.list().associateBy { it.id }
-                        active.forEach { (id, work) ->
-                            if (states[id]?.state == TaskState.CANCELLED) work.cancellation.cancel()
+                        active.forEach { (sessionId, attempt) ->
+                            val task = states[attempt.taskId]
+                            if (task?.state == TaskState.CANCELLED && task.sessionId == sessionId)
+                                attempt.cancellation.cancel()
                         }
-                        val done = active.filterValues { it.future.isDone }.keys.toList()
-                        done.forEach { id ->
-                            active.remove(id)!!.future.get()
+                        val finishedIds = active.entries.filter { it.value.future.isDone }.map { it.key }
+                        finishedIds.forEach { sessionId ->
+                            val attempt = active.remove(sessionId)!!
+                            attempt.future.get()
                             completed++
                         }
                         if (active.isEmpty()) {
@@ -554,10 +596,15 @@ class TaskScheduler(
                         Thread.sleep(pollMillis)
                     }
                 } finally {
-                    active.values.forEach { it.cancellation.cancel() }
-                    pool.shutdownNow()
-                    try { pool.awaitTermination(10, TimeUnit.SECONDS) } catch (_: InterruptedException) {
-                        Thread.currentThread().interrupt()
+                    // Also runs if the scheduler loop fails, without inventing a user cancellation.
+                    try {
+                        if (active.isNotEmpty()) requestStop()
+                    } finally {
+                        pool.shutdownNow()
+                        try { pool.awaitTermination(10, TimeUnit.SECONDS) } catch (_: InterruptedException) {
+                            Thread.currentThread().interrupt()
+                        }
+                        active.clear()
                     }
                 }
                 return SchedulerReport(launched, completed, service.isPaused())
