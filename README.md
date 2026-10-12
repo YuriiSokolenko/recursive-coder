@@ -1,51 +1,65 @@
 # Recursive Coder
 
-**Recursive Coder** — самостоятельный open-source агент для разработки программного обеспечения на **Kotlin/JVM + JetBrains Koog**.
+**Recursive Coder** is a standalone open-source software engineering agent built with **Kotlin/JVM and JetBrains Koog**.
 
-> **Status:** первый исполняемый CLI с `SessionController`, read-only sample agent и детерминированным FakeModel. Реальные провайдеры, полноценный Koog агент, планировщик, рекурсия и безопасные изменения кода пока не реализованы.
+> **Current status:** The first executable command-line session engine is implemented in PR #14: `SessionController`, a read-only sample agent, an observable deterministic FakeModel, and Session Protocol v1. Production Koog-based model execution, task scheduling, recursive development, and trusted code changes are planned but **not yet implemented**.
 
-## Что мы создаём
+## What we are building
 
-Не оболочку над чужим CI, а полноценный coding agent, который сам управляет жизненным циклом задачи: получает запрос, изучает проект, декомпозирует работу, создаёт спецификацию и тесты, пишет код, проверяет изменения и сохраняет результат. Его можно запускать локально или интегрировать в другие системы, но для работы ему не нужен внешний GitHub workflow, отдельный диспетчер или сторонний контролирующий сервис.
+Recursive Coder is a full coding agent, **not** a wrapper around another project's CI system. It owns the task lifecycle: accepting requests, inspecting a project, breaking work into smaller tasks, producing specifications and tests, implementing code, independently validating changes, and recording results.
 
-### Рекурсивный процесс
+Users should be able to run it locally or connect it to other systems without depending on an external GitHub workflow, dispatcher, or controlling service. External integrations are always optional adapters; they never own the agent's execution authority.
 
-`SDD → ATDD → TDD → Develop → Independent Review`.
+## Recursive engineering process
 
-Каждая роль — отдельный агент; сложная задача может рекурсивно делиться на подзадачи до достижения атомарных шагов. Спецификации и тесты, созданные SDD/ATDD/TDD, защищены от изменений Developer; корректировки проходят отдельную авторизованную проверку.
+`SDD → ATDD → TDD → Develop → Independent Review`
 
-## Архитектура продукта
+Each stage runs in a separately authorized agent role. Any stage can recursively decompose a difficult task until bounded atomic subtasks can be evaluated and integrated. Specifications and tests created by SDD, ATDD, and TDD are protected from unilateral edits by the Developer. Changes require a distinct, independently approved process.
 
-- **Task Manager / Scheduler:** собственные задачи, приоритеты, зависимости, управление параллельностью и отменой.
-- **Session Controller:** корневая сессия и вложенные агенты, конечный автомат, бюджеты, ограничения времени.
-- **Agent Graph:** рекурсивная декомпозиция и координация SDD, ATDD, TDD, Developer, Reviewer.
-- **Tool Runtime:** доверенная авторизация, изоляция workspace, инструменты чтения, изменения и валидации.
-- **Model Gateway:** настраиваемые локальные и совместимые LLM API; без привязки к одной модели, хосту или устройству.
-- **Event Journal / Checkpoints:** коррелированные события, диагностика, восстановление и контролируемый повтор внешних действий.
-- **Interfaces:** в первую очередь CLI, затем API и опциональные интеграции.
+## Product architecture
 
-Продукт должен управлять **своими** задачами и сессиями. Git используется для работы с кодом; GitHub может стать одним из дополнительных провайдеров, но не обязательной частью runtime.
+- **Task Manager / Scheduler:** first-party tasks, priorities, dependencies, concurrency limits, pause, retry, and cancellation.
+- **Session Controller:** root sessions, nested agents, explicit state transitions, budgets, and deadlines.
+- **Agent Graph:** recursive orchestration of SDD, ATDD, TDD, Developer, and Reviewer roles.
+- **Trusted Tool Runtime:** enforced authorization, workspace isolation, read/write/check tools, and verifiable results.
+- **Model Gateway:** configurable local or remote compatible LLM endpoints with explicit protocol capability negotiation.
+- **Event Journal / Checkpoints:** correlated events, diagnostics, safe recovery, and controlled handling of uncertain side effects.
+- **Interfaces:** CLI first, followed by optional API and integrations.
 
-## Сборка и CI
+Recursive Coder itself owns its tasks and sessions. Git can manage source workspaces; a particular git host is neither a required runtime component nor a privileged controller.
 
-Сейчас: Kotlin 2.4.21, JDK 21, Gradle 9.8.1, Koog 1.3.0 (зависимость), unit-тесты и версия протокола `1.0`. CLI исполняет локальную read-only fake-модель, пишет SessionResult и коррелированный журнал. Реальные LLM и Koog integration — отдельные задачи.
+## Build and test
 
-[Собственный GitHub Actions CI](.github/workflows/ci.yml) на `ubuntu-latest` запускает Kotlin build/test и проверку Session Protocol через Node + JSON Schema Draft 2020-12. Никакой внешний runner, локальная LLM или приватные API для CI не нужны.
+The current foundation uses Kotlin 2.4.21, JDK 21, Gradle 9.8.1, Koog 1.3.0, and Session Protocol `1.0`.
 
-## Документация
+The current PR adds a local, offline-only fake-model CLI. For setup, supported features, sample execution, and known limitations, see **[First executable session](docs/architecture/FIRST_SESSION.md)**.
 
-- [Архитектура и собственный план развития](docs/architecture/ARCHITECTURE.md)
-- [Первый исполняемый CLI](docs/architecture/FIRST_SESSION.md) — запуск, fake-модель, ограничения и тесты
-- [Session Protocol v1](contracts/README.md) — вход/выход, события, checkpoint, политика совместимости
-- [JSON Schema](contracts/v1/session-v1.schema.json) и [тестовые примеры](contracts/v1/session-v1.examples.json)
+With Gradle 9.8.1 and JDK 21 installed:
 
-## План реализации
+```bash
+./gradlew test installDist
+```
 
-1. Собственный CLI и `SessionController`; детерминированный fake LLM и наблюдаемый read-only сценарий.
-2. Model Gateway и реальная проверка совместимости LLM API.
-3. Собственный Task Manager, рекурсивный Agent Graph, SDD → ATDD → TDD → Develop → Review.
-4. Доверенные инструменты, защита спецификаций и тестов, sandbox, проверка результатов.
-5. Checkpoints, recovery, идемпотентность, полная диагностика, fault injection.
-6. Публичный API, интеграции, release packaging и измерения качества на независимых тестовых задачах.
+The independent [GitHub Actions CI](.github/workflows/ci.yml) runs JVM and protocol checks on GitHub-hosted runners. The fake-model integration tests do not require a network model endpoint, personal hardware, secrets, or an external runner. Optional live-model checks will be separately gated.
 
-**Принцип:** Recursive Coder проектируется и тестируется как отдельный продукт. Внешние инструменты и сервисы — подключаемые адаптеры, а не владельцы его жизненного цикла.
+## Documentation
+
+- [Architecture and engineering roadmap](docs/architecture/ARCHITECTURE.md)
+- [First executable CLI session](docs/architecture/FIRST_SESSION.md)
+- [Session Protocol v1](contracts/README.md)
+- [Canonical JSON Schema](contracts/v1/session-v1.schema.json)
+- [Versioned protocol examples](contracts/v1/session-v1.examples.json)
+- [Contributing and documentation language](CONTRIBUTING.md)
+
+**All repository documentation, comments intended for publication, PR descriptions, and issue specifications must be written in English.** This includes future RFCs and design notes.
+
+## Implementation roadmap
+
+1. **Session Engine:** executable CLI, `SessionController`, deterministic FakeModel, observed read-only session.
+2. **Workspace and Model Gateway:** trusted workspace boundaries and a capability-negotiated real model adapter.
+3. **Task Manager and recursive Agent Graph:** first-party scheduling and SDD → ATDD → TDD → Develop → Independent Review.
+4. **Trusted Tooling:** immutable specs/tests, sandboxed writes and validation, independent evidence, and policy tests.
+5. **Durability:** checkpoints, crash recovery, idempotency, fencing, and fault injection.
+6. **Product interfaces and quality:** optional API, integrations, releases, and independently reproducible coding benchmarks.
+
+**Core principle:** Recursive Coder is designed, built, and tested as a fully independent product. External services are optional integrations, not owners of its execution lifecycle.

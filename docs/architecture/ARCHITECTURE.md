@@ -1,18 +1,18 @@
-# Recursive Coder — самостоятельная архитектура
+# Recursive Coder — Standalone Architecture
 
-> **Статус:** целевая архитектура, версия RFC 0.3  
-> **Технологии:** Kotlin/JVM, JetBrains Koog, локальные или совместимые LLM API  
-> **Основной принцип:** все обязанности coding agent реализуются внутри Recursive Coder. Ни один внешний workflow, репозиторий или сервис не требуется в роли обязательного координатора.
+> **Status:** target architecture, RFC 0.3  
+> **Technology:** Kotlin/JVM, JetBrains Koog, configurable local or compatible LLM APIs  
+> **Core principle:** Recursive Coder must own the complete coding-agent lifecycle. No external workflow, repository, or service may be a mandatory coordinator.
 
-## 1. Миссия
+## 1. Mission
 
-Создать **полноценного автономного агента разработки**, который умеет принимать сложные задания, рекурсивно их уточнять и реализовывать, проверять качество и безопасно сохранять результаты.
+Build a **fully independent software engineering agent** that can accept complex development tasks, recursively refine and implement them, validate the results, and preserve outcomes safely.
 
-Koog используется как библиотека агентных строительных блоков, но сам Recursive Coder контролирует жизненный цикл: очереди, задачи, сессии, вложенных агентов, инструменты, бюджеты, восстановление, события и итоговый результат.
+Koog provides agent-building primitives, while Recursive Coder retains ownership of task queues, session lifecycles, nested agents, tools, budgets, recovery, event history, and terminal results.
 
-Проект не является плагином к чужому решению. Любое подключение к облачной платформе, git-хостингу, IDE или системе задач — необязательная интеграция поверх публичных интерфейсов.
+This project is not a plugin for another orchestration platform. Cloud providers, source-control hosting, IDEs, and task trackers are optional integrations built on public interfaces.
 
-## 2. Компоненты
+## 2. Components
 
 ```text
   CLI / Public API / Future UI
@@ -35,101 +35,104 @@ Koog используется как библиотека агентных ст�
 
 ### Task Manager
 
-Владеет очередью локальных задач, зависимостями, приоритетами, признаками готовности, паузой, отменой и параллельностью. Задача идентифицируется собственным `taskId`. Для новых подзадач не требуются внешние Issues и отдельные CI jobs.
+Owns the local task queue, dependencies, priorities, readiness, pause/resume, cancellation, and concurrency. Each task has a first-party `taskId`. Neither creating child tasks nor scheduling their execution requires externally hosted issues or CI jobs.
 
 ### Session Controller
 
-Одна задача может создать одну или несколько последовательных попыток сессии. Контроллер владеет `sessionId`, таймаутами, токенами, правами, квотами, состоянием child agents, итоговым результатом и судьбой checkpoint.
+A task can have one or more session attempts. The controller owns `sessionId`, deadlines, token and tool budgets, capabilities, child-agent state, terminal outcomes, and checkpoint lifecycle.
 
-Состояния: `created → accepted → running`, `running → checkpointing → running|paused`, `paused → resuming → running`; успех, отказ, ошибка, отмена и timeout терминальны. Состояния должны быть проверены программно, а не выводиться из фразы LLM.
+The canonical protocol represents transitions such as `created → accepted → running`, `running → checkpointing → running|paused`, and `paused → resuming → running`. Success, failure, cancellation, rejection, and timeout are terminal conditions. Status must be derived from verified runtime state, **not** from a model's final words.
+
+The bootstrap implementation in issue #4 handles one fake-model read-only session; the fuller state machine, nested agents, and durable recovery are future milestones.
 
 ### Recursive Agent Graph
 
-Каждый этап — изолированный агент со своей ролью и областью полномочий:
+Each stage is an independent agent role with separately enforced authority:
 
-1. **SDD** формирует спецификацию задачи и проверяемые требования.
-2. **ATDD** превращает критерии приёмки в независимые тесты.
-3. **TDD** формирует детальные unit/integration тесты и контракты.
-4. **Developer** реализует код для уже согласованных тестов.
-5. **Reviewer** независимо проверяет результат, может вернуть на исправление или предложить декомпозицию.
+1. **SDD** produces the task specification and testable requirements.
+2. **ATDD** converts acceptance criteria into independent acceptance tests.
+3. **TDD** designs focused unit/integration tests and contracts.
+4. **Developer** implements code against the previously approved specifications and tests.
+5. **Reviewer** independently evaluates the implementation, requests repair, or recommends decomposition.
 
-Рекурсия применяется ко **всем** этапам, а не только к Developer. Для декомпозированной подзадачи строится собственный мини-процесс с ограниченной глубиной и общими бюджетами. Внутренний reviewer не вправе изменять исходные требования, чтобы скрыть несоответствие.
+Recursion applies to **every stage**, not only Developer. A decomposed subtask receives its own bounded workflow and shares parent budgets. A nested reviewer may not rewrite the source requirements to conceal a failure.
 
 ### Trusted Tool Runtime
 
-Полномочия не выводятся из prompt. Перед вызовом проверяются текущая роль, allow/deny tool policy, права на файлы, реальные пути/symlinks, ограничения на запуск команд и активные бюджеты. Developer **не может менять** спецификации и тесты SDD/ATDD/TDD: изменение требует отдельной проверенной операции, одобренной доверенным контроллером.
+Tool permission is not inferred from prompt text. Every invocation must be checked against the active role, allow/deny policy (denials take precedence), file scope, canonical real paths and symlinks, sandbox rules, and remaining budgets. The Developer **must not modify** specifications and tests owned by SDD/ATDD/TDD. Any such change requires a distinct trusted and independently approved workflow.
 
 ### Workspace Manager
 
-Создаёт и защищает рабочую директорию, хранит исходный Git baseline, обеспечивает принятую область изменений и восстановление после сбоя. При публикации результатов проверяет список изменённых файлов и финальные тесты. Поддержка произвольных каталогов без Git — отдельный будущий режим, без подделки хешей.
+Creates and protects an execution workspace, records the original Git baseline, validates the allowed mutation scope, and supports safe recovery after interruptions. Before accepting a result, the engine verifies the changed-file manifest and trusted check receipts. Supporting arbitrary directories without Git is a separate explicit future mode; no baseline SHA may be fabricated.
 
 ### Model Gateway
 
-Модели выбираются конфигурацией **самого** Recursive Coder. Сервис поддерживает тестируемые OpenAI-compatible endpoints и расширяемые провайдеры; не задаёт конкретную домашнюю сеть, железо, порт, модель или cloud credential как обязательные. Перед работой проверяются tool calls, structured output, streaming, токеновые бюджеты, ограничения контекста и несовместимые особенности провайдера. В CI используется fake LLM.
+Model selection is configured by Recursive Coder rather than by a hardcoded home network, GPU, server port, model, or cloud credential. Adapters may implement testable OpenAI-compatible endpoints and other providers. Before execution, the engine negotiates tool calling, structured output, streaming, token budgets, context limits, and provider-specific incompatibilities. The CI path uses an offline deterministic fake model.
 
-### Events и durable recovery
+### Event Journal and durable recovery
 
-События модели, инструментов, политики, затрат, рекурсии и состояния имеют идентификаторы и связи parent/child. Хранилище событий append-only, структура и версия проверяются схемой; секреты удаляются до записи.
+Model, tool, policy, resource-usage, recursion, and state events have structured identifiers and parent/child correlations. Events are append-only and versioned; secret or private content is redacted before persistence.
 
-Checkpoint фиксирует хешированные snapshots и журнал сайд-эффектов. Повторный запуск сессии получает более высокий `fenceGeneration`, исключительную lease, и проходит проверку версии, политики, baseline, содержимого workspace и unresolved writes. Неопределённые side effects нельзя выполнять повторно без сверки и безопасного протокола повторения.
+Checkpoints contain hashed state snapshots and a journal of side effects. Resuming requires a new monotonic `fenceGeneration`, an exclusive lease, and checks of the protocol version, policy, workspace baseline and digest, and unresolved mutations. Uncertain side effects must **not** be repeated without reconciliation.
 
-**Диагностический replay** воспроизводит сохранённые входы и наблюдаемые ответы в тестовой среде; он не претендует на детерминизм скрытого reasoning LLM.
+**Diagnostic replay** can reconstruct recorded inputs and observed outputs in a controlled environment. It does not claim deterministic access to a model's hidden internal reasoning.
 
-## 3. Публичный контракт
+## 3. Public session protocol
 
-`contracts/v1/session-v1.schema.json` — канонический transport protocol проекта:
+`contracts/v1/session-v1.schema.json` is the canonical transport schema of the project:
 
-- `SessionRequest`: `invocation` (`cli|api|scheduler`), workspace, задача, модель, policy, бюджеты, outputs, checkpoint/resume.
-- `SessionResult`: терминальный статус, диагностика, usage completeness, хешированные outputs и provenance.
-- `SessionEvent`: корреляция, агент, тип действия, время, sanitization и наблюдаемые метрики.
-- `SessionCheckpoint`: долговечное состояние, generation/fencing и side-effect журнал.
+- **SessionRequest:** invocation source (`cli|api|scheduler`), workspace, task, model, policy, budgets, outputs, and checkpoint/resume request.
+- **SessionResult:** terminal status, diagnostics, usage completeness, hashed artifact references, and provenance.
+- **SessionEvent:** correlation, agent/tool identity, action type, timing, redaction, and available observed metrics.
+- **SessionCheckpoint:** persisted state, generation/fencing, and side-effect journal.
 
-Текущий контракт — pre-release v1.0; до первого стабильного релиза изменения проходят CI и review. Несовместимая версия/неизвестная capability приводят к отказу, а не к молчаливому упрощению.
+Session Protocol v1.0 is **pre-release**. Incompatible versions and unsupported required capabilities are rejected explicitly rather than silently downgraded. All compatibility changes require tests and review.
 
-Система сама создаёт `invocationId` и `sessionId`; они не зависят от GitHub run ID, IDE или других внешних сущностей.
+The engine creates and owns `invocationId` and `sessionId`. These identifiers are independent of any GitHub workflow run, IDE session, or third-party task tracker.
 
-## 4. Способы запуска
+## 4. Execution interfaces
 
-**Сначала CLI.** В локальном каталоге пользователь предоставляет задачу и конфигурацию; агент создаёт сессию, анализирует проект, выполняет разрешённые инструменты и возвращает машиночитаемый результат и диагностику. CLI не обязан иметь доступ к Интернету, если модель и инструменты доступны локально.
+**CLI first.** The user supplies a task and a local session configuration. The agent owns the session, inspects the project, executes authorized tools, and returns a machine-readable result plus diagnostics. When the configured model and required tools are local, no Internet connection should be necessary.
 
-**Затем API.** Тот же сервис задач и сессий доступен через HTTP/gRPC или иной публичный контракт. Удалённые UI и интеграции подключаются к API, не вызывая напрямую привилегированные инструменты.
+**API later.** The same task and session services may be exposed through a versioned HTTP/gRPC interface. Remote user interfaces and integrations use this API; they cannot directly invoke privileged tools.
 
-**Затем scheduler/daemon.** Может обрабатывать множество задач, но должен учитывать ограничения локальной модели, concurrency и fairness. Эта возможность принадлежит агенту, а не внешнему workflow.
+**Scheduler/daemon later.** Internal scheduling can handle many tasks subject to local model capacity, bounded concurrency, and fairness. This responsibility stays inside the product, not in external workflows.
 
-Подключение к git-хостингу (создание PR, комментарии, webhooks), IDE и системам тикетов — отдельные плагины, отключённые по умолчанию и работающие с минимальными правами. Они не входят в ядро сессий.
+Git-host integrations (PR creation, reviews, webhooks), IDE extensions, and task-system adapters are independent opt-in plugins with narrowly scoped permissions. They do not belong in the trusted session core.
 
 ## 5. Security invariants
 
-- Запрет имеет приоритет над разрешением; нераспознанные capabilities и версии отклоняются.
-- Файлы управления агентом, его политики, секреты, `.git`, спецификации и чужие тесты защищены вне зависимости от текста задачи.
-- Prompt, output модели и retrieved context считаются недоверенными данными.
-- Все локальные команды и сетевые адреса проходят отдельную авторизацию и sandbox.
-- Результат инструмента, отправленный моделью, не равен подтверждённому изменению workspace.
-- Принятие результата требует проверенных тестов и допустимого diff.
-- Checkpoint и терминальные receipts привязаны к конкретной сессии, policy, baseline и generation.
-- При отказе оборудования или модели контроллер возвращает явный terminal/error state и сохраняет доступное диагностическое состояние.
+- Denials override grants. Unknown protocol versions and capabilities fail closed.
+- Agent control files, policies, secrets, `.git`, specifications, and role-protected tests must be protected regardless of task instructions.
+- Prompts, model output, and retrieved context are untrusted data.
+- Every shell command, path, and network destination requires independent authorization and appropriate sandboxing.
+- A model-supplied tool result is **not** equivalent to a trusted workspace mutation receipt.
+- Accepting a coding result requires independently verified checks and a permissible final diff.
+- Checkpoints and terminal receipts are tied to the exact session, policy, baseline, and fence generation.
+- Hardware or provider failures must produce an explicit terminal/error state with available diagnostic evidence; crashes may require safe later reconciliation.
 
-## 6. Собственный CI и качество
+## 6. Independent CI and quality
 
-GitHub Actions используется **исключительно как CI данного репозитория**, а не как исполнитель внешнего конвейера разработки. Текущее CI строится на GitHub-hosted runner и не требует локального оборудования:
+GitHub Actions is used **solely as CI for this repository**, never as the owner of an external engineering workflow. GitHub-hosted runners execute tests without private inference hardware:
 
-- Kotlin/JVM compilation и unit-тесты;
-- machine-readable контрактные тесты JSON Schema 2020-12 + негативные примеры;
-- в дальнейшем fake LLM интеграция, тесты агента, рекурсии, tool policy и recovery;
-- отдельные опциональные live-model и performance прогоны;
-- release с воспроизводимым binary/CLI и checksums.
+- Kotlin/JVM compilation and unit tests;
+- JSON Schema Draft 2020-12 conformance and negative protocol cases;
+- deterministic fake-model CLI/integration tests;
+- planned recursive-agent, tool-policy, sandbox, and recovery tests;
+- separately gated optional live-model and performance evaluations;
+- reproducible packaged CLI release artifacts and checksums.
 
-Каждый новый модуль сопровождается собственными тестами. Live-тесты не заменяют sandbox/security tests, и сравнение качества модели не доказывает корректность контроля доступа.
+Every new engine module must ship with relevant tests. Live model behavior does not replace security, sandbox, or recovery proofs; model benchmark scores do not demonstrate authorization correctness.
 
-## 7. План первых задач
+## 7. Delivery roadmap
 
-| Этап | Результат |
+| Milestone | Deliverable |
 | --- | --- |
-| Foundation | Структура проекта, CI, собственная схема Session v1, независимая архитектура |
-| Session Engine | CLI, `SessionController`, fake model, read-only agent, проверяемые transitions |
-| Agent Graph | Рекурсивные SDD/ATDD/TDD/Develop/Review, лимиты и иммутабельность артефактов |
-| Tooling | Workspace, безопасные чтение/изменение/валидация, guards и policy tests |
-| Durability | Event Journal, checkpoint/resume, fail-closed recovery |
-| Product | Task queue, daemon/API, integration plugins, observability UI, releases |
+| Foundation | Repository structure, independent CI, versioned Session Protocol v1, standalone architecture |
+| Session Engine | CLI, `SessionController`, deterministic FakeModel, observable read-only session and validated transitions |
+| Agent Graph | Recursive SDD/ATDD/TDD/Develop/Review roles, bounded recursion, and immutable approved artifacts |
+| Tooling | Workspace protection, safe read/write/check tools, policy enforcement, and adversarial tests |
+| Durability | Event Journal, checkpoints, fenced resume, and fail-closed recovery |
+| Product | First-party task scheduling, optional daemon/API and integrations, diagnostics UI, and releases |
 
-**Пока реализован только Foundation.** Это не означает, что CLI, Model Gateway, рекурсивная сессия или recovery уже работают. Следующий осмысленный PR должен создать минимально рабочую сессию с fake LLM без зависимости от сторонних workflows.
+**Implementation status:** the foundation is present and issue #4 implements the first offline fake-model session. Production Koog execution, real model adapters, recursive multi-agent workflows, writable tools, and crash recovery are not yet available. This architecture describes requirements rather than claiming those future capabilities are implemented.
