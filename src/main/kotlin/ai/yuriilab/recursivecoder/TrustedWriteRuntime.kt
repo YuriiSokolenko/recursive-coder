@@ -282,7 +282,9 @@ class TrustedWriteRuntime private constructor(
             fail("WORKSPACE_BASELINE_MISMATCH")
         if (sha(git.text(256 * 1024, "config", "--local", "--list").toByteArray()) != configHash)
             fail("GIT_CONFIGURATION_CHANGED")
-        if (indexFingerprint(git) != indexHash) fail("INDEX_MUTATION_DENIED")
+        val currentIndex = try { indexFingerprint(git) }
+            catch (_: Refused) { fail("INDEX_MUTATION_DENIED") }
+        if (currentIndex != indexHash) fail("INDEX_MUTATION_DENIED")
     }
 
     private fun authorized(path: String) {
