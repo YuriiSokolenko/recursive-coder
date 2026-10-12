@@ -200,8 +200,10 @@ class SessionRequest private constructor(val raw: JsonObject) {
               onStart: (String, String, Instant) -> Unit = { _, _, _ -> }): WorkspaceManager {
         if (!SessionProtocol.supports(raw.textAt("version")))
             throw Refused("UNSUPPORTED_PROTOCOL", "protocol", "Unsupported protocol version")
-        if (invocation.textAt("source") != "cli" || invocation.longAt("attempt") != 1L)
-            throw Refused("UNSUPPORTED_INVOCATION", "protocol", "Only fresh CLI invocations are supported")
+        val source = invocation.textAt("source")
+        val attempt = invocation.longAt("attempt")
+        if (source !in setOf("cli", "scheduler") || (source == "cli" && attempt != 1L))
+            throw Refused("UNSUPPORTED_INVOCATION", "protocol", "Unsupported invocation source or attempt")
         if (raw.objectAt("resume").textAt("mode") != "fresh" ||
             raw.objectAt("resume").longAt("fenceGeneration") != 1L)
             throw Refused("UNSUPPORTED_RESUME", "checkpoint", "Resume is not supported")
