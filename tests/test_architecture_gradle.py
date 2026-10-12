@@ -12,9 +12,11 @@ class ArchitectureBoundaryTest(unittest.TestCase):
     def run_with_test_edge(self, source: str, target: str) -> str:
         init_script = (
             "gradle.projectsEvaluated {\n"
-            f"    def owner = gradle.rootProject.project('{source}')\n"
-            "    owner.dependencies.add('testImplementation', "
+            f"    if (gradle.rootProject.findProject('{source}') != null) {{\n"
+            f"        def owner = gradle.rootProject.project('{source}')\n"
+            "        owner.dependencies.add('testImplementation', "
             f"owner.dependencies.project(path: '{target}'))\n"
+            "    }\n"
             "}\n"
         )
         with tempfile.TemporaryDirectory() as directory:
