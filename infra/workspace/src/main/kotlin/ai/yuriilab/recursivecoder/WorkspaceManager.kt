@@ -331,7 +331,7 @@ class WorkspaceManager private constructor(
      * Accept a logical path beneath the declared root (e.g. macOS /var -> /private/var)
      * or the canonical root. Never resolve an in-workspace symlink before descriptor traversal.
      */
-    fun taskRelativePath(path: Path): String {
+    override fun taskRelativePath(path: Path): String {
         if (!path.isAbsolute) deny("INVALID_TASK_PATH")
         val normalized = path.normalize()
         val ancestor = when {

@@ -30,7 +30,7 @@ Recursive Coder itself owns its tasks and sessions. Git can manage source worksp
 
 ## Build and test
 
-The current foundation uses Kotlin 2.4.21, JDK 21, Gradle 9.8.1, Koog 1.3.0, and Session Protocol `1.0`.
+The current foundation uses Kotlin 2.4.21, JDK 21, Gradle 9.8.1, and Session Protocol `1.0`. Koog execution remains planned; the existing core does not link a Koog runtime.
 
 The Gradle build has six modules with explicit boundaries. The **CLI is the only application module**; core session/task logic has no production dependency on Koog or HTTP model adapters. See [Gradle module ownership](docs/architecture/MODULES.md).
 

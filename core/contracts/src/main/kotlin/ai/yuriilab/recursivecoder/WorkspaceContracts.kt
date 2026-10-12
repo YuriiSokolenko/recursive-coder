@@ -38,6 +38,7 @@ data class ToolAudit(val receiptId: String, val tool: String, val started: Insta
 /** Trusted workspace access is injected by the application, never resolved in the session core. */
 interface WorkspaceSession : AutoCloseable {
     fun verifyTask(path: java.nio.file.Path, expectedSha: String)
+    fun taskRelativePath(path: java.nio.file.Path): String
     fun execute(tool: WorkspaceTool, claimedExecutionId: String? = null): ToolOutcome
 }
 
