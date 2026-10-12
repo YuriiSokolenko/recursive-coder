@@ -269,3 +269,23 @@ class TrustedWriteRuntimeTest {
         }
     }
 }
+
+
+class TrustedWriteToolSchemaTest {
+    @Test fun strictlyDecodeOnlyScopedWriteCommands() {
+        val edit = TrustedWriteToolSchema.decode(
+            """{"operations":[{"op":"edit","path":"src/main/A.kt","expectedSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","content":"fun a() = 2"}]}"""
+        )
+        assertEquals(1, edit.size)
+        assertIs<WriteOperation.Edit>(edit.single())
+        val invalid = listOf(
+            """{"operations":[{"op":"create","path":"src/main/A.kt","content":"ok","role":"SDD"}]}""",
+            """{"operations":[{"op":"create","path":"src/main/A.kt","content":4}]}""",
+            """{"operations":[{"op":"delete","path":"src/main/A.kt","expectedSha256":"bad"}]}""",
+            """{"operations":[{"op":"run","path":"src/main/A.kt"}]}""",
+            """{"operations":[],"claimedToolId":"tool-1"}""",
+            """{"operations":[{"op":"create","path":"x","content":"a"},{"op":"delete","path":"x","expectedSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}"""
+        )
+        invalid.forEach { assertFailsWith<IllegalArgumentException>(it) { TrustedWriteToolSchema.decode(it) } }
+    }
+}
