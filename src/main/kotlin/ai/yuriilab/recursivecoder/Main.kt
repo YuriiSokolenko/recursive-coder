@@ -24,7 +24,7 @@ fun main(args: Array<String>) {
         System.err.println("Invalid SessionRequest v1 JSON or input path")
         exitProcess(2)
     }
-    val provider = request.model["provider"]?.toString()?.trim('"') ?: "unknown"
+    val provider = ModelConfig.from(request.model).provider
     if (provider != "fake" && delayMs != 0L) {
         System.err.println("--fake-delay-ms is supported only for the fake provider")
         exitProcess(2)
