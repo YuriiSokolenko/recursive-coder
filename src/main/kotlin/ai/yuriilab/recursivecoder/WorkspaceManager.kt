@@ -532,33 +532,58 @@ class WorkspaceManager private constructor(
 /** Fixed Git verbs with no shell, no inherited model environment and bounded process output/time. */
 internal class RestrictedGit(private val root: Path, private val executable: Path) {
     fun text(maxBytes: Int, vararg arguments: String): String {
-        val output = Files.createTempFile("recursive-coder-git-", ".out")
-        try {
-            val process = ProcessBuilder(
-                listOf(executable.toString(), "--no-optional-locks", "-C", root.toString(),
-                    "-c", "core.fsmonitor=false", "-c", "diff.external=") + arguments
-            ).directory(root.toFile()).redirectError(ProcessBuilder.Redirect.DISCARD)
-                .redirectOutput(output.toFile()).apply {
-                    environment().clear()
-                    environment()["LC_ALL"] = "C"
-                    environment()["GIT_CONFIG_NOSYSTEM"] = "1"
-                    environment()["GIT_CONFIG_GLOBAL"] = "/dev/null"
-                    environment()["GIT_CONFIG_SYSTEM"] = "/dev/null"
-                    environment()["GIT_ATTR_NOSYSTEM"] = "1"
-                    environment()["GIT_NO_REPLACE_OBJECTS"] = "1"
-                    environment()["GIT_OPTIONAL_LOCKS"] = "0"
-                    environment()["GIT_TERMINAL_PROMPT"] = "0"
-                }.start()
-            val finished = process.waitFor(3, TimeUnit.SECONDS)
-            if (!finished) {
-                process.destroyForcibly()
-                throw Refused("GIT_TIMEOUT", "policy", "Git inspection exceeded its deadline")
+        val process = ProcessBuilder(
+            listOf(executable.toString(), "--no-optional-locks", "-C", root.toString(),
+                "-c", "core.fsmonitor=false", "-c", "diff.external=") + arguments
+        ).directory(root.toFile()).redirectError(ProcessBuilder.Redirect.DISCARD).apply {
+            environment().clear()
+            environment()["LC_ALL"] = "C"
+            environment()["GIT_CONFIG_NOSYSTEM"] = "1"
+            environment()["GIT_CONFIG_GLOBAL"] = "/dev/null"
+            environment()["GIT_CONFIG_SYSTEM"] = "/dev/null"
+            environment()["GIT_ATTR_NOSYSTEM"] = "1"
+            environment()["GIT_NO_REPLACE_OBJECTS"] = "1"
+            environment()["GIT_OPTIONAL_LOCKS"] = "0"
+            environment()["GIT_TERMINAL_PROMPT"] = "0"
+        }.start()
+        val reader = java.util.concurrent.Executors.newSingleThreadExecutor {
+            Thread(it, "recursive-coder-git-output").apply { isDaemon = true }
+        }
+        val future = reader.submit<ByteArray> {
+            process.inputStream.use { stream ->
+                val buffer = ByteArray(4096)
+                val output = java.io.ByteArrayOutputStream()
+                while (true) {
+                    val read = stream.read(buffer)
+                    if (read < 0) break
+                    if (output.size() + read > maxBytes)
+                        throw Refused("GIT_OUTPUT_LIMIT_EXCEEDED", "policy", "Git output exceeds maximum size")
+                    output.write(buffer, 0, read)
+                }
+                output.toByteArray()
             }
-            if (process.exitValue() != 0 || Files.size(output) > maxBytes)
-                throw Refused("GIT_INSPECTION_DENIED", "policy", "Git inspection is unavailable or too large")
-            return Files.readString(output, StandardCharsets.UTF_8).trimEnd('\n')
+        }
+        try {
+            val data = future.get(3, TimeUnit.SECONDS)
+            if (!process.waitFor(1, TimeUnit.SECONDS) || process.exitValue() != 0)
+                throw Refused("GIT_INSPECTION_DENIED", "policy", "Git inspection failed")
+            return try {
+                StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(data))
+                    .toString().trimEnd('\n')
+            } catch (_: Exception) {
+                throw Refused("GIT_OUTPUT_INVALID", "policy", "Git output is not valid UTF-8")
+            }
+        } catch (_: java.util.concurrent.TimeoutException) {
+            throw Refused("GIT_TIMEOUT", "policy", "Git inspection exceeded its deadline")
+        } catch (e: java.util.concurrent.ExecutionException) {
+            val cause = e.cause
+            if (cause is Refused) throw cause
+            throw Refused("GIT_INSPECTION_DENIED", "policy", "Git inspection failed")
         } finally {
-            Files.deleteIfExists(output)
+            if (process.isAlive) process.destroyForcibly()
+            future.cancel(true)
+            reader.shutdownNow()
         }
     }
 }
