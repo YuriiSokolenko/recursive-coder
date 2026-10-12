@@ -104,7 +104,7 @@ class SessionRuntimeTest {
         assertEquals(2, events.count { it["type"]!!.jsonPrimitive.content == "llm.response" })
         assertEquals(1, events.count { it["type"]!!.jsonPrimitive.content == "tool.started" })
         assertEquals(1, events.count { it["type"]!!.jsonPrimitive.content == "tool.completed" })
-        assertEquals(1, events.count { it["transition"]?.jsonObject?.get("to")?.jsonPrimitive?.content == "completed" })
+        assertEquals(1, events.count { it["transition"]?.jsonObject?.get("to")?.jsonPrimitive?.content == "succeeded" })
         assertEquals((1..events.size).toList(), events.map { it["sequence"]!!.jsonPrimitive.int })
         assertEquals(events.size, result["lastEventSeq"]!!.jsonPrimitive.int)
         assertTrue(events.all { it["traceId"]!!.jsonPrimitive.content == "trace-4" })
@@ -151,7 +151,7 @@ class SessionRuntimeTest {
             it["transition"]?.jsonObject?.get("to")?.jsonPrimitive?.content == "failed"
         })
         assertTrue(events().any {
-            it["transition"]?.jsonObject?.get("to")?.jsonPrimitive?.content == "cancelling"
+            it["transition"]?.jsonObject?.get("to")?.jsonPrimitive?.content == "cancelled"
         })
     }
 
