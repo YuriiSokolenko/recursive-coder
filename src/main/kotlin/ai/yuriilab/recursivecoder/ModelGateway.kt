@@ -75,7 +75,17 @@ object ModelGateways {
     fun create(provider: String, fakeDelayMs: Long = 0): ModelGateway = when (provider) {
         "fake" -> FakeModel(fakeDelayMs)
         "openai-compatible" -> OpenAICompatibleGateway()
-        else -> throw Refused("UNSUPPORTED_MODEL", "provider", "Unknown model provider")
+        else -> object : ModelGateway {
+            override fun negotiate(
+                config: ModelConfig, cancellation: Cancellation, deadline: Instant
+            ): GatewayCapabilities =
+                throw Refused("UNSUPPORTED_MODEL", "provider", "Unknown model provider")
+            override fun next(
+                config: ModelConfig, task: Path, observed: Pair<Int, String>?,
+                cancellation: Cancellation, deadline: Instant, allowRetry: Boolean
+            ): ModelTurn =
+                throw Refused("UNSUPPORTED_MODEL", "provider", "Unknown model provider")
+        }
     }
 }
 
