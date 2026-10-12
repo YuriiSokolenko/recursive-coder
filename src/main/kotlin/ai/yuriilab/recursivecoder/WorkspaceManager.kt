@@ -532,6 +532,14 @@ class WorkspaceManager private constructor(
 /** Fixed Git verbs with no shell, no inherited model environment and bounded process output/time. */
 internal class RestrictedGit(private val root: Path, private val executable: Path) {
     fun text(maxBytes: Int, vararg arguments: String): String {
+        val (exitCode, output) = inspect(maxBytes, *arguments)
+        if (exitCode != 0)
+            throw Refused("GIT_INSPECTION_DENIED", "policy", "Git inspection failed")
+        return output
+    }
+
+    /** Supports fixed Git predicates such as check-ignore, whose status 1 means no match. */
+    fun inspect(maxBytes: Int, vararg arguments: String): Pair<Int, String> {
         val process = ProcessBuilder(
             listOf(executable.toString(), "--no-optional-locks", "-C", root.toString(),
                 "-c", "core.fsmonitor=false", "-c", "diff.external=") + arguments
@@ -565,10 +573,11 @@ internal class RestrictedGit(private val root: Path, private val executable: Pat
         }
         try {
             val data = future.get(3, TimeUnit.SECONDS)
-            if (!process.waitFor(1, TimeUnit.SECONDS) || process.exitValue() != 0)
-                throw Refused("GIT_INSPECTION_DENIED", "policy", "Git inspection failed")
+            if (!process.waitFor(1, TimeUnit.SECONDS))
+                throw Refused("GIT_TIMEOUT", "policy", "Git inspection exceeded its deadline")
             return try {
-                StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
+                process.exitValue() to StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
                     .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(data))
                     .toString().trimEnd('\n')
             } catch (_: Exception) {
