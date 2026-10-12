@@ -1,0 +1,504 @@
+{
+  "freshRequest": {
+    "kind": "session-request",
+    "version": "1.0",
+    "requestId": "req-demo-1",
+    "sessionId": "sess-demo-e2e",
+    "traceId": "trace-demo-e2e",
+    "task": {
+      "stage": "develop",
+      "role": "implementer",
+      "taskId": "task-demo",
+      "taskInputRef": {
+        "path": "/tmp/recursive-coder/sessions/demo/task.md",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "parentAgentId": null
+    },
+    "model": {
+      "provider": "openai-compatible",
+      "modelId": "local-example-model",
+      "baseUrl": "http://127.0.0.1:8080/v1",
+      "credentialRef": "env:OPENAI_API_KEY",
+      "contextTokens": 262144,
+      "maxOutputTokens": 16384,
+      "features": [
+        "tool_calls",
+        "structured_output"
+      ],
+      "temperature": 0.4
+    },
+    "toolPolicy": {
+      "mode": "scoped-write",
+      "allowedTools": [
+        "read",
+        "repo_search",
+        "safe_edit",
+        "run_check",
+        "submit_result"
+      ],
+      "deniedTools": [
+        "publish_remote",
+        "git_push",
+        "arbitrary_shell"
+      ],
+      "protectedPaths": [
+        ".git/**",
+        "contracts/**",
+        "src/test/**",
+        "specs/**"
+      ],
+      "writablePaths": [
+        "src/main/**"
+      ],
+      "immutableInputs": [
+        {
+          "path": "/tmp/recursive-coder/sessions/demo/spec.md",
+          "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      ],
+      "policySha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "budgets": {
+      "deadlineAt": "2026-10-11T05:00:00Z",
+      "maxWallTimeMs": 14400000,
+      "maxTotalTokens": 1200000,
+      "maxToolCalls": 150,
+      "maxChildAgents": 16,
+      "maxDepth": 8,
+      "maxModelRequests": 200
+    },
+    "outputs": {
+      "rootDir": "/tmp/recursive-coder/sessions/demo",
+      "resultPath": "/tmp/recursive-coder/sessions/demo/result.json",
+      "eventsPath": "/tmp/recursive-coder/sessions/demo/events.jsonl",
+      "checkpointDir": "/tmp/recursive-coder/sessions/demo/checkpoints",
+      "diagnosticsPath": "/tmp/recursive-coder/sessions/demo/diagnostics.json"
+    },
+    "resume": {
+      "mode": "fresh",
+      "fenceGeneration": 1,
+      "checkpoint": null
+    },
+    "requiredCapabilities": [
+      "session-events-v1",
+      "durable-checkpoints-v1",
+      "scoped-workspace-write-v1"
+    ],
+    "invocation": {
+      "source": "cli",
+      "invocationId": "invoke-demo",
+      "attempt": 1
+    },
+    "workspace": {
+      "workspaceId": "workspace-demo",
+      "rootPath": "/tmp/recursive-coder/workspaces/demo",
+      "baselineSha": "1111111111111111111111111111111111111111",
+      "headSha": "1111111111111111111111111111111111111111",
+      "branch": "dev"
+    }
+  },
+  "resumeRequest": {
+    "kind": "session-request",
+    "version": "1.0",
+    "requestId": "req-demo-2",
+    "sessionId": "sess-demo-e2e",
+    "traceId": "trace-demo-e2e",
+    "task": {
+      "stage": "develop",
+      "role": "implementer",
+      "taskId": "task-demo",
+      "taskInputRef": {
+        "path": "/tmp/recursive-coder/sessions/demo/task.md",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "parentAgentId": null
+    },
+    "model": {
+      "provider": "openai-compatible",
+      "modelId": "local-example-model",
+      "baseUrl": "http://127.0.0.1:8080/v1",
+      "credentialRef": "env:OPENAI_API_KEY",
+      "contextTokens": 262144,
+      "maxOutputTokens": 16384,
+      "features": [
+        "tool_calls",
+        "structured_output"
+      ],
+      "temperature": 0.4
+    },
+    "toolPolicy": {
+      "mode": "scoped-write",
+      "allowedTools": [
+        "read",
+        "repo_search",
+        "safe_edit",
+        "run_check",
+        "submit_result"
+      ],
+      "deniedTools": [
+        "publish_remote",
+        "git_push",
+        "arbitrary_shell"
+      ],
+      "protectedPaths": [
+        ".git/**",
+        "contracts/**",
+        "src/test/**",
+        "specs/**"
+      ],
+      "writablePaths": [
+        "src/main/**"
+      ],
+      "immutableInputs": [
+        {
+          "path": "/tmp/recursive-coder/sessions/demo/spec.md",
+          "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      ],
+      "policySha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "budgets": {
+      "deadlineAt": "2026-10-11T05:00:00Z",
+      "maxWallTimeMs": 14400000,
+      "maxTotalTokens": 1200000,
+      "maxToolCalls": 150,
+      "maxChildAgents": 16,
+      "maxDepth": 8,
+      "maxModelRequests": 200
+    },
+    "outputs": {
+      "rootDir": "/tmp/recursive-coder/sessions/demo",
+      "resultPath": "/tmp/recursive-coder/sessions/demo/result.json",
+      "eventsPath": "/tmp/recursive-coder/sessions/demo/events.jsonl",
+      "checkpointDir": "/tmp/recursive-coder/sessions/demo/checkpoints",
+      "diagnosticsPath": "/tmp/recursive-coder/sessions/demo/diagnostics.json"
+    },
+    "resume": {
+      "mode": "resume",
+      "fenceGeneration": 2,
+      "checkpoint": {
+        "path": "/tmp/recursive-coder/sessions/demo/checkpoints/cp-demo-seq-4.json",
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      }
+    },
+    "requiredCapabilities": [
+      "session-events-v1",
+      "durable-checkpoints-v1",
+      "scoped-workspace-write-v1"
+    ],
+    "invocation": {
+      "source": "cli",
+      "invocationId": "invoke-demo",
+      "attempt": 2
+    },
+    "workspace": {
+      "workspaceId": "workspace-demo",
+      "rootPath": "/tmp/recursive-coder/workspaces/demo",
+      "baselineSha": "1111111111111111111111111111111111111111",
+      "headSha": "1111111111111111111111111111111111111111",
+      "branch": "dev"
+    }
+  },
+  "successResult": {
+    "kind": "session-result",
+    "version": "1.0",
+    "sessionId": "sess-demo-e2e",
+    "traceId": "trace-demo-e2e",
+    "requestId": "req-demo-2",
+    "status": "succeeded",
+    "startedAt": "2026-10-11T02:48:00Z",
+    "finishedAt": "2026-10-11T02:58:00Z",
+    "durationMs": 600000,
+    "lastEventSeq": 18,
+    "provenance": {
+      "baselineSha": "1111111111111111111111111111111111111111",
+      "policySha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "fenceGeneration": 2,
+      "workspaceId": "workspace-demo"
+    },
+    "outputs": {
+      "eventLog": {
+        "path": "/tmp/recursive-coder/sessions/demo/events.jsonl",
+        "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      },
+      "diagnostics": {
+        "path": "/tmp/recursive-coder/sessions/demo/diagnostics.json",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "terminalReceipt": {
+        "path": "/tmp/recursive-coder/sessions/demo/terminal-receipt.json",
+        "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      },
+      "changeManifest": {
+        "path": "/tmp/recursive-coder/sessions/demo/changed-paths.json",
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      },
+      "checkpoint": {
+        "path": "/tmp/recursive-coder/sessions/demo/checkpoints/cp-demo-seq-4.json",
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      }
+    },
+    "error": null,
+    "usage": {
+      "inputTokens": 20000,
+      "outputTokens": 2500,
+      "cacheReadTokens": 85000,
+      "cacheWriteTokens": 0,
+      "totalTokens": 107500,
+      "completeness": "incomplete"
+    },
+    "invocation": {
+      "source": "cli",
+      "invocationId": "invoke-demo",
+      "attempt": 2
+    }
+  },
+  "failureResult": {
+    "kind": "session-result",
+    "version": "1.0",
+    "sessionId": "sess-demo-e2e",
+    "traceId": "trace-demo-e2e",
+    "requestId": "req-demo-2",
+    "status": "timed_out",
+    "startedAt": "2026-10-11T02:48:00Z",
+    "finishedAt": "2026-10-11T02:58:00Z",
+    "durationMs": 600000,
+    "lastEventSeq": 19,
+    "provenance": {
+      "baselineSha": "1111111111111111111111111111111111111111",
+      "policySha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "fenceGeneration": 2,
+      "workspaceId": "workspace-demo"
+    },
+    "outputs": {
+      "eventLog": {
+        "path": "/tmp/recursive-coder/sessions/demo/events.jsonl",
+        "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      },
+      "diagnostics": {
+        "path": "/tmp/recursive-coder/sessions/demo/diagnostics.json",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "terminalReceipt": null,
+      "changeManifest": null,
+      "checkpoint": {
+        "path": "/tmp/recursive-coder/sessions/demo/checkpoints/cp-demo-seq-4.json",
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      }
+    },
+    "error": {
+      "code": "SESSION_DEADLINE_EXCEEDED",
+      "category": "timeout",
+      "retryable": true,
+      "safeMessage": "Session deadline elapsed; durable checkpoint available.",
+      "relatedEventId": "evt-demo-19",
+      "toolExecutionId": null
+    },
+    "usage": {
+      "inputTokens": 20000,
+      "outputTokens": 2600,
+      "cacheReadTokens": 85000,
+      "cacheWriteTokens": 0,
+      "totalTokens": 107600,
+      "completeness": "incomplete"
+    },
+    "invocation": {
+      "source": "cli",
+      "invocationId": "invoke-demo",
+      "attempt": 2
+    }
+  },
+  "event": {
+    "kind": "session-event",
+    "version": "1.0",
+    "sessionId": "sess-demo-e2e",
+    "traceId": "trace-demo-e2e",
+    "eventId": "evt-demo-5",
+    "sequence": 5,
+    "timestamp": "2026-10-11T02:48:00Z",
+    "type": "session.resumed",
+    "status": "completed",
+    "correlationId": "corr-demo-resume",
+    "causationId": "evt-demo-4",
+    "actor": {
+      "agentId": "agent-implementer",
+      "parentAgentId": null,
+      "childAgentId": null,
+      "toolExecutionId": null,
+      "childSessionId": null
+    },
+    "transition": {
+      "from": "paused",
+      "to": "resuming"
+    },
+    "timing": {
+      "startedAt": "2026-10-11T02:48:00Z",
+      "durationMs": 45
+    },
+    "redaction": {
+      "mode": "metadata-only",
+      "removedFields": [
+        "credentialRef",
+        "rawPrompt",
+        "authorizationHeader"
+      ]
+    },
+    "metadata": {
+      "checkpointId": "cp-demo-seq-4",
+      "attempt": 2
+    }
+  },
+  "checkpoint": {
+    "kind": "session-checkpoint",
+    "version": "1.0",
+    "sessionId": "sess-demo-e2e",
+    "traceId": "trace-demo-e2e",
+    "requestId": "req-demo-1",
+    "checkpointId": "cp-demo-seq-4",
+    "sequence": 4,
+    "createdAt": "2026-10-11T02:45:00Z",
+    "state": "paused",
+    "fenceGeneration": 1,
+    "policySha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "journalSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "activeAgentIds": [
+      "agent-implementer"
+    ],
+    "pendingToolExecutionIds": [],
+    "unresolvedSideEffectIds": [],
+    "snapshots": {
+      "agentGraph": {
+        "path": "/tmp/recursive-coder/sessions/demo/checkpoints/graph.json",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "modelState": {
+        "path": "/tmp/recursive-coder/sessions/demo/checkpoints/model.json",
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "toolJournal": {
+        "path": "/tmp/recursive-coder/sessions/demo/checkpoints/tool-journal.json",
+        "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      }
+    },
+    "correlationId": "corr-demo-checkpoint",
+    "causationId": "evt-demo-3",
+    "parentSessionId": null,
+    "activeChildSessionIds": [
+      "child-demo-planner"
+    ],
+    "persistedAt": "2026-10-11T02:45:01Z",
+    "writeDurationMs": 1200,
+    "lastEventSeq": 4,
+    "status": "durable",
+    "workspace": {
+      "workspaceId": "workspace-demo",
+      "baselineSha": "1111111111111111111111111111111111111111",
+      "workspaceDigestSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  },
+  "forwardMinorRequest": {
+    "kind": "session-request",
+    "version": "1.1",
+    "requestId": "req-demo-1",
+    "sessionId": "sess-demo-e2e",
+    "traceId": "trace-demo-e2e",
+    "task": {
+      "stage": "develop",
+      "role": "implementer",
+      "taskId": "task-demo",
+      "taskInputRef": {
+        "path": "/tmp/recursive-coder/sessions/demo/task.md",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "parentAgentId": null
+    },
+    "model": {
+      "provider": "openai-compatible",
+      "modelId": "local-example-model",
+      "baseUrl": "http://127.0.0.1:8080/v1",
+      "credentialRef": "env:OPENAI_API_KEY",
+      "contextTokens": 262144,
+      "maxOutputTokens": 16384,
+      "features": [
+        "tool_calls",
+        "structured_output"
+      ],
+      "temperature": 0.4
+    },
+    "toolPolicy": {
+      "mode": "scoped-write",
+      "allowedTools": [
+        "read",
+        "repo_search",
+        "safe_edit",
+        "run_check",
+        "submit_result"
+      ],
+      "deniedTools": [
+        "publish_remote",
+        "git_push",
+        "arbitrary_shell"
+      ],
+      "protectedPaths": [
+        ".git/**",
+        "contracts/**",
+        "src/test/**",
+        "specs/**"
+      ],
+      "writablePaths": [
+        "src/main/**"
+      ],
+      "immutableInputs": [
+        {
+          "path": "/tmp/recursive-coder/sessions/demo/spec.md",
+          "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      ],
+      "policySha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "budgets": {
+      "deadlineAt": "2026-10-11T05:00:00Z",
+      "maxWallTimeMs": 14400000,
+      "maxTotalTokens": 1200000,
+      "maxToolCalls": 150,
+      "maxChildAgents": 16,
+      "maxDepth": 8,
+      "maxModelRequests": 200
+    },
+    "outputs": {
+      "rootDir": "/tmp/recursive-coder/sessions/demo",
+      "resultPath": "/tmp/recursive-coder/sessions/demo/result.json",
+      "eventsPath": "/tmp/recursive-coder/sessions/demo/events.jsonl",
+      "checkpointDir": "/tmp/recursive-coder/sessions/demo/checkpoints",
+      "diagnosticsPath": "/tmp/recursive-coder/sessions/demo/diagnostics.json"
+    },
+    "resume": {
+      "mode": "fresh",
+      "fenceGeneration": 1,
+      "checkpoint": null
+    },
+    "requiredCapabilities": [
+      "session-events-v1",
+      "durable-checkpoints-v1",
+      "scoped-workspace-write-v1"
+    ],
+    "extensions": {
+      "x-runtime-hints": {
+        "priority": "normal"
+      }
+    },
+    "invocation": {
+      "source": "cli",
+      "invocationId": "invoke-demo",
+      "attempt": 1
+    },
+    "workspace": {
+      "workspaceId": "workspace-demo",
+      "rootPath": "/tmp/recursive-coder/workspaces/demo",
+      "baselineSha": "1111111111111111111111111111111111111111",
+      "headSha": "1111111111111111111111111111111111111111",
+      "branch": "dev"
+    }
+  }
+}
