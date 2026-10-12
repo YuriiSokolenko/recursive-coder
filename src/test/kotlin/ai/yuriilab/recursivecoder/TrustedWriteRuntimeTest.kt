@@ -282,6 +282,23 @@ class TrustedWriteRuntimeTest {
         val sandbox = Path.of("/usr/bin/bwrap")
         Assumptions.assumeTrue(Files.isExecutable(python) && Files.isExecutable(sandbox),
             "Sandbox prerequisites not installed")
+        // Probe kernel namespace support independently of the runtime. This
+        // runner may forbid configuring loopback in a private network namespace.
+        val probeArgs = mutableListOf(sandbox.toString(), "--die-with-parent",
+            "--new-session", "--unshare-all", "--tmpfs", "/",
+            "--proc", "/proc", "--dev", "/dev")
+        for (directory in listOf("/usr", "/bin", "/lib", "/lib64")) {
+            if (Files.exists(Path.of(directory))) {
+                probeArgs.addAll(listOf("--ro-bind", directory, directory))
+            }
+        }
+        probeArgs.addAll(listOf("--", "/usr/bin/true"))
+        val probe = ProcessBuilder(probeArgs).redirectError(ProcessBuilder.Redirect.DISCARD).start()
+        val supported = probe.waitFor(5, java.util.concurrent.TimeUnit.SECONDS) &&
+            probe.exitValue() == 0
+        if (probe.isAlive) probe.destroyForcibly()
+        Assumptions.assumeTrue(supported,
+            "Host does not permit the isolated network namespace required by runCheck")
         val script = "from pathlib import Path; assert Path('/workspace/src/main/Feature.kt').read_text() == 'fun value() = 4\\n'"
         open(f, checks = mapOf("separate-test" to TrustedCheck(python, listOf("-c", script))),
             required = setOf("separate-test")).use { runtime ->
