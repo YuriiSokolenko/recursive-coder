@@ -18,10 +18,24 @@ class WorkspaceBoundaryUnitTest {
             .joinToString("") { "%02x".format(it) }
 
     private fun git(root: Path, vararg args: String): String {
-        val process = ProcessBuilder(listOf("git") + args).directory(root.toFile())
-            .redirectErrorStream(true).start()
+        // Do not inherit signing, hooks, templates or Git settings from the developer machine.
+        val home = temp.resolve("git-home").also(Files::createDirectories)
+        val hooks = temp.resolve("empty-git-hooks").also(Files::createDirectories)
+        val templates = temp.resolve("empty-git-templates").also(Files::createDirectories)
+        val processBuilder = ProcessBuilder(
+            listOf("git", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=$hooks") + args
+        ).directory(root.toFile()).redirectErrorStream(true)
+        processBuilder.environment().apply {
+            keys.removeAll { it.startsWith("GIT_") }
+            put("GIT_CONFIG_NOSYSTEM", "1")
+            put("GIT_CONFIG_GLOBAL", home.resolve("config").toString())
+            put("GIT_TEMPLATE_DIR", templates.toString())
+            put("HOME", home.toString())
+            put("XDG_CONFIG_HOME", home.toString())
+        }
+        val process = processBuilder.start()
         val output = process.inputStream.bufferedReader().readText()
-        assertEquals(0, process.waitFor(), output)
+        assertEquals(0, process.waitFor(), "git ${args.joinToString(" ")}: $output")
         return output.trim()
     }
 
@@ -30,7 +44,9 @@ class WorkspaceBoundaryUnitTest {
         Files.createDirectories(root)
         Files.writeString(root.resolve("task.md"), "Read an isolated workspace")
         Files.writeString(root.resolve(".env"), "SECRET_NOT_FOR_TOOLS")
-        git(root, "init", "-b", "dev")
+        // symbolic-ref works on Git versions older than 'git init -b' (2.28).
+        git(root, "init")
+        git(root, "symbolic-ref", "HEAD", "refs/heads/dev")
         git(root, "config", "user.email", "test@example.invalid")
         git(root, "config", "user.name", "Workspace unit test")
         git(root, "add", ".")
@@ -135,32 +151,44 @@ class WorkspaceBoundaryUnitTest {
 
     @Test fun writeToolDecoderRejectsUnknownFieldsTypesAndDuplicates() {
         val invalid = listOf(
-            "{}",
-            writeOperations(),
-            writeOperations(create("same.md", "a"), create("same.md", "b")),
-            writeOperations(buildJsonObject {
+            "missing operations" to "{}",
+            "empty batch" to writeOperations(),
+            "duplicate paths" to writeOperations(create("same.md", "a"), create("same.md", "b")),
+            "non-string content" to writeOperations(buildJsonObject {
                 put("op", "create"); put("path", "task.md"); put("content", 123)
             }),
-            writeOperations(buildJsonObject {
+            "unexpected field" to writeOperations(buildJsonObject {
                 put("op", "create"); put("path", "task.md")
                 put("content", "ok"); put("unexpected", true)
             }),
-            writeOperations(buildJsonObject {
+            "uppercase digest" to writeOperations(buildJsonObject {
                 put("op", "edit"); put("path", "task.md")
                 put("content", "ok"); put("expectedSha256", "A".repeat(64))
             }),
-            writeOperations(buildJsonObject {
+            "missing digest" to writeOperations(buildJsonObject {
                 put("op", "delete"); put("path", "task.md")
             }),
-            writeOperations(*Array(9) { index -> create("file" + index + ".md", "ok") })
+            "nine operations" to writeOperations(*Array(9) { index ->
+                create("file" + index + ".md", "ok")
+            })
         )
 
-        invalid.forEach { payload ->
-            assertEquals("INVALID_WRITE_TOOL_SCHEMA",
-                assertFailsWith<IllegalArgumentException> {
-                    TrustedWriteToolSchema.decode(payload)
-                }.message)
+        invalid.forEach { (case, payload) ->
+            val error = assertFailsWith<IllegalArgumentException>("Case: $case") {
+                TrustedWriteToolSchema.decode(payload)
+            }
+            assertEquals("INVALID_WRITE_TOOL_SCHEMA", error.message, "Case: $case")
         }
+    }
+
+    @Test fun writeToolDecoderAcceptsMaximumBatchOfEightOperations() {
+        val batch = Array(8) { index -> create("file$index.md", "content-$index") }
+
+        val decoded = TrustedWriteToolSchema.decode(writeOperations(*batch))
+
+        assertEquals((0 until 8).map { index ->
+            WriteOperation.Create("file$index.md", "content-$index")
+        }, decoded)
     }
 
     @Test fun writeToolDecoderLimitsUtf8ByteCountAndRejectsNul() {
