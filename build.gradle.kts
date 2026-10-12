@@ -41,7 +41,7 @@ tasks.register("checkArchitecture") {
             for (configuration in module.configurations.sortedBy { it.name }) {
                 for (dependency in configuration.dependencies) {
                     if (dependency is org.gradle.api.artifacts.ProjectDependency) {
-                        val target = dependency.dependencyProject.path
+                        val target = dependency.path
                         edges.getValue(module.path).add(target)
                         if (target !in allowed.orEmpty()) {
                             problems += "Forbidden project dependency " + module.path + ":" +
