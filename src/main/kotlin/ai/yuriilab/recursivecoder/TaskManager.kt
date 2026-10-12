@@ -388,7 +388,7 @@ class TaskService(val store: TaskStore, private val clock: Clock = Clock.systemU
                     TaskState.FAILED, TaskState.CANCELLED)) continue
             if (task.state == TaskState.NEEDS_ATTENTION &&
                 task.reason?.startsWith("dependency:") != true) continue
-            val missing = task.dependencies.map(db::find).firstOrNull {
+            val missing = task.dependencies.map { dependency -> db.find(dependency) }.firstOrNull {
                 it.state in setOf(TaskState.FAILED, TaskState.CANCELLED, TaskState.NEEDS_ATTENTION)
             }
             val next = when {
