@@ -5,7 +5,9 @@ import java.nio.file.Path
 import kotlin.system.exitProcess
 
 /** Run the standalone CLI; Clikt handles syntax before any runtime is constructed. */
-fun main(args: Array<String>): Nothing = exitProcess(executeCli(args.toList()))
+fun main(args: Array<String>) {
+    exitProcess(executeCli(args.toList()))
+}
 
 /** Execute one first-party SessionRequest v1 with the configured model provider. */
 internal fun executeSession(requestPath: Path, delayMs: Long): Int {
