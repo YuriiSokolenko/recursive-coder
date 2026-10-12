@@ -16,6 +16,7 @@ application {
 
 dependencies {
     implementation("ai.koog:koog-agents:1.3.0")
+    implementation("com.github.ajalt.clikt:clikt:5.1.0")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
     testImplementation(kotlin("test-junit5"))
     testRuntimeOnly("org.junit.jupiter:junit-jupiter-engine:5.12.2")
