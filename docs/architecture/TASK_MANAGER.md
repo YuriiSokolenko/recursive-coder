@@ -63,11 +63,12 @@ working Git repository so its session outputs cannot mutate the workspace.
 
 ## Ordering, durability, and recovery
 
-The scheduler runs at most 1–32 local sessions concurrently. Among ready
-tasks it selects the maximum of `priority + min(waitTurns,1000)*10`, breaking
-ties by earliest queue order. A waiting task gains one turn whenever another
-task is claimed, preventing unbounded starvation by newly arriving higher
-priority tasks. Dependency unblocking and manual retries re-enter the queue
+The scheduler runs at most 1–32 local sessions concurrently. On seven of every eight dispatches the scheduler selects the maximum of
+`priority + min(waitTurns,1000)*10`, breaking ties by earliest queue order.
+Every eighth dispatch selects the oldest ready task regardless of priority.
+A waiting task also gains one turn whenever another task is claimed. This
+persistent FIFO quota prevents starvation even if all tasks entered the
+queue together with unequal priorities. Dependency unblocking and manual retries re-enter the queue
 with fresh order; pause/resume keeps existing waiting credit.
 
 All queue mutations are serialized with both a JVM mutex and an OS file lock.
