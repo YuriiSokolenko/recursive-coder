@@ -587,8 +587,9 @@ class TaskScheduler(
                         }
                         val finishedIds = active.entries.filter { it.value.future.isDone }.map { it.key }
                         finishedIds.forEach { sessionId ->
-                            val attempt = active.remove(sessionId)!!
+                            val attempt = active.getValue(sessionId)
                             attempt.future.get()
+                            active.remove(sessionId)
                             completed++
                         }
                         if (active.isEmpty()) {
@@ -603,10 +604,19 @@ class TaskScheduler(
                         if (active.isNotEmpty()) requestStop()
                     } finally {
                         pool.shutdownNow()
-                        try { pool.awaitTermination(10, TimeUnit.SECONDS) } catch (_: InterruptedException) {
-                            Thread.currentThread().interrupt()
+                        // Keep the exclusive scheduler lock while any local worker remains alive.
+                        // Otherwise a fresh scheduler could start concurrent work on the same store.
+                        var interrupted = false
+                        var terminated = false
+                        while (!terminated) {
+                            try {
+                                terminated = pool.awaitTermination(1, TimeUnit.SECONDS)
+                            } catch (_: InterruptedException) {
+                                interrupted = true
+                            }
                         }
                         active.clear()
+                        if (interrupted) Thread.currentThread().interrupt()
                     }
                 }
                 return SchedulerReport(launched, completed, service.isPaused())
