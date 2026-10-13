@@ -166,8 +166,11 @@ class SessionController(
             Duration.between(clock.instant(), deadline).toMillis().coerceAtLeast(0), TimeUnit.MILLISECONDS)
 
         fun checkActive() {
-            if (SessionBudgetPolicy.deadlineReached(clock.instant(), deadline)) throw Stopped(true)
-            cancellation.check(deadline)
+            when (SessionBudgetPolicy.interruption(cancellation.signals(), clock.instant(), deadline)) {
+                SessionEndReason.TIMEOUT -> throw Stopped(true)
+                SessionEndReason.CANCELLATION -> throw Stopped(false)
+                else -> Unit
+            }
         }
 
         fun transition(to: SessionPhase, eventStatus: String = "completed") {
