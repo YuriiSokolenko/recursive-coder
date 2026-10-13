@@ -27,13 +27,16 @@ internal fun executeSession(requestPath: Path, delayMs: Long): Int {
     }
     val cancellation = Cancellation()
     val finished = CountDownLatch(1)
-    val runSession = resolveRunSessionUseCase(ModelGateways.create(provider, delayMs))
     val hook = Thread {
         cancellation.cancel()
         finished.await(3000, TimeUnit.MILLISECONDS)
     }
     Runtime.getRuntime().addShutdownHook(hook)
-    val result = try { runSession(request, cancellation).toSessionProtocolJson(request) } catch (_: Exception) {
+    val result = try {
+        withRunSessionUseCase(ModelGateways.create(provider, delayMs)) { useCase ->
+            useCase(request, cancellation)
+        }
+    } catch (_: Exception) {
         System.err.println("Session output initialization failed (no existing files were overwritten)")
         return 2
     } finally {
@@ -42,8 +45,8 @@ internal fun executeSession(requestPath: Path, delayMs: Long): Int {
             // The JVM is shutting down.
         }
     }
-    val status = result["status"]?.toString()?.trim('"') ?: "failed"
-    System.out.println(result.toString())
+    val status = result.outcome.wire
+    System.out.println(result.protocol.toString())
     System.err.println("Session " + request.sessionId + ": " + status +
         " | result=" + request.output("resultPath") +
         " | events=" + request.output("eventsPath"))
@@ -60,6 +63,5 @@ internal fun createSessionController(
     model: ModelGateway,
     cancellation: Cancellation = Cancellation()
 ): SessionController = SessionController(
-    request, model, cancellation, cliWorkspaceOpener, cliEventSinkFactory,
-    runSession = resolveRunSessionUseCase(model)
+    request, model, cancellation, cliWorkspaceOpener, cliEventSinkFactory
 )

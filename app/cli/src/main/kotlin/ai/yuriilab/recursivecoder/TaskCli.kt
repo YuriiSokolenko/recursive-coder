@@ -27,6 +27,8 @@ internal fun executeCli(args: List<String>): Int {
     } catch (error: Exception) {
         System.err.println(error.message ?: "Command failed")
         2
+    } finally {
+        root.close()
     }
 }
 
@@ -39,7 +41,11 @@ private class RecursiveCoderCommand : CliktCommand(name = "recursive-coder") {
     override val invokeWithoutSubcommand = true
     override fun help(context: Context) = "Run a coding session or manage local tasks."
 
-    init { subcommands(RunSessionCommand(), TasksCommand()) }
+    private val tasks = TasksCommand()
+
+    init { subcommands(RunSessionCommand(), tasks) }
+
+    fun close() = tasks.close()
 
     override fun run() {
         if (currentContext.invokedSubcommand == null) {
@@ -74,6 +80,7 @@ private class TasksCommand : CliktCommand(name = "tasks") {
         .convert { Path.of(it) }.multiple()
 
     private lateinit var storeDirectory: Path
+    private var composition: TaskComposition? = null
 
     init {
         subcommands(
@@ -94,9 +101,17 @@ private class TasksCommand : CliktCommand(name = "tasks") {
         if (!storeDirectory.isAbsolute) throw UsageError("Store directory must be absolute")
     }
 
-    // Construct the store only after Clikt has parsed every token and checked options.
-    fun service(): TaskService = resolveTaskService(storeDirectory)
-    fun enqueue(): EnqueueTaskUseCase = resolveEnqueueTaskUseCase(storeDirectory)
+    // Delay file store creation until after Clikt has validated the command.
+    private fun dependencies(): TaskComposition =
+        composition ?: TaskComposition(TaskStore(storeDirectory)).also { composition = it }
+
+    fun service(): TaskService = dependencies().service()
+    fun enqueue(): EnqueueTaskUseCase = dependencies().enqueue()
+
+    fun close() {
+        composition?.close()
+        composition = null
+    }
 }
 
 private class EnqueueTask(private val tasks: TasksCommand) : CliktCommand(name = "enqueue") {
@@ -183,7 +198,7 @@ private class RunTasks(private val tasks: TasksCommand) : CliktCommand(name = "r
         val concurrency = once(concurrencyOptions, "--concurrency", 1)
         val scheduler = TaskScheduler(tasks.service(), TaskRunner { request, cancellation ->
             val gateway = ModelGateways.create(ModelConfig.from(request.model).provider)
-            resolveRunSessionUseCase(gateway)(request, cancellation).outcome.wire
+            withRunSessionUseCase(gateway) { it(request, cancellation).outcome.wire }
         })
         val hook = Thread({ scheduler.requestStop() }, "task-scheduler-shutdown")
         Runtime.getRuntime().addShutdownHook(hook)

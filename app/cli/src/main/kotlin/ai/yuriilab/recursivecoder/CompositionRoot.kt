@@ -1,26 +1,22 @@
 package ai.yuriilab.recursivecoder
 
-import java.nio.file.Path
 import java.time.Clock
-import org.koin.dsl.koinApplication
 import org.koin.core.module.Module
+import org.koin.dsl.koinApplication
 import org.koin.dsl.module
 
 /**
- * CLI-owned dependency wiring. Neither core bounded context imports Koin.
- * A local KoinApplication is created per CLI invocation, never a global container.
+ * The CLI owns all Koin applications. Each command gets one task repository,
+ * and session-scoped applications are closed after each invocation.
+ * No Koin API is imported by core use cases or domain policies.
  */
-internal fun taskModule(storeDirectory: Path): Module = module {
+internal fun taskModule(repository: TaskRepository): Module = module {
     single<Clock> { Clock.systemUTC() }
-    single<TaskRepository> { TaskStore(storeDirectory) }
+    single<TaskRepository> { repository }
     factory<EnqueueTaskUseCase> { DefaultEnqueueTaskUseCase(get(), get()) }
     factory { TaskService(get(), get(), get()) }
 }
 
-/**
- * Model provider is chosen per execution; a Use Case and WorkspaceOpener are
- * factories, and Cancellation / workspace / journal are per-invocation resources.
- */
 internal fun sessionModule(model: ModelGateway): Module = module {
     single<Clock> { Clock.systemUTC() }
     single<ModelGateway> { model }
@@ -33,11 +29,32 @@ internal val cliWorkspaceOpener: WorkspaceOpener = WorkspaceOpener { request, on
     WorkspaceManager.open(request, onAudit, onStart)
 }
 
-internal fun resolveTaskService(storeDirectory: Path): TaskService =
-    koinApplication { modules(taskModule(storeDirectory)) }.koin.get()
+/** Command lifetime: one repository/lock owner for both service and enqueue. */
+internal class TaskComposition(repository: TaskRepository) : AutoCloseable {
+    private val application = koinApplication { modules(taskModule(repository)) }
+    private var closed = false
 
-internal fun resolveEnqueueTaskUseCase(storeDirectory: Path): EnqueueTaskUseCase =
-    koinApplication { modules(taskModule(storeDirectory)) }.koin.get()
+    private fun dependencies() = application.koin.also {
+        check(!closed) { "Task composition is closed" }
+    }
 
-internal fun resolveRunSessionUseCase(model: ModelGateway): RunSessionUseCase =
-    koinApplication { modules(sessionModule(model)) }.koin.get()
+    fun service(): TaskService = dependencies().get()
+    fun enqueue(): EnqueueTaskUseCase = dependencies().get()
+
+    override fun close() {
+        if (!closed) {
+            closed = true
+            application.close()
+        }
+    }
+}
+
+/** Per-session scope: close the container on success, denial and exceptions. */
+internal fun <T> withRunSessionUseCase(model: ModelGateway, action: (RunSessionUseCase) -> T): T {
+    val application = koinApplication { modules(sessionModule(model)) }
+    return try {
+        action(application.koin.get())
+    } finally {
+        application.close()
+    }
+}
