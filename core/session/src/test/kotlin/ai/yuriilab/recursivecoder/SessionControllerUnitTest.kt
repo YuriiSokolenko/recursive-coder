@@ -18,8 +18,16 @@ import org.junit.jupiter.api.io.TempDir
 @Tag("integration")
 class SessionControllerUnitTest {
     @TempDir lateinit var temp: Path
-    private val eventSink = InMemoryEventSink()
-    private val eventSinkFactory = EventSinkFactory { eventSink }
+    // A distinct sink belongs to each controller, even when a test starts more than one.
+    private var activeEventSink = InMemoryEventSink()
+    private var nextEventSink = activeEventSink
+    private val eventSink get() = activeEventSink
+    private val eventSinkFactory = EventSinkFactory {
+        nextEventSink.also { sink ->
+            activeEventSink = sink
+            nextEventSink = InMemoryEventSink()
+        }
+    }
 
     private fun sha256(text: String): String =
         MessageDigest.getInstance("SHA-256").digest(text.toByteArray(Charsets.UTF_8))
@@ -189,6 +197,16 @@ class SessionControllerUnitTest {
     }
 
     private fun JsonObject.value(key: String) = getValue(key).jsonPrimitive.content
+
+    @Test fun eachControllerReceivesItsOwnMemoryEventSink() {
+        val first = eventSinkFactory.open(temp.resolve("first.jsonl"))
+        val second = eventSinkFactory.open(temp.resolve("second.jsonl"))
+        assertNotSame(first, second)
+        first.append(buildJsonObject { put("type", "first") })
+        assertTrue((second as InMemoryEventSink).events.isEmpty())
+        first.close()
+        second.close()
+    }
 
     @Test fun successfulReadUsesOnlyInjectedPortsAndPreservesEventOrder() {
         val request = fixture()
