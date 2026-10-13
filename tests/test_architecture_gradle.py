@@ -18,7 +18,6 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 
 
-
 class _WindowsProcessJob:
     """Track descendants after the direct Gradle process exits on Windows."""
 
