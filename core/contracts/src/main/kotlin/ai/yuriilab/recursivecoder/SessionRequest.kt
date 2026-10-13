@@ -164,6 +164,9 @@ class SessionRequest private constructor(val raw: JsonObject) {
 
 }
 
+/** Snapshot of externally requested cancellation and watchdog timeout. */
+data class CancellationSignals(val requested: Boolean, val expired: Boolean)
+
 class Cancellation {
     private val requested = AtomicBoolean()
     private val expired = AtomicBoolean()
@@ -171,6 +174,7 @@ class Cancellation {
     fun bind() { worker = Thread.currentThread(); if (requested.get()) worker?.interrupt() }
     fun cancel() { requested.set(true); worker?.interrupt() }
     fun expire() { expired.set(true); worker?.interrupt() }
+    fun signals(): CancellationSignals = CancellationSignals(requested.get(), expired.get())
     fun check(deadline: Instant) {
         if (expired.get() || !Instant.now().isBefore(deadline)) throw Stopped(true)
         if (requested.get()) throw Stopped(false)
