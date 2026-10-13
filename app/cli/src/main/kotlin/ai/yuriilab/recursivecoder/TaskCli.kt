@@ -95,7 +95,8 @@ private class TasksCommand : CliktCommand(name = "tasks") {
     }
 
     // Construct the store only after Clikt has parsed every token and checked options.
-    fun service(): TaskService = TaskService(TaskStore(storeDirectory))
+    fun service(): TaskService = resolveTaskService(storeDirectory)
+    fun enqueue(): EnqueueTaskUseCase = resolveEnqueueTaskUseCase(storeDirectory)
 }
 
 private class EnqueueTask(private val tasks: TasksCommand) : CliktCommand(name = "enqueue") {
@@ -117,7 +118,7 @@ private class EnqueueTask(private val tasks: TasksCommand) : CliktCommand(name =
         if (!requestPath.isAbsolute || !Files.isRegularFile(requestPath) ||
             Files.size(requestPath) > 262144
         ) throw UsageError("Invalid request path")
-        echo(tasks.service().enqueue(Files.readString(requestPath), priority, dependencies).toPublicJson())
+        echo(tasks.enqueue()(Files.readString(requestPath), priority, dependencies).toPublicJson())
     }
 }
 

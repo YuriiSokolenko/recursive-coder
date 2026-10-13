@@ -12,6 +12,8 @@ dependencies {
     implementation(project(":infra:task-store"))
     implementation(project(":infra:journal"))
     implementation("com.github.ajalt.clikt:clikt:5.1.0")
+    implementation("io.insert-koin:koin-core:4.2.2")
+    testImplementation("io.insert-koin:koin-test:4.2.2")
 }
 
 application {

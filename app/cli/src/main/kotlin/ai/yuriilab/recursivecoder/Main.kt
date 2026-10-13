@@ -2,6 +2,8 @@ package ai.yuriilab.recursivecoder
 
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.system.exitProcess
 
 /** Run the standalone CLI; Clikt handles syntax before any runtime is constructed. */
@@ -23,16 +25,19 @@ internal fun executeSession(requestPath: Path, delayMs: Long): Int {
         System.err.println("--fake-delay-ms is supported only for the fake provider")
         return 2
     }
-    val controller = createSessionController(request, ModelGateways.create(provider, delayMs))
+    val cancellation = Cancellation()
+    val finished = CountDownLatch(1)
+    val runSession = resolveRunSessionUseCase(ModelGateways.create(provider, delayMs))
     val hook = Thread {
-        controller.cancellation.cancel()
-        controller.awaitFinished(3000)
+        cancellation.cancel()
+        finished.await(3000, TimeUnit.MILLISECONDS)
     }
     Runtime.getRuntime().addShutdownHook(hook)
-    val result = try { controller.run() } catch (_: Exception) {
+    val result = try { runSession(request, cancellation) } catch (_: Exception) {
         System.err.println("Session output initialization failed (no existing files were overwritten)")
         return 2
     } finally {
+        finished.countDown()
         try { Runtime.getRuntime().removeShutdownHook(hook) } catch (_: IllegalStateException) {
             // The JVM is shutting down.
         }
@@ -49,12 +54,12 @@ internal fun executeSession(requestPath: Path, delayMs: Long): Int {
 internal val cliEventSinkFactory: EventSinkFactory =
     EventSinkFactory { path -> JsonlEventSink.open(path) }
 
-/** Composition root: core modules do not reference concrete workspace or HTTP adapters. */
+/** Compatibility adapter used by existing integration clients. */
 internal fun createSessionController(
     request: SessionRequest,
     model: ModelGateway,
     cancellation: Cancellation = Cancellation()
-): SessionController = SessionController(request, model, cancellation,
-    WorkspaceOpener { workspaceRequest, onAudit, onStart ->
-        WorkspaceManager.open(workspaceRequest, onAudit, onStart)
-    }, cliEventSinkFactory)
+): SessionController = SessionController(
+    request, model, cancellation, cliWorkspaceOpener, cliEventSinkFactory,
+    runSession = resolveRunSessionUseCase(model)
+)
