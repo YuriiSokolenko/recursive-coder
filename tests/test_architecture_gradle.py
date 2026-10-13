@@ -281,11 +281,17 @@ class ArchitectureConfigurationCacheRegressionTest(unittest.TestCase):
                     encoding="utf-8",
                 )
                 try:
+                    # Gradle 9.8.1 names the invalidated compile task input,
+                    # rather than the Kotlin source file, in its cache reason.
+                    self.assertIn(
+                        '":core:tasks" to emptySet(),',
+                        rules_file.read_text(encoding="utf-8"),
+                    )
                     self.assert_cache_invalidated(
                         fixture,
                         "Forbidden project dependency "
                         ":core:tasks:implementation -> :core:contracts",
-                        r"ArchitectureGraph\.kt",
+                        r"an input to task ':build-logic:compileKotlin' has changed",
                     )
                 finally:
                     rules_file.write_text(original_rules, encoding="utf-8")
