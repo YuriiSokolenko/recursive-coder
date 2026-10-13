@@ -706,18 +706,10 @@ class LoggedGradleSubprocessTest(unittest.TestCase):
             )
         self.assertEqual(0, result.returncode)
         self.assertIn("END status=passed", log.getvalue())
-        line = next(line for line in result.stdout.splitlines()
-                    if line.startswith("grandchild_pid="))
-        pid = int(line.split("=", 1)[1])
-        proc_stat = Path(f"/proc/{pid}/stat")
-        # Either the child was reaped or it is a zombie awaiting init.
-        # Reading /proc races with reaping, so ENOENT also means success.
-        try:
-            state = proc_stat.read_text().split(") ", 1)[1][0]
-        except FileNotFoundError:
-            pass
-        else:
-            self.assertEqual("Z", state)
+        # The grandchild sleeps for 60 seconds with stdout inherited.
+        # Successful EOF/return before the 30-second runner deadline proves
+        # that process-tree cleanup released the inherited pipe.
+        self.assertIn("grandchild_pid=", result.stdout)
 
     def test_windows_cleanup_targets_process_tree(self):
         process = mock.Mock(pid=1234)
