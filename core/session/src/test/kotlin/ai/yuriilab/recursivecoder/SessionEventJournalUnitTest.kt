@@ -106,6 +106,21 @@ class SessionEventJournalUnitTest {
         }
     }
 
+    @Test fun failedWriteCannotLaterProduceAVerifiedJournal() {
+        val sink = InMemoryEventSink().apply { failFlush = true }
+        val journal = journal(sink)
+        val original = assertFailsWith<EventSinkFailure> {
+            journal.append("llm.request", "started")
+        }
+        sink.failFlush = false
+        assertSame(original, assertFailsWith<EventSinkFailure> {
+            journal.append("llm.response", "completed")
+        })
+        assertSame(original, assertFailsWith<EventSinkFailure> { journal.finish() })
+        assertTrue(sink.closed)
+        assertEquals(0, journal.sequence)
+    }
+
     @Test fun closeFailureCannotProduceACommitChecksum() {
         val sink = InMemoryEventSink().apply { failClose = true }
         val journal = journal(sink)
