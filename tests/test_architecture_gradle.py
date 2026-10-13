@@ -762,7 +762,8 @@ class LoggedGradleSubprocessTest(unittest.TestCase):
                 "    time.sleep(0.02)\n"
                 "print('finished', flush=True)\n"
             )
-\n            class NotifyingOutput(io.StringIO):
+
+            class NotifyingOutput(io.StringIO):
                 def __init__(self) -> None:
                     super().__init__()
                     self.first_line = threading.Event()
