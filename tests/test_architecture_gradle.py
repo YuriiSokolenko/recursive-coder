@@ -28,13 +28,15 @@ def _stop_gradle_tree(process: subprocess.Popen[str], *, force: bool = False) ->
         # taskkill /T terminates the process tree, not just the Gradle parent.
         # Windows does not support POSIX process-group signals.
         try:
-            subprocess.run(
+            result = subprocess.run(
                 ["taskkill", "/PID", str(process.pid), "/T", "/F"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=10,
                 check=False,
             )
+            if result.returncode != 0 and process.poll() is None:
+                process.kill()
         except (OSError, subprocess.TimeoutExpired):
             if process.poll() is None:
                 process.kill()
@@ -645,6 +647,17 @@ class LoggedGradleSubprocessTest(unittest.TestCase):
             check=False,
         )
         process.kill.assert_not_called()
+
+    def test_windows_cleanup_falls_back_if_taskkill_fails(self):
+        process = mock.Mock(pid=1234)
+        process.poll.return_value = None
+        with (
+            mock.patch.object(os, "name", "nt"),
+            mock.patch.object(subprocess, "run") as command,
+        ):
+            command.return_value.returncode = 1
+            _stop_gradle_tree(process, force=True)
+        process.kill.assert_called_once_with()
 
     def test_stream_reaches_log_before_child_exits(self):
         with tempfile.TemporaryDirectory(prefix="gradle-logging-") as directory:
