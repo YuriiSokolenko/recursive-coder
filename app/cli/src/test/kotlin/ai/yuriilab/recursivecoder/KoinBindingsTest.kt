@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
 import org.koin.test.verify.verify
 import org.koin.dsl.module
+import org.koin.dsl.onClose
 import kotlin.test.*
 
 /** Close-tracking in-memory port used to test resource lifetime. */
