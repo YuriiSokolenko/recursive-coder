@@ -65,7 +65,10 @@ class ArchitectureBoundaryTest(unittest.TestCase):
 
     def test_unclassified_new_module(self):
         output = self.run_with_init_script(
-            "gradle.settingsEvaluated { settings -> settings.include(':unknown') }\n"
+            "gradle.settingsEvaluated { settings ->\n"
+            "    settings.include(':unknown')\n"
+            "    settings.project(':unknown').projectDir = new File(settings.rootDir, 'docs')\n"
+            "}\n"
         )
         self.assertIn("Unclassified module :unknown", output)
 
