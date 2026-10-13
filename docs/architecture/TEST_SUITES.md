@@ -17,6 +17,25 @@ Run `./gradlew checkArchitecture` or `./gradlew checkArchitecture --configuratio
 
 The checker also rejects unclassified new modules and direct core dependencies on Koog, Clikt and common HTTP framework dependency groups. Each forbidden edge diagnostic identifies its module, configuration and target. The Gradle task snapshots declared module/configuration/target coordinates during configuration and consumes only serializable inputs during execution; it never resolves dependencies. A standalone pure Kotlin graph verifier also tests an all-allowed synthetic cycle independently of the allowlist. CI covers illegal production and test dependencies, a test-only cycle, unknown modules, a forbidden core framework group, and valid graphs.
 
+### Configuration-cache invalidation regression (issue #41)
+
+A cache hit is not a permanent architecture approval. The Python regression in
+`tests/test_architecture_gradle.py` copies only Gradle build inputs and the local
+`build-logic` into an isolated temporary project. On Gradle 9.8.1 it first runs
+`checkArchitecture --configuration-cache` on a valid graph, then proves that
+the second run **reuses** the cache. After the cache hit, it changes a copied
+module `build.gradle.kts` to add an illegal `implementation` edge and,
+separately, an illegal `testImplementation` edge. Each run must fail with
+module/configuration/target diagnostics and show that Gradle **invalidated the
+cache because the build file changed** and recalculated the task graph.
+
+After each negative case it restores the original input and requires the
+valid graph to pass again. The restored run may either reuse a matching valid
+entry or reconfigure; an invalidated entry is **not** expected to be reused.
+The fixture never modifies the checkout, resolves dependencies, or calls a
+model service. CI runs it together with the other architecture regressions
+using the pinned Gradle 9.8.1 installation.
+
 **Scope and existing exceptions:** The rules cover Gradle project dependencies and selected external framework groups, not imports or the implementation of port interfaces. The included `build-logic` build belongs to Gradle tooling, not product modules. Current `:core:tasks` has a file-backed `TaskStore` and `:core:session` still writes a physical event journal internally. These are *existing extraction debts* tracked by issues #27 and #29, not permissions for core to depend on infrastructure or CLI. This task deliberately does not refactor production code.
 
 ## Test taxonomy
