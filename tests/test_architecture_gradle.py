@@ -226,7 +226,6 @@ class ArchitectureConfigurationCacheRegressionTest(unittest.TestCase):
                     self.assert_valid(restored)
                     self.assertEqual(original, build_file.read_text(encoding="utf-8"))
 
-
     def test_non_module_inputs_invalidate_a_warmed_configuration_cache(self):
         with tempfile.TemporaryDirectory(prefix="architecture-input-cache-") as temporary:
             fixture = Path(temporary)
