@@ -66,8 +66,10 @@ class ArchitectureBoundaryTest(unittest.TestCase):
     def test_unclassified_new_module(self):
         output = self.run_with_init_script(
             "gradle.settingsEvaluated { settings ->\n"
-            "    settings.include(':unknown')\n"
-            "    settings.project(':unknown').projectDir = new File(settings.rootDir, 'docs')\n"
+            "    if (settings.rootProject.name == 'recursive-coder') {\n"
+            "        settings.include(':unknown')\n"
+            "        settings.project(':unknown').projectDir = new File(settings.rootDir, 'docs')\n"
+            "    }\n"
             "}\n"
         )
         self.assertIn("Unclassified module :unknown", output)
@@ -75,8 +77,10 @@ class ArchitectureBoundaryTest(unittest.TestCase):
     def test_forbidden_core_framework_in_test_configuration(self):
         output = self.run_with_init_script(
             "gradle.projectsEvaluated {\n"
-            "    def owner = gradle.rootProject.project(':core:session')\n"
-            "    owner.dependencies.add('testImplementation', 'io.ktor:ktor-client:1.0')\n"
+            "    if (gradle.rootProject.findProject(':core:session') != null) {\n"
+            "        def owner = gradle.rootProject.project(':core:session')\n"
+            "        owner.dependencies.add('testImplementation', 'io.ktor:ktor-client:1.0')\n"
+            "    }\n"
             "}\n"
         )
         self.assertIn(
