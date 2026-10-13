@@ -288,14 +288,14 @@ class SessionController(
         val finishedAt = clock.instant()
         val outcome = checkNotNull(finalOutcome)
         val diagnosticsPath = request.output("diagnosticsPath")
-        val diagnostics = SessionResultMapper.diagnostics(request.sessionId, outcome, journal.sequence)
+        val diagnostics = SessionResultMapper.diagnostics(request.sessionId, outcome, journal.sequence.toLong())
         Files.writeString(diagnosticsPath, diagnostics.toString(),
             StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
         val result = SessionResultMapper.encode(SessionRunResult(
             outcome = outcome,
             startedAt = started,
             finishedAt = finishedAt,
-            lastEventSeq = journal.sequence,
+            lastEventSeq = journal.sequence.toLong(),
             eventLog = SessionArtifact(request.output("eventsPath"), checkNotNull(eventDigest)),
             diagnostics = SessionResultMapper.artifact(diagnosticsPath),
             failure = failure,
