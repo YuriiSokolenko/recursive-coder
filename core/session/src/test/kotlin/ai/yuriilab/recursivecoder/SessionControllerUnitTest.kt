@@ -100,6 +100,7 @@ class SessionControllerUnitTest {
         var readCount = 0
         var closed = false
         var denyRead = false
+        var failClose = false
         private var onAudit: (ToolAudit) -> Unit = {}
         private var onStart: (String, String, Instant) -> Unit = { _, _, _ -> }
 
@@ -139,7 +140,10 @@ class SessionControllerUnitTest {
             return ToolOutcome(receipt, tool.name, data, code)
         }
 
-        override fun close() { closed = true }
+        override fun close() {
+            closed = true
+            if (failClose) error("Injected workspace close failure")
+        }
 
         private fun digest(text: String): String =
             MessageDigest.getInstance("SHA-256").digest(text.toByteArray(Charsets.UTF_8))
@@ -330,6 +334,22 @@ class SessionControllerUnitTest {
         assertEquals(1, eventSink.events.size)
         assertEquals(1, eventSink.events.single().getValue("sequence").jsonPrimitive.int)
         assertTrue(workspace.closed)
+    }
+
+    @Test fun journalErrorSurvivesAnotherFailureDuringCleanup() {
+        val request = fixture()
+        val workspace = StubWorkspace(request, "Read the isolated task").apply { failClose = true }
+        eventSink.failFlush = true
+
+        val original = assertFailsWith<EventSinkFailure> {
+            run(request, StubGateway(), workspace)
+        }
+        assertEquals("Injected flush failure", original.cause?.message)
+        assertEquals(1, original.suppressed.size)
+        assertEquals("Injected workspace close failure", original.suppressed.single().message)
+        assertTrue(workspace.closed)
+        assertTrue(eventSink.closed)
+        assertFalse(Files.exists(request.output("resultPath")))
     }
 
     @Test fun journalCloseFailureNeverPublishesSuccessResult() {
