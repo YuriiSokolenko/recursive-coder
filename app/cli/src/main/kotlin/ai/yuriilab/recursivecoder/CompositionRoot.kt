@@ -14,6 +14,31 @@ internal fun taskModule(repository: TaskRepository): Module = module {
     single<Clock> { Clock.systemUTC() }
     single<TaskRepository> { repository }
     factory<EnqueueTaskUseCase> { DefaultEnqueueTaskUseCase(get(), get()) }
+    factory<TaskQueriesUseCase> { DefaultTaskQueriesUseCase(get()) }
+    factory<CancelTaskUseCase> { DefaultCancelTaskUseCase(get(), get()) }
+    factory<RetryTaskUseCase> { DefaultRetryTaskUseCase(get(), get()) }
+    factory<PauseTaskQueueUseCase> { DefaultPauseTaskQueueUseCase(get(), get()) }
+    factory<ResumeTaskQueueUseCase> { DefaultResumeTaskQueueUseCase(get(), get()) }
+    factory<ReplaceTaskDependenciesUseCase> { DefaultReplaceTaskDependenciesUseCase(get(), get()) }
+    factory<CancelAllTasksUseCase> { DefaultCancelAllTasksUseCase(get(), get()) }
+    factory<ClaimNextTaskUseCase> { DefaultClaimNextTaskUseCase(get(), get()) }
+    factory<CompleteTaskAttemptUseCase> { DefaultCompleteTaskAttemptUseCase(get(), get()) }
+    factory<InterruptTaskAttemptUseCase> { DefaultInterruptTaskAttemptUseCase(get(), get()) }
+    factory<RecoverInterruptedAttemptsUseCase> { DefaultRecoverInterruptedAttemptsUseCase(get(), get()) }
+    factory<PrepareTaskAttemptUseCase> { DefaultPrepareTaskAttemptUseCase(get()) }
+    factory<TaskRunner> {
+        TaskRunner { request, cancellation ->
+            val gateway = ModelGateways.create(ModelConfig.from(request.model).provider)
+            withRunSessionUseCase(gateway) { it(request, cancellation).outcome.wire }
+        }
+    }
+    factory {
+        TaskScheduler(
+            repository = get(), queries = get(), claim = get(), complete = get(),
+            interrupt = get(), recover = get(), prepare = get(), runner = get()
+        )
+    }
+    // Compatibility adapter for callers still using the original in-process API.
     factory { TaskService(get(), get(), get()) }
 }
 
@@ -38,8 +63,16 @@ internal class TaskComposition(repository: TaskRepository) : AutoCloseable {
         check(!closed) { "Task composition is closed" }
     }
 
-    fun service(): TaskService = dependencies().get()
+    fun service(): TaskService = dependencies().get() // Compatibility adapter only.
     fun enqueue(): EnqueueTaskUseCase = dependencies().get()
+    fun queries(): TaskQueriesUseCase = dependencies().get()
+    fun cancel(): CancelTaskUseCase = dependencies().get()
+    fun retry(): RetryTaskUseCase = dependencies().get()
+    fun pause(): PauseTaskQueueUseCase = dependencies().get()
+    fun resume(): ResumeTaskQueueUseCase = dependencies().get()
+    fun cancelAll(): CancelAllTasksUseCase = dependencies().get()
+    fun replaceDependencies(): ReplaceTaskDependenciesUseCase = dependencies().get()
+    fun scheduler(): TaskScheduler = dependencies().get()
 
     override fun close() {
         if (!closed) {
