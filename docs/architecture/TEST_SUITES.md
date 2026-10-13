@@ -51,6 +51,9 @@ The three input changes are:
 - **Build logic:** removing `:core:contracts` from the `:core:tasks` allowlist
   in the copied `ArchitectureGraph.kt` causes the existing
   `:core:tasks:implementation -> :core:contracts` edge to be rejected.
+  Gradle 9.8.1 reports the invalidation as a changed input to
+  `:build-logic:compileKotlin`, not as an `ArchitectureGraph.kt` path;
+  the fixture separately confirms the source edit.
 - **Settings:** including a temporary `:architectureUnclassified` project
   through the copied `settings.gradle.kts` triggers an
   `Unclassified module` diagnostic; the directory is entirely fixture-local.
