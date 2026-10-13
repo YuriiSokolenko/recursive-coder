@@ -310,11 +310,15 @@ class ArchitectureConfigurationCacheRegressionTest(unittest.TestCase):
             fixture = Path(temporary)
             self.copy_fixture(fixture)
 
-            cold = self.check_architecture(fixture, scenario="module build.gradle.kts baseline", phase="cold-warmup")
+            cold = self.check_architecture(
+                fixture, scenario="module build.gradle.kts baseline", phase="cold-warmup"
+            )
             self.assert_valid(cold)
             self.assertIn("Configuration cache entry stored.", cold.stdout)
 
-            warm = self.check_architecture(fixture, scenario="module build.gradle.kts baseline", phase="cache-reuse")
+            warm = self.check_architecture(
+                fixture, scenario="module build.gradle.kts baseline", phase="cache-reuse"
+            )
             self.assert_valid(warm)
             self.assertIn("Reusing configuration cache.", warm.stdout)
 
@@ -334,7 +338,11 @@ class ArchitectureConfigurationCacheRegressionTest(unittest.TestCase):
                     )
                     build_file.write_text(original + injection, encoding="utf-8")
                     try:
-                        rejected = self.check_architecture(fixture, scenario=f"{relative.as_posix()} ({configuration} -> {target})", phase="invalidated")
+                        rejected = self.check_architecture(
+                            fixture,
+                            scenario=f"{relative.as_posix()} ({configuration} -> {target})",
+                            phase="invalidated",
+                        )
                         self.assertNotEqual(0, rejected.returncode, rejected.stdout)
                         self.assertIn(
                             f"Forbidden project dependency {module}:{configuration} -> {target}",
@@ -352,7 +360,11 @@ class ArchitectureConfigurationCacheRegressionTest(unittest.TestCase):
 
                     # Restoring exactly the original build input must pass,
                     # regardless of whether Gradle reuses or rebuilds the entry.
-                    restored = self.check_architecture(fixture, scenario=f"{relative.as_posix()} ({configuration} -> {target})", phase="restored")
+                    restored = self.check_architecture(
+                        fixture,
+                        scenario=f"{relative.as_posix()} ({configuration} -> {target})",
+                        phase="restored",
+                    )
                     self.assert_valid(restored)
                     self.assertEqual(original, build_file.read_text(encoding="utf-8"))
 
@@ -393,10 +405,12 @@ class ArchitectureConfigurationCacheRegressionTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            cold = self.check_architecture(fixture, scenario="non-module inputs baseline", phase="cold-warmup")
+            cold = self.check_architecture(
+                fixture, scenario="non-module inputs baseline", phase="cold-warmup"
+            )
             self.assert_valid(cold)
             self.assertIn("Configuration cache entry stored.", cold.stdout)
-            self.assert_cache_hit(fixture, scenario='non-module inputs baseline')
+            self.assert_cache_hit(fixture, scenario="non-module inputs baseline")
 
             # 1. Change the compiled allowlist, not any module build script.
             # :core:tasks already declares :core:contracts; the new rule
@@ -429,7 +443,9 @@ class ArchitectureConfigurationCacheRegressionTest(unittest.TestCase):
                 self.assertEqual(
                     original_rules, rules_file.read_text(encoding="utf-8")
                 )
-                self.assert_restored_cache_ready(fixture, scenario='build-logic ArchitectureGraph.kt rules')
+                self.assert_restored_cache_ready(
+                    fixture, scenario="build-logic ArchitectureGraph.kt rules"
+                )
 
             # 2. Include a new fixture-local module through settings, rather
             # than injecting one with a Gradle init script.
@@ -457,7 +473,7 @@ class ArchitectureConfigurationCacheRegressionTest(unittest.TestCase):
                 self.assertEqual(
                     original_settings, settings_file.read_text(encoding="utf-8")
                 )
-                self.assert_restored_cache_ready(fixture, scenario='settings.gradle.kts')
+                self.assert_restored_cache_ready(fixture, scenario="settings.gradle.kts")
 
             # 3. Flip only the tracked fixture property. The build script and
             # Gradle daemon/JVM settings stay unchanged across the cache hit.
@@ -480,7 +496,11 @@ class ArchitectureConfigurationCacheRegressionTest(unittest.TestCase):
                     properties_file.write_text(
                         properties_with_disabled_edge, encoding="utf-8"
                     )
-                restored = self.check_architecture(fixture, scenario="gradle.properties (architectureFixtureIllegalEdge)", phase="restored")
+                restored = self.check_architecture(
+                    fixture,
+                    scenario="gradle.properties (architectureFixtureIllegalEdge)",
+                    phase="restored",
+                )
                 self.assert_valid(restored)
                 self.assertEqual(
                     properties_with_disabled_edge,
@@ -509,6 +529,52 @@ class LoggedGradleSubprocessTest(unittest.TestCase):
         self.assertLess(log.getvalue().index("err\n"), log.getvalue().index("END"))
         self.assertIn("status=failed exit=7", log.getvalue())
 
+    def test_stream_reaches_log_before_child_exits(self):
+        with tempfile.TemporaryDirectory(prefix="gradle-logging-") as directory:
+            release = Path(directory) / "release"
+            code = (
+                "import pathlib, time\n"
+                f"release = pathlib.Path({str(release)!r})\n"
+                "print('first line', flush=True)\n"
+                "while not release.exists():\n"
+                "    time.sleep(0.02)\n"
+                "print('finished', flush=True)\n"
+            )
+            log = io.StringIO()
+            results = []
+            failures = []
+
+            def invoke() -> None:
+                try:
+                    results.append(
+                        run_logged_gradle(
+                            [sys.executable, "-u", "-c", code],
+                            cwd=ROOT,
+                            scenario="live fixture",
+                            phase="cold-warmup",
+                            sequence=1,
+                            timeout=10,
+                        )
+                    )
+                except BaseException as error:
+                    failures.append(error)
+
+            with redirect_stdout(log):
+                worker = threading.Thread(target=invoke)
+                worker.start()
+                try:
+                    deadline = time.monotonic() + 5
+                    while "first line\n" not in log.getvalue() and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    self.assertIn("first line\n", log.getvalue())
+                    self.assertTrue(worker.is_alive(), "Child exited before release")
+                finally:
+                    release.touch()
+                    worker.join(timeout=5)
+            self.assertFalse(worker.is_alive(), "Runner did not exit after release")
+            self.assertEqual([], failures)
+            self.assertEqual("first line\nfinished\n", results[0].stdout)
+
     def test_timeout_reports_scenario_and_partial_output(self):
         log = io.StringIO()
         with redirect_stdout(log):
@@ -519,7 +585,7 @@ class LoggedGradleSubprocessTest(unittest.TestCase):
                         "import time; print('diagnostic', flush=True); time.sleep(60)",
                     ],
                     cwd=ROOT, scenario="settings.gradle.kts",
-                    phase="invalidated", sequence=2, timeout=0.5,
+                    phase="invalidated", sequence=2, timeout=1.5,
                 )
         self.assertIn("settings.gradle.kts", str(error.exception))
         self.assertIn("diagnostic", str(error.exception))
