@@ -395,4 +395,56 @@ class SessionControllerUnitTest {
         assertEquals(0, workspace.readCount)
         assertTrue(workspace.closed)
     }
+
+    @Test fun runSessionInterfaceExecutesWithInjectedPorts() {
+        val request = fixture()
+        val gateway = StubGateway()
+        val workspace = StubWorkspace(request, "Read the isolated task")
+        val useCase: RunSessionUseCase = DefaultRunSessionUseCase(
+            gateway, WorkspaceOpener { _, audit, start -> workspace.attach(audit, start) },
+            eventSinkFactory
+        )
+        val result = useCase(request, Cancellation())
+        assertEquals("succeeded", result.value("status"))
+        assertEquals(1, workspace.readCount)
+        assertEquals(2, gateway.turns)
+        assertTrue(workspace.closed)
+    }
+
+    @Test fun useCaseRejectsBeforeOpeningWorkspace() {
+        val invalid = withField(fixture(), "version", JsonPrimitive("1.1"))
+        val gateway = StubGateway()
+        val useCase: RunSessionUseCase = DefaultRunSessionUseCase(
+            gateway, WorkspaceOpener { _, _, _ ->
+                throw AssertionError("Admission failure must precede opening a workspace")
+            }, eventSinkFactory
+        )
+        val result = useCase(invalid, Cancellation())
+        assertEquals("rejected", result.value("status"))
+        assertEquals(0, gateway.negotiations)
+    }
+
+    @Test fun compatibilityFacadeAcceptsSubstitutedUseCase() {
+        val request = fixture()
+        val expected = buildJsonObject { put("status", "succeeded") }
+        var invoked = false
+        val substitute = object : RunSessionUseCase {
+            override fun invoke(requestArg: SessionRequest, cancellation: Cancellation): JsonObject {
+                assertSame(request, requestArg)
+                invoked = true
+                return expected
+            }
+        }
+        val controller = SessionController(
+            request, StubGateway(),
+            workspaceOpener = WorkspaceOpener { _, _, _ ->
+                throw AssertionError("Injected use case must own the workspace")
+            },
+            eventSinkFactory = eventSinkFactory,
+            runSession = substitute
+        )
+        assertSame(expected, controller.run())
+        assertTrue(invoked)
+        assertTrue(controller.awaitFinished(10))
+    }
 }
