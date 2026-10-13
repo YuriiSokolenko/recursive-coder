@@ -45,6 +45,10 @@ internal fun executeSession(requestPath: Path, delayMs: Long): Int {
     return if (status == "succeeded") 0 else if (status == "rejected") 2 else 1
 }
 
+/** CLI-owned JSONL adapter selection shared by CLI integration fixtures. */
+internal val cliEventSinkFactory: EventSinkFactory =
+    EventSinkFactory { path -> JsonlEventSink.open(path) }
+
 /** Composition root: core modules do not reference concrete workspace or HTTP adapters. */
 internal fun createSessionController(
     request: SessionRequest,
@@ -53,4 +57,4 @@ internal fun createSessionController(
 ): SessionController = SessionController(request, model, cancellation,
     WorkspaceOpener { workspaceRequest, onAudit, onStart ->
         WorkspaceManager.open(workspaceRequest, onAudit, onStart)
-    }, EventSinkFactory { path -> JsonlEventSink.open(path) })
+    }, cliEventSinkFactory)
