@@ -3,6 +3,7 @@
 from contextlib import redirect_stdout
 import io
 import os
+import re
 from pathlib import Path
 import shutil
 import signal
@@ -17,7 +18,45 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def _stop_gradle_tree(process: subprocess.Popen[str], *, force: bool = False) -> None:
+
+class _WindowsProcessJob:
+    """Track descendants after the direct Gradle process exits on Windows."""
+
+    def __init__(self, process: subprocess.Popen[str]) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+        kernel.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        kernel.AssignProcessToJobObject.restype = wintypes.BOOL
+        kernel.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel.TerminateJobObject.restype = wintypes.BOOL
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel.CloseHandle.restype = wintypes.BOOL
+
+        handle = kernel.CreateJobObjectW(None, None)
+        if not handle:
+            raise OSError(ctypes.get_last_error(), "CreateJobObjectW failed")
+        if not kernel.AssignProcessToJobObject(handle, process._handle):
+            error = ctypes.get_last_error()
+            kernel.CloseHandle(handle)
+            raise OSError(error, "AssignProcessToJobObject failed")
+        self._kernel = kernel
+        self._handle = handle
+
+    def terminate(self) -> bool:
+        return bool(self._kernel.TerminateJobObject(self._handle, 1))
+
+    def close(self) -> None:
+        self._kernel.CloseHandle(self._handle)
+
+
+def _stop_gradle_tree(
+    process: subprocess.Popen[str], *, force: bool = False,
+    windows_job=None,
+) -> None:
     """Stop Gradle and its descendants, including children holding stdout."""
     if os.name == "posix":
         try:
@@ -25,6 +64,9 @@ def _stop_gradle_tree(process: subprocess.Popen[str], *, force: bool = False) ->
         except ProcessLookupError:
             pass
     elif os.name == "nt":
+        if windows_job is not None and windows_job.terminate():
+            return
+        # Fallback when Windows Job Objects are unavailable.
         # taskkill /T terminates the process tree, not just the Gradle parent.
         # Windows does not support POSIX process-group signals.
         try:
@@ -77,6 +119,17 @@ def run_logged_gradle(
         )
         raise
 
+    windows_job = None
+    if os.name == "nt":
+        try:
+            windows_job = _WindowsProcessJob(process)
+        except OSError as error:
+            print(
+                f"{label} WARNING Job Object unavailable ({error}); "
+                "falling back to taskkill",
+                flush=True,
+            )
+
     output_lines: list[str] = []
 
     def relay() -> None:
@@ -107,34 +160,49 @@ def run_logged_gradle(
                     flush=True,
                 )
     finally:
-        if timed_out:
-            _stop_gradle_tree(process)
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                _stop_gradle_tree(process, force=True)
-                process.wait()
-        reader.join(timeout=5)
-        if reader.is_alive():
-            # The Gradle parent can exit while a descendant still holds stdout.
-            _stop_gradle_tree(process, force=True)
+        try:
+            if timed_out:
+                _stop_gradle_tree(process, windows_job=windows_job)
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    _stop_gradle_tree(
+                        process, force=True, windows_job=windows_job
+                    )
+                    process.wait()
             reader.join(timeout=5)
-        if process.poll() is None:
-            _stop_gradle_tree(process, force=True)
-        process.wait()
-        if reader.is_alive():
-            # Closing TextIOWrapper from a second thread can block indefinitely
-            # when the relay is stuck inside a read. Fail boundedly instead.
-            print(
-                f"{label} END status=output-reader-stuck exit={process.returncode} "
-                f"elapsed={time.monotonic() - started:.1f}s",
-                flush=True,
-            )
-            raise AssertionError(
-                f"{label}: output reader did not exit after process-tree cleanup"
-            )
-        assert process.stdout is not None
-        process.stdout.close()
+            if reader.is_alive():
+                # Parent may exit while its descendants still hold stdout.
+                _stop_gradle_tree(
+                    process, force=True, windows_job=windows_job
+                )
+                reader.join(timeout=5)
+            if process.poll() is None:
+                _stop_gradle_tree(
+                    process, force=True, windows_job=windows_job
+                )
+            process.wait()
+            if reader.is_alive():
+                # Closing an active reader's pipe may itself hang.
+                status = "timeout" if timed_out else "output-reader-stuck"
+                print(
+                    f"{label} END status={status} exit={process.returncode} "
+                    f"elapsed={time.monotonic() - started:.1f}s",
+                    flush=True,
+                )
+                reason = (
+                    f"timed out after {timeout:g}s; reader remains stuck"
+                    if timed_out else "output reader did not exit"
+                )
+                raise AssertionError(
+                    f"{label} {reason} after process-tree cleanup; "
+                    "see streamed output above"
+                )
+            assert process.stdout is not None
+            process.stdout.close()
+        finally:
+            if windows_job is not None:
+                windows_job.close()
 
     transcript = "".join(output_lines)
     elapsed = time.monotonic() - started
@@ -166,7 +234,23 @@ def run_logged_gradle(
     return subprocess.CompletedProcess(command, process.returncode, transcript)
 
 
-class ArchitectureBoundaryTest(unittest.TestCase):
+class _GradleOutputAssertions(unittest.TestCase):
+    """Keep unittest assertions from duplicating live Gradle output."""
+
+    def assert_gradle_contains(self, expected: str, output: str) -> None:
+        if expected not in output:
+            self.fail(f"Expected {expected!r}; see streamed Gradle output above.")
+
+    def assert_gradle_not_contains(self, forbidden: str, output: str) -> None:
+        if forbidden in output:
+            self.fail(f"Unexpected {forbidden!r}; see streamed Gradle output above.")
+
+    def assert_gradle_regex(self, output: str, pattern: str) -> None:
+        if re.search(pattern, output) is None:
+            self.fail(f"Expected pattern {pattern!r}; see streamed Gradle output above.")
+
+
+class ArchitectureBoundaryTest(_GradleOutputAssertions):
     def run_with_edge(self, source: str, target: str, configuration: str) -> str:
         init_script = (
             "gradle.projectsEvaluated {\n"
@@ -210,14 +294,14 @@ class ArchitectureBoundaryTest(unittest.TestCase):
 
     def test_forbidden_core_to_adapter_test_dependency(self):
         output = self.run_with_edge(":core:session", ":infra:model", "testImplementation")
-        self.assertIn(
+        self.assert_gradle_contains(
             "Forbidden project dependency :core:session:testImplementation -> :infra:model",
             output,
         )
 
     def test_test_only_edge_cannot_complete_a_cycle(self):
         output = self.run_with_edge(":core:contracts", ":core:session", "testImplementation")
-        self.assertIn(
+        self.assert_gradle_contains(
             "Project dependency cycle (including tests): "
             ":core:contracts -> :core:session -> :core:contracts",
             output,
@@ -225,7 +309,7 @@ class ArchitectureBoundaryTest(unittest.TestCase):
 
     def test_forbidden_production_dependency(self):
         output = self.run_with_edge(":core:tasks", ":infra:workspace", "implementation")
-        self.assertIn(
+        self.assert_gradle_contains(
             "Forbidden project dependency :core:tasks:implementation -> :infra:workspace",
             output,
         )
@@ -239,7 +323,7 @@ class ArchitectureBoundaryTest(unittest.TestCase):
             "    }\n"
             "}\n"
         )
-        self.assertIn("Unclassified module :unknown", output)
+        self.assert_gradle_contains("Unclassified module :unknown", output)
 
     def test_forbidden_core_framework_in_test_configuration(self):
         output = self.run_with_init_script(
@@ -250,13 +334,13 @@ class ArchitectureBoundaryTest(unittest.TestCase):
             "    }\n"
             "}\n"
         )
-        self.assertIn(
+        self.assert_gradle_contains(
             "Forbidden core framework dependency :core:session:testImplementation -> io.ktor:ktor-client",
             output,
         )
 
 
-class ArchitectureConfigurationCacheRegressionTest(unittest.TestCase):
+class ArchitectureConfigurationCacheRegressionTest(_GradleOutputAssertions):
     """A previously valid cache entry must not conceal new forbidden edges."""
 
     @staticmethod
@@ -309,14 +393,14 @@ class ArchitectureConfigurationCacheRegressionTest(unittest.TestCase):
         self.assertEqual(
             0, result.returncode, "Gradle failed; see streamed output above."
         )
-        self.assertRegex(
+        self.assert_gradle_regex(
             result.stdout, r"Architecture boundaries verified for [1-9]\d* modules\."
         )
 
     def assert_cache_hit(self, fixture: Path, *, scenario: str) -> None:
         warm = self.check_architecture(fixture, scenario=scenario, phase="cache-reuse")
         self.assert_valid(warm)
-        self.assertIn("Reusing configuration cache.", warm.stdout)
+        self.assert_gradle_contains("Reusing configuration cache.", warm.stdout)
 
     def assert_restored_cache_ready(self, fixture: Path, *, scenario: str) -> None:
         restored = self.check_architecture(fixture, scenario=scenario, phase="restored")
@@ -333,15 +417,15 @@ class ArchitectureConfigurationCacheRegressionTest(unittest.TestCase):
         self.assertNotEqual(
             0, rejected.returncode, "Expected Gradle rejection; see streamed output."
         )
-        self.assertIn(diagnostic, rejected.stdout)
-        self.assertIn(
+        self.assert_gradle_contains(diagnostic, rejected.stdout)
+        self.assert_gradle_contains(
             "Calculating task graph as configuration cache cannot be reused",
             rejected.stdout,
         )
-        self.assertNotIn("Reusing configuration cache.", rejected.stdout)
+        self.assert_gradle_not_contains("Reusing configuration cache.", rejected.stdout)
         # Name the changed input in the invalidation reason, rather than
         # matching an unrelated Gradle progress message.
-        self.assertRegex(
+        self.assert_gradle_regex(
             rejected.stdout.replace("\\", "/"),
             r"Calculating task graph as configuration cache cannot be reused because [^\n]*"
             + input_pattern,
@@ -356,13 +440,13 @@ class ArchitectureConfigurationCacheRegressionTest(unittest.TestCase):
                 fixture, scenario="module build.gradle.kts baseline", phase="cold-warmup"
             )
             self.assert_valid(cold)
-            self.assertIn("Configuration cache entry stored.", cold.stdout)
+            self.assert_gradle_contains("Configuration cache entry stored.", cold.stdout)
 
             warm = self.check_architecture(
                 fixture, scenario="module build.gradle.kts baseline", phase="cache-reuse"
             )
             self.assert_valid(warm)
-            self.assertIn("Reusing configuration cache.", warm.stdout)
+            self.assert_gradle_contains("Reusing configuration cache.", warm.stdout)
 
             for module, configuration, target in (
                 (":core:tasks", "implementation", ":infra:workspace"),
@@ -389,17 +473,17 @@ class ArchitectureConfigurationCacheRegressionTest(unittest.TestCase):
                             0, rejected.returncode,
                             "Expected Gradle rejection; see streamed output.",
                         )
-                        self.assertIn(
+                        self.assert_gradle_contains(
                             f"Forbidden project dependency {module}:{configuration} -> {target}",
                             rejected.stdout,
                         )
-                        self.assertIn(
+                        self.assert_gradle_contains(
                             "Calculating task graph as configuration cache cannot be reused",
                             rejected.stdout,
                         )
-                        self.assertIn("has changed", rejected.stdout)
-                        self.assertIn(relative.as_posix(), rejected.stdout.replace("\\", "/"))
-                        self.assertNotIn("Reusing configuration cache.", rejected.stdout)
+                        self.assert_gradle_contains("has changed", rejected.stdout)
+                        self.assert_gradle_contains(relative.as_posix(), rejected.stdout.replace("\\", "/"))
+                        self.assert_gradle_not_contains("Reusing configuration cache.", rejected.stdout)
                     finally:
                         build_file.write_text(original, encoding="utf-8")
 
@@ -454,7 +538,7 @@ class ArchitectureConfigurationCacheRegressionTest(unittest.TestCase):
                 fixture, scenario="non-module inputs baseline", phase="cold-warmup"
             )
             self.assert_valid(cold)
-            self.assertIn("Configuration cache entry stored.", cold.stdout)
+            self.assert_gradle_contains("Configuration cache entry stored.", cold.stdout)
             self.assert_cache_hit(fixture, scenario="non-module inputs baseline")
 
             # 1. Change the compiled allowlist, not any module build script.
@@ -633,10 +717,9 @@ class LoggedGradleSubprocessTest(unittest.TestCase):
 
     def test_windows_cleanup_targets_process_tree(self):
         process = mock.Mock(pid=1234)
-        with (
-            mock.patch.object(os, "name", "nt"),
-            mock.patch.object(subprocess, "run") as command,
-        ):
+        with mock.patch.object(os, "name", "nt"), mock.patch.object(
+            subprocess, "run"
+        ) as command:
             command.return_value.returncode = 0
             _stop_gradle_tree(process, force=True)
         command.assert_called_once_with(
@@ -648,13 +731,23 @@ class LoggedGradleSubprocessTest(unittest.TestCase):
         )
         process.kill.assert_not_called()
 
+    def test_windows_job_terminates_orphans_after_parent_exit(self):
+        process = mock.Mock(pid=1234)
+        process.poll.return_value = 0
+        job = mock.Mock()
+        job.terminate.return_value = True
+        with mock.patch.object(os, "name", "nt"):
+            with mock.patch.object(subprocess, "run") as command:
+                _stop_gradle_tree(process, force=True, windows_job=job)
+        job.terminate.assert_called_once_with()
+        command.assert_not_called()
+
     def test_windows_cleanup_falls_back_if_taskkill_fails(self):
         process = mock.Mock(pid=1234)
         process.poll.return_value = None
-        with (
-            mock.patch.object(os, "name", "nt"),
-            mock.patch.object(subprocess, "run") as command,
-        ):
+        with mock.patch.object(os, "name", "nt"), mock.patch.object(
+            subprocess, "run"
+        ) as command:
             command.return_value.returncode = 1
             _stop_gradle_tree(process, force=True)
         process.kill.assert_called_once_with()
@@ -670,7 +763,7 @@ class LoggedGradleSubprocessTest(unittest.TestCase):
                 "    time.sleep(0.02)\n"
                 "print('finished', flush=True)\n"
             )
-            class NotifyingOutput(io.StringIO):
+\n            class NotifyingOutput(io.StringIO):
                 def __init__(self) -> None:
                     super().__init__()
                     self.first_line = threading.Event()
