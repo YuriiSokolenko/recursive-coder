@@ -125,7 +125,6 @@ class TrustedWriteRuntime private constructor(
         private const val MAX_FILE_BYTES = 64 * 1024
         private val shaPattern = Regex("[a-f0-9]{64}")
         private val gitPattern = Regex("[a-f0-9]{40}")
-        private val idPattern = Regex("[A-Za-z0-9][A-Za-z0-9._:-]{0,159}")
 
         private fun sha(bytes: ByteArray): String =
             MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
@@ -143,11 +142,11 @@ class TrustedWriteRuntime private constructor(
             // Never silently downgrade to path-based or followable filesystem operations.
             if (!System.getProperty("os.name").startsWith("Linux"))
                 fail("SANDBOX_UNAVAILABLE")
-            if (!idPattern.matches(policy.sessionId) || !gitPattern.matches(policy.baselineHead) ||
+            if (!ToolAuthorizationPolicy.validHostIdentifier(policy.sessionId) || !gitPattern.matches(policy.baselineHead) ||
                 policy.branch.isBlank() || policy.maxToolCalls !in 1..10_000 ||
                 policy.requiredChecks.isEmpty() ||
                 policy.requiredChecks.any { it != "git_diff_check" && it !in policy.checks } ||
-                policy.checks.keys.any { !idPattern.matches(it) || it == "git_diff_check" })
+                policy.checks.keys.any { !ToolAuthorizationPolicy.validHostIdentifier(it) || it == "git_diff_check" })
                 fail("INVALID_WRITE_POLICY")
             // Reject unwinnable Developer sessions before taking a workspace lease
             // or changing files. The trusted host, not the model, chooses test checks.
@@ -639,7 +638,8 @@ class TrustedWriteRuntime private constructor(
                     }
                 }
             } else {
-                val check = policy.checks[checkId] ?: fail("CHECK_NOT_ALLOWLISTED")
+                // authorizeCheck already established membership in the host's allowlist.
+                val check = policy.checks.getValue(checkId)
                 runIsolated(check)
             }
             if (verifyState() != manifest) fail("CHECK_WORKSPACE_CHANGED")

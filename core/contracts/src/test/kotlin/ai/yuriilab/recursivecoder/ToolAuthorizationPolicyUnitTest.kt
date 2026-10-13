@@ -43,6 +43,107 @@ class ToolAuthorizationPolicyUnitTest {
         }
     }
 
+    /**
+     * BEFORE/AFTER GOLDEN FIXTURES.
+     * The expected denial codes below were transcribed from the inline authorized(path)
+     * implementation at dev@04018999bafa9cba4cc49c1d72b0d4cd8ec03057, before #30.
+     * These are fixed outcomes, NOT recomputed from the current ToolAuthorizationPolicy.
+     * A null expected code means the old implementation reached permit. The old function
+     * ignored operation kind; vary it here to detect accidental per-kind broadening.
+     */
+    private data class LegacyWriteFixture(
+        val label: String,
+        val role: EngineeringRole,
+        val path: String,
+        val expectedCode: String?,
+        val gitMode: String? = null,
+        val insideSubmodule: Boolean = false,
+        val immutable: Boolean = false,
+        val reviewed: Boolean = false
+    )
+
+    @TestFactory
+    fun preservesLegacyDevWriteDecisionFixtures(): List<DynamicTest> {
+        val before = listOf(
+            LegacyWriteFixture("SDD owns specs", EngineeringRole.SDD, "specs/Feature.md", null),
+            LegacyWriteFixture("ATDD owns acceptance", EngineeringRole.ATDD, "tests/acceptance/Feature.md", null),
+            LegacyWriteFixture("TDD owns src tests", EngineeringRole.TDD, "src/test/FeatureTest.kt", null),
+            LegacyWriteFixture("TDD owns unit tests", EngineeringRole.TDD, "tests/unit/Rules.kt", null),
+            LegacyWriteFixture("Developer owns main", EngineeringRole.DEVELOPER, "src/main/Feature.kt", null),
+            LegacyWriteFixture("Reviewer cannot write", EngineeringRole.REVIEWER, "src/main/Feature.kt", "ROLE_NOT_AUTHORIZED"),
+            LegacyWriteFixture("Developer cannot write specs", EngineeringRole.DEVELOPER, "specs/Feature.md", "ROLE_NOT_AUTHORIZED"),
+            LegacyWriteFixture("Developer cannot write unit tests", EngineeringRole.DEVELOPER, "tests/unit/Rules.kt", "ROLE_NOT_AUTHORIZED"),
+            LegacyWriteFixture("Developer cannot write acceptance tests", EngineeringRole.DEVELOPER, "tests/acceptance/Feature.md", "ROLE_NOT_AUTHORIZED"),
+            LegacyWriteFixture("TDD cannot write main", EngineeringRole.TDD, "src/main/Feature.kt", "ROLE_NOT_AUTHORIZED"),
+            LegacyWriteFixture("ATDD cannot write unit tests", EngineeringRole.ATDD, "tests/unit/Rules.kt", "ROLE_NOT_AUTHORIZED"),
+            LegacyWriteFixture("SDD protected env beats role", EngineeringRole.SDD, "specs/.env", "PROTECTED_PATH"),
+            LegacyWriteFixture("ATDD protected env beats role", EngineeringRole.ATDD, "tests/acceptance/.env", "PROTECTED_PATH"),
+            LegacyWriteFixture("TDD protected env beats role", EngineeringRole.TDD, "src/test/.env", "PROTECTED_PATH"),
+            LegacyWriteFixture("Reviewer protected path beats role", EngineeringRole.REVIEWER, "specs/.env", "PROTECTED_PATH"),
+            LegacyWriteFixture("Developer protected config beats role", EngineeringRole.DEVELOPER, "src/main/.github/config", "PROTECTED_PATH"),
+            LegacyWriteFixture("Developer test suffix", EngineeringRole.DEVELOPER, "src/main/FeatureTest.kt", "PROTECTED_PATH"),
+            LegacyWriteFixture("Developer mixed-case test suffix", EngineeringRole.DEVELOPER, "src/main/FooTEST.kt", "PROTECTED_PATH"),
+            LegacyWriteFixture("Developer mixed-case spec suffix", EngineeringRole.DEVELOPER, "src/main/FooSPEC.MD", "PROTECTED_PATH"),
+            LegacyWriteFixture("Developer ordinary file", EngineeringRole.DEVELOPER, "src/main/Feature.kt", null, "100644"),
+            LegacyWriteFixture("Executable regular Git file", EngineeringRole.DEVELOPER, "src/main/Runner.kt", null, "100755"),
+            LegacyWriteFixture("Symlink Git entry", EngineeringRole.DEVELOPER, "src/main/Alias.kt", "NONREGULAR_GIT_ENTRY", "120000"),
+            LegacyWriteFixture("Submodule Git entry", EngineeringRole.SDD, "specs/Link", "NONREGULAR_GIT_ENTRY", "160000"),
+            LegacyWriteFixture("Submodule child", EngineeringRole.DEVELOPER, "src/main/submodule/Feature.kt", "SUBMODULE_BOUNDARY", insideSubmodule = true),
+            LegacyWriteFixture("Submodule wins over Git mode", EngineeringRole.DEVELOPER, "src/main/submodule/Feature.kt", "SUBMODULE_BOUNDARY", "160000", insideSubmodule = true),
+            LegacyWriteFixture("Protected wins over submodule", EngineeringRole.SDD, "specs/.env", "PROTECTED_PATH", insideSubmodule = true),
+            LegacyWriteFixture("Role wins over submodule", EngineeringRole.ATDD, "src/main/submodule/Feature.kt", "ROLE_NOT_AUTHORIZED", insideSubmodule = true),
+            LegacyWriteFixture("Invalid traversal", EngineeringRole.DEVELOPER, "src/main/../outside.kt", "INVALID_TOOL_PATH"),
+            LegacyWriteFixture("Invalid traversal beats protected", EngineeringRole.DEVELOPER, "src/main/../.env", "INVALID_TOOL_PATH"),
+            LegacyWriteFixture("Invalid absolute path", EngineeringRole.SDD, "/etc/passwd", "INVALID_TOOL_PATH"),
+            LegacyWriteFixture("Invalid backslash", EngineeringRole.DEVELOPER, "src/main\\Alias.kt", "INVALID_TOOL_PATH"),
+            LegacyWriteFixture("Invalid empty segment", EngineeringRole.DEVELOPER, "src/main//Alias.kt", "INVALID_TOOL_PATH"),
+            LegacyWriteFixture("Frozen approved test", EngineeringRole.TDD, "src/test/FrozenTest.kt", "APPROVED_ARTIFACT_IMMUTABLE", immutable = true),
+            LegacyWriteFixture("Frozen approved spec", EngineeringRole.SDD, "specs/Frozen.md", "APPROVED_ARTIFACT_IMMUTABLE", immutable = true),
+            LegacyWriteFixture("Approved test with independent review", EngineeringRole.TDD, "src/test/FrozenTest.kt", null, immutable = true, reviewed = true),
+            LegacyWriteFixture("Review cannot widen scope", EngineeringRole.DEVELOPER, "src/test/FrozenTest.kt", "ROLE_NOT_AUTHORIZED", immutable = true, reviewed = true),
+            LegacyWriteFixture("Review cannot bypass nonregular Git entry", EngineeringRole.TDD, "src/test/FrozenTest.kt", "NONREGULAR_GIT_ENTRY", "160000", immutable = true, reviewed = true)
+        )
+        return before.flatMap { fixture ->
+            WriteOperationKind.entries.map { kind ->
+                DynamicTest.dynamicTest("dev-before: " + fixture.label + " (" + kind + ")") {
+                    val immutablePaths = if (fixture.immutable) setOf(fixture.path) else emptySet()
+                    val reviewedPaths = if (fixture.reviewed) setOf(fixture.path) else emptySet()
+                    val after = ToolAuthorizationPolicy.authorizeWrite(WriteAuthorizationFacts(
+                        actorRole = fixture.role,
+                        operationKind = kind,
+                        declaredPath = fixture.path,
+                        trackedGitMode = fixture.gitMode,
+                        withinSubmodule = fixture.insideSubmodule,
+                        immutableArtifactPaths = immutablePaths,
+                        independentlyReviewedPaths = reviewedPaths
+                    ))
+                    assertEquals(fixture.expectedCode, code(after), fixture.toString())
+                }
+            }
+        }
+    }
+
+    @Test
+    fun sharedHostIdentifierGrammarIsConsistentWithReviewValidation() {
+        val good = listOf("a", "issue-30.session:1", "Z".repeat(160))
+        val bad = listOf("", "_leading", "bad id", "x".repeat(161), "id/with/slash")
+        for (id in good) {
+            assertTrue(ToolAuthorizationPolicy.validHostIdentifier(id), id)
+            assertEquals(null, code(ToolAuthorizationPolicy.validateIndependentReview(
+                ReviewedChangeFacts(id, "author", "reviewer",
+                    EngineeringRole.TDD, EngineeringRole.TDD,
+                    setOf("src/test/FrozenTest.kt"), setOf("src/test/FrozenTest.kt")))))
+        }
+        for (id in bad) {
+            assertFalse(ToolAuthorizationPolicy.validHostIdentifier(id), id)
+            assertEquals("INVALID_REVIEW_AUTHORIZATION",
+                code(ToolAuthorizationPolicy.validateIndependentReview(
+                    ReviewedChangeFacts(id, "author", "reviewer",
+                        EngineeringRole.TDD, EngineeringRole.TDD,
+                        setOf("src/test/FrozenTest.kt"), setOf("src/test/FrozenTest.kt")))))
+        }
+    }
+
     @Test
     fun readAllowDenyMatrixUsesDenyPrecedenceAndFailClosedUnknownTools() {
         val known = ToolAuthorizationPolicy.knownReadTools

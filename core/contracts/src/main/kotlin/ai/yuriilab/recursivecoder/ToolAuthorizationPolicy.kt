@@ -7,6 +7,11 @@ package ai.yuriilab.recursivecoder
  */
 enum class EngineeringRole { SDD, ATDD, TDD, DEVELOPER, REVIEWER }
 
+/**
+ * Host-approved write intent. All three known kinds share the same logical role/path policy.
+ * The kind currently only gates unknown/missing intents; create/edit/delete preconditions,
+ * optimistic hashes and actual effects are checked separately in trusted infrastructure.
+ */
 enum class WriteOperationKind { CREATE, EDIT, DELETE }
 
 sealed interface ToolAuthorizationDecision {
@@ -37,6 +42,8 @@ data class ReadAuthorizationFacts(
 /**
  * Scope and immutable ownership are declared facts. trackedGitMode/withinSubmodule must come
  * from the host's inspected Git tree, and independentlyReviewedPaths from validated host review.
+ * operationKind is deliberately not a per-operation permission matrix today; physical
+ * create/edit/delete semantics and preconditions remain in TrustedWriteRuntime.
  */
 data class WriteAuthorizationFacts(
     val actorRole: EngineeringRole?,
@@ -64,7 +71,10 @@ object ToolAuthorizationPolicy {
     private val protectedFiles = setOf("gradle.properties", "local.properties", "build.gradle.kts",
         "settings.gradle.kts", ".gitattributes", ".gitignore", ".gitmodules")
     private val developerTestSuffix = Regex(".*(test|spec)\\.[a-z0-9]+")
-    private val reviewIdPattern = Regex("[A-Za-z0-9][A-Za-z0-9._:-]{0,159}")
+    private val hostIdentifierPattern = Regex("[A-Za-z0-9][A-Za-z0-9._:-]{0,159}")
+
+    /** Shared stable grammar for host-issued session IDs, check IDs and review request IDs. */
+    fun validHostIdentifier(id: String): Boolean = hostIdentifierPattern.matches(id)
 
     /** The same lexical syntax is used for host policy admission and each model-declared path. */
     fun validDeclaredPath(path: String): Boolean =
@@ -126,7 +136,7 @@ object ToolAuthorizationPolicy {
 
     /** Review validation never treats an agent's claimed approval as authority. */
     fun validateIndependentReview(facts: ReviewedChangeFacts): ToolAuthorizationDecision {
-        if (!reviewIdPattern.matches(facts.changeRequestId) ||
+        if (!validHostIdentifier(facts.changeRequestId) ||
             facts.requestedBy.isBlank() || facts.reviewedBy.isBlank() ||
             facts.requestedBy == facts.reviewedBy || facts.reviewedRole != facts.actorRole ||
             facts.actorRole == null || facts.paths.isEmpty())
