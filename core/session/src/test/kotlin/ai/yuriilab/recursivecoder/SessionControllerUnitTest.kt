@@ -18,6 +18,16 @@ import org.junit.jupiter.api.io.TempDir
 @Tag("integration")
 class SessionControllerUnitTest {
     @TempDir lateinit var temp: Path
+    // A distinct sink belongs to each controller, even when a test starts more than one.
+    private var activeEventSink = InMemoryEventSink()
+    private var nextEventSink = activeEventSink
+    private val eventSink get() = activeEventSink
+    private val eventSinkFactory = EventSinkFactory {
+        nextEventSink.also { sink ->
+            activeEventSink = sink
+            nextEventSink = InMemoryEventSink()
+        }
+    }
 
     private fun sha256(text: String): String =
         MessageDigest.getInstance("SHA-256").digest(text.toByteArray(Charsets.UTF_8))
@@ -98,6 +108,7 @@ class SessionControllerUnitTest {
         var readCount = 0
         var closed = false
         var denyRead = false
+        var failClose = false
         private var onAudit: (ToolAudit) -> Unit = {}
         private var onStart: (String, String, Instant) -> Unit = { _, _, _ -> }
 
@@ -137,7 +148,10 @@ class SessionControllerUnitTest {
             return ToolOutcome(receipt, tool.name, data, code)
         }
 
-        override fun close() { closed = true }
+        override fun close() {
+            closed = true
+            if (failClose) error("Injected workspace close failure")
+        }
 
         private fun digest(text: String): String =
             MessageDigest.getInstance("SHA-256").digest(text.toByteArray(Charsets.UTF_8))
@@ -174,13 +188,25 @@ class SessionControllerUnitTest {
     private fun run(request: SessionRequest, model: StubGateway, workspace: StubWorkspace) =
         SessionController(request, model, workspaceOpener = WorkspaceOpener { _, audit, start ->
             workspace.attach(audit, start)
-        }).run()
+        }, eventSinkFactory = eventSinkFactory).run()
 
-    private fun events(request: SessionRequest): List<JsonObject> =
-        Files.readAllLines(request.output("eventsPath"))
-            .map { Json.parseToJsonElement(it).jsonObject }
+    private fun events(request: SessionRequest): List<JsonObject> {
+        // The Session layer can observe event semantics without a physical journal.
+        assertFalse(Files.exists(request.output("eventsPath")))
+        return eventSink.events.toList()
+    }
 
     private fun JsonObject.value(key: String) = getValue(key).jsonPrimitive.content
+
+    @Test fun eachControllerReceivesItsOwnMemoryEventSink() {
+        val first = eventSinkFactory.open(temp.resolve("first.jsonl"))
+        val second = eventSinkFactory.open(temp.resolve("second.jsonl"))
+        assertNotSame(first, second)
+        first.append(buildJsonObject { put("type", "first") })
+        assertTrue((second as InMemoryEventSink).events.isEmpty())
+        first.close()
+        second.close()
+    }
 
     @Test fun successfulReadUsesOnlyInjectedPortsAndPreservesEventOrder() {
         val request = fixture()
@@ -216,7 +242,8 @@ class SessionControllerUnitTest {
         }
 
         val result = SessionController(
-            request, model, workspaceOpener = forbiddenOpener
+            request, model, workspaceOpener = forbiddenOpener,
+            eventSinkFactory = eventSinkFactory
         ).run()
 
         assertEquals("rejected", result.value("status"))
@@ -301,6 +328,57 @@ class SessionControllerUnitTest {
         val responses = events(request).filter { it.value("type") == "llm.response" }
         assertEquals(2, responses.first().getValue("metadata").jsonObject.getValue("attempts").jsonPrimitive.int)
         assertEquals(1, responses.last().getValue("metadata").jsonObject.getValue("attempts").jsonPrimitive.int)
+    }
+
+    @Test fun journalAppendFailureNeverPublishesSuccessResult() {
+        val request = fixture()
+        val workspace = StubWorkspace(request, "Read the isolated task")
+        eventSink.failAppend = true
+
+        assertFailsWith<EventSinkFailure> { run(request, StubGateway(), workspace) }
+        assertFalse(Files.exists(request.output("resultPath")))
+        assertTrue(workspace.closed)
+        assertTrue(eventSink.closed)
+    }
+
+    @Test fun journalFlushFailureNeverPublishesSuccessResult() {
+        val request = fixture()
+        val workspace = StubWorkspace(request, "Read the isolated task")
+        eventSink.failFlush = true
+
+        assertFailsWith<EventSinkFailure> { run(request, StubGateway(), workspace) }
+        assertFalse(Files.exists(request.output("resultPath")))
+        // append reached the in-memory buffer before flush failed; it is not committed.
+        assertEquals(1, eventSink.events.size)
+        assertEquals(1, eventSink.events.single().getValue("sequence").jsonPrimitive.int)
+        assertTrue(workspace.closed)
+    }
+
+    @Test fun journalErrorSurvivesAnotherFailureDuringCleanup() {
+        val request = fixture()
+        val workspace = StubWorkspace(request, "Read the isolated task").apply { failClose = true }
+        eventSink.failFlush = true
+
+        val original = assertFailsWith<EventSinkFailure> {
+            run(request, StubGateway(), workspace)
+        }
+        assertEquals("Injected flush failure", original.cause?.message)
+        assertEquals(1, original.suppressed.size)
+        assertEquals("Injected workspace close failure", original.suppressed.single().message)
+        assertTrue(workspace.closed)
+        assertTrue(eventSink.closed)
+        assertFalse(Files.exists(request.output("resultPath")))
+    }
+
+    @Test fun journalCloseFailureNeverPublishesSuccessResult() {
+        val request = fixture()
+        val workspace = StubWorkspace(request, "Read the isolated task")
+        eventSink.failClose = true
+
+        assertFailsWith<EventSinkFailure> { run(request, StubGateway(), workspace) }
+        assertFalse(Files.exists(request.output("resultPath")))
+        assertTrue(eventSink.events.isNotEmpty())
+        assertTrue(workspace.closed)
     }
 
     @Test fun excessiveTokenUsageIsRejectedBeforeAnyToolSideEffect() {

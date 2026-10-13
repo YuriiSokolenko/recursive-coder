@@ -1,6 +1,5 @@
 package ai.yuriilab.recursivecoder
 
-import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
@@ -79,63 +78,24 @@ private fun SessionRequest.admit(workspaceOpener: WorkspaceOpener,
     }
 }
 
-private class EventJournal(private val request: SessionRequest, private val clock: Clock) : AutoCloseable {
-    private val writer = Files.newBufferedWriter(request.output("eventsPath"),
-        StandardCharsets.UTF_8, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
-    var sequence = 0
-        private set
-    private var previous: String? = null
-    fun append(type: String, status: String, transition: Pair<String, String>? = null,
-               toolId: String? = null, started: Instant? = null, extra: JsonObject? = null) {
-        sequence++
-        val eventId = "evt-" + request.sessionId + "-" + sequence
-        val now = clock.instant()
-        val event = buildJsonObject {
-            put("kind", "session-event"); put("version", SessionProtocol.VERSION)
-            put("sessionId", request.sessionId); put("traceId", request.traceId)
-            put("eventId", eventId); put("sequence", sequence)
-            put("timestamp", now.toString()); put("type", type); put("status", status)
-            put("correlationId", request.requestId)
-            put("causationId", previous?.let(::JsonPrimitive) ?: JsonNull)
-            put("actor", buildJsonObject {
-                put("agentId", JsonPrimitive("agent-" + request.sessionId))
-                put("parentAgentId", JsonNull); put("childAgentId", JsonNull)
-                put("toolExecutionId", toolId?.let(::JsonPrimitive) ?: JsonNull)
-                put("childSessionId", JsonNull)
-            })
-            transition?.let { (from, to) -> put("transition", buildJsonObject {
-                put("from", from); put("to", to)
-            }) }
-            started?.let { put("timing", buildJsonObject {
-                put("startedAt", it.toString())
-                put("durationMs", Duration.between(it, now).toMillis().coerceAtLeast(0))
-            }) }
-            put("redaction", buildJsonObject {
-                put("mode", "metadata-only")
-                put("removedFields", buildJsonArray {
-                    listOf("rawPrompt", "rawResponse", "rawToolOutput", "credentialRef", "authorizationHeader")
-                        .forEach { add(it) }
-                })
-            })
-            extra?.let { put("metadata", it) }
-        }
-        writer.write(event.toString()); writer.newLine(); writer.flush()
-        previous = eventId
-    }
-    override fun close() { writer.close() }
-}
-
 class SessionController(
     private val request: SessionRequest,
     private val model: ModelGateway,
     val cancellation: Cancellation = Cancellation(),
     private val workspaceOpener: WorkspaceOpener,
+    private val eventSinkFactory: EventSinkFactory,
     private val clock: Clock = Clock.systemUTC()
 ) {
     private val finished = CountDownLatch(1)
     fun awaitFinished(timeoutMs: Long) = finished.await(timeoutMs, TimeUnit.MILLISECONDS)
 
-    fun run(): JsonObject {
+    fun run(): JsonObject = try {
+        execute()
+    } finally {
+        finished.countDown()
+    }
+
+    private fun execute(): JsonObject {
         cancellation.bind()
         val started = clock.instant()
         // Never open or truncate existing output files. A later recovery milestone owns replay.
@@ -153,7 +113,8 @@ class SessionController(
         targetPaths.forEach { target ->
             if (target.parent != outputRoot) throw Refused("UNSAFE_OUTPUT_PATH", "policy", "Nested outputs are unsupported")
         }
-        val journal = EventJournal(request, clock)
+        val journal = SessionEventJournal(request.sessionId, request.traceId, request.requestId,
+            clock, eventSinkFactory.open(request.output("eventsPath")))
         var state = SessionPhase.CREATED
         var finalOutcome: SessionOutcome? = null
         var error: JsonElement = JsonNull
@@ -201,173 +162,189 @@ class SessionController(
         var workspaceManager: WorkspaceSession? = null
         val config = ModelConfig.from(request.model)
         var budgetState = SessionBudgetState()
+        var eventDigest: String? = null
+        var executionFailure: Throwable? = null
         try {
-            workspaceManager = request.admit(workspaceOpener,
-                onAudit = { audit ->
-                    journal.append(if (audit.permitted) "tool.completed" else "policy.denied",
-                        if (audit.permitted) "completed" else "denied",
-                        toolId = audit.receiptId, started = audit.started,
+            try {
+                workspaceManager = request.admit(workspaceOpener,
+                    onAudit = { audit ->
+                        journal.append(if (audit.permitted) "tool.completed" else "policy.denied",
+                            if (audit.permitted) "completed" else "denied",
+                            toolId = audit.receiptId, started = audit.started,
+                            extra = buildJsonObject {
+                                put("tool", audit.tool)
+                                put("receiptId", audit.receiptId)
+                                put("bytes", audit.outputBytes)
+                                audit.code?.let { put("deniedCode", it) }
+                                audit.sha256?.let { put("sha256", it) }
+                            })
+                    },
+                    onStart = { receipt, tool, startedAt ->
+                        journal.append("tool.started", "started", toolId = receipt, started = startedAt,
+                            extra = buildJsonObject { put("tool", tool); put("receiptId", receipt) })
+                    }
+                )
+                checkActive()
+                val capabilities = model.negotiate(config, cancellation, deadline)
+                journal.append("llm.capabilities", "completed", extra = buildJsonObject {
+                    put("contextTokens", capabilities.contextTokens)
+                    put("maxOutputTokens", capabilities.maxOutputTokens)
+                    put("features", capabilities.features.sorted().joinToString(","))
+                })
+                transition(SessionPhase.ADMITTED)
+                transition(SessionPhase.RUNNING)
+                journal.append("agent.started", "started")
+                var observed: Pair<Int, String>? = null
+                // Only actual inference POSTs count; discovery GETs are not model requests.
+                val maxModelRequests = request.budgets["maxModelRequests"]?.let {
+                    request.budgets.longAt("maxModelRequests")
+                } ?: Long.MAX_VALUE
+                val maxTotalTokens = request.budgets.longAt("maxTotalTokens")
+                val maxToolCalls = request.budgets.longAt("maxToolCalls")
+                repeat(2) { turn ->
+                    checkActive()
+                    val permission = SessionBudgetPolicy.beforeTurn(budgetState, maxModelRequests, turn)
+                    val allowPreToolRetry = when (permission) {
+                        is BudgetDecision.Allowed -> permission.value
+                        is BudgetDecision.Denied -> throw Refused(
+                            permission.reason.code, "policy", "Model request budget exhausted")
+                    }
+                    val modelStart = clock.instant()
+                    journal.append("llm.request", "started", started = modelStart,
+                        extra = buildJsonObject { put("provider", config.provider); put("turn", turn + 1) })
+                    val response = try {
+                        model.next(config, request.taskPath, observed, cancellation, deadline, allowPreToolRetry)
+                    } catch (_: InterruptedException) { checkActive(); throw Stopped(false) }
+                    checkActive()
+                    // Reject adapter-reported usage and retries before trusted tool side effects.
+                    budgetState = when (val charged = SessionBudgetPolicy.recordModel(
+                        budgetState, maxModelRequests, maxTotalTokens,
+                        response.attempts, allowPreToolRetry, response.usage)) {
+                        is BudgetDecision.Allowed -> charged.value
+                        is BudgetDecision.Denied -> throw Refused(
+                            charged.reason.code, "policy", charged.reason.message)
+                    }
+                    journal.append("llm.response", "completed", started = modelStart,
                         extra = buildJsonObject {
-                            put("tool", audit.tool)
-                            put("receiptId", audit.receiptId)
-                            put("bytes", audit.outputBytes)
-                            audit.code?.let { put("deniedCode", it) }
-                            audit.sha256?.let { put("sha256", it) }
+                            put("provider", config.provider)
+                            put("turn", turn + 1)
+                            put("attempts", response.attempts)
+                            response.statusCode?.let { put("httpStatus", it) }
+                            response.usage?.let {
+                                put("inputTokens", it.input)
+                                put("outputTokens", it.output)
+                            }
                         })
-                },
-                onStart = { receipt, tool, startedAt ->
-                    journal.append("tool.started", "started", toolId = receipt, started = startedAt,
-                        extra = buildJsonObject { put("tool", tool); put("receiptId", receipt) })
-                }
-            )
-            checkActive()
-            val capabilities = model.negotiate(config, cancellation, deadline)
-            journal.append("llm.capabilities", "completed", extra = buildJsonObject {
-                put("contextTokens", capabilities.contextTokens)
-                put("maxOutputTokens", capabilities.maxOutputTokens)
-                put("features", capabilities.features.sorted().joinToString(","))
-            })
-            transition(SessionPhase.ADMITTED)
-            transition(SessionPhase.RUNNING)
-            journal.append("agent.started", "started")
-            var observed: Pair<Int, String>? = null
-            // Only actual inference POSTs count; discovery GETs are not model requests.
-            val maxModelRequests = request.budgets["maxModelRequests"]?.let {
-                request.budgets.longAt("maxModelRequests")
-            } ?: Long.MAX_VALUE
-            val maxTotalTokens = request.budgets.longAt("maxTotalTokens")
-            val maxToolCalls = request.budgets.longAt("maxToolCalls")
-            repeat(2) { turn ->
-                checkActive()
-                val permission = SessionBudgetPolicy.beforeTurn(budgetState, maxModelRequests, turn)
-                val allowPreToolRetry = when (permission) {
-                    is BudgetDecision.Allowed -> permission.value
-                    is BudgetDecision.Denied -> throw Refused(
-                        permission.reason.code, "policy", "Model request budget exhausted")
-                }
-                val modelStart = clock.instant()
-                journal.append("llm.request", "started", started = modelStart,
-                    extra = buildJsonObject { put("provider", config.provider); put("turn", turn + 1) })
-                val response = try {
-                    model.next(config, request.taskPath, observed, cancellation, deadline, allowPreToolRetry)
-                } catch (_: InterruptedException) { checkActive(); throw Stopped(false) }
-                checkActive()
-                // Reject adapter-reported usage and retries before trusted tool side effects.
-                budgetState = when (val charged = SessionBudgetPolicy.recordModel(
-                    budgetState, maxModelRequests, maxTotalTokens,
-                    response.attempts, allowPreToolRetry, response.usage)) {
-                    is BudgetDecision.Allowed -> charged.value
-                    is BudgetDecision.Denied -> throw Refused(
-                        charged.reason.code, "policy", charged.reason.message)
-                }
-                journal.append("llm.response", "completed", started = modelStart,
-                    extra = buildJsonObject {
-                        put("provider", config.provider)
-                        put("turn", turn + 1)
-                        put("attempts", response.attempts)
-                        response.statusCode?.let { put("httpStatus", it) }
-                        response.usage?.let {
-                            put("inputTokens", it.input)
-                            put("outputTokens", it.output)
+                    when (val decision = response.decision) {
+                        is ModelDecision.Read -> {
+                            if (turn != 0 || decision.path != request.taskPath) refuse("Unexpected fake tool call")
+                            checkActive()
+                            val relative = workspaceManager!!.taskRelativePath(decision.path)
+                            budgetState = when (val charged = SessionBudgetPolicy.recordTool(budgetState, maxToolCalls)) {
+                                is BudgetDecision.Allowed -> charged.value
+                                is BudgetDecision.Denied -> throw Refused(
+                                    charged.reason.code, "policy", charged.reason.message)
+                            }
+                            val outcome = workspaceManager.execute(WorkspaceTool.Read(relative))
+                            if (!outcome.permitted)
+                                throw Refused(outcome.deniedCode!!, "policy", "Read-only tool denied")
+                            val read = outcome.data as? ToolData.FileText
+                                ?: throw Refused("TOOL_RESULT_INVALID", "policy", "Unexpected tool result")
+                            if (read.sha256 != request.task.objectAt("taskInputRef").textAt("sha256"))
+                                throw Refused("TASK_CHANGED", "policy", "Task changed during execution")
+                            observed = read.bytes to read.sha256
                         }
-                    })
-                when (val decision = response.decision) {
-                    is ModelDecision.Read -> {
-                        if (turn != 0 || decision.path != request.taskPath) refuse("Unexpected fake tool call")
-                        checkActive()
-                        val relative = workspaceManager!!.taskRelativePath(decision.path)
-                        budgetState = when (val charged = SessionBudgetPolicy.recordTool(budgetState, maxToolCalls)) {
-                            is BudgetDecision.Allowed -> charged.value
-                            is BudgetDecision.Denied -> throw Refused(
-                                charged.reason.code, "policy", charged.reason.message)
+                        is ModelDecision.Done -> {
+                            if (turn != 1 || observed != (decision.bytes to decision.sha256))
+                                throw Refused("MODEL_INVALID_COMPLETION", "provider", "Model completion did not match trusted observation")
                         }
-                        val outcome = workspaceManager.execute(WorkspaceTool.Read(relative))
-                        if (!outcome.permitted)
-                            throw Refused(outcome.deniedCode!!, "policy", "Read-only tool denied")
-                        val read = outcome.data as? ToolData.FileText
-                            ?: throw Refused("TOOL_RESULT_INVALID", "policy", "Unexpected tool result")
-                        if (read.sha256 != request.task.objectAt("taskInputRef").textAt("sha256"))
-                            throw Refused("TASK_CHANGED", "policy", "Task changed during execution")
-                        observed = read.bytes to read.sha256
+                        ModelDecision.Refusal ->
+                            throw Refused("MODEL_REFUSAL", "provider", "Model declined the request")
                     }
-                    is ModelDecision.Done -> {
-                        if (turn != 1 || observed != (decision.bytes to decision.sha256))
-                            throw Refused("MODEL_INVALID_COMPLETION", "provider", "Model completion did not match trusted observation")
-                    }
-                    ModelDecision.Refusal ->
-                        throw Refused("MODEL_REFUSAL", "provider", "Model declined the request")
                 }
+                checkActive()
+                journal.append("agent.completed", "completed")
+                finish(SessionEndReason.SUCCESS)
+            } catch (e: EventSinkFailure) {
+                // A journal failure makes even an otherwise successful session unverifiable.
+                // Do not emit a terminal success event or produce a result.
+                throw e
+            } catch (e: Refused) {
+                error = sessionError(e.code, e.category, e.explanation)
+                finish(SessionEndReason.REFUSAL, "denied")
+            } catch (e: Stopped) {
+                error = sessionError(if (e.timedOut) "SESSION_DEADLINE_EXCEEDED" else "SESSION_CANCELLED",
+                    if (e.timedOut) "timeout" else "cancellation",
+                    if (e.timedOut) "Session deadline exceeded" else "Session cancelled")
+                finish(if (e.timedOut) SessionEndReason.TIMEOUT else SessionEndReason.CANCELLATION,
+                    if (e.timedOut) "timed_out" else "cancelled")
+            } catch (_: Exception) {
+                error = sessionError("SESSION_EXECUTION_FAILED", "infrastructure", "Session execution failed")
+                finish(SessionEndReason.FAILURE, "failed")
             }
-            checkActive()
-            journal.append("agent.completed", "completed")
-            finish(SessionEndReason.SUCCESS)
-        } catch (e: Refused) {
-            error = sessionError(e.code, e.category, e.explanation)
-            finish(SessionEndReason.REFUSAL, "denied")
-        } catch (e: Stopped) {
-            error = sessionError(if (e.timedOut) "SESSION_DEADLINE_EXCEEDED" else "SESSION_CANCELLED",
-                if (e.timedOut) "timeout" else "cancellation",
-                if (e.timedOut) "Session deadline exceeded" else "Session cancelled")
-            finish(if (e.timedOut) SessionEndReason.TIMEOUT else SessionEndReason.CANCELLATION,
-                if (e.timedOut) "timed_out" else "cancelled")
-        } catch (_: Exception) {
-            error = sessionError("SESSION_EXECUTION_FAILED", "infrastructure", "Session execution failed")
-            finish(SessionEndReason.FAILURE, "failed")
+        } catch (e: Throwable) {
+            executionFailure = e
         } finally {
-            workspaceManager?.close()
             watchdog.shutdownNow()
-            journal.close()
-        }
-        try {
-            val finishedAt = clock.instant()
-            val status = checkNotNull(finalOutcome).wire
-            val diagnostics = buildJsonObject {
-                put("sessionId", request.sessionId); put("status", status)
-                put("events", journal.sequence)
-                put("summary", when (status) {
-                    "succeeded" -> "Read-only model session completed"
-                    "cancelled" -> "Session cancelled"
-                    "timed_out" -> "Session deadline exceeded"
-                    "rejected" -> "Session rejected before model invocation"
-                    else -> "Session failed"
-                })
+            fun recordCleanupFailure(failure: Throwable) {
+                val original = executionFailure
+                if (original == null) executionFailure = failure
+                else if (original !== failure) original.addSuppressed(failure)
             }
-            Files.writeString(request.output("diagnosticsPath"), diagnostics.toString(),
-                StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
-            val result = buildJsonObject {
-                put("kind", "session-result"); put("version", SessionProtocol.VERSION)
-                put("sessionId", request.sessionId); put("traceId", request.traceId)
-                put("requestId", request.requestId); put("status", status)
-                put("startedAt", started.toString()); put("finishedAt", finishedAt.toString())
-                put("durationMs", Duration.between(started, finishedAt).toMillis().coerceAtLeast(0))
-                put("lastEventSeq", journal.sequence)
-                put("provenance", buildJsonObject {
-                    put("workspaceId", request.workspace.textAt("workspaceId"))
-                    put("baselineSha", request.workspace.textAt("baselineSha"))
-                    put("policySha256", request.policy.textAt("policySha256"))
-                    put("fenceGeneration", request.raw.objectAt("resume").longAt("fenceGeneration"))
-                })
-                put("outputs", buildJsonObject {
-                    put("eventLog", artifact(request.output("eventsPath")))
-                    put("diagnostics", artifact(request.output("diagnosticsPath")))
-                    put("terminalReceipt", JsonNull); put("changeManifest", JsonNull)
-                    put("checkpoint", JsonNull)
-                })
-                put("error", error)
-                put("usage", buildJsonObject {
-                    put("inputTokens", budgetState.inputTokens); put("outputTokens", budgetState.outputTokens)
-                    put("cacheReadTokens", 0); put("cacheWriteTokens", 0)
-                    put("totalTokens", budgetState.inputTokens + budgetState.outputTokens)
-                    put("completeness", if (budgetState.completeUsage) "complete" else "unknown")
-                })
-                put("invocation", request.invocation)
-            }
-            Files.writeString(request.output("resultPath"), result.toString(),
-                StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
-            return result
-        } finally {
-            finished.countDown()
+            try { workspaceManager?.close() } catch (e: Throwable) { recordCleanupFailure(e) }
+            try { eventDigest = journal.finish() } catch (e: Throwable) { recordCleanupFailure(e) }
         }
+        executionFailure?.let { throw it }
+
+        val finishedAt = clock.instant()
+        val status = checkNotNull(finalOutcome).wire
+        val diagnostics = buildJsonObject {
+            put("sessionId", request.sessionId); put("status", status)
+            put("events", journal.sequence)
+            put("summary", when (status) {
+                "succeeded" -> "Read-only model session completed"
+                "cancelled" -> "Session cancelled"
+                "timed_out" -> "Session deadline exceeded"
+                "rejected" -> "Session rejected before model invocation"
+                else -> "Session failed"
+            })
+        }
+        Files.writeString(request.output("diagnosticsPath"), diagnostics.toString(),
+            StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
+        val result = buildJsonObject {
+            put("kind", "session-result"); put("version", SessionProtocol.VERSION)
+            put("sessionId", request.sessionId); put("traceId", request.traceId)
+            put("requestId", request.requestId); put("status", status)
+            put("startedAt", started.toString()); put("finishedAt", finishedAt.toString())
+            put("durationMs", Duration.between(started, finishedAt).toMillis().coerceAtLeast(0))
+            put("lastEventSeq", journal.sequence)
+            put("provenance", buildJsonObject {
+                put("workspaceId", request.workspace.textAt("workspaceId"))
+                put("baselineSha", request.workspace.textAt("baselineSha"))
+                put("policySha256", request.policy.textAt("policySha256"))
+                put("fenceGeneration", request.raw.objectAt("resume").longAt("fenceGeneration"))
+            })
+            put("outputs", buildJsonObject {
+                put("eventLog", buildJsonObject {
+                    put("path", request.output("eventsPath").toString())
+                    put("sha256", checkNotNull(eventDigest))
+                })
+                put("diagnostics", artifact(request.output("diagnosticsPath")))
+                put("terminalReceipt", JsonNull); put("changeManifest", JsonNull)
+                put("checkpoint", JsonNull)
+            })
+            put("error", error)
+            put("usage", buildJsonObject {
+                put("inputTokens", budgetState.inputTokens); put("outputTokens", budgetState.outputTokens)
+                put("cacheReadTokens", 0); put("cacheWriteTokens", 0)
+                put("totalTokens", budgetState.inputTokens + budgetState.outputTokens)
+                put("completeness", if (budgetState.completeUsage) "complete" else "unknown")
+            })
+            put("invocation", request.invocation)
+        }
+        Files.writeString(request.output("resultPath"), result.toString(),
+            StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
+        return result
     }
 }
 
