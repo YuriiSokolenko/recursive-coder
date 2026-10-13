@@ -326,7 +326,9 @@ class SessionControllerUnitTest {
 
         assertFailsWith<EventSinkFailure> { run(request, StubGateway(), workspace) }
         assertFalse(Files.exists(request.output("resultPath")))
-        assertEquals(0, eventSink.events.size, "The failed journal event is not acknowledged")
+        // append reached the in-memory buffer before flush failed; it is not committed.
+        assertEquals(1, eventSink.events.size)
+        assertEquals(1, eventSink.events.single().getValue("sequence").jsonPrimitive.int)
         assertTrue(workspace.closed)
     }
 
