@@ -5,13 +5,13 @@ Issue #22 introduced six modules; issues #27 and #29 add the task persistence an
 | Module | Ownership | Production project dependencies |
 | --- | --- | --- |
 | `:core:contracts` | Session Protocol support, request validation, model/workspace contracts, shared value types and pure tool authorization | none |
-| `:core:session` | Session Controller, deadline/budget enforcement, admission policy and event journal | `:core:contracts` |
-| `:core:tasks` | Task policy, repository port, scheduler and task execution interface | `:core:contracts` |
+| `:core:session` | `RunSessionUseCase` + `DefaultRunSessionUseCase`, compatibility Session Controller, deadline/budget enforcement, admission policy and event journal | `:core:contracts` |
+| `:core:tasks` | `EnqueueTaskUseCase` + `DefaultEnqueueTaskUseCase`, TaskService façade, task policy, repository port and scheduler | `:core:contracts` |
 | `:infra:model` | Offline FakeModel and optional OpenAI-compatible HTTP adapter | `:core:contracts` |
 | `:infra:workspace` | Workspace Manager, restricted Git and trusted write/check runtime | `:core:contracts` |
 | `:infra:task-store` | Durable tasks.json snapshot, file locks and atomic replacement | `:core:tasks`, `:core:contracts` |
 | `:infra:journal` | JSONL append/flush/close and physical event-log SHA-256 | `:core:session`, `:core:contracts` |
-| `:app:cli` | Clikt command entry point, configuration and concrete dependency composition | all seven libraries |
+| `:app:cli` | Clikt command entry point and Koin 4.2.2 interface-to-implementation bindings/composition | all seven libraries |
 
 ```text
                       :app:cli  (only executable)
@@ -21,7 +21,16 @@ Issue #22 introduced six modules; issues #27 and #29 add the task persistence an
                          :core:contracts
 ```
 
-Production dependencies point from the composition root and adapters toward the core contracts; no core module depends on the CLI, Koog, or the HTTP model implementation. The concrete workspace opener, model provider and JSONL EventSink are injected by `:app:cli`. The scheduler accepts a `TaskRunner` instead of constructing a model adapter. Session Protocol JSON Schema and fixtures remain at the repository root under `contracts/v1/` and continue to be validated independently by Node/Python CI.
+Production dependencies point from the composition root and adapters toward the core contracts; no core module depends on the CLI, Koog, or the HTTP model implementation. The concrete workspace opener, model provider and JSONL EventSink are injected by `:app:cli` using Koin factories and constructor injection; Koin is not present in any core module. The scheduler accepts a `TaskRunner` instead of constructing a model adapter. Session Protocol JSON Schema and fixtures remain at the repository root under `contracts/v1/` and continue to be validated independently by Node/Python CI.
+
+
+## Use Case contracts and Koin composition (issue #58)
+
+The initial application vertical slice introduces `EnqueueTaskUseCase` in `:core:tasks` and `RunSessionUseCase` in `:core:session`, each with one separate `Default*` implementation. The CLI resolves **interfaces** using explicit Koin module definitions in `:app:cli/CompositionRoot.kt`. It does not construct concrete Use Cases or use `get()` from business logic. No new Gradle layer is needed: interfaces, orchestration and owned ports stay inside the bounded contexts.
+
+`TaskService.enqueue` and `SessionController.run` now delegate to the new implementations while retaining constructor/API compatibility for older callers. Session state (`Cancellation`, opened workspace, event journal, watchdog) is created per invocation, not injected as a shared singleton; `RunSessionUseCase` is a factory. Koin is local to `:app:cli` and versioned in the shared catalog (`koin-core`/`koin-test` 4.2.2); core implementations and tests need no Koin dependencies. A focused Koin graph test verifies both module definitions, plus interface resolution/factory lifetimes.
+
+The `tasks enqueue` path and both direct `run` / scheduled-session paths use the new Use Case interfaces. Other `TaskService` commands and scheduler claim/finish operations have **not** migrated and remain intentional compatibility work under [#59](https://github.com/YuriiSokolenko/recursive-coder/issues/59). No wire format, store schema, event or outcome mapping changed.
 
 ## Contracts and request admission
 
@@ -36,7 +45,7 @@ would introduce extra dependency edges without separating any working implementa
 | Boundary | Transport coupling | Typed domain owner / mapping decision |
 | --- | --- | --- |
 | Incoming SessionRequest | `:core:contracts/SessionRequest.kt` parses and validates JSON and paths | Validated DTO shared by CLI, Task and workspace ports; `:core:session/SessionAdmissionPolicy` *independently* checks supported version, capabilities, model, budgets and policy |
-| Enqueue and scheduled attempt | `:core:tasks/TaskRequestMapper.kt` parses/substitutes v1 requests | `:core:tasks/TaskService` accepts validated submissions; `TaskPolicy` handles Task transitions without creating JSON |
+| Enqueue and scheduled attempt | `:core:tasks/TaskRequestMapper.kt` parses/substitutes v1 requests | `:core:tasks/DefaultEnqueueTaskUseCase` accepts validated submissions via `EnqueueTaskUseCase`; `TaskService` delegates for compatibility and `TaskPolicy` handles Task transitions without creating JSON |
 | Session termination | `:core:session/SessionResultMapper.kt` projects v1 result, diagnostics and artifact refs | `SessionLifecyclePolicy` decides typed `SessionOutcome`, budget is `SessionBudgetState`, and coordinator passes `SessionRunResult` |
 | Task completion | Runner/TaskService converts wire status via `SessionOutcome.fromWire` | `TaskPolicy.finish` receives only a typed outcome; unsupported values fail before transaction with a fixed, non-echoing diagnostic |
 | Task CLI output | `:app:cli/TaskJsonMapper.kt` | Typed `TaskState` and `SessionOutcome` stay in the core aggregate |
