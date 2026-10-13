@@ -2,7 +2,7 @@ package ai.yuriilab.recursivecoder
 
 import java.nio.file.Path
 import java.time.Clock
-import org.koin.core.context.koinApplication
+import org.koin.dsl.koinApplication
 import org.koin.core.module.Module
 import org.koin.dsl.module
 

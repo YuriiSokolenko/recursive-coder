@@ -4,7 +4,7 @@ import java.nio.file.Path
 import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
-import org.koin.core.context.koinApplication
+import org.koin.dsl.koinApplication
 import org.koin.test.verify.verify
 import kotlin.test.*
 
@@ -23,7 +23,7 @@ class KoinBindingsTest {
         try {
             assertNotSame(tasks.koin.get<EnqueueTaskUseCase>(), tasks.koin.get<EnqueueTaskUseCase>())
             val service = tasks.koin.get<TaskService>()
-            assertTrue(service.store is TaskRepository)
+            assertSame(tasks.koin.get<TaskRepository>(), service.store)
             assertNotSame(sessions.koin.get<RunSessionUseCase>(), sessions.koin.get<RunSessionUseCase>())
             assertTrue(sessions.koin.get<RunSessionUseCase>() is DefaultRunSessionUseCase)
         } finally {
