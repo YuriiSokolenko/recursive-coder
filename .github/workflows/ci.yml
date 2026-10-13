@@ -33,7 +33,19 @@ jobs:
       - name: Reject deliberately illegal and cyclic test edges
         run: python3 -m unittest discover -s tests -p 'test_architecture_gradle.py' -v
       - name: Validate test tier guard against negative bytecode fixtures
-        run: python3 -m unittest discover -s tests -p 'test_test_tiers.py' -v
+        run: |
+          python3 - <<'PY'
+          import unittest
+
+          suite = unittest.defaultTestLoader.discover("tests", pattern="test_test_tiers.py")
+          expected = suite.countTestCases()
+          if not expected:
+              raise SystemExit("Test tier regression fixtures must be discovered")
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          if result.skipped or not result.wasSuccessful() or result.testsRun != expected:
+              raise SystemExit("Test tier regression fixtures must all run and pass without skips")
+          print(f"Verified {result.testsRun} passing test tier regression fixtures (0 skips)")
+          PY
       - name: Ensure the pure unit suite actually executed
         run: |
           python3 - <<'PY'
