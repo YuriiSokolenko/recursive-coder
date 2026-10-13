@@ -9,8 +9,8 @@ import java.nio.file.Path
 import kotlinx.serialization.json.*
 
 /**
- * CLI syntax and transport format only. TaskService and SessionController remain
- * the authority for priorities, dependencies, scheduling and security policy.
+ * CLI syntax and transport format only. Injected Use Cases own task decisions;
+ * the session and scheduler retain their separate runtime authority.
  */
 internal fun executeCli(args: List<String>): Int {
     val root = RecursiveCoderCommand()
@@ -105,8 +105,14 @@ private class TasksCommand : CliktCommand(name = "tasks") {
     private fun dependencies(): TaskComposition =
         composition ?: TaskComposition(TaskStore(storeDirectory)).also { composition = it }
 
-    fun service(): TaskService = dependencies().service()
     fun enqueue(): EnqueueTaskUseCase = dependencies().enqueue()
+    fun queries(): TaskQueriesUseCase = dependencies().queries()
+    fun cancel(): CancelTaskUseCase = dependencies().cancel()
+    fun retry(): RetryTaskUseCase = dependencies().retry()
+    fun pause(): PauseTaskQueueUseCase = dependencies().pause()
+    fun resume(): ResumeTaskQueueUseCase = dependencies().resume()
+    fun cancelAll(): CancelAllTasksUseCase = dependencies().cancelAll()
+    fun scheduler(): TaskScheduler = dependencies().scheduler()
 
     fun close() {
         composition?.close()
@@ -118,7 +124,7 @@ private class EnqueueTask(private val tasks: TasksCommand) : CliktCommand(name =
     override fun help(context: Context) = "Add a SessionRequest v1 to the durable task queue."
 
     private val requestPath by argument("REQUEST").convert { Path.of(it) }
-    private val priorityOptions by option("--priority", help = "Task priority (default 50; validated by TaskService).")
+    private val priorityOptions by option("--priority", help = "Task priority (default 50; validated by the enqueue Use Case).")
         .int().multiple()
     private val dependencyOptions by option("--depends-on", help = "Comma-separated existing task IDs.")
         .convert { value ->
@@ -139,7 +145,7 @@ private class EnqueueTask(private val tasks: TasksCommand) : CliktCommand(name =
 
 private class ListTasks(private val tasks: TasksCommand) : CliktCommand(name = "list") {
     override fun help(context: Context) = "List tasks without their request bodies."
-    override fun run() = echo(JsonArray(tasks.service().list().map(Task::toPublicJson)))
+    override fun run() = echo(JsonArray(tasks.queries().list().map(Task::toPublicJson)))
 }
 
 private abstract class TaskByIdCommand(
@@ -151,23 +157,23 @@ private abstract class TaskByIdCommand(
 
 private class ShowTask(tasks: TasksCommand) : TaskByIdCommand("show", tasks) {
     override fun help(context: Context) = "Show task state and transitions."
-    override fun run() = echo(tasks.service().show(taskId).toPublicJson())
+    override fun run() = echo(tasks.queries().show(taskId).toPublicJson())
 }
 
 private class CancelTask(tasks: TasksCommand) : TaskByIdCommand("cancel", tasks) {
     override fun help(context: Context) = "Cancel a queued or running task."
-    override fun run() = echo(tasks.service().cancel(taskId).toPublicJson())
+    override fun run() = echo(tasks.cancel()(taskId).toPublicJson())
 }
 
 private class RetryTask(tasks: TasksCommand) : TaskByIdCommand("retry", tasks) {
     override fun help(context: Context) = "Retry a failed or cancelled task."
-    override fun run() = echo(tasks.service().retry(taskId).toPublicJson())
+    override fun run() = echo(tasks.retry()(taskId).toPublicJson())
 }
 
 private class PauseTasks(private val tasks: TasksCommand) : CliktCommand(name = "pause") {
     override fun help(context: Context) = "Pause new task dispatches."
     override fun run() {
-        tasks.service().pause()
+        tasks.pause()()
         echo(buildJsonObject { put("paused", true) })
     }
 }
@@ -175,7 +181,7 @@ private class PauseTasks(private val tasks: TasksCommand) : CliktCommand(name = 
 private class ResumeTasks(private val tasks: TasksCommand) : CliktCommand(name = "resume") {
     override fun help(context: Context) = "Resume dispatching queued tasks."
     override fun run() {
-        tasks.service().resume()
+        tasks.resume()()
         echo(buildJsonObject { put("paused", false) })
     }
 }
@@ -183,7 +189,7 @@ private class ResumeTasks(private val tasks: TasksCommand) : CliktCommand(name =
 private class CancelAllTasks(private val tasks: TasksCommand) : CliktCommand(name = "cancel-all") {
     override fun help(context: Context) = "Cancel all tasks and pause future launches."
     override fun run() {
-        tasks.service().cancelAll()
+        tasks.cancelAll()()
         echo(buildJsonObject { put("paused", true); put("cancelled", true) })
     }
 }
@@ -196,10 +202,7 @@ private class RunTasks(private val tasks: TasksCommand) : CliktCommand(name = "r
 
     override fun run() {
         val concurrency = once(concurrencyOptions, "--concurrency", 1)
-        val scheduler = TaskScheduler(tasks.service(), TaskRunner { request, cancellation ->
-            val gateway = ModelGateways.create(ModelConfig.from(request.model).provider)
-            withRunSessionUseCase(gateway) { it(request, cancellation).outcome.wire }
-        })
+        val scheduler = tasks.scheduler()
         val hook = Thread({ scheduler.requestStop() }, "task-scheduler-shutdown")
         Runtime.getRuntime().addShutdownHook(hook)
         val report = try {

@@ -7,79 +7,48 @@ import java.util.concurrent.Executors
 import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
 
-/** Task use cases apply pure decisions inside a repository-owned atomic transaction. */
+/** Compatibility façade; new CLI and scheduler consumers inject use cases directly. */
 class TaskService(
     val store: TaskRepository,
     private val clock: Clock = Clock.systemUTC(),
     private val enqueueUseCase: EnqueueTaskUseCase = DefaultEnqueueTaskUseCase(store, clock)
 ) {
-    fun list(): List<Task> = store.read { it.tasks.toList() }
-    fun show(id: String): Task = store.read { it.find(id) }
-    fun isPaused(): Boolean = store.read { it.paused }
+    internal val queries: TaskQueriesUseCase = DefaultTaskQueriesUseCase(store)
+    internal val claimUseCase: ClaimNextTaskUseCase = DefaultClaimNextTaskUseCase(store, clock)
+    internal val completeUseCase: CompleteTaskAttemptUseCase = DefaultCompleteTaskAttemptUseCase(store, clock)
+    internal val interruptUseCase: InterruptTaskAttemptUseCase = DefaultInterruptTaskAttemptUseCase(store, clock)
+    internal val recoverUseCase: RecoverInterruptedAttemptsUseCase =
+        DefaultRecoverInterruptedAttemptsUseCase(store, clock)
+    internal val prepareUseCase: PrepareTaskAttemptUseCase = DefaultPrepareTaskAttemptUseCase(store)
+    private val cancelUseCase: CancelTaskUseCase = DefaultCancelTaskUseCase(store, clock)
+    private val retryUseCase: RetryTaskUseCase = DefaultRetryTaskUseCase(store, clock)
+    private val pauseUseCase: PauseTaskQueueUseCase = DefaultPauseTaskQueueUseCase(store, clock)
+    private val resumeUseCase: ResumeTaskQueueUseCase = DefaultResumeTaskQueueUseCase(store, clock)
+    private val replaceDependenciesUseCase: ReplaceTaskDependenciesUseCase =
+        DefaultReplaceTaskDependenciesUseCase(store, clock)
+    private val cancelAllUseCase: CancelAllTasksUseCase = DefaultCancelAllTasksUseCase(store, clock)
 
-    private fun now(): String = clock.instant().toString()
-    private fun TaskQueue.find(id: String): Task =
-        tasks.firstOrNull { it.id == id } ?: throw IllegalArgumentException("Unknown task")
-
+    fun list(): List<Task> = queries.list()
+    fun show(id: String): Task = queries.show(id)
+    fun isPaused(): Boolean = queries.isPaused()
     fun enqueue(requestJson: String, priority: Int = 50, dependencies: List<String> = emptyList()): Task =
         enqueueUseCase(requestJson, priority, dependencies)
+    fun replaceDependencies(id: String, dependencies: List<String>): Task =
+        replaceDependenciesUseCase(id, dependencies)
+    fun pause(): Unit = pauseUseCase()
+    fun resume(): Unit = resumeUseCase()
+    fun cancel(id: String): Task = cancelUseCase(id)
+    fun cancelAll(): Unit = cancelAllUseCase()
+    fun retry(id: String): Task = retryUseCase(id)
 
-    /** Only tasks not yet attempted can change their prerequisites. */
-    fun replaceDependencies(id: String, dependencies: List<String>): Task = store.update { queue ->
-        val next = TaskPolicy.replaceDependencies(queue, id, dependencies, now())
-        TaskMutation(next, next.find(id))
-    }
-
-    fun pause(): Unit = store.update { TaskMutation(TaskPolicy.pause(it, now()), Unit) }
-    fun resume(): Unit = store.update { TaskMutation(TaskPolicy.resume(it, now()), Unit) }
-
-    fun cancel(id: String): Task = store.update { queue ->
-        val next = TaskPolicy.cancel(queue, id, now())
-        TaskMutation(next, next.find(id))
-    }
-
-    fun cancelAll(): Unit = store.update { TaskMutation(TaskPolicy.cancelAll(it, now()), Unit) }
-
-    fun retry(id: String): Task = store.update { queue ->
-        val next = TaskPolicy.retry(queue, id, now())
-        TaskMutation(next, next.find(id))
-    }
-
-    /**
-     * Scheduler-only integration API: atomically claim the next eligible Task.
-     * Kept public for cross-module adapter contracts; CLI callers should use TaskScheduler.
-     * This must remain a single repository transaction.
-     */
-    fun claim(excludedTaskIds: Set<String> = emptySet()): Task? = store.update { queue ->
-        val decision = TaskPolicy.claim(queue, excludedTaskIds, now())
-        TaskMutation(decision.queue, decision.task)
-    }
-
-    /** Scheduler-only completion; a stale session ID must never change a newer attempt. */
-    fun finish(id: String, sessionId: String, resultStatus: String): Task {
-        // Keep the adapter-facing signature but validate before any transaction.
-        val outcome = SessionOutcome.fromWire(resultStatus)
-        return store.update { queue ->
-            val next = TaskPolicy.finish(queue, id, sessionId, outcome, now())
-            TaskMutation(next, next.find(id))
-        }
-    }
-
-    /** Scheduler-only failure recovery: a stopped attempt is not user cancellation. */
+    /** Adapter for callers retaining the original scheduler-facing methods. */
+    fun claim(excludedTaskIds: Set<String> = emptySet()): Task? = claimUseCase(excludedTaskIds)
+    fun finish(id: String, sessionId: String, resultStatus: String): Task =
+        completeUseCase(id, sessionId, resultStatus)
     fun interruptAttempt(id: String, sessionId: String, reason: String): Task =
-        store.update { queue ->
-            val next = TaskPolicy.interrupt(queue, id, sessionId, reason, now())
-            TaskMutation(next, next.find(id))
-        }
-
-    /** Scheduler-only recovery; caller MUST hold the repository's exclusive scheduler lease. */
-    fun recoverInterrupted(): Unit = store.update {
-        TaskMutation(TaskPolicy.recoverInterrupted(it, now()), Unit)
-    }
-
-    /** Scheduler-only invocation preparation; the JSON projection is a mapper. */
-    fun requestFor(task: Task): SessionRequest =
-        TaskRequestMapper.forAttempt(task, store.outputRoot(task))
+        interruptUseCase(id, sessionId, reason)
+    fun recoverInterrupted(): Unit = recoverUseCase()
+    fun requestFor(task: Task): SessionRequest = prepareUseCase(task)
 }
 
 fun interface TaskRunner {
@@ -94,10 +63,22 @@ data class SchedulerReport(val launched: Int, val completed: Int, val paused: Bo
  * its previous worker is still shutting down. Both generations consume slots.
  */
 class TaskScheduler(
-    private val service: TaskService,
+    private val repository: TaskRepository,
+    private val queries: TaskQueriesUseCase,
+    private val claim: ClaimNextTaskUseCase,
+    private val complete: CompleteTaskAttemptUseCase,
+    private val interrupt: InterruptTaskAttemptUseCase,
+    private val recover: RecoverInterruptedAttemptsUseCase,
+    private val prepare: PrepareTaskAttemptUseCase,
     private val runner: TaskRunner,
     private val pollMillis: Long = 30
 ) {
+    /** Compatibility constructor; the CLI uses the injected primary constructor. */
+    constructor(service: TaskService, runner: TaskRunner, pollMillis: Long = 30) : this(
+        service.store, service.queries, service.claimUseCase, service.completeUseCase,
+        service.interruptUseCase, service.recoverUseCase, service.prepareUseCase, runner, pollMillis
+    )
+
     private data class RunningAttempt(
         val taskId: String,
         val cancellation: Cancellation,
@@ -116,7 +97,7 @@ class TaskScheduler(
         val inFlight = active.entries.toList()
         inFlight.forEach { it.value.cancellation.cancel() }
         inFlight.forEach { (sessionId, attempt) ->
-            service.interruptAttempt(attempt.taskId, sessionId,
+            interrupt(attempt.taskId, sessionId,
                 "scheduler stopped: reconcile unfinished attempt before retry")
         }
     }
@@ -124,9 +105,9 @@ class TaskScheduler(
     fun runUntilIdle(concurrency: Int = 1): SchedulerReport {
         require(concurrency in 1..32) { "Concurrency must be 1..32" }
         require(pollMillis in 1..1000)
-        return service.store.withSchedulerLock {
-            if (stopping.get()) return@withSchedulerLock SchedulerReport(0, 0, service.isPaused())
-            service.recoverInterrupted()
+        return repository.withSchedulerLock {
+            if (stopping.get()) return@withSchedulerLock SchedulerReport(0, 0, queries.isPaused())
+            recover()
             val pool = Executors.newFixedThreadPool(concurrency)
             var launched = 0
             var completed = 0
@@ -134,10 +115,10 @@ class TaskScheduler(
                 while (!stopping.get()) {
                     while (!stopping.get() && active.size < concurrency) {
                         val occupiedTaskIds = active.values.mapTo(mutableSetOf()) { it.taskId }
-                        val task = service.claim(occupiedTaskIds) ?: break
+                        val task = claim(occupiedTaskIds) ?: break
                         val sessionId = task.sessionId!!
                         if (stopping.get()) {
-                            service.interruptAttempt(task.id, sessionId,
+                            interrupt(task.id, sessionId,
                                 "scheduler stopped before session started")
                             break
                         }
@@ -145,10 +126,10 @@ class TaskScheduler(
                         val future = pool.submit {
                             cancellation.bind()
                             val status = try {
-                                val current = service.show(task.id)
+                                val current = queries.show(task.id)
                                 if (current.sessionId != sessionId ||
                                     current.state == TaskState.CANCELLED || stopping.get()) "cancelled"
-                                else SessionOutcome.fromWire(runner.execute(service.requestFor(task), cancellation)).wire
+                                else SessionOutcome.fromWire(runner.execute(prepare(task), cancellation)).wire
                             } catch (_: InterruptedException) {
                                 "cancelled"
                             } catch (_: Exception) {
@@ -157,10 +138,10 @@ class TaskScheduler(
                             // Clear worker interruption before locking the durable store.
                             Thread.interrupted()
                             if (stopping.get()) {
-                                service.interruptAttempt(task.id, sessionId,
+                                interrupt(task.id, sessionId,
                                     "scheduler stopped: reconcile unfinished attempt before retry")
                             } else {
-                                service.finish(task.id, sessionId, status)
+                                complete(task.id, sessionId, status)
                             }
                         }
                         active[sessionId] = RunningAttempt(task.id, cancellation, future)
@@ -169,7 +150,7 @@ class TaskScheduler(
                         if (stopping.get()) requestStop()
                     }
                     if (stopping.get()) break
-                    val states = service.list().associateBy { it.id }
+                    val states = queries.list().associateBy { it.id }
                     active.forEach { (sessionId, attempt) ->
                         val task = states[attempt.taskId]
                         if (task?.state == TaskState.CANCELLED || task?.sessionId != sessionId)
@@ -183,7 +164,7 @@ class TaskScheduler(
                         completed++
                     }
                     if (active.isEmpty()) {
-                        if (service.isPaused() || service.list().none { it.state == TaskState.READY })
+                        if (queries.isPaused() || queries.list().none { it.state == TaskState.READY })
                             break
                     }
                     Thread.sleep(pollMillis)
@@ -209,7 +190,7 @@ class TaskScheduler(
                     if (interrupted) Thread.currentThread().interrupt()
                 }
             }
-            SchedulerReport(launched, completed, service.isPaused())
+            SchedulerReport(launched, completed, queries.isPaused())
         }
     }
 }

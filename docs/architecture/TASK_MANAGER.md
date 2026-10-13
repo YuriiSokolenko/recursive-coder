@@ -63,9 +63,7 @@ ISO timestamp, and returns a new snapshot (or a `TaskClaim` with a new snapshot
 and selected task). No policy decision reads the system clock, accesses a file,
 launches a process, runs a model or mutates shared state.
 
-`TaskService` remains a compatibility façade. `EnqueueTaskUseCase` now owns enqueue admission and an atomic repository update; `DefaultEnqueueTaskUseCase` uses the same pure `TaskPolicy` and is injected via the CLI Koin module. Inside each remaining
-`TaskRepository.update` it takes a snapshot, invokes the policy, and applies
-the result under the same mutex and OS lock. `TaskScheduler` still owns
+`TaskService` is a compatibility façade that delegates task business methods to independent Use Cases. `EnqueueTaskUseCase` owns enqueue admission; the remaining Use Cases own their corresponding policy decisions. Each mutation reads a snapshot, invokes `TaskPolicy` and commits the decision inside one `TaskRepository.update` under the same mutex and OS lock. `TaskScheduler` still owns
 worker execution, shutdown and polling, not the claim decision. Storage
 continues to serialize the existing v1 `tasks.json` fields, state names,
 session ID scheme, event history (128 recent transitions plus pruned count)
@@ -80,13 +78,13 @@ durable restart behavior. Run `./gradlew unitTest integrationTest` for
 the tiered suites, or `./gradlew test` for the full unfiltered suite.
 
 
-## Application Use Cases (issue #58)
+## Application Use Cases (issues #58 and #59)
 
 `tasks enqueue` now consumes the `EnqueueTaskUseCase` contract resolved from a command-local Koin composition root, with `DefaultEnqueueTaskUseCase(TaskRepository, Clock)` as the implementation. Submission parsing and priority admission occur before mutation; DAG/dependency checks and publication occur atomically under `TaskRepository.update`. A fixed-clock/in-memory test covers successful blocked/ready submissions, rejections with rollback and concurrent same-ID contention.
 
 `recursive-coder run` and scheduled task execution use `RunSessionUseCase` resolved through Koin at `:app:cli`. The implementation owns all existing session lifecycle coordination and verification; the old `SessionController` API delegates for compatibility. There is no global Koin container and no shared mutable session state. A single task command-scoped `TaskComposition` owns the shared `TaskRepository` until command exit; session Koin containers are closed after each invocation.
 
-Remaining mappings to be migrated under [#59](https://github.com/YuriiSokolenko/recursive-coder/issues/59): cancel, retry, cancel-all, replace-dependencies, pause/resume, list/show, scheduler claim, completion, interrupt and recovery. Those retain their existing transactional semantics, direct `TaskService` entrypoints and existing integration tests until a focused follow-up migrates each meaningful intent.
+Issue [#59](https://github.com/YuriiSokolenko/recursive-coder/issues/59) migrates the remaining operations. `TaskQueriesUseCase` groups read-only list/show/pause-status inspection. Cancel, retry, pause, resume, cancel-all and replace-dependencies each have an interface and independent `Default*` implementation. For scheduled attempts, `ClaimNextTaskUseCase`, `CompleteTaskAttemptUseCase`, `InterruptTaskAttemptUseCase`, `RecoverInterruptedAttemptsUseCase` and `PrepareTaskAttemptUseCase` are injected directly into `TaskScheduler`. The scheduler owns the exclusive repository lease spanning recovery, dispatch and worker shutdown; claim/finish use atomic transactions, completion rejects unsupported status before mutation, and stale session IDs cannot overwrite newer attempts. `TaskService` and its scheduler constructor are compatibility adapters only. Isolated in-memory/fixed-clock tests cover denial, contention, stale completions and recovery; durable adapter, installed CLI and sandbox tests remain in place.
 
 ## State transitions
 
