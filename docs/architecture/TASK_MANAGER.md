@@ -54,6 +54,31 @@ model availability, effective budgets and read-only tool policy are checked
 by SessionController **at dispatch**, not promised at enqueue. Store the queue **outside** the
 working Git repository so its session outputs cannot mutate the workspace.
 
+## Pure Task policy boundary (issue #26)
+
+Task entities, DAG validation, state-transition guards, dependency readiness,
+fairness, retry/cancel decisions and claim ownership live in `TaskPolicy.kt`.
+`TaskPolicy` consumes an immutable `TaskQueue` snapshot and a caller-provided
+ISO timestamp, and returns a new snapshot (or a `TaskClaim` with a new snapshot
+and selected task). No policy decision reads the system clock, accesses a file,
+launches a process, runs a model or mutates shared state.
+
+`TaskService` remains the public use-case API. Inside each existing
+`TaskStore.transaction` it takes a snapshot, invokes the policy, and applies
+the result under the same mutex and OS lock. `TaskScheduler` still owns
+worker execution, shutdown and polling, not the claim decision. Storage
+continues to serialize the existing v1 `tasks.json` fields, state names,
+session ID scheme, event history (128 recent transitions plus pruned count)
+and default priorities without a migration.
+
+`TaskPolicyUnitTest` is tagged `unit` and covers the state matrix,
+rejections, DAG errors, wake-up, starvation, queue ordering, pause/resume,
+claim ownership, late completion, recovery and event retention using
+in-memory fixtures. `TaskManagerTest` remains tagged `integration`
+and exercises the real store, locks, scheduler workers, Git fixture and
+durable restart behavior. Run `./gradlew unitTest integrationTest` for
+the tiered suites, or `./gradlew test` for the full unfiltered suite.
+
 ## State transitions
 
 - New tasks begin in `created` then become `ready` or `blocked`.
