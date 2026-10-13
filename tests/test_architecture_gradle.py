@@ -95,22 +95,23 @@ class ArchitectureConfigurationCacheRegressionTest(unittest.TestCase):
 
     @staticmethod
     def copy_fixture(destination: Path) -> None:
-        # Copy only tracked Gradle inputs and local build logic. No sources,
-        # repository metadata or existing configuration cache enter the fixture.
-        for relative in (
-            "settings.gradle.kts",
-            "build.gradle.kts",
-            "gradle.properties",
-            "app/cli/build.gradle.kts",
-            "core/contracts/build.gradle.kts",
-            "core/session/build.gradle.kts",
-            "core/tasks/build.gradle.kts",
-            "infra/model/build.gradle.kts",
-            "infra/workspace/build.gradle.kts",
-        ):
+        # Discover product module build scripts instead of maintaining a fixed
+        # list. The included build-logic build is copied separately below.
+        # Exclude Gradle output directories and existing configuration caches.
+        inputs = [ROOT / "settings.gradle.kts", ROOT / "gradle.properties"]
+        inputs.extend(
+            source
+            for source in ROOT.rglob("build.gradle.kts")
+            if not any(
+                part in {"build-logic", ".gradle", "build"}
+                for part in source.relative_to(ROOT).parts[:-1]
+            )
+        )
+        for source in sorted(inputs):
+            relative = source.relative_to(ROOT)
             target = destination / relative
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(ROOT / relative, target)
+            shutil.copy2(source, target)
         shutil.copytree(
             ROOT / "build-logic",
             destination / "build-logic",
@@ -138,7 +139,9 @@ class ArchitectureConfigurationCacheRegressionTest(unittest.TestCase):
 
     def assert_valid(self, result: subprocess.CompletedProcess[str]) -> None:
         self.assertEqual(0, result.returncode, result.stdout)
-        self.assertIn("Architecture boundaries verified for 6 modules.", result.stdout)
+        self.assertRegex(
+            result.stdout, r"Architecture boundaries verified for [1-9]\\d* modules\\."
+        )
 
     def test_changed_build_script_invalidates_cache_for_production_and_test_edges(self):
         with tempfile.TemporaryDirectory(prefix="architecture-cache-") as temporary:
