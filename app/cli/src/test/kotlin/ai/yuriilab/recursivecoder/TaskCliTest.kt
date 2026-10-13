@@ -154,7 +154,7 @@ class TaskCliTest {
         assertEquals(0, TaskCli.execute(prefix + listOf("run")))
         val task = TaskService(TaskStore(store)).show("readtask")
         assertEquals(TaskState.SUCCEEDED, task.state)
-        assertEquals("succeeded", task.lastResultStatus)
+        assertEquals(SessionOutcome.SUCCEEDED, task.lastResultStatus)
         val output = store.resolve("runs/readtask/attempt-1")
         assertEquals("session-readtask-1",
             Json.parseToJsonElement(Files.readString(output.resolve("result.json")))

@@ -154,7 +154,7 @@ class TaskPolicyUnitTest {
         assertEquals(0, retried.tasks[2].attempt)
         val claimed = TaskPolicy.claim(retried, emptySet(), at)
         val succeeded = TaskPolicy.finish(claimed.queue, "parent",
-            claimed.task!!.sessionId!!, "succeeded", at)
+            claimed.task!!.sessionId!!, SessionOutcome.SUCCEEDED, at)
         assertEquals(TaskState.READY, succeeded.tasks[1].state)
         assertEquals(TaskState.BLOCKED, succeeded.tasks[0].state)
     }
@@ -217,7 +217,7 @@ class TaskPolicyUnitTest {
         assertFalse(paused.tasks[1].preserveOrderOnResume)
         assertEquals(TaskState.RUNNING, paused.tasks[2].state)
         assertNull(TaskPolicy.claim(paused, emptySet(), at).task)
-        val whilePaused = TaskPolicy.finish(paused, "root", "session-root-1", "succeeded", at)
+        val whilePaused = TaskPolicy.finish(paused, "root", "session-root-1", SessionOutcome.SUCCEEDED, at)
         assertEquals(TaskState.PAUSED, whilePaused.tasks[1].state)
         val resumed = TaskPolicy.resume(whilePaused, at)
         assertEquals(1L, resumed.tasks[0].queueOrder)
@@ -234,18 +234,18 @@ class TaskPolicyUnitTest {
         val oldSession = first.task!!.sessionId!!
         val cancelled = TaskPolicy.cancel(first.queue, "one", at)
         assertEquals(TaskState.CANCELLED, cancelled.tasks.single().state)
-        assertEquals(cancelled, TaskPolicy.finish(cancelled, "one", oldSession, "succeeded", at))
+        assertEquals(cancelled, TaskPolicy.finish(cancelled, "one", oldSession, SessionOutcome.SUCCEEDED, at))
         assertEquals(cancelled, TaskPolicy.cancel(cancelled, "one", at))
         val retried = TaskPolicy.retry(cancelled, "one", at)
         assertNull(retried.tasks.single().sessionId)
         val second = TaskPolicy.claim(retried, emptySet(), at)
         assertEquals(2, second.task!!.attempt)
         assertNotEquals(oldSession, second.task!!.sessionId)
-        assertEquals(second.queue, TaskPolicy.finish(second.queue, "one", oldSession, "succeeded", at))
+        assertEquals(second.queue, TaskPolicy.finish(second.queue, "one", oldSession, SessionOutcome.SUCCEEDED, at))
         val complete = TaskPolicy.finish(second.queue, "one",
-            second.task!!.sessionId!!, "succeeded", at)
+            second.task!!.sessionId!!, SessionOutcome.SUCCEEDED, at)
         assertEquals(TaskState.SUCCEEDED, complete.tasks.single().state)
-        assertEquals("succeeded", complete.tasks.single().lastResultStatus)
+        assertEquals(SessionOutcome.SUCCEEDED, complete.tasks.single().lastResultStatus)
         assertEquals(complete, TaskPolicy.cancel(complete, "one", at))
         assertFailsWith<IllegalArgumentException> { TaskPolicy.retry(complete, "one", at) }
     }
