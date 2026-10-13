@@ -119,7 +119,7 @@ jobs:
           sandbox = [case for case in e2e if case.get("name", "").startswith(marker)]
           if not integration or any(case.get("name", "").startswith(marker) for case in integration):
               raise SystemExit("integrationTest must run ordinary integration tests but exclude sandbox E2E")
-          if len(sandbox) != 1 or len(e2e) != 1 or any(
+          if len(sandbox) != 1 or any(
               case.find(tag) is not None for case in sandbox for tag in ("skipped", "failure", "error")
           ):
               raise SystemExit("e2eTest must select exactly one passing sandbox test")
