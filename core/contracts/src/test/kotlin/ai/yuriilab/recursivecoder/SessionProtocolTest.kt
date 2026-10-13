@@ -18,6 +18,7 @@ class SessionProtocolTest {
         assertFalse(SessionProtocol.supports("1.0.0"))
         assertFalse(SessionProtocol.supports(""))
     }
+
     @Test
     fun terminalResultCodecRejectsUnknownStatusesSafely() {
         val expected = mapOf(

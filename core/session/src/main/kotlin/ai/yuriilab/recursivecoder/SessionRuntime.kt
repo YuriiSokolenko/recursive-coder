@@ -289,18 +289,20 @@ class SessionController(
         val outcome = checkNotNull(finalOutcome)
         val diagnosticsPath = request.output("diagnosticsPath")
         val diagnostics = SessionResultMapper.diagnostics(request.sessionId, outcome, journal.sequence.toLong())
-        Files.writeString(diagnosticsPath, diagnostics.toString(),
-            StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
+        val diagnosticsContent = diagnostics.toString()
+        // Validate the full terminal result before publishing any diagnostics or result file.
         val result = SessionResultMapper.encode(SessionRunResult(
             outcome = outcome,
             startedAt = started,
             finishedAt = finishedAt,
             lastEventSeq = journal.sequence.toLong(),
             eventLog = SessionArtifact(request.output("eventsPath"), checkNotNull(eventDigest)),
-            diagnostics = SessionResultMapper.artifact(diagnosticsPath),
+            diagnostics = SessionResultMapper.artifact(diagnosticsPath, diagnosticsContent),
             failure = failure,
             usage = budgetState
         ), request)
+        Files.writeString(diagnosticsPath, diagnosticsContent,
+            StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
         Files.writeString(request.output("resultPath"), result.toString(),
             StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
         return result

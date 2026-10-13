@@ -16,6 +16,4 @@ class TaskRequestMapperUnitTest {
             TaskRequestMapper.submission("x".repeat(262145))
         }
     }
-
-
 }

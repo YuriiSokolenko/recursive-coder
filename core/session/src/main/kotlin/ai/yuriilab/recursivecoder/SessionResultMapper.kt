@@ -1,6 +1,6 @@
 package ai.yuriilab.recursivecoder
 
-import java.nio.file.Files
+import java.nio.charset.StandardCharsets
 import java.nio.file.Path
 import java.security.MessageDigest
 import java.time.Duration
@@ -23,8 +23,9 @@ internal data class SessionRunResult(
 
 /** Versioned JSON projection of a finished Session; never used by lifecycle/budget decisions. */
 internal object SessionResultMapper {
-    fun artifact(path: Path): SessionArtifact {
-        val sha256 = MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(path))
+    /** Digest the exact payload before any output file is created. */
+    fun artifact(path: Path, content: String): SessionArtifact {
+        val sha256 = MessageDigest.getInstance("SHA-256").digest(content.toByteArray(StandardCharsets.UTF_8))
             .joinToString("") { "%02x".format(it) }
         return SessionArtifact(path, sha256)
     }

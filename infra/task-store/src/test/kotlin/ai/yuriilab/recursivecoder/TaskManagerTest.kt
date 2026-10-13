@@ -292,6 +292,40 @@ class TaskManagerTest {
         assertEquals("{broken", Files.readString(path))
     }
 
+    @Test fun unknownStoredResultStatusRejectsAllReadsAndMutationsWithoutClobberingSnapshot() {
+        val service = service()
+        service.enqueue(request("one"))
+        val path = temp.resolve("store/tasks.json")
+        val original = Json.parseToJsonElement(Files.readString(path)).jsonObject
+        val tamperedTasks = buildJsonArray {
+            original.getValue("tasks").jsonArray.forEach { task ->
+                add(JsonObject(task.jsonObject + ("lastResultStatus" to JsonPrimitive("bogus"))))
+            }
+        }
+        val poisoned = JsonObject(original + ("tasks" to tamperedTasks)).toString()
+        Files.writeString(path, poisoned)
+
+        val failure = assertFailsWith<IllegalStateException> { service().list() }
+        assertEquals("Corrupt task store; refusing to overwrite it", failure.message)
+        assertEquals("Unsupported session result status", failure.cause?.message)
+        assertFailsWith<IllegalStateException> { service().pause() }
+        assertEquals(poisoned, Files.readString(path))
+    }
+
+    @Test fun schedulerConvertsUnknownRunnerStatusIntoDurableFailure() {
+        val service = service()
+        service.enqueue(request("one"))
+        val report = TaskScheduler(service, TaskRunner { _, _ -> "secret-invalid-status" },
+            pollMillis = 10).runUntilIdle()
+        assertEquals(1, report.launched)
+        assertEquals(1, report.completed)
+        val persisted = service().show("one")
+        assertEquals(TaskState.FAILED, persisted.state)
+        assertEquals(SessionOutcome.FAILED, persisted.lastResultStatus)
+        assertEquals(1, persisted.attempt)
+        assertFalse(Files.readString(temp.resolve("store/tasks.json")).contains("secret-invalid-status"))
+    }
+
     @Test fun retryRequeuesBehindAlreadyWaitingPeer() {
         val service = service()
         service.enqueue(request("first"), priority = 50)
@@ -502,8 +536,6 @@ class TaskManagerTest {
             persistedTask.getValue("prunedTransitions").jsonPrimitive.long)
     }
 
-
-
     @Test fun schedulerRejectsTamperedTaskTemplatesAtMappingBoundary() {
         val service = service()
         val bad = Task(id = "task", requestTemplate = "{}",
@@ -513,6 +545,18 @@ class TaskManagerTest {
         assertFailsWith<IllegalArgumentException> {
             service.requestFor(bad.copy(state = TaskState.READY))
         }
+    }
+
+    @Test fun scheduledAttemptRejectsValidTemplateBelongingToAnotherTask() {
+        val service = service()
+        service.enqueue(request("original"))
+        val running = service.claim()!!
+        val foreignTemplate = request("foreign")
+        val failure = assertFailsWith<IllegalArgumentException> {
+            service.requestFor(running.copy(requestTemplate = foreignTemplate))
+        }
+        assertEquals("Task template ID mismatch", failure.message)
+        assertEquals(TaskState.RUNNING, service.show("original").state)
     }
 
     @Test fun invalidRunnerResultIsRejectedBeforeAnyPersistentMutation() {

@@ -84,7 +84,6 @@ class TaskService(val store: TaskRepository, private val clock: Clock = Clock.sy
     /** Scheduler-only invocation preparation; the JSON projection is a mapper. */
     fun requestFor(task: Task): SessionRequest =
         TaskRequestMapper.forAttempt(task, store.outputRoot(task))
-
 }
 
 fun interface TaskRunner {
@@ -153,7 +152,7 @@ class TaskScheduler(
                                 val current = service.show(task.id)
                                 if (current.sessionId != sessionId ||
                                     current.state == TaskState.CANCELLED || stopping.get()) "cancelled"
-                                else runner.execute(service.requestFor(task), cancellation)
+                                else SessionOutcome.fromWire(runner.execute(service.requestFor(task), cancellation)).wire
                             } catch (_: InterruptedException) {
                                 "cancelled"
                             } catch (_: Exception) {
