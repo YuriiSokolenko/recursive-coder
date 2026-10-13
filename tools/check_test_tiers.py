@@ -113,7 +113,10 @@ def parse_class(path, module):
         return utf(cp[index][1]) if index else None
 
     def annotation(reader):
-        name = utf(reader.u2()).strip("L;")
+        descriptor = utf(reader.u2())
+        if not (descriptor.startswith("L") and descriptor.endswith(";")):
+            raise ClassFormatError(f"Invalid annotation descriptor: {descriptor}")
+        name = descriptor[1:-1]
         values = {}
         for _ in range(reader.u2()):
             key = utf(reader.u2())
@@ -233,6 +236,29 @@ def class_tiers(info, classes):
     return tags
 
 
+def pure_unit_related_classes(info, classes):
+    """Include @Nested enclosing fixtures as well as local helpers and base classes.
+
+    JUnit executes enclosing-class lifecycle fixtures for a nested test even when
+    the outer class declares no @Test methods of its own.
+    """
+    owners = [info]
+    current = info
+    while "$" in current.name and any(
+        a.name == "org/junit/jupiter/api/Nested" for a in expanded(current.annotations, classes)
+    ):
+        outer = classes.get(current.name.rsplit("$", 1)[0])
+        if outer is None:
+            break
+        owners.append(outer)
+        current = outer
+
+    related_names = {parent.name for owner in owners for parent in ancestors(owner, classes)}
+    return [candidate for candidate in classes.values()
+            if any(candidate.name == name or candidate.name.startswith(name + "$")
+                   for name in related_names)]
+
+
 def test_methods(info, classes):
     """Apply Java override rules; annotations on inherited methods are retained."""
     visible = {}
@@ -307,10 +333,7 @@ def validate(modules, root):
                     problems.append(f"{target}: incompatible JUnit tiers {sorted(tags)}; "
                                     "only integration + e2e is supported together")
                 if tags == {"unit"}:
-                    inherited = {ancestor.name for ancestor in ancestors(info, classes)}
-                    related = [other for other in classes.values()
-                               if other.name == info.name or other.name.startswith(info.name + "$")
-                               or other.name in inherited]
+                    related = pure_unit_related_classes(info, classes)
                     bad = sorted({reference for related_class in related
                                   for item in related_class.references
                                   if (reference := forbidden_reference(item))})
