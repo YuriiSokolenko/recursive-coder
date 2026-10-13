@@ -92,12 +92,16 @@ class TaskPolicyUnitTest {
         val invalid = listOf(
             listOf(a, a),
             listOf(a, b.copy(dependencies = listOf("a", "a"))),
-            listOf(a, b.copy(dependencies = listOf("missing"))),
-            listOf(a.copy(dependencies = listOf("c")), b, c),
-            listOf(a.copy(dependencies = listOf("a")))
+            listOf(a, b.copy(dependencies = listOf("missing")))
         )
         for (graph in invalid) {
             assertFailsWith<IllegalArgumentException> { validateGraph(graph) }
+        }
+        assertFailsWith<IllegalStateException> {
+            validateGraph(listOf(a.copy(dependencies = listOf("c")), b, c))
+        }
+        assertFailsWith<IllegalStateException> {
+            validateGraph(listOf(a.copy(dependencies = listOf("a"))))
         }
         // Edits are also rejected atomically: the original snapshot is untouched.
         val queue = TaskQueue(tasks = listOf(a, b, c))
@@ -126,7 +130,7 @@ class TaskPolicyUnitTest {
         assertFailsWith<IllegalArgumentException> {
             TaskPolicy.enqueue(started, "new", "{}", 50, listOf("unknown"), at)
         }
-        assertFailsWith<IllegalArgumentException> {
+        assertFailsWith<IllegalStateException> {
             TaskPolicy.replaceDependencies(started, "root", listOf("root"), at)
         }
     }
