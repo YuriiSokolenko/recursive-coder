@@ -30,6 +30,15 @@ jobs:
           gradle-version: '9.8.1'
       - name: Verify architecture and run pure unit tests
         run: ./gradlew --no-daemon checkArchitecture unitTest --stacktrace
+      - name: Test independent architecture graph verifier
+        run: ./gradlew --no-daemon -p build-logic test --stacktrace
+      - name: Prove fresh and reused Gradle configuration cache
+        run: |
+          rm -rf .gradle/configuration-cache
+          ./gradlew --no-daemon --offline --console=plain --configuration-cache checkArchitecture | tee /tmp/architecture-cache-first.log
+          grep -F 'Configuration cache entry stored.' /tmp/architecture-cache-first.log
+          ./gradlew --no-daemon --offline --console=plain --configuration-cache checkArchitecture | tee /tmp/architecture-cache-second.log
+          grep -F 'Reusing configuration cache.' /tmp/architecture-cache-second.log
       - name: Reject deliberately illegal and cyclic test edges
         run: python3 -m unittest discover -s tests -p 'test_architecture_gradle.py' -v
       - name: Ensure the pure unit suite actually executed
