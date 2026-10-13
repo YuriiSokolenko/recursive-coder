@@ -62,7 +62,7 @@ internal enum class TaskRepositoryOwnership { OWNED, BORROWED }
 internal class TaskComposition(
     private val repository: TaskRepository,
     private val ownership: TaskRepositoryOwnership,
-    private val afterKoinClose: () -> Unit = {}
+    private val additionalModules: List<Module> = emptyList()
 ) : AutoCloseable {
     private fun closeOwnedRepository() {
         if (ownership == TaskRepositoryOwnership.OWNED) {
@@ -71,7 +71,7 @@ internal class TaskComposition(
     }
 
     private val application = try {
-        koinApplication { modules(taskModule(repository)) }
+        koinApplication { modules(listOf(taskModule(repository)) + additionalModules) }
     } catch (failure: Throwable) {
         // A failed DI setup must not leak a newly created resource-owning adapter.
         try {
@@ -103,10 +103,7 @@ internal class TaskComposition(
         if (closed) return
         closed = true
         // A scheduler has already exited before command cleanup reaches this point.
-        closeTaskCompositionResources(
-            closeApplication = { application.close(); afterKoinClose() },
-            closeRepository = ::closeOwnedRepository
-        )
+        closeTaskCompositionResources(application::close, ::closeOwnedRepository)
     }
 }
 

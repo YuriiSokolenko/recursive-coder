@@ -6,6 +6,8 @@ import com.github.ajalt.clikt.parameters.options.*
 import com.github.ajalt.clikt.parameters.types.*
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.Collections
+import java.util.IdentityHashMap
 import kotlinx.serialization.json.*
 
 /**
@@ -61,13 +63,21 @@ internal fun executeCli(
             commandFailure.suppressed.forEach(::reportCleanupFailure)
             2
         }
-        else -> throw commandFailure
+        else -> throw commandFailure // JVM-fatal errors must not become ordinary CLI exit codes.
     }
 }
 
 private fun reportCleanupFailure(error: Throwable) {
-    System.err.println("Cleanup failed: " + (error.message ?: "Unknown failure"))
-    error.suppressed.forEach(::reportCleanupFailure)
+    // Identity-based visitation handles cyclic suppressed graphs without recursion.
+    val seen = Collections.newSetFromMap(IdentityHashMap<Throwable, Boolean>())
+    val pending = ArrayDeque<Throwable>()
+    pending.addLast(error)
+    while (pending.isNotEmpty()) {
+        val current = pending.removeLast()
+        if (!seen.add(current)) continue
+        System.err.println("Cleanup failed: " + (current.message ?: "Unknown failure"))
+        current.suppressed.reversed().forEach(pending::addLast)
+    }
 }
 
 private fun <T> once(values: List<T>, flag: String, default: T): T {

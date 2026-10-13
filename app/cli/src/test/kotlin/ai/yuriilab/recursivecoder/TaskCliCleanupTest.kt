@@ -119,6 +119,21 @@ class TaskCliCleanupTest {
         assertContains(diagnostics, "Cleanup failed: cleanup failed")
     }
 
+    @Test fun cyclicSuppressedCleanupFailuresAreReportedOnceEach() {
+        val first = IllegalStateException("first shutdown failure")
+        val second = IllegalStateException("second shutdown failure")
+        first.addSuppressed(second)
+        second.addSuppressed(first)
+        val repository = TrackingRepository(closeFailure = first)
+        val (status, diagnostics) = withStderr {
+            executeCli(listOf("tasks", "list")) { repository }
+        }
+        assertEquals(2, status)
+        assertEquals(1, repository.closeCount)
+        assertEquals(1, "Cleanup failed: first shutdown failure".toRegex().findAll(diagnostics).count())
+        assertEquals(1, "Cleanup failed: second shutdown failure".toRegex().findAll(diagnostics).count())
+    }
+
     @Test fun helpAndParserOnlyErrorsDoNotConstructARepository() {
         var creations = 0
         val factory: (Path) -> TaskRepository = {

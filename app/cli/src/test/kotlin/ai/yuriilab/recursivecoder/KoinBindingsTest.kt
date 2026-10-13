@@ -3,6 +3,7 @@ package ai.yuriilab.recursivecoder
 import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
 import org.koin.test.verify.verify
+import org.koin.dsl.module
 import kotlin.test.*
 
 /** Close-tracking in-memory port used to test resource lifetime. */
@@ -22,21 +23,33 @@ private class CloseTrackingTaskRepository(
     }
 }
 
+private class KoinCloseProbe
+
 /** All definitions are exercised with in-memory ports, no filesystem or global Koin. */
 @Tag("unit")
 class KoinBindingsTest {
     @Test fun actualCompositionClosesKoinBeforeOwnedRepositoryExactlyOnce() {
         val events = mutableListOf<String>()
-        var koinClosed = false
         val repository = CloseTrackingTaskRepository(events) {
-            assertTrue(koinClosed, "The repository must not close while Koin is active")
+            assertEquals(
+                listOf("koin"), events,
+                "Koin's singleton onClose must fire before the repository closes"
+            )
+        }
+        // This event can only be emitted by the real Koin container, not by
+        // a callback manually called after TaskComposition.application.close().
+        val closeProbe = module {
+            single(createdAtStart = true) { KoinCloseProbe() } onClose {
+                events += "koin"
+            }
         }
         val composition = TaskComposition(
             repository,
             TaskRepositoryOwnership.OWNED,
-            afterKoinClose = { koinClosed = true; events += "koin" }
+            additionalModules = listOf(closeProbe)
         )
         assertSame(repository, composition.service().store)
+        assertTrue(events.isEmpty())
         composition.close()
         composition.close()
         assertEquals(listOf("koin", "repository"), events)
