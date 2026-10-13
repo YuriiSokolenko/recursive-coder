@@ -496,8 +496,10 @@ class TaskManagerTest {
         assertEquals(128, stored.transitions.size)
         assertTrue(stored.prunedTransitions > 0)
         assertEquals(TaskState.READY, stored.state)
-        assertEquals(stored.prunedTransitions.toInt(),
-            stored.toPublicJson().getValue("prunedTransitions").jsonPrimitive.int)
+        val disk = Json.parseToJsonElement(Files.readString(temp.resolve("store/tasks.json"))).jsonObject
+        val persistedTask = disk.getValue("tasks").jsonArray.single().jsonObject
+        assertEquals(stored.prunedTransitions,
+            persistedTask.getValue("prunedTransitions").jsonPrimitive.long)
     }
 
 
