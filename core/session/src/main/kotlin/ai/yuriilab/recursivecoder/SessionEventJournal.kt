@@ -42,10 +42,12 @@ class SessionEventJournal(
         private set
     private var previous: String? = null
     private var closed = false
+    private var writeFailure: EventSinkFailure? = null
 
     fun append(type: String, status: String, transition: Pair<String, String>? = null,
                toolId: String? = null, started: Instant? = null, extra: JsonObject? = null) {
         check(!closed) { "Session event journal is already closed" }
+        writeFailure?.let { throw it }
         val next = Math.addExact(sequence, 1)
         val eventId = "evt-" + sessionId + "-" + next
         val now = clock.instant()
@@ -82,7 +84,7 @@ class SessionEventJournal(
             sink.append(event)
             sink.flush()
         } catch (e: Exception) {
-            throw EventSinkFailure(e)
+            throw EventSinkFailure(e).also { writeFailure = it }
         }
         // Never advance the correlation chain before the sink acknowledges the write.
         sequence = next
@@ -93,6 +95,11 @@ class SessionEventJournal(
     fun finish(): String {
         check(!closed) { "Session event journal is already closed" }
         closed = true
+        writeFailure?.let { original ->
+            // An unacknowledged partial write is never a verified journal.
+            try { sink.close() } catch (e: Exception) { original.addSuppressed(e) }
+            throw original
+        }
         return try {
             sink.close()
             sink.sha256().also { hash ->
