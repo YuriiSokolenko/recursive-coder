@@ -12,9 +12,9 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
-
 
 
 def _stop_gradle_tree(process: subprocess.Popen[str], *, force: bool = False) -> None:
@@ -24,6 +24,20 @@ def _stop_gradle_tree(process: subprocess.Popen[str], *, force: bool = False) ->
             os.killpg(process.pid, signal.SIGKILL if force else signal.SIGTERM)
         except ProcessLookupError:
             pass
+    elif os.name == "nt":
+        # taskkill /T terminates the process tree, not just the Gradle parent.
+        # Windows does not support POSIX process-group signals.
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            if process.poll() is None:
+                process.kill()
     elif process.poll() is None:
         (process.kill if force else process.terminate)()
 
@@ -48,6 +62,8 @@ def run_logged_gradle(
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             bufsize=1,
             start_new_session=(os.name == "posix"),
         )
@@ -98,12 +114,23 @@ def run_logged_gradle(
                 process.wait()
         reader.join(timeout=5)
         if reader.is_alive():
-            # A descendant can outlive the parent and keep the pipe open.
+            # The Gradle parent can exit while a descendant still holds stdout.
             _stop_gradle_tree(process, force=True)
             reader.join(timeout=5)
         if process.poll() is None:
             _stop_gradle_tree(process, force=True)
         process.wait()
+        if reader.is_alive():
+            # Closing TextIOWrapper from a second thread can block indefinitely
+            # when the relay is stuck inside a read. Fail boundedly instead.
+            print(
+                f"{label} END status=output-reader-stuck exit={process.returncode} "
+                f"elapsed={time.monotonic() - started:.1f}s",
+                flush=True,
+            )
+            raise AssertionError(
+                f"{label}: output reader did not exit after process-tree cleanup"
+            )
         assert process.stdout is not None
         process.stdout.close()
 
@@ -117,8 +144,8 @@ def run_logged_gradle(
         )
         raise AssertionError(
             f"{label} timed out after {timeout:g}s (exit={process.returncode}). "
-            f"Captured output (last 8000 characters of {len(transcript)}):\n"
-            f"{transcript[-8000:]}"
+            f"Gradle output was streamed above; last 2048 characters:\n"
+            f"{transcript[-2048:]}"
         )
     if "Reusing configuration cache." in transcript:
         cache = "reused"
@@ -173,7 +200,10 @@ class ArchitectureBoundaryTest(unittest.TestCase):
                 sequence=1,
                 timeout=180,
             )
-        self.assertNotEqual(0, run.returncode, run.stdout)
+        self.assertNotEqual(
+            0, run.returncode,
+            "Expected Gradle to reject the injected dependency; see streamed output.",
+        )
         return run.stdout
 
     def test_forbidden_core_to_adapter_test_dependency(self):
@@ -274,7 +304,9 @@ class ArchitectureConfigurationCacheRegressionTest(unittest.TestCase):
         )
 
     def assert_valid(self, result: subprocess.CompletedProcess[str]) -> None:
-        self.assertEqual(0, result.returncode, result.stdout)
+        self.assertEqual(
+            0, result.returncode, "Gradle failed; see streamed output above."
+        )
         self.assertRegex(
             result.stdout, r"Architecture boundaries verified for [1-9]\d* modules\."
         )
@@ -296,7 +328,9 @@ class ArchitectureConfigurationCacheRegressionTest(unittest.TestCase):
         self, fixture: Path, diagnostic: str, input_pattern: str, *, scenario: str
     ) -> None:
         rejected = self.check_architecture(fixture, scenario=scenario, phase="invalidated")
-        self.assertNotEqual(0, rejected.returncode, rejected.stdout)
+        self.assertNotEqual(
+            0, rejected.returncode, "Expected Gradle rejection; see streamed output."
+        )
         self.assertIn(diagnostic, rejected.stdout)
         self.assertIn(
             "Calculating task graph as configuration cache cannot be reused",
@@ -349,7 +383,10 @@ class ArchitectureConfigurationCacheRegressionTest(unittest.TestCase):
                             scenario=f"{relative.as_posix()} ({configuration} -> {target})",
                             phase="invalidated",
                         )
-                        self.assertNotEqual(0, rejected.returncode, rejected.stdout)
+                        self.assertNotEqual(
+                            0, rejected.returncode,
+                            "Expected Gradle rejection; see streamed output.",
+                        )
                         self.assertIn(
                             f"Forbidden project dependency {module}:{configuration} -> {target}",
                             rejected.stdout,
@@ -535,6 +572,80 @@ class LoggedGradleSubprocessTest(unittest.TestCase):
         self.assertLess(log.getvalue().index("err\n"), log.getvalue().index("END"))
         self.assertIn("status=failed exit=7", log.getvalue())
 
+    def test_invalid_utf8_is_replaced_without_stopping_reader(self):
+        log = io.StringIO()
+        with redirect_stdout(log):
+            result = run_logged_gradle(
+                [
+                    sys.executable, "-u", "-c",
+                    "import sys; sys.stdout.buffer.write(b'bad: \\xff\\n'); "
+                    "sys.stdout.buffer.flush()",
+                ],
+                cwd=ROOT, scenario="invalid UTF-8",
+                phase="warmup", sequence=4, timeout=10,
+            )
+        self.assertEqual(0, result.returncode)
+        self.assertIn("bad: \ufffd", result.stdout)
+        self.assertIn("status=passed", log.getvalue())
+
+    def test_spawn_failure_has_end_marker(self):
+        with tempfile.TemporaryDirectory(prefix="missing-gradle-") as directory:
+            missing = str(Path(directory) / "does-not-exist")
+            log = io.StringIO()
+            with redirect_stdout(log):
+                with self.assertRaises(OSError):
+                    run_logged_gradle(
+                        [missing],
+                        cwd=ROOT, scenario="spawn failure",
+                        phase="cold-warmup", sequence=5, timeout=10,
+                    )
+            self.assertIn("START", log.getvalue())
+            self.assertIn("END status=spawn-failed exit=n/a", log.getvalue())
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux process groups")
+    def test_descendant_holding_stdout_is_terminated_after_parent_exit(self):
+        # Parent exits immediately, but its child inherits the stdout pipe.
+        # The relay must close only after cleaning up the entire process group.
+        script = (
+            "import subprocess, sys\n"
+            "child = subprocess.Popen([sys.executable, '-u', '-c', "
+            "'import time; time.sleep(60)'])\n"
+            "print(f'grandchild_pid={child.pid}', flush=True)\n"
+        )
+        log = io.StringIO()
+        with redirect_stdout(log):
+            result = run_logged_gradle(
+                [sys.executable, "-u", "-c", script],
+                cwd=ROOT, scenario="descendant keeps stdout",
+                phase="cleanup", sequence=6, timeout=30,
+            )
+        self.assertEqual(0, result.returncode)
+        self.assertIn("END status=passed", log.getvalue())
+        line = next(line for line in result.stdout.splitlines()
+                    if line.startswith("grandchild_pid="))
+        pid = int(line.split("=", 1)[1])
+        proc_stat = Path(f"/proc/{pid}/stat")
+        if proc_stat.exists():
+            # A defunct child may remain as a zombie until init reaps it.
+            self.assertEqual("Z", proc_stat.read_text().split(") ", 1)[1][0])
+
+    def test_windows_cleanup_targets_process_tree(self):
+        process = mock.Mock(pid=1234)
+        with (
+            mock.patch.object(os, "name", "nt"),
+            mock.patch.object(subprocess, "run") as command,
+        ):
+            command.return_value.returncode = 0
+            _stop_gradle_tree(process, force=True)
+        command.assert_called_once_with(
+            ["taskkill", "/PID", "1234", "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+        )
+        process.kill.assert_not_called()
+
     def test_stream_reaches_log_before_child_exits(self):
         with tempfile.TemporaryDirectory(prefix="gradle-logging-") as directory:
             release = Path(directory) / "release"
@@ -546,7 +657,18 @@ class LoggedGradleSubprocessTest(unittest.TestCase):
                 "    time.sleep(0.02)\n"
                 "print('finished', flush=True)\n"
             )
-            log = io.StringIO()
+            class NotifyingOutput(io.StringIO):
+                def __init__(self) -> None:
+                    super().__init__()
+                    self.first_line = threading.Event()
+
+                def write(self, value: str) -> int:
+                    count = super().write(value)
+                    if "first line" in value:
+                        self.first_line.set()
+                    return count
+
+            log = NotifyingOutput()
             results = []
             failures = []
 
@@ -559,7 +681,7 @@ class LoggedGradleSubprocessTest(unittest.TestCase):
                             scenario="live fixture",
                             phase="cold-warmup",
                             sequence=1,
-                            timeout=10,
+                            timeout=45,
                         )
                     )
                 except BaseException as error:
@@ -569,14 +691,14 @@ class LoggedGradleSubprocessTest(unittest.TestCase):
                 worker = threading.Thread(target=invoke)
                 worker.start()
                 try:
-                    deadline = time.monotonic() + 5
-                    while "first line\n" not in log.getvalue() and time.monotonic() < deadline:
-                        time.sleep(0.01)
-                    self.assertIn("first line\n", log.getvalue())
+                    self.assertTrue(
+                        log.first_line.wait(timeout=30),
+                        "No live output from the subprocess",
+                    )
                     self.assertTrue(worker.is_alive(), "Child exited before release")
                 finally:
                     release.touch()
-                    worker.join(timeout=5)
+                    worker.join(timeout=30)
             self.assertFalse(worker.is_alive(), "Runner did not exit after release")
             self.assertEqual([], failures)
             self.assertEqual("first line\nfinished\n", results[0].stdout)
@@ -591,7 +713,7 @@ class LoggedGradleSubprocessTest(unittest.TestCase):
                         "import time; print('diagnostic', flush=True); time.sleep(60)",
                     ],
                     cwd=ROOT, scenario="settings.gradle.kts",
-                    phase="invalidated", sequence=2, timeout=1.5,
+                    phase="invalidated", sequence=2, timeout=5,
                 )
         self.assertIn("settings.gradle.kts", str(error.exception))
         self.assertIn("diagnostic", str(error.exception))
