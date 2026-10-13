@@ -13,7 +13,7 @@ Recursive Coder will combine **Clean Architecture**, **Hexagonal Architecture (P
 - **Ports & Adapters** isolate model providers, trusted workspaces, task storage, event journals, clocks and future integrations. The core owns the contracts it needs; external implementations satisfy them.
 - **DDD-lite** establishes clear Task, Session and Agent Execution boundaries, invariants and vocabulary without imposing a large tactical-DDD framework.
 - **Functional Core / Imperative Shell** keeps security, scheduling, resource-budget and state-transition *decisions* deterministic, while a thin coordinating shell invokes I/O and commits effects.
-- **Event-driven observability** records correlated, versioned facts and verified outcomes. Event sourcing, CQRS, distributed services and a dependency-injection framework are **not** required for the initial design.
+- **Event-driven observability** records correlated, versioned facts and verified outcomes. Event sourcing, CQRS and distributed services are **not** required. Koin is mandatory only at the CLI composition root; core decisions and contracts remain framework-free.
 
 This is a direction for controlled evolution of the existing product, **not** a greenfield rewrite or a reason to introduce empty Gradle modules.
 
@@ -24,8 +24,13 @@ This is a direction for controlled evolution of the existing product, **not** a 
 ```text
 CLI / future API (composition root)
                 |
-      Application use cases
-   TaskService / SessionController
+      Application use case contracts
+ EnqueueTaskUseCase | RunSessionUseCase
+       (remaining cases: #59)
+                |
+      Concrete implementations
+   DefaultEnqueueTaskUseCase
+   DefaultRunSessionUseCase
                 |
           Domain decisions
  Task | Session | Policy | Budgets | DAG
@@ -105,6 +110,24 @@ Use typed domain states/outcomes where meaningful. Treat serialized wire DTOs as
 
 A future Koog module may depend on core contracts and application services, while the core must never depend on Koog. Infrastructure adapter selection happens at an application composition root.
 
+
+### Explicit Use Case interfaces and CLI DI (issue #58, initial slice)
+
+The application boundary is represented by interface + implementation pairs within their owning bounded contexts, **not** by a new empty Gradle module:
+
+| Contract | Implementation | Owns | Consumer |
+| --- | --- | --- | --- |
+| `EnqueueTaskUseCase.invoke(requestJson, priority, dependencies): Task` | `DefaultEnqueueTaskUseCase` in `:core:tasks` | Shape/priority admission, then atomic repository update applying `TaskPolicy.enqueue` | `tasks enqueue` via Koin; existing `TaskService.enqueue` delegates for compatibility |
+| `RunSessionUseCase.invoke(request, cancellation): SessionExecutionResult` | `DefaultRunSessionUseCase` in `:core:session` | Workspace and protocol admission, trusted model/tool execution, budgets, terminal events and verified result publication | `recursive-coder run` and scheduler's `TaskRunner` via Koin; existing `SessionController` delegates for compatibility |
+
+The input reuses the existing validated `SessionRequest`; the public Use Case returns an immutable `SessionExecutionResult(outcome, protocol)` containing the typed terminal `SessionOutcome` and the **already-validated, already-published** Session Protocol v1 `JsonObject`. The Use Case serializes and validates exactly once before publishing `result.json`; the CLI and compatibility façade reuse that same value without encoding again. Detailed `SessionRunResult`, `SessionArtifact`, `SessionFailure` and `SessionBudgetState` stay `internal` to `:core:session` and are **not** supported public contracts.
+
+`:app:cli/CompositionRoot.kt` owns Koin definitions. `io.insert-koin:koin-core:4.2.2` and `koin-test:4.2.2` share the `koin` version in the Gradle catalog. Koin 4.2.2 is a stable Kotlin 2.x-compatible line; no annotations or code generation are used. Factories explicitly bind `EnqueueTaskUseCase` / `RunSessionUseCase` to concrete implementations, while `TaskRepository`, `ModelGateway`, `WorkspaceOpener`, `EventSinkFactory` and `Clock` are injected through constructors. `koinApplication { modules(...) }` builds **local** containers, always closed in `finally` or `AutoCloseable.close()`; there is no process-global `startKoin` or service-locator call inside the core.
+
+Lifetime rules: one `TaskComposition` and `TaskRepository` are shared across operations of a parsed task CLI command and closed in `executeCli`'s `finally`. Session compositions are created for individual direct or scheduled session invocations and closed on normal or exceptional exit; no Koin container survives its work. Use Cases are factories. The model provider is selected per invocation. `Cancellation`, the admitted workspace, journal, watchdog and all session execution state belong to each individual `RunSessionUseCase.invoke`, **not** singleton Koin definitions. Unit tests instantiate implementations directly with in-memory repositories/fakes and fixed clocks; the `KoinBindingsTest` pure unit suite verifies graph definitions and task composition identity/closure using in-memory repositories only, with no global Koin state.
+
+`TaskService` still owns task read/query, cancel/retry, pause/resume, claim/finish and interruption/recovery orchestration; `TaskScheduler` continues using its compatibility API. Follow-up [#59](https://github.com/YuriiSokolenko/recursive-coder/issues/59) tracks extraction of those remaining business intents and scheduler interface injection. Compatibility façades are not the desired long-term application API. The original transactional, policy, authorization and durability rules remain in place.
+
 ## 6. Testing architecture
 
 Use **JUnit 5 + kotlin.test** as the baseline. Prefer handwritten deterministic fakes for narrow ports; introduce mocking or property-based test tools only where a concrete case merits them.
@@ -171,6 +194,6 @@ This plan deliberately **does not recreate** the finished multi-module refactor 
 
 ## 10. Explicit non-goals
 
-No microservices, no dependency injection framework requirement, no mandatory CQRS/Event Sourcing, no full framework rewrite, no empty speculative Gradle modules, no live LLM dependency for CI, no change to the product's independent execution authority, and no broad unreviewed JSON/protocol migration.
+No microservices, no Koin dependency inside core, no mandatory CQRS/Event Sourcing, no full framework rewrite, no empty speculative Gradle modules, no live LLM dependency for CI, no change to the product's independent execution authority, and no broad unreviewed JSON/protocol migration.
 
 **Architecture priority:** correct and testable decisions first; stable ports second; physical module moves only when they enforce a real boundary.

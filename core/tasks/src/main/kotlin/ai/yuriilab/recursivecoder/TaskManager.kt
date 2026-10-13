@@ -8,7 +8,11 @@ import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
 
 /** Task use cases apply pure decisions inside a repository-owned atomic transaction. */
-class TaskService(val store: TaskRepository, private val clock: Clock = Clock.systemUTC()) {
+class TaskService(
+    val store: TaskRepository,
+    private val clock: Clock = Clock.systemUTC(),
+    private val enqueueUseCase: EnqueueTaskUseCase = DefaultEnqueueTaskUseCase(store, clock)
+) {
     fun list(): List<Task> = store.read { it.tasks.toList() }
     fun show(id: String): Task = store.read { it.find(id) }
     fun isPaused(): Boolean = store.read { it.paused }
@@ -17,16 +21,8 @@ class TaskService(val store: TaskRepository, private val clock: Clock = Clock.sy
     private fun TaskQueue.find(id: String): Task =
         tasks.firstOrNull { it.id == id } ?: throw IllegalArgumentException("Unknown task")
 
-    fun enqueue(requestJson: String, priority: Int = 50, dependencies: List<String> = emptyList()): Task {
-        val submission = TaskRequestMapper.submission(requestJson)
-        val id = submission.taskId
-        require(safeTaskId.matches(id)) { "Unsafe task ID" }
-        require(priority in 0..100) { "Priority must be 0..100" }
-        return store.update { queue ->
-            val next = TaskPolicy.enqueue(queue, id, submission.template, priority, dependencies, now())
-            TaskMutation(next, next.find(id))
-        }
-    }
+    fun enqueue(requestJson: String, priority: Int = 50, dependencies: List<String> = emptyList()): Task =
+        enqueueUseCase(requestJson, priority, dependencies)
 
     /** Only tasks not yet attempted can change their prerequisites. */
     fun replaceDependencies(id: String, dependencies: List<String>): Task = store.update { queue ->

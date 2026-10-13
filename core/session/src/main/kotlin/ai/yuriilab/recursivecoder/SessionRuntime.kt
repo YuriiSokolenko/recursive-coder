@@ -7,7 +7,6 @@ import java.nio.file.StandardOpenOption
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
-import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlinx.serialization.json.*
@@ -67,24 +66,18 @@ private fun SessionRequest.admit(workspaceOpener: WorkspaceOpener,
     }
 }
 
-class SessionController(
-    private val request: SessionRequest,
+/**
+ * Session application orchestration: admission precedes workspace/model effects;
+ * completion is published only after the journal and result have been verified.
+ * All mutable execution state is local to invoke(), never shared between sessions.
+ */
+class DefaultRunSessionUseCase(
     private val model: ModelGateway,
-    val cancellation: Cancellation = Cancellation(),
     private val workspaceOpener: WorkspaceOpener,
     private val eventSinkFactory: EventSinkFactory,
     private val clock: Clock = Clock.systemUTC()
-) {
-    private val finished = CountDownLatch(1)
-    fun awaitFinished(timeoutMs: Long) = finished.await(timeoutMs, TimeUnit.MILLISECONDS)
-
-    fun run(): JsonObject = try {
-        execute()
-    } finally {
-        finished.countDown()
-    }
-
-    private fun execute(): JsonObject {
+) : RunSessionUseCase {
+    override fun invoke(request: SessionRequest, cancellation: Cancellation): SessionExecutionResult {
         cancellation.bind()
         val started = clock.instant()
         // Never open or truncate existing output files. A later recovery milestone owns replay.
@@ -291,7 +284,7 @@ class SessionController(
         val diagnostics = SessionResultMapper.diagnostics(request.sessionId, outcome, journal.sequence.toLong())
         val diagnosticsContent = diagnostics.toString()
         // Validate the full terminal result before publishing any diagnostics or result file.
-        val result = SessionResultMapper.encode(SessionRunResult(
+        val completed = SessionRunResult(
             outcome = outcome,
             startedAt = started,
             finishedAt = finishedAt,
@@ -300,11 +293,12 @@ class SessionController(
             diagnostics = SessionResultMapper.artifact(diagnosticsPath, diagnosticsContent),
             failure = failure,
             usage = budgetState
-        ), request)
+        )
+        val protocol = completed.toSessionProtocolJson(request)
         Files.writeString(diagnosticsPath, diagnosticsContent,
             StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
-        Files.writeString(request.output("resultPath"), result.toString(),
+        Files.writeString(request.output("resultPath"), protocol.toString(),
             StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
-        return result
+        return SessionExecutionResult(outcome, protocol)
     }
 }

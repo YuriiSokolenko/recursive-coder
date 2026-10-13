@@ -99,3 +99,8 @@ internal object SessionResultMapper {
         }
     }
 }
+
+
+/** Compatibility transport projection; not part of the Use Case contract. */
+internal fun SessionRunResult.toSessionProtocolJson(request: SessionRequest): JsonObject =
+    SessionResultMapper.encode(this, request)
