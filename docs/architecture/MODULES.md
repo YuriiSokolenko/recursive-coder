@@ -41,7 +41,7 @@ python -m unittest discover -s tests -p 'test_cli_runtime_v1.py' -v
 
 Module-local unit tests can be run separately with `./gradlew :core:session:test :infra:workspace:test`:
 
-- `:core:session` owns fast Session Controller tests with in-module `ModelGateway` and `WorkspaceSession` fakes. These cover admission, trusted observations, token/request budgets, errors, and event ordering without loading concrete adapters.
+- `:core:session` owns the pure `SessionLifecyclePolicy`, `SessionAdmissionPolicy` and `SessionBudgetPolicy` with deterministic value-only tests (`SessionPolicyUnitTest`). `SessionControllerUnitTest` uses in-module `ModelGateway` and `WorkspaceSession` fakes plus temporary event files to exercise orchestration, admission, trusted observations, budgets, errors and event ordering without concrete adapters.
 - `:infra:workspace` owns write-tool schema validation and direct Workspace Manager policy/adapter tests. They use only `:core:contracts` types; the small Git fixture stays inside the infrastructure module.
 - `:app:cli` retains the real Session Controller + FakeModel + Workspace Manager integration tests, CLI scheduler tests, and sandbox E2E. These are intentionally not copied into the unit-test modules.
 
