@@ -15,10 +15,11 @@ import kotlinx.serialization.json.*
 internal fun executeCli(args: List<String>): Int {
     val root = RecursiveCoderCommand()
     return try {
-        root.parse(args)
+        root.use { it.parse(args) }
         0
     } catch (error: CliktError) {
         if (error !is ProgramResult && error !is Abort) root.echoFormattedHelp(error)
+        error.suppressed.forEach { System.err.println("Cleanup failed: " + (it.message ?: "Unknown failure")) }
         when {
             error is ProgramResult || error is Abort -> error.statusCode
             error.statusCode == 0 -> 0
@@ -26,9 +27,8 @@ internal fun executeCli(args: List<String>): Int {
         }
     } catch (error: Exception) {
         System.err.println(error.message ?: "Command failed")
+        error.suppressed.forEach { System.err.println("Cleanup failed: " + (it.message ?: "Unknown failure")) }
         2
-    } finally {
-        root.close()
     }
 }
 
@@ -37,7 +37,7 @@ private fun <T> once(values: List<T>, flag: String, default: T): T {
     return values.singleOrNull() ?: default
 }
 
-private class RecursiveCoderCommand : CliktCommand(name = "recursive-coder") {
+private class RecursiveCoderCommand : CliktCommand(name = "recursive-coder"), AutoCloseable {
     override val invokeWithoutSubcommand = true
     override fun help(context: Context) = "Run a coding session or manage local tasks."
 
@@ -45,7 +45,7 @@ private class RecursiveCoderCommand : CliktCommand(name = "recursive-coder") {
 
     init { subcommands(RunSessionCommand(), tasks) }
 
-    fun close() = tasks.close()
+    override fun close() = tasks.close()
 
     override fun run() {
         if (currentContext.invokedSubcommand == null) {
@@ -103,7 +103,8 @@ private class TasksCommand : CliktCommand(name = "tasks") {
 
     // Delay file store creation until after Clikt has validated the command.
     private fun dependencies(): TaskComposition =
-        composition ?: TaskComposition(TaskStore(storeDirectory)).also { composition = it }
+        composition ?: TaskComposition(TaskStore(storeDirectory), TaskRepositoryOwnership.OWNED)
+            .also { composition = it }
 
     fun enqueue(): EnqueueTaskUseCase = dependencies().enqueue()
     fun queries(): TaskQueriesUseCase = dependencies().queries()
@@ -115,8 +116,9 @@ private class TasksCommand : CliktCommand(name = "tasks") {
     fun scheduler(): TaskScheduler = dependencies().scheduler()
 
     fun close() {
-        composition?.close()
+        val current = composition
         composition = null
+        current?.close()
     }
 }
 

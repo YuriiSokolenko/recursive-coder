@@ -6,8 +6,9 @@ import org.koin.dsl.koinApplication
 import org.koin.dsl.module
 
 /**
- * The CLI owns all Koin applications. Each command gets one task repository,
- * and session-scoped applications are closed after each invocation.
+ * The CLI owns all Koin applications. Each task command uses one repository.
+ * An owned closeable repository is released only after its Koin application;
+ * borrowed repositories remain under their caller's lifetime management.
  * No Koin API is imported by core use cases or domain policies.
  */
 internal fun taskModule(repository: TaskRepository): Module = module {
@@ -54,9 +55,31 @@ internal val cliWorkspaceOpener: WorkspaceOpener = WorkspaceOpener { request, on
     WorkspaceManager.open(request, onAudit, onStart)
 }
 
-/** Command lifetime: one repository/lock owner for both service and enqueue. */
-internal class TaskComposition(repository: TaskRepository) : AutoCloseable {
-    private val application = koinApplication { modules(taskModule(repository)) }
+/** The CLI-created adapter is owned; adapters injected by other callers may be borrowed. */
+internal enum class TaskRepositoryOwnership { OWNED, BORROWED }
+
+/** Command lifetime: one shared repository for all task use cases and the scheduler. */
+internal class TaskComposition(
+    private val repository: TaskRepository,
+    private val ownership: TaskRepositoryOwnership
+) : AutoCloseable {
+    private fun closeOwnedRepository() {
+        if (ownership == TaskRepositoryOwnership.OWNED) {
+            (repository as? AutoCloseable)?.close()
+        }
+    }
+
+    private val application = try {
+        koinApplication { modules(taskModule(repository)) }
+    } catch (failure: Throwable) {
+        // A failed DI setup must not leak a newly created resource-owning adapter.
+        try {
+            closeOwnedRepository()
+        } catch (cleanup: Throwable) {
+            if (cleanup !== failure) failure.addSuppressed(cleanup)
+        }
+        throw failure
+    }
     private var closed = false
 
     private fun dependencies() = application.koin.also {
@@ -74,12 +97,37 @@ internal class TaskComposition(repository: TaskRepository) : AutoCloseable {
     fun replaceDependencies(): ReplaceTaskDependenciesUseCase = dependencies().get()
     fun scheduler(): TaskScheduler = dependencies().get()
 
+    @Synchronized
     override fun close() {
-        if (!closed) {
-            closed = true
-            application.close()
-        }
+        if (closed) return
+        closed = true
+        // A scheduler has already exited before command cleanup reaches this point.
+        closeTaskCompositionResources(application::close, ::closeOwnedRepository)
     }
+}
+
+/**
+ * Shut down DI before releasing an owned repository. Always attempt both phases,
+ * keeping the earliest failure and suppressing later distinct failures.
+ */
+internal fun closeTaskCompositionResources(
+    closeApplication: () -> Unit,
+    closeRepository: () -> Unit
+) {
+    var failure: Throwable? = null
+    try {
+        closeApplication()
+    } catch (error: Throwable) {
+        failure = error
+    }
+    try {
+        closeRepository()
+    } catch (error: Throwable) {
+        val earlier = failure
+        if (earlier == null) failure = error
+        else if (earlier !== error) earlier.addSuppressed(error)
+    }
+    failure?.let { throw it }
 }
 
 /** Per-session scope: close the container on success, denial and exceptions. */
