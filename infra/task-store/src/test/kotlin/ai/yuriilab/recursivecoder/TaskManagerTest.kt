@@ -504,4 +504,28 @@ class TaskManagerTest {
 
 
 
+    @Test fun schedulerRejectsTamperedTaskTemplatesAtMappingBoundary() {
+        val service = service()
+        val bad = Task(id = "task", requestTemplate = "{}",
+            dependencies = emptyList(), priority = 50,
+            state = TaskState.RUNNING, attempt = 1, sessionId = "session-task-1")
+        assertFailsWith<Refused> { service.requestFor(bad) }
+        assertFailsWith<IllegalArgumentException> {
+            service.requestFor(bad.copy(state = TaskState.READY))
+        }
+    }
+
+    @Test fun invalidRunnerResultIsRejectedBeforeAnyPersistentMutation() {
+        val service = service()
+        service.enqueue(request("one"))
+        val running = service.claim()!!
+        val snapshot = Files.readString(temp.resolve("store/tasks.json"))
+        val failure = assertFailsWith<IllegalArgumentException> {
+            service.finish(running.id, running.sessionId!!, "secret-user-text")
+        }
+        assertEquals("Unsupported session result status", failure.message)
+        assertEquals(snapshot, Files.readString(temp.resolve("store/tasks.json")))
+        assertEquals(TaskState.RUNNING, service.show("one").state)
+    }
+
 }
