@@ -77,7 +77,7 @@ class DefaultRunSessionUseCase(
     private val eventSinkFactory: EventSinkFactory,
     private val clock: Clock = Clock.systemUTC()
 ) : RunSessionUseCase {
-    override fun invoke(request: SessionRequest, cancellation: Cancellation): SessionRunResult {
+    override fun invoke(request: SessionRequest, cancellation: Cancellation): SessionExecutionResult {
         cancellation.bind()
         val started = clock.instant()
         // Never open or truncate existing output files. A later recovery milestone owns replay.
@@ -299,6 +299,6 @@ class DefaultRunSessionUseCase(
             StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
         Files.writeString(request.output("resultPath"), protocol.toString(),
             StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
-        return completed
+        return SessionExecutionResult(outcome, protocol)
     }
 }

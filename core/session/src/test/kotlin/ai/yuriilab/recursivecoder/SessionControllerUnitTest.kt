@@ -406,6 +406,7 @@ class SessionControllerUnitTest {
         )
         val result = useCase(request, Cancellation())
         assertEquals(SessionOutcome.SUCCEEDED, result.outcome)
+        assertEquals(Files.readString(request.output("resultPath")), result.protocol.toString())
         assertEquals(1, workspace.readCount)
         assertEquals(2, gateway.turns)
         assertTrue(workspace.closed)
@@ -424,35 +425,19 @@ class SessionControllerUnitTest {
         assertEquals(0, gateway.negotiations)
     }
 
-    @Test fun compatibilityFacadeAcceptsSubstitutedUseCase() {
+    @Test fun compatibilityFacadeAcceptsSubstitutedUseCaseWithoutReencoding() {
         val request = fixture()
-        val expected = SessionRunResult(
-            outcome = SessionOutcome.SUCCEEDED,
-            startedAt = Instant.parse("2026-01-01T00:00:00Z"),
-            finishedAt = Instant.parse("2026-01-01T00:00:01Z"),
-            lastEventSeq = 0,
-            eventLog = SessionArtifact(request.output("eventsPath"), "a".repeat(64)),
-            diagnostics = SessionArtifact(request.output("diagnosticsPath"), "b".repeat(64)),
-            failure = null,
-            usage = SessionBudgetState()
-        )
+        val expected = buildJsonObject { put("status", "succeeded") }
         var invoked = false
         val substitute = object : RunSessionUseCase {
-            override fun invoke(requestArg: SessionRequest, cancellation: Cancellation): SessionRunResult {
+            override fun invoke(requestArg: SessionRequest, cancellation: Cancellation): SessionExecutionResult {
                 assertSame(request, requestArg)
                 invoked = true
-                return expected
+                return SessionExecutionResult(SessionOutcome.SUCCEEDED, expected)
             }
         }
-        val controller = SessionController(
-            request, StubGateway(),
-            workspaceOpener = WorkspaceOpener { _, _, _ ->
-                throw AssertionError("Injected use case must own the workspace")
-            },
-            eventSinkFactory = eventSinkFactory,
-            runSession = substitute
-        )
-        assertEquals(expected.toSessionProtocolJson(request), controller.run())
+        val controller = SessionController(request, Cancellation(), substitute)
+        assertSame(expected, controller.run())
         assertTrue(invoked)
         assertTrue(controller.awaitFinished(10))
     }

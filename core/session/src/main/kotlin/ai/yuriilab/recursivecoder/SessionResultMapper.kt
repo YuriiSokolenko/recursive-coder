@@ -8,9 +8,9 @@ import java.time.Instant
 import kotlinx.serialization.json.*
 
 /** Pure value types for the terminal Session decision, before protocol serialization. */
-data class SessionFailure(val code: String, val category: String, val safeMessage: String)
-data class SessionArtifact(val path: Path, val sha256: String)
-data class SessionRunResult(
+internal data class SessionFailure(val code: String, val category: String, val safeMessage: String)
+internal data class SessionArtifact(val path: Path, val sha256: String)
+internal data class SessionRunResult(
     val outcome: SessionOutcome,
     val startedAt: Instant,
     val finishedAt: Instant,
@@ -102,5 +102,5 @@ internal object SessionResultMapper {
 
 
 /** Compatibility transport projection; not part of the Use Case contract. */
-fun SessionRunResult.toSessionProtocolJson(request: SessionRequest): JsonObject =
+internal fun SessionRunResult.toSessionProtocolJson(request: SessionRequest): JsonObject =
     SessionResultMapper.encode(this, request)

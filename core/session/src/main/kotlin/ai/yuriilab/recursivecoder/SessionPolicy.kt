@@ -147,7 +147,7 @@ internal sealed interface BudgetDecision<out T> {
     data class Denied(val reason: BudgetDenial) : BudgetDecision<Nothing>
 }
 
-data class SessionBudgetState(
+internal data class SessionBudgetState(
     val modelRequests: Long = 0,
     val inputTokens: Long = 0,
     val outputTokens: Long = 0,
