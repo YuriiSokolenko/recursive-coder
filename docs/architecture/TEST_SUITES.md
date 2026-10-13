@@ -36,6 +36,39 @@ The fixture never modifies the checkout, resolves dependencies, or calls a
 model service. CI runs it together with the other architecture regressions
 using the pinned Gradle 9.8.1 installation.
 
+### Non-module configuration-cache inputs (issue #45)
+
+The same isolated Gradle 9.8.1 regression suite additionally proves invalidation
+after three changes **outside product module build scripts**. It starts with a
+valid graph and an explicitly reused configuration-cache entry. Each mutation
+follows a confirmed cache hit and is followed by restoring the changed input
+and verifying the valid graph succeeds again. Before the second and third
+mutations, a cache hit is verified using the restored run itself if it reused
+a valid entry, or one additional warm-up run if restoration reconfigured.
+After the final properties restoration, no extra cache hit is required.
+The three input changes are:
+
+- **Build logic:** removing `:core:contracts` from the `:core:tasks` allowlist
+  in the copied `ArchitectureGraph.kt` causes the existing
+  `:core:tasks:implementation -> :core:contracts` edge to be rejected.
+  Gradle 9.8.1 reports the invalidation as a changed input to
+  `:build-logic:compileKotlin`, not as an `ArchitectureGraph.kt` path;
+  the fixture separately confirms the source edit.
+- **Settings:** including a temporary `:architectureUnclassified` project
+  through the copied `settings.gradle.kts` triggers an
+  `Unclassified module` diagnostic; the directory is entirely fixture-local.
+- **Properties:** a fixture-only `architectureFixtureIllegalEdge` property
+  is read during module configuration. Changing only that property from
+  `false` to `true` introduces a forbidden declared edge from
+  `:core:tasks` to `:infra:workspace`. No JVM or daemon property is changed.
+
+Each negative run requires a configuration-cache miss, an input-specific
+indicator in Gradle's cache invalidation reason, and an actionable architecture
+diagnostic. The
+restored run needs to **pass**, not necessarily report an invalidation:
+Gradle is free to reuse an earlier valid entry. No production build logic,
+repository input or remote endpoint is modified by these tests.
+
 **Scope and existing exceptions:** The rules cover Gradle project dependencies and selected external framework groups, not imports or the implementation of port interfaces. The included `build-logic` build belongs to Gradle tooling, not product modules. Current `:core:tasks` has a file-backed `TaskStore` and `:core:session` still writes a physical event journal internally. These are *existing extraction debts* tracked by issues #27 and #29, not permissions for core to depend on infrastructure or CLI. This task deliberately does not refactor production code.
 
 ## Test taxonomy

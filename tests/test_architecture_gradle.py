@@ -143,6 +143,38 @@ class ArchitectureConfigurationCacheRegressionTest(unittest.TestCase):
             result.stdout, r"Architecture boundaries verified for [1-9]\d* modules\."
         )
 
+    def assert_cache_hit(self, fixture: Path) -> None:
+        warm = self.check_architecture(fixture)
+        self.assert_valid(warm)
+        self.assertIn("Reusing configuration cache.", warm.stdout)
+
+    def assert_restored_cache_ready(self, fixture: Path) -> None:
+        restored = self.check_architecture(fixture)
+        self.assert_valid(restored)
+        # The restored run itself may reuse an earlier valid cache entry.
+        # Only perform an extra warm-up if Gradle had to reconfigure.
+        if "Reusing configuration cache." not in restored.stdout:
+            self.assert_cache_hit(fixture)
+
+    def assert_cache_invalidated(
+        self, fixture: Path, diagnostic: str, input_pattern: str
+    ) -> None:
+        rejected = self.check_architecture(fixture)
+        self.assertNotEqual(0, rejected.returncode, rejected.stdout)
+        self.assertIn(diagnostic, rejected.stdout)
+        self.assertIn(
+            "Calculating task graph as configuration cache cannot be reused",
+            rejected.stdout,
+        )
+        self.assertNotIn("Reusing configuration cache.", rejected.stdout)
+        # Name the changed input in the invalidation reason, rather than
+        # matching an unrelated Gradle progress message.
+        self.assertRegex(
+            rejected.stdout.replace("\\", "/"),
+            r"Calculating task graph as configuration cache cannot be reused because [^\n]*"
+            + input_pattern,
+        )
+
     def test_changed_build_script_invalidates_cache_for_production_and_test_edges(self):
         with tempfile.TemporaryDirectory(prefix="architecture-cache-") as temporary:
             fixture = Path(temporary)
@@ -193,6 +225,134 @@ class ArchitectureConfigurationCacheRegressionTest(unittest.TestCase):
                     restored = self.check_architecture(fixture)
                     self.assert_valid(restored)
                     self.assertEqual(original, build_file.read_text(encoding="utf-8"))
+
+    def test_non_module_inputs_invalidate_a_warmed_configuration_cache(self):
+        with tempfile.TemporaryDirectory(prefix="architecture-input-cache-") as temporary:
+            fixture = Path(temporary)
+            self.copy_fixture(fixture)
+
+            properties_file = fixture / "gradle.properties"
+            tasks_build_file = fixture / "core/tasks/build.gradle.kts"
+            rules_file = (
+                fixture / "build-logic/src/main/kotlin/ai/yuriilab/"
+                "recursivecoder/buildlogic/architecture/ArchitectureGraph.kt"
+            )
+            settings_file = fixture / "settings.gradle.kts"
+
+            original_properties = properties_file.read_text(encoding="utf-8")
+            original_tasks_build = tasks_build_file.read_text(encoding="utf-8")
+            original_rules = rules_file.read_text(encoding="utf-8")
+            original_settings = settings_file.read_text(encoding="utf-8")
+
+            # Install a property-driven *declared* dependency only in this
+            # temporary fixture. Resolving the provider during configuration
+            # makes its value a tracked configuration-cache input.
+            property_name = "architectureFixtureIllegalEdge"
+            self.assertNotIn(property_name, original_properties)
+            properties_with_disabled_edge = (
+                original_properties + f"\n{property_name}=false\n"
+            )
+            properties_file.write_text(
+                properties_with_disabled_edge, encoding="utf-8"
+            )
+            tasks_build_file.write_text(
+                original_tasks_build
+                + '\nif (providers.gradleProperty("architectureFixtureIllegalEdge").orNull == "true") {\n'
+                + '    dependencies { implementation(project(":infra:workspace")) }\n'
+                + '}\n',
+                encoding="utf-8",
+            )
+
+            cold = self.check_architecture(fixture)
+            self.assert_valid(cold)
+            self.assertIn("Configuration cache entry stored.", cold.stdout)
+            self.assert_cache_hit(fixture)
+
+            # 1. Change the compiled allowlist, not any module build script.
+            # :core:tasks already declares :core:contracts; the new rule
+            # must recompile/reconfigure and reject that existing edge.
+            with self.subTest(input="build-logic rules"):
+                allowed = '":core:tasks" to setOf(":core:contracts"),'
+                self.assertEqual(1, original_rules.count(allowed))
+                rules_file.write_text(
+                    original_rules.replace(
+                        allowed, '":core:tasks" to emptySet(),'
+                    ),
+                    encoding="utf-8",
+                )
+                try:
+                    # Gradle 9.8.1 names the invalidated compile task input,
+                    # rather than the Kotlin source file, in its cache reason.
+                    self.assertIn(
+                        '":core:tasks" to emptySet(),',
+                        rules_file.read_text(encoding="utf-8"),
+                    )
+                    self.assert_cache_invalidated(
+                        fixture,
+                        "Forbidden project dependency "
+                        ":core:tasks:implementation -> :core:contracts",
+                        r"an input to task ':build-logic:compileKotlin' has changed",
+                    )
+                finally:
+                    rules_file.write_text(original_rules, encoding="utf-8")
+                self.assertEqual(
+                    original_rules, rules_file.read_text(encoding="utf-8")
+                )
+                self.assert_restored_cache_ready(fixture)
+
+            # 2. Include a new fixture-local module through settings, rather
+            # than injecting one with a Gradle init script.
+            with self.subTest(input="settings.gradle.kts"):
+                unknown_module = fixture / "architectureUnclassified"
+                unknown_module.mkdir()
+                (unknown_module / "build.gradle.kts").write_text(
+                    "// Intentionally missing from the architecture allowlist.\n",
+                    encoding="utf-8",
+                )
+                settings_file.write_text(
+                    original_settings + '\ninclude(":architectureUnclassified")\n',
+                    encoding="utf-8",
+                )
+                try:
+                    self.assert_cache_invalidated(
+                        fixture,
+                        "Unclassified module :architectureUnclassified",
+                        r"settings\.gradle\.kts",
+                    )
+                finally:
+                    settings_file.write_text(original_settings, encoding="utf-8")
+                    shutil.rmtree(unknown_module)
+                self.assertEqual(
+                    original_settings, settings_file.read_text(encoding="utf-8")
+                )
+                self.assert_restored_cache_ready(fixture)
+
+            # 3. Flip only the tracked fixture property. The build script and
+            # Gradle daemon/JVM settings stay unchanged across the cache hit.
+            with self.subTest(input="gradle.properties"):
+                properties_file.write_text(
+                    properties_with_disabled_edge.replace(
+                        f"{property_name}=false", f"{property_name}=true"
+                    ),
+                    encoding="utf-8",
+                )
+                try:
+                    self.assert_cache_invalidated(
+                        fixture,
+                        "Forbidden project dependency "
+                        ":core:tasks:implementation -> :infra:workspace",
+                        r"gradle\.properties|architectureFixtureIllegalEdge",
+                    )
+                finally:
+                    properties_file.write_text(
+                        properties_with_disabled_edge, encoding="utf-8"
+                    )
+                restored = self.check_architecture(fixture)
+                self.assert_valid(restored)
+                self.assertEqual(
+                    properties_with_disabled_edge,
+                    properties_file.read_text(encoding="utf-8"),
+                )
 
 
 if __name__ == "__main__":
