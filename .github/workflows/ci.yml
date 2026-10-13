@@ -29,9 +29,23 @@ jobs:
         with:
           gradle-version: '9.8.1'
       - name: Verify architecture and run pure unit tests
-        run: ./gradlew --no-daemon checkArchitecture unitTest --stacktrace
+        run: ./gradlew --no-daemon checkArchitecture checkTestTiers unitTest --stacktrace
       - name: Reject deliberately illegal and cyclic test edges
         run: python3 -m unittest discover -s tests -p 'test_architecture_gradle.py' -v
+      - name: Validate test tier guard against negative bytecode fixtures
+        run: |
+          python3 - <<'PY'
+          import unittest
+
+          suite = unittest.defaultTestLoader.discover("tests", pattern="test_test_tiers.py")
+          expected = suite.countTestCases()
+          if not expected:
+              raise SystemExit("Test tier regression fixtures must be discovered")
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          if result.skipped or not result.wasSuccessful() or result.testsRun != expected:
+              raise SystemExit("Test tier regression fixtures must all run and pass without skips")
+          print(f"Verified {result.testsRun} passing test tier regression fixtures (0 skips)")
+          PY
       - name: Ensure the pure unit suite actually executed
         run: |
           python3 - <<'PY'
@@ -80,7 +94,7 @@ jobs:
       - name: Compile and test standalone Gradle modules and distribution
         env:
           CI: 'true'
-        run: ./gradlew --no-daemon clean test installDist --stacktrace
+        run: ./gradlew --no-daemon clean test integrationTest e2eTest installDist --stacktrace
       - name: Confirm sandbox integration test was not skipped
         run: |
           python3 - <<'PY'
@@ -101,6 +115,27 @@ jobs:
           ):
               raise SystemExit("Sandbox integration MUST run and pass exactly once in CI")
           print("Verified sandbox integration executed and passed (0 skips).")
+          PY
+      - name: Verify focused integration excludes sandbox and E2E includes it once
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from xml.etree import ElementTree as ET
+
+          marker = "realSeparatelyExecutedSandboxedTestPassesIfHostSupportsUserNamespaces"
+          def read_cases(tier):
+              files = list(Path(".").glob(f"**/build/test-results/{tier}/TEST-*.xml"))
+              return [case for file in files for case in ET.parse(file).iter("testcase")]
+          integration = read_cases("integrationTest")
+          e2e = read_cases("e2eTest")
+          sandbox = [case for case in e2e if case.get("name", "").startswith(marker)]
+          if not integration or any(case.get("name", "").startswith(marker) for case in integration):
+              raise SystemExit("integrationTest must run ordinary integration tests but exclude sandbox E2E")
+          if len(sandbox) != 1 or any(
+              case.find(tag) is not None for case in sandbox for tag in ("skipped", "failure", "error")
+          ):
+              raise SystemExit("e2eTest must select exactly one passing sandbox test")
+          print("Verified focused integration excludes sandbox; focused E2E runs it once.")
           PY
       - name: Publish Kotlin JUnit results
         if: always()
