@@ -11,7 +11,7 @@ import org.junit.jupiter.api.Test
 class TaskRepositoryUnitTest {
     @Test fun memoryAdapterRollsBackFailedMutation() {
         val repo = InMemoryTaskRepository()
-        val initial = Task(id = "only", requestTemplate = "{}", priority = 50,
+        val initial = Task(id = "only", requestTemplate = "{}", dependencies = emptyList(), priority = 50,
             state = TaskState.READY)
         repo.update { TaskMutation(it.copy(tasks = listOf(initial)), Unit) }
         assertFailsWith<IllegalArgumentException> {
@@ -25,7 +25,7 @@ class TaskRepositoryUnitTest {
 
     @Test fun policyClaimIsAtomicOnOneInMemoryRepository() {
         val repo = InMemoryTaskRepository()
-        val initial = Task(id = "only", requestTemplate = "{}", priority = 50,
+        val initial = Task(id = "only", requestTemplate = "{}", dependencies = emptyList(), priority = 50,
             state = TaskState.READY)
         repo.update { TaskMutation(it.copy(tasks = listOf(initial)), Unit) }
         val start = CountDownLatch(1)
