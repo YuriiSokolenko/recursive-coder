@@ -4,7 +4,7 @@ Issue #25 makes the accepted architecture direction executable without modifying
 
 ## Dependency graph verification
 
-Run `./gradlew checkArchitecture`. This inspects every declared Gradle project dependency across production and test configurations, including future test fixtures. It rejects project dependency cycles even when an edge is declared only in `testImplementation`.
+Run `./gradlew checkArchitecture` or `./gradlew checkArchitecture --configuration-cache` (Gradle 9.8.1). The first configuration-cache run stores the task graph; the second reuses it. CI verifies both messages explicitly. This inspects every declared Gradle project dependency across production and test configurations, including future test fixtures. It rejects project dependency cycles even when an edge is declared only in `testImplementation`.
 
 | Consumer module | Allowed project dependencies |
 | --- | --- |
@@ -15,7 +15,7 @@ Run `./gradlew checkArchitecture`. This inspects every declared Gradle project d
 | `:infra:workspace` | `:core:contracts` |
 | `:app:cli` | All five modules above |
 
-The checker also rejects unclassified new modules and direct core dependencies on Koog, Clikt and common HTTP framework dependency groups. Each forbidden edge diagnostic identifies its module, configuration and target. CI runs two negative regressions using temporary Gradle init scripts: a core-to-adapter test dependency and a test-only edge that creates a cycle.
+The checker also rejects unclassified new modules and direct core dependencies on Koog, Clikt and common HTTP framework dependency groups. Each forbidden edge diagnostic identifies its module, configuration and target. The Gradle task snapshots declared module/configuration/target coordinates during configuration and consumes only serializable inputs during execution; it never resolves dependencies. A standalone pure Kotlin graph verifier also tests an all-allowed synthetic cycle independently of the allowlist. CI covers illegal production and test dependencies, a test-only cycle, unknown modules, a forbidden core framework group, and valid graphs.
 
 **Scope and existing exceptions:** The rules cover Gradle project dependencies and selected external framework groups, not imports or the implementation of port interfaces. The included `build-logic` build belongs to Gradle tooling, not product modules. Current `:core:tasks` has a file-backed `TaskStore` and `:core:session` still writes a physical event journal internally. These are *existing extraction debts* tracked by issues #27 and #29, not permissions for core to depend on infrastructure or CLI. This task deliberately does not refactor production code.
 
@@ -52,6 +52,8 @@ A test with no effective tier, including a typo such as `@Tag("unti")`, fails th
 
 ~~~sh
 ./gradlew checkArchitecture checkTestTiers unitTest
+./gradlew checkArchitecture --configuration-cache
+./gradlew -p build-logic test
 ./gradlew integrationTest
 ./gradlew e2eTest
 ./gradlew test installDist
@@ -62,4 +64,4 @@ node --test contracts/v1/session-v1.test.mjs
 
 `test` **still runs all existing tests** regardless of their tags; `./gradlew test installDist` is backward-compatible. An untagged future test is therefore still included in the full JVM CI, not silently dropped. New tests **must** have an effective tier tag or `checkTestTiers` fails, even though they still execute under `test`. Do not classify a test as pure just because it has fake model/workspace interfaces if its fixture writes files or launches a process.
 
-CI has an independent architecture/tier-validation/pure-unit job, verifies the fast suite really executed, and retains the full JVM `test` job, its mandatory sandbox JUnit XML check, focused `integrationTest`/`e2eTest` routing assertion and the installed CLI E2E. The independent protocol-conformance job is unchanged. All default verification is offline from any inference endpoint and does not require credentials or personal hardware. Sandbox E2E may be skipped on unsupported local hosts, but **must run and pass in Linux CI**.
+CI has an independent architecture/tier-validation/pure-unit job with cold/reused Gradle 9.8.1 configuration-cache verification and graph-algorithm unit tests, verifies the fast suite really executed, and retains the full JVM `test` job, its mandatory sandbox JUnit XML check, focused `integrationTest`/`e2eTest` routing assertion and the installed CLI E2E. The independent protocol-conformance job is unchanged. All default verification is offline from any inference endpoint and does not require credentials or personal hardware. Sandbox E2E may be skipped on unsupported local hosts, but **must run and pass in Linux CI**.
