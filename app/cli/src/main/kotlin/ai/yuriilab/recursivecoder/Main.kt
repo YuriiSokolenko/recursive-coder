@@ -33,7 +33,7 @@ internal fun executeSession(requestPath: Path, delayMs: Long): Int {
         finished.await(3000, TimeUnit.MILLISECONDS)
     }
     Runtime.getRuntime().addShutdownHook(hook)
-    val result = try { runSession(request, cancellation) } catch (_: Exception) {
+    val result = try { runSession(request, cancellation).toSessionProtocolJson(request) } catch (_: Exception) {
         System.err.println("Session output initialization failed (no existing files were overwritten)")
         return 2
     } finally {

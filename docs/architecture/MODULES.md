@@ -30,7 +30,7 @@ The initial application vertical slice introduces `EnqueueTaskUseCase` in `:core
 
 `TaskService.enqueue` and `SessionController.run` now delegate to the new implementations while retaining constructor/API compatibility for older callers. Session state (`Cancellation`, opened workspace, event journal, watchdog) is created per invocation, not injected as a shared singleton; `RunSessionUseCase` is a factory. Koin is local to `:app:cli` and versioned in the shared catalog (`koin-core`/`koin-test` 4.2.2); core implementations and tests need no Koin dependencies. A focused Koin graph test verifies both module definitions, plus interface resolution/factory lifetimes.
 
-The `tasks enqueue` path and both direct `run` / scheduled-session paths use the new Use Case interfaces. Other `TaskService` commands and scheduler claim/finish operations have **not** migrated and remain intentional compatibility work under [#59](https://github.com/YuriiSokolenko/recursive-coder/issues/59). No wire format, store schema, event or outcome mapping changed.
+The `tasks enqueue` path and both direct `run` / scheduled-session paths use the new Use Case interfaces. Other `TaskService` commands and scheduler claim/finish operations have **not** migrated and remain intentional compatibility work under [#59](https://github.com/YuriiSokolenko/recursive-coder/issues/59). `RunSessionUseCase` returns typed `SessionRunResult`, projected to Session Protocol v1 JSON only at CLI/compatibility entry points. No wire format, store schema, event or outcome mapping changed.
 
 ## Contracts and request admission
 

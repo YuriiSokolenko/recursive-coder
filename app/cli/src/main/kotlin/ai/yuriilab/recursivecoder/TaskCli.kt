@@ -183,8 +183,7 @@ private class RunTasks(private val tasks: TasksCommand) : CliktCommand(name = "r
         val concurrency = once(concurrencyOptions, "--concurrency", 1)
         val scheduler = TaskScheduler(tasks.service(), TaskRunner { request, cancellation ->
             val gateway = ModelGateways.create(ModelConfig.from(request.model).provider)
-            createSessionController(request, gateway, cancellation).run()
-                .getValue("status").jsonPrimitive.content
+            resolveRunSessionUseCase(gateway)(request, cancellation).outcome.wire
         })
         val hook = Thread({ scheduler.requestStop() }, "task-scheduler-shutdown")
         Runtime.getRuntime().addShutdownHook(hook)

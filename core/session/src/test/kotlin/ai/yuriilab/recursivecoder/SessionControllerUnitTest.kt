@@ -405,7 +405,7 @@ class SessionControllerUnitTest {
             eventSinkFactory
         )
         val result = useCase(request, Cancellation())
-        assertEquals("succeeded", result.value("status"))
+        assertEquals(SessionOutcome.SUCCEEDED, result.outcome)
         assertEquals(1, workspace.readCount)
         assertEquals(2, gateway.turns)
         assertTrue(workspace.closed)
@@ -420,16 +420,25 @@ class SessionControllerUnitTest {
             }, eventSinkFactory
         )
         val result = useCase(invalid, Cancellation())
-        assertEquals("rejected", result.value("status"))
+        assertEquals(SessionOutcome.REJECTED, result.outcome)
         assertEquals(0, gateway.negotiations)
     }
 
     @Test fun compatibilityFacadeAcceptsSubstitutedUseCase() {
         val request = fixture()
-        val expected = buildJsonObject { put("status", "succeeded") }
+        val expected = SessionRunResult(
+            outcome = SessionOutcome.SUCCEEDED,
+            startedAt = Instant.parse("2026-01-01T00:00:00Z"),
+            finishedAt = Instant.parse("2026-01-01T00:00:01Z"),
+            lastEventSeq = 0,
+            eventLog = SessionArtifact(request.output("eventsPath"), "a".repeat(64)),
+            diagnostics = SessionArtifact(request.output("diagnosticsPath"), "b".repeat(64)),
+            failure = null,
+            usage = SessionBudgetState()
+        )
         var invoked = false
         val substitute = object : RunSessionUseCase {
-            override fun invoke(requestArg: SessionRequest, cancellation: Cancellation): JsonObject {
+            override fun invoke(requestArg: SessionRequest, cancellation: Cancellation): SessionRunResult {
                 assertSame(request, requestArg)
                 invoked = true
                 return expected
@@ -443,7 +452,7 @@ class SessionControllerUnitTest {
             eventSinkFactory = eventSinkFactory,
             runSession = substitute
         )
-        assertSame(expected, controller.run())
+        assertEquals(expected.toSessionProtocolJson(request), controller.run())
         assertTrue(invoked)
         assertTrue(controller.awaitFinished(10))
     }
