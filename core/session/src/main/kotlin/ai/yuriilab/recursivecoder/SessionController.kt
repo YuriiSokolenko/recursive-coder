@@ -24,7 +24,7 @@ class SessionController(
     fun awaitFinished(timeoutMs: Long): Boolean = finished.await(timeoutMs, TimeUnit.MILLISECONDS)
 
     fun run(): JsonObject = try {
-        runSession(request, cancellation)
+        runSession(request, cancellation).toSessionProtocolJson(request)
     } finally {
         finished.countDown()
     }

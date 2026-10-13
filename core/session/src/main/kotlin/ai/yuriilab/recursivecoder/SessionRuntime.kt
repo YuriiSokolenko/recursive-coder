@@ -77,7 +77,7 @@ class DefaultRunSessionUseCase(
     private val eventSinkFactory: EventSinkFactory,
     private val clock: Clock = Clock.systemUTC()
 ) : RunSessionUseCase {
-    override fun invoke(request: SessionRequest, cancellation: Cancellation): JsonObject {
+    override fun invoke(request: SessionRequest, cancellation: Cancellation): SessionRunResult {
         cancellation.bind()
         val started = clock.instant()
         // Never open or truncate existing output files. A later recovery milestone owns replay.
@@ -284,7 +284,7 @@ class DefaultRunSessionUseCase(
         val diagnostics = SessionResultMapper.diagnostics(request.sessionId, outcome, journal.sequence.toLong())
         val diagnosticsContent = diagnostics.toString()
         // Validate the full terminal result before publishing any diagnostics or result file.
-        val result = SessionResultMapper.encode(SessionRunResult(
+        val completed = SessionRunResult(
             outcome = outcome,
             startedAt = started,
             finishedAt = finishedAt,
@@ -293,11 +293,12 @@ class DefaultRunSessionUseCase(
             diagnostics = SessionResultMapper.artifact(diagnosticsPath, diagnosticsContent),
             failure = failure,
             usage = budgetState
-        ), request)
+        )
+        val protocol = completed.toSessionProtocolJson(request)
         Files.writeString(diagnosticsPath, diagnosticsContent,
             StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
-        Files.writeString(request.output("resultPath"), result.toString(),
+        Files.writeString(request.output("resultPath"), protocol.toString(),
             StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
-        return result
+        return completed
     }
 }
