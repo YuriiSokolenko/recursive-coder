@@ -19,7 +19,7 @@ class TaskRepositoryContractTest {
             "memory" to InMemoryTaskRepository(),
             "file" to TaskStore(temp.resolve("store"))
         ).map { (name, repo) ->
-            val initial = Task(id = "only", requestTemplate = "{}", priority = 50,
+            val initial = Task(id = "only", requestTemplate = "{}", dependencies = emptyList(), priority = 50,
                 state = TaskState.READY)
             repo.update { TaskMutation(it.copy(tasks = listOf(initial)), Unit) }
             assertFailsWith<IllegalArgumentException>(name) {
