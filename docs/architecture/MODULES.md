@@ -4,7 +4,7 @@ Issue #22 introduced six modules; issue #27 adds the task persistence adapter; t
 
 | Module | Ownership | Production project dependencies |
 | --- | --- | --- |
-| `:core:contracts` | Session Protocol support, request validation, model/workspace contracts and cross-module value types | none |
+| `:core:contracts` | Session Protocol support, request validation, model/workspace contracts, shared value types and pure tool authorization | none |
 | `:core:session` | Session Controller, deadline/budget enforcement, admission policy and event journal | `:core:contracts` |
 | `:core:tasks` | Task policy, repository port, scheduler and task execution interface | `:core:contracts` |
 | `:infra:model` | Offline FakeModel and optional OpenAI-compatible HTTP adapter | `:core:contracts` |
@@ -24,7 +24,7 @@ Production dependencies point from the composition root and adapters toward the 
 
 ## Contracts and request admission
 
-`:core:contracts` intentionally owns the shared `SessionRequest` parser and shape validation (approximately 190 lines) as well as `Cancellation`, `Refused` and `Stopped`. Both `:core:session` and the infrastructure adapters consume these stable types; moving them into `:core:session` would force the adapters to depend on the session runtime. Workspace authorization and execution checks **remain** in their existing core/session and infrastructure modules; `contracts/v1` is still the authoritative transport schema.
+`:core:contracts` intentionally owns the shared `SessionRequest` parser and shape validation (approximately 190 lines) as well as `Cancellation`, `Refused` and `Stopped`. Both `:core:session` and the infrastructure adapters consume these stable types; moving them into `:core:session` would force the adapters to depend on the session runtime. Pure read/write/check authorization decisions and the SDD/ATDD/TDD/Developer/Reviewer ownership matrix now live in `:core:contracts` (`ToolAuthorizationPolicy`). The trusted workspace adapter still owns canonical-path/descriptor checks, Git state, sandbox execution, review provenance and mutation receipts. `contracts/v1` remains the authoritative transport schema.
 
 ## Koog dependency
 

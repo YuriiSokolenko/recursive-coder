@@ -52,7 +52,6 @@ class WorkspaceManager private constructor(
     private var totalBytes = 0
 
     companion object {
-        private val known = setOf("read", "list", "find", "search", "git_status", "git_diff")
         private const val maxReadBytes = 32 * 1024
         private const val maxToolOutputBytes = 48 * 1024
         private const val maxTotalOutputBytes = 256 * 1024
@@ -68,9 +67,11 @@ class WorkspaceManager private constructor(
             val mode = request.policy["mode"]!!.jsonPrimitive.content
             val allowed = request.policy["allowedTools"]!!.jsonArray.map { it.jsonPrimitive.content }
             val denied = request.policy["deniedTools"]!!.jsonArray.map { it.jsonPrimitive.content }
-            if (mode != "read-only" || allowed.any { it !in known } ||
-                request.policy["writablePaths"]!!.jsonArray.isNotEmpty() ||
-                (request.policy["immutableInputs"] as? JsonArray)?.isNotEmpty() == true)
+            if (ToolAuthorizationPolicy.admitReadOnlyPolicy(ReadPolicyFacts(
+                    mode, allowed.toSet(),
+                    request.policy["writablePaths"]!!.jsonArray.isNotEmpty(),
+                    (request.policy["immutableInputs"] as? JsonArray)?.isNotEmpty() == true
+                )).deniedCode != null)
                 throw Refused("UNSUPPORTED_TOOL_POLICY", "policy", "Unsupported workspace tool policy")
             val root = try {
                 if (Files.isSymbolicLink(request.rootPath)) throw IllegalArgumentException()
@@ -346,7 +347,9 @@ class WorkspaceManager private constructor(
     override fun verifyTask(path: Path, expectedSha: String) {
         checkCurrent()
         val rel = taskRelativePath(path)
-        if ("read" !in allowed || "read" in denied) deny("READ_NOT_AUTHORIZED")
+        ToolAuthorizationPolicy.authorizeRead(ReadAuthorizationFacts(
+            "read", allowed, denied, taskAdmission = true
+        )).deniedCode?.let(::deny)
         if (sha256(secureRead(rel)) != expectedSha) deny("TASK_DIGEST_MISMATCH")
     }
 
@@ -362,7 +365,9 @@ class WorkspaceManager private constructor(
         try {
             if (claimedExecutionId != null) deny("FORGED_TOOL_ID")
             if (calls > maxCalls) deny("TOOL_QUOTA_EXCEEDED")
-            if (tool.name !in allowed || tool.name in denied) deny("TOOL_NOT_AUTHORIZED")
+            ToolAuthorizationPolicy.authorizeRead(ReadAuthorizationFacts(
+                tool.name, allowed, denied
+            )).deniedCode?.let(::deny)
             checkCurrent()
             data = when (tool) {
                 is WorkspaceTool.Read -> {
