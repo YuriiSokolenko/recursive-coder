@@ -39,7 +39,7 @@ jobs:
           grep -F 'Configuration cache entry stored.' /tmp/architecture-cache-first.log
           ./gradlew --no-daemon --offline --console=plain --configuration-cache checkArchitecture | tee /tmp/architecture-cache-second.log
           grep -F 'Reusing configuration cache.' /tmp/architecture-cache-second.log
-      - name: Reject deliberately illegal and cyclic test edges
+      - name: Reject illegal edges, cycles and stale configuration-cache snapshots
         run: python3 -m unittest discover -s tests -p 'test_architecture_gradle.py' -v
       - name: Validate test tier guard against negative bytecode fixtures
         run: |

@@ -1,6 +1,7 @@
 """Regression checks for architecture rules using temporary Gradle init scripts."""
 
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -87,6 +88,111 @@ class ArchitectureBoundaryTest(unittest.TestCase):
             "Forbidden core framework dependency :core:session:testImplementation -> io.ktor:ktor-client",
             output,
         )
+
+
+class ArchitectureConfigurationCacheRegressionTest(unittest.TestCase):
+    """A previously valid cache entry must not conceal new forbidden edges."""
+
+    @staticmethod
+    def copy_fixture(destination: Path) -> None:
+        # Discover product module build scripts instead of maintaining a fixed
+        # list. The included build-logic build is copied separately below.
+        # Exclude Gradle output directories and existing configuration caches.
+        inputs = [ROOT / "settings.gradle.kts", ROOT / "gradle.properties"]
+        inputs.extend(
+            source
+            for source in ROOT.rglob("build.gradle.kts")
+            if not any(
+                part in {"build-logic", ".gradle", "build"}
+                for part in source.relative_to(ROOT).parts[:-1]
+            )
+        )
+        for source in sorted(inputs):
+            relative = source.relative_to(ROOT)
+            target = destination / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+        shutil.copytree(
+            ROOT / "build-logic",
+            destination / "build-logic",
+            ignore=shutil.ignore_patterns(".gradle", "build", "__pycache__"),
+        )
+
+    @staticmethod
+    def check_architecture(directory: Path) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                str(ROOT / "gradlew"),
+                "--no-daemon",
+                "--offline",
+                "--console=plain",
+                "--configuration-cache",
+                "checkArchitecture",
+            ],
+            cwd=directory,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=240,
+            check=False,
+        )
+
+    def assert_valid(self, result: subprocess.CompletedProcess[str]) -> None:
+        self.assertEqual(0, result.returncode, result.stdout)
+        self.assertRegex(
+            result.stdout, r"Architecture boundaries verified for [1-9]\d* modules\."
+        )
+
+    def test_changed_build_script_invalidates_cache_for_production_and_test_edges(self):
+        with tempfile.TemporaryDirectory(prefix="architecture-cache-") as temporary:
+            fixture = Path(temporary)
+            self.copy_fixture(fixture)
+
+            cold = self.check_architecture(fixture)
+            self.assert_valid(cold)
+            self.assertIn("Configuration cache entry stored.", cold.stdout)
+
+            warm = self.check_architecture(fixture)
+            self.assert_valid(warm)
+            self.assertIn("Reusing configuration cache.", warm.stdout)
+
+            for module, configuration, target in (
+                (":core:tasks", "implementation", ":infra:workspace"),
+                (":core:session", "testImplementation", ":infra:model"),
+            ):
+                relative = Path(module.lstrip(":").replace(":", "/")) / "build.gradle.kts"
+                build_file = fixture / relative
+                original = build_file.read_text(encoding="utf-8")
+
+                with self.subTest(module=module, configuration=configuration):
+                    # Mutate a copied build input after a confirmed cache hit.
+                    # The added dependency is declared, never resolved.
+                    injection = (
+                        f'\n\ndependencies {{ {configuration}(project("{target}")) }}\n'
+                    )
+                    build_file.write_text(original + injection, encoding="utf-8")
+                    try:
+                        rejected = self.check_architecture(fixture)
+                        self.assertNotEqual(0, rejected.returncode, rejected.stdout)
+                        self.assertIn(
+                            f"Forbidden project dependency {module}:{configuration} -> {target}",
+                            rejected.stdout,
+                        )
+                        self.assertIn(
+                            "Calculating task graph as configuration cache cannot be reused",
+                            rejected.stdout,
+                        )
+                        self.assertIn("has changed", rejected.stdout)
+                        self.assertIn(relative.as_posix(), rejected.stdout.replace("\\", "/"))
+                        self.assertNotIn("Reusing configuration cache.", rejected.stdout)
+                    finally:
+                        build_file.write_text(original, encoding="utf-8")
+
+                    # Restoring exactly the original build input must pass,
+                    # regardless of whether Gradle reuses or rebuilds the entry.
+                    restored = self.check_architecture(fixture)
+                    self.assert_valid(restored)
+                    self.assertEqual(original, build_file.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
