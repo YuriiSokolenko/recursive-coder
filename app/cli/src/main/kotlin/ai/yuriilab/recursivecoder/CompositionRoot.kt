@@ -61,7 +61,8 @@ internal enum class TaskRepositoryOwnership { OWNED, BORROWED }
 /** Command lifetime: one shared repository for all task use cases and the scheduler. */
 internal class TaskComposition(
     private val repository: TaskRepository,
-    private val ownership: TaskRepositoryOwnership
+    private val ownership: TaskRepositoryOwnership,
+    private val afterKoinClose: () -> Unit = {}
 ) : AutoCloseable {
     private fun closeOwnedRepository() {
         if (ownership == TaskRepositoryOwnership.OWNED) {
@@ -102,7 +103,10 @@ internal class TaskComposition(
         if (closed) return
         closed = true
         // A scheduler has already exited before command cleanup reaches this point.
-        closeTaskCompositionResources(application::close, ::closeOwnedRepository)
+        closeTaskCompositionResources(
+            closeApplication = { application.close(); afterKoinClose() },
+            closeRepository = ::closeOwnedRepository
+        )
     }
 }
 

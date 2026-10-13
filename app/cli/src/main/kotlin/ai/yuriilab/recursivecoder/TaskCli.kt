@@ -12,24 +12,62 @@ import kotlinx.serialization.json.*
  * CLI syntax and transport format only. Injected Use Cases own task decisions;
  * the session and scheduler retain their separate runtime authority.
  */
-internal fun executeCli(args: List<String>): Int {
-    val root = RecursiveCoderCommand()
-    return try {
-        root.use { it.parse(args) }
-        0
-    } catch (error: CliktError) {
-        if (error !is ProgramResult && error !is Abort) root.echoFormattedHelp(error)
-        error.suppressed.forEach { System.err.println("Cleanup failed: " + (it.message ?: "Unknown failure")) }
-        when {
-            error is ProgramResult || error is Abort -> error.statusCode
-            error.statusCode == 0 -> 0
-            else -> 2 // Map only CLI usage errors to the legacy invalid-input exit status.
-        }
-    } catch (error: Exception) {
-        System.err.println(error.message ?: "Command failed")
-        error.suppressed.forEach { System.err.println("Cleanup failed: " + (it.message ?: "Unknown failure")) }
-        2
+internal fun executeCli(
+    args: List<String>,
+    repositoryFactory: (Path) -> TaskRepository = ::TaskStore
+): Int {
+    val root = RecursiveCoderCommand(repositoryFactory)
+    // Keep the command failure primary, even when shutdown also fails. In particular,
+    // a successful ProgramResult(0) must not mask an owned repository close failure.
+    val commandFailure = try {
+        root.parse(args)
+        null
+    } catch (error: Throwable) {
+        error
     }
+    val cleanupFailure = try {
+        root.close()
+        null
+    } catch (error: Throwable) {
+        error
+    }
+
+    if (commandFailure == null) {
+        if (cleanupFailure != null) {
+            reportCleanupFailure(cleanupFailure)
+            return 2
+        }
+        return 0
+    }
+    if (cleanupFailure != null && cleanupFailure !== commandFailure) {
+        commandFailure.addSuppressed(cleanupFailure)
+    }
+    return when (commandFailure) {
+        is CliktError -> {
+            if (commandFailure !is ProgramResult && commandFailure !is Abort) {
+                root.echoFormattedHelp(commandFailure)
+            }
+            commandFailure.suppressed.forEach(::reportCleanupFailure)
+            val status = when {
+                commandFailure is ProgramResult || commandFailure is Abort ->
+                    commandFailure.statusCode
+                commandFailure.statusCode == 0 -> 0
+                else -> 2 // Preserve the legacy invalid-input status for usage errors.
+            }
+            if (status == 0 && cleanupFailure != null) 2 else status
+        }
+        is Exception -> {
+            System.err.println(commandFailure.message ?: "Command failed")
+            commandFailure.suppressed.forEach(::reportCleanupFailure)
+            2
+        }
+        else -> throw commandFailure
+    }
+}
+
+private fun reportCleanupFailure(error: Throwable) {
+    System.err.println("Cleanup failed: " + (error.message ?: "Unknown failure"))
+    error.suppressed.forEach(::reportCleanupFailure)
 }
 
 private fun <T> once(values: List<T>, flag: String, default: T): T {
@@ -37,11 +75,13 @@ private fun <T> once(values: List<T>, flag: String, default: T): T {
     return values.singleOrNull() ?: default
 }
 
-private class RecursiveCoderCommand : CliktCommand(name = "recursive-coder"), AutoCloseable {
+private class RecursiveCoderCommand(
+    repositoryFactory: (Path) -> TaskRepository
+) : CliktCommand(name = "recursive-coder"), AutoCloseable {
     override val invokeWithoutSubcommand = true
     override fun help(context: Context) = "Run a coding session or manage local tasks."
 
-    private val tasks = TasksCommand()
+    private val tasks = TasksCommand(repositoryFactory)
 
     init { subcommands(RunSessionCommand(), tasks) }
 
@@ -70,7 +110,9 @@ private class RunSessionCommand : CliktCommand(name = "run") {
     }
 }
 
-private class TasksCommand : CliktCommand(name = "tasks") {
+private class TasksCommand(
+    private val repositoryFactory: (Path) -> TaskRepository
+) : CliktCommand(name = "tasks") {
     override val invokeWithoutSubcommand = true
     override fun help(context: Context) =
         "Manage native tasks. Store defaults to ~/.recursive-coder/tasks. " +
@@ -103,7 +145,7 @@ private class TasksCommand : CliktCommand(name = "tasks") {
 
     // Delay file store creation until after Clikt has validated the command.
     private fun dependencies(): TaskComposition =
-        composition ?: TaskComposition(TaskStore(storeDirectory), TaskRepositoryOwnership.OWNED)
+        composition ?: TaskComposition(repositoryFactory(storeDirectory), TaskRepositoryOwnership.OWNED)
             .also { composition = it }
 
     fun enqueue(): EnqueueTaskUseCase = dependencies().enqueue()

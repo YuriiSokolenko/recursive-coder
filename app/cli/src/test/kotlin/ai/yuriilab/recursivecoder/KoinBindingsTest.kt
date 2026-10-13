@@ -5,23 +5,45 @@ import org.junit.jupiter.api.Test
 import org.koin.test.verify.verify
 import kotlin.test.*
 
-/** All definitions are exercised with in-memory ports, no filesystem or global Koin. */
+/** Close-tracking in-memory port used to test resource lifetime. */
 private class CloseTrackingTaskRepository(
-    val events: MutableList<String> = mutableListOf()
+    val events: MutableList<String> = mutableListOf(),
+    private val onClose: () -> Unit = {}
 ) : TaskRepository by InMemoryTaskRepository(), AutoCloseable {
     var closeCount = 0
         private set
     var closeFailure: Throwable? = null
 
     override fun close() {
+        onClose()
         closeCount++
         events += "repository"
         closeFailure?.let { throw it }
     }
 }
 
+/** All definitions are exercised with in-memory ports, no filesystem or global Koin. */
 @Tag("unit")
 class KoinBindingsTest {
+    @Test fun actualCompositionClosesKoinBeforeOwnedRepositoryExactlyOnce() {
+        val events = mutableListOf<String>()
+        var koinClosed = false
+        val repository = CloseTrackingTaskRepository(events) {
+            assertTrue(koinClosed, "The repository must not close while Koin is active")
+        }
+        val composition = TaskComposition(
+            repository,
+            TaskRepositoryOwnership.OWNED,
+            afterKoinClose = { koinClosed = true; events += "koin" }
+        )
+        assertSame(repository, composition.service().store)
+        composition.close()
+        composition.close()
+        assertEquals(listOf("koin", "repository"), events)
+        assertEquals(1, repository.closeCount)
+        assertFailsWith<IllegalStateException> { composition.queries() }
+    }
+
     @Test fun ownedCloseableRepositoryClosesOnlyOnce() {
         val repository = CloseTrackingTaskRepository()
         val composition = TaskComposition(repository, TaskRepositoryOwnership.OWNED)
