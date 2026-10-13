@@ -12,9 +12,10 @@ object ArchitectureGraph {
         ":infra:model" to setOf(":core:contracts"),
         ":infra:workspace" to setOf(":core:contracts"),
         ":infra:task-store" to setOf(":core:tasks", ":core:contracts"),
+        ":infra:journal" to setOf(":core:session", ":core:contracts"),
         ":app:cli" to setOf(
             ":core:contracts", ":core:session", ":core:tasks",
-            ":infra:model", ":infra:workspace", ":infra:task-store",
+            ":infra:model", ":infra:workspace", ":infra:task-store", ":infra:journal",
         ),
     )
 

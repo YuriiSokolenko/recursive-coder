@@ -1,6 +1,5 @@
 package ai.yuriilab.recursivecoder
 
-import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
@@ -79,63 +78,24 @@ private fun SessionRequest.admit(workspaceOpener: WorkspaceOpener,
     }
 }
 
-private class EventJournal(private val request: SessionRequest, private val clock: Clock) : AutoCloseable {
-    private val writer = Files.newBufferedWriter(request.output("eventsPath"),
-        StandardCharsets.UTF_8, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
-    var sequence = 0
-        private set
-    private var previous: String? = null
-    fun append(type: String, status: String, transition: Pair<String, String>? = null,
-               toolId: String? = null, started: Instant? = null, extra: JsonObject? = null) {
-        sequence++
-        val eventId = "evt-" + request.sessionId + "-" + sequence
-        val now = clock.instant()
-        val event = buildJsonObject {
-            put("kind", "session-event"); put("version", SessionProtocol.VERSION)
-            put("sessionId", request.sessionId); put("traceId", request.traceId)
-            put("eventId", eventId); put("sequence", sequence)
-            put("timestamp", now.toString()); put("type", type); put("status", status)
-            put("correlationId", request.requestId)
-            put("causationId", previous?.let(::JsonPrimitive) ?: JsonNull)
-            put("actor", buildJsonObject {
-                put("agentId", JsonPrimitive("agent-" + request.sessionId))
-                put("parentAgentId", JsonNull); put("childAgentId", JsonNull)
-                put("toolExecutionId", toolId?.let(::JsonPrimitive) ?: JsonNull)
-                put("childSessionId", JsonNull)
-            })
-            transition?.let { (from, to) -> put("transition", buildJsonObject {
-                put("from", from); put("to", to)
-            }) }
-            started?.let { put("timing", buildJsonObject {
-                put("startedAt", it.toString())
-                put("durationMs", Duration.between(it, now).toMillis().coerceAtLeast(0))
-            }) }
-            put("redaction", buildJsonObject {
-                put("mode", "metadata-only")
-                put("removedFields", buildJsonArray {
-                    listOf("rawPrompt", "rawResponse", "rawToolOutput", "credentialRef", "authorizationHeader")
-                        .forEach { add(it) }
-                })
-            })
-            extra?.let { put("metadata", it) }
-        }
-        writer.write(event.toString()); writer.newLine(); writer.flush()
-        previous = eventId
-    }
-    override fun close() { writer.close() }
-}
-
 class SessionController(
     private val request: SessionRequest,
     private val model: ModelGateway,
     val cancellation: Cancellation = Cancellation(),
     private val workspaceOpener: WorkspaceOpener,
+    private val eventSinkFactory: EventSinkFactory,
     private val clock: Clock = Clock.systemUTC()
 ) {
     private val finished = CountDownLatch(1)
     fun awaitFinished(timeoutMs: Long) = finished.await(timeoutMs, TimeUnit.MILLISECONDS)
 
-    fun run(): JsonObject {
+    fun run(): JsonObject = try {
+        execute()
+    } finally {
+        finished.countDown()
+    }
+
+    private fun execute(): JsonObject {
         cancellation.bind()
         val started = clock.instant()
         // Never open or truncate existing output files. A later recovery milestone owns replay.
@@ -153,7 +113,8 @@ class SessionController(
         targetPaths.forEach { target ->
             if (target.parent != outputRoot) throw Refused("UNSAFE_OUTPUT_PATH", "policy", "Nested outputs are unsupported")
         }
-        val journal = EventJournal(request, clock)
+        val journal = SessionEventJournal(request.sessionId, request.traceId, request.requestId,
+            clock, eventSinkFactory.open(request.output("eventsPath")))
         var state = SessionPhase.CREATED
         var finalOutcome: SessionOutcome? = null
         var error: JsonElement = JsonNull
@@ -201,6 +162,7 @@ class SessionController(
         var workspaceManager: WorkspaceSession? = null
         val config = ModelConfig.from(request.model)
         var budgetState = SessionBudgetState()
+        var eventDigest: String? = null
         try {
             workspaceManager = request.admit(workspaceOpener,
                 onAudit = { audit ->
@@ -301,6 +263,10 @@ class SessionController(
             checkActive()
             journal.append("agent.completed", "completed")
             finish(SessionEndReason.SUCCESS)
+        } catch (e: EventSinkFailure) {
+            // A journal failure makes even an otherwise successful session unverifiable.
+            // Do not emit a terminal success event or produce a result.
+            throw e
         } catch (e: Refused) {
             error = sessionError(e.code, e.category, e.explanation)
             finish(SessionEndReason.REFUSAL, "denied")
@@ -314,12 +280,15 @@ class SessionController(
             error = sessionError("SESSION_EXECUTION_FAILED", "infrastructure", "Session execution failed")
             finish(SessionEndReason.FAILURE, "failed")
         } finally {
-            workspaceManager?.close()
             watchdog.shutdownNow()
-            journal.close()
+            var cleanupError: Throwable? = null
+            try { workspaceManager?.close() } catch (e: Throwable) { cleanupError = e }
+            try { eventDigest = journal.finish() } catch (e: Throwable) {
+                if (cleanupError == null) cleanupError = e else cleanupError.addSuppressed(e)
+            }
+            cleanupError?.let { throw it }
         }
-        try {
-            val finishedAt = clock.instant()
+        val finishedAt = clock.instant()
             val status = checkNotNull(finalOutcome).wire
             val diagnostics = buildJsonObject {
                 put("sessionId", request.sessionId); put("status", status)
@@ -348,7 +317,10 @@ class SessionController(
                     put("fenceGeneration", request.raw.objectAt("resume").longAt("fenceGeneration"))
                 })
                 put("outputs", buildJsonObject {
-                    put("eventLog", artifact(request.output("eventsPath")))
+                    put("eventLog", buildJsonObject {
+                        put("path", request.output("eventsPath").toString())
+                        put("sha256", checkNotNull(eventDigest))
+                    })
                     put("diagnostics", artifact(request.output("diagnosticsPath")))
                     put("terminalReceipt", JsonNull); put("changeManifest", JsonNull)
                     put("checkpoint", JsonNull)
@@ -365,9 +337,6 @@ class SessionController(
             Files.writeString(request.output("resultPath"), result.toString(),
                 StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
             return result
-        } finally {
-            finished.countDown()
-        }
     }
 }
 

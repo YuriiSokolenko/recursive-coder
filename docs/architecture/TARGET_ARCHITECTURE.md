@@ -97,7 +97,7 @@ Use typed domain states/outcomes where meaningful. Treat serialized wire DTOs as
 ### Conditional modules — add only with working implementations
 
 - `:infra:task-store` once concrete file snapshot/locking code is extracted from the Task core.
-- `:infra:journal` once physical JSONL journal I/O is extracted from the Session core.
+- `:infra:journal` owns physical JSONL append/flush/close and checksum behavior; the Session core owns event envelopes and ordering.
 - `:agent:runtime` when Koog-backed recursive role execution is implemented (see [#9](https://github.com/YuriiSokolenko/recursive-coder/issues/9)).
 - `:infra:tools` when standalone sandbox/write/check execution warrants its own owned boundary.
 

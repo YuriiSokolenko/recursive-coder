@@ -15,6 +15,7 @@ import org.junit.jupiter.api.io.TempDir
 private val sessionTestWorkspaceOpener = WorkspaceOpener { request, audit, start ->
     WorkspaceManager.open(request, audit, start)
 }
+private val sessionTestEventSinkFactory = EventSinkFactory { path -> JsonlEventSink.open(path) }
 
 @Tag("integration")
 class SessionRuntimeTest {
@@ -98,7 +99,7 @@ class SessionRuntimeTest {
     private fun JsonObject.changeChild(key: String, child: String, value: JsonElement) =
         change(key, (this[key] as JsonObject).change(child, value))
     private fun run(request: JsonObject, model: FakeModel = FakeModel()) =
-        SessionController(SessionRequest.parse(request.toString()), model, workspaceOpener = sessionTestWorkspaceOpener).run()
+        SessionController(SessionRequest.parse(request.toString()), model, workspaceOpener = sessionTestWorkspaceOpener, eventSinkFactory = sessionTestEventSinkFactory).run()
     private fun status(result: JsonObject) = result["status"]!!.jsonPrimitive.content
     private fun events() = Files.readAllLines(temp.resolve("out/events.jsonl"))
         .map { Json.parseToJsonElement(it).jsonObject }
@@ -146,7 +147,7 @@ class SessionRuntimeTest {
     }
 
     @Test fun cancellationEmitsOneTerminalResult() {
-        val controller = SessionController(SessionRequest.parse(fixture().toString()), FakeModel(5000), workspaceOpener = sessionTestWorkspaceOpener)
+        val controller = SessionController(SessionRequest.parse(fixture().toString()), FakeModel(5000), workspaceOpener = sessionTestWorkspaceOpener, eventSinkFactory = sessionTestEventSinkFactory)
         val result = AtomicReference<JsonObject>()
         val worker = thread { result.set(controller.run()) }
         Thread.sleep(150)
@@ -269,7 +270,7 @@ class SessionRuntimeTest {
                     add("model-gateway-v1")
                 })
             val result = SessionController(SessionRequest.parse(live.toString()),
-                OpenAICompatibleGateway(), workspaceOpener = sessionTestWorkspaceOpener).run()
+                OpenAICompatibleGateway(), workspaceOpener = sessionTestWorkspaceOpener, eventSinkFactory = sessionTestEventSinkFactory).run()
             assertEquals("succeeded", status(result))
             assertEquals(2, calls.get())
             assertEquals(41, result["usage"]!!.jsonObject["totalTokens"]!!.jsonPrimitive.int)
@@ -313,7 +314,7 @@ class SessionRuntimeTest {
         val request = fixture().changeChild("budgets", "maxModelRequests", JsonPrimitive(3))
         var retryAllowed = false
         val gateway = countedGateway(firstAttempts = 2) { retryAllowed = it }
-        val result = SessionController(SessionRequest.parse(request.toString()), gateway, workspaceOpener = sessionTestWorkspaceOpener).run()
+        val result = SessionController(SessionRequest.parse(request.toString()), gateway, workspaceOpener = sessionTestWorkspaceOpener, eventSinkFactory = sessionTestEventSinkFactory).run()
         assertEquals("succeeded", status(result))
         assertTrue(retryAllowed, "The initial turn may retry only if budget reserves the final turn")
         val modelEvents = events().filter { it["type"]!!.jsonPrimitive.content == "llm.response" }
@@ -327,7 +328,7 @@ class SessionRuntimeTest {
         val request = fixture() // maxModelRequests = 2, one POST for each turn
         var retryAllowed = true
         val gateway = countedGateway(firstAttempts = 2) { retryAllowed = it }
-        val result = SessionController(SessionRequest.parse(request.toString()), gateway, workspaceOpener = sessionTestWorkspaceOpener).run()
+        val result = SessionController(SessionRequest.parse(request.toString()), gateway, workspaceOpener = sessionTestWorkspaceOpener, eventSinkFactory = sessionTestEventSinkFactory).run()
         assertFalse(retryAllowed, "The final turn's reserved request must not fund a retry")
         assertEquals("failed", status(result))
         assertEquals("MODEL_REQUEST_BUDGET_EXCEEDED",
@@ -338,7 +339,7 @@ class SessionRuntimeTest {
     @Test fun tokenBudgetExceededBeforeWorkspaceRead() {
         val request = fixture().changeChild("budgets", "maxTotalTokens", JsonPrimitive(2))
         val gateway = countedGateway(firstAttempts = 1, firstUsage = ModelUsage(20L, 10L))
-        val result = SessionController(SessionRequest.parse(request.toString()), gateway, workspaceOpener = sessionTestWorkspaceOpener).run()
+        val result = SessionController(SessionRequest.parse(request.toString()), gateway, workspaceOpener = sessionTestWorkspaceOpener, eventSinkFactory = sessionTestEventSinkFactory).run()
         assertEquals("failed", status(result))
         assertEquals("TOKEN_BUDGET_EXCEEDED",
             result["error"]!!.jsonObject["code"]!!.jsonPrimitive.content)

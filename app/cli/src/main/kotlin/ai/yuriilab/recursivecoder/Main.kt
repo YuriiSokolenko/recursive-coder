@@ -53,4 +53,4 @@ internal fun createSessionController(
 ): SessionController = SessionController(request, model, cancellation,
     WorkspaceOpener { workspaceRequest, onAudit, onStart ->
         WorkspaceManager.open(workspaceRequest, onAudit, onStart)
-    })
+    }, EventSinkFactory { path -> JsonlEventSink.open(path) })

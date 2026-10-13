@@ -1,6 +1,6 @@
 # Gradle multi-module boundaries
 
-Issue #22 introduced six modules; issue #27 adds the task persistence adapter; the Gradle root remains `recursive-coder` and is not an executable module.
+Issue #22 introduced six modules; issues #27 and #29 add the task persistence and event journal adapters; the Gradle root remains `recursive-coder` and is not an executable module.
 
 | Module | Ownership | Production project dependencies |
 | --- | --- | --- |
@@ -10,17 +10,18 @@ Issue #22 introduced six modules; issue #27 adds the task persistence adapter; t
 | `:infra:model` | Offline FakeModel and optional OpenAI-compatible HTTP adapter | `:core:contracts` |
 | `:infra:workspace` | Workspace Manager, restricted Git and trusted write/check runtime | `:core:contracts` |
 | `:infra:task-store` | Durable tasks.json snapshot, file locks and atomic replacement | `:core:tasks`, `:core:contracts` |
-| `:app:cli` | Clikt command entry point, configuration and concrete dependency composition | all six libraries |
+| `:infra:journal` | JSONL append/flush/close and physical event-log SHA-256 | `:core:session`, `:core:contracts` |
+| `:app:cli` | Clikt command entry point, configuration and concrete dependency composition | all seven libraries |
 
 ```text
                       :app:cli  (only executable)
                     /     |        |          \
-           :core:session :core:tasks :infra:model :infra:workspace :infra:task-store
+           :core:session :core:tasks :infra:model :infra:workspace :infra:task-store :infra:journal
                     \     |        |          /
                          :core:contracts
 ```
 
-Production dependencies point from the composition root and adapters toward the core contracts; no core module depends on the CLI, Koog, or the HTTP model implementation. The concrete workspace opener and model provider are injected by `:app:cli`. The scheduler accepts a `TaskRunner` instead of constructing a model adapter. Session Protocol JSON Schema and fixtures remain at the repository root under `contracts/v1/` and continue to be validated independently by Node/Python CI.
+Production dependencies point from the composition root and adapters toward the core contracts; no core module depends on the CLI, Koog, or the HTTP model implementation. The concrete workspace opener, model provider and JSONL EventSink are injected by `:app:cli`. The scheduler accepts a `TaskRunner` instead of constructing a model adapter. Session Protocol JSON Schema and fixtures remain at the repository root under `contracts/v1/` and continue to be validated independently by Node/Python CI.
 
 ## Contracts and request admission
 
@@ -41,7 +42,7 @@ python -m unittest discover -s tests -p 'test_cli_runtime_v1.py' -v
 
 Module-local unit tests can be run separately with `./gradlew :core:session:test :infra:workspace:test`:
 
-- `:core:session` owns the pure `SessionLifecyclePolicy`, `SessionAdmissionPolicy` and `SessionBudgetPolicy` with deterministic value-only tests (`SessionPolicyUnitTest`). `SessionControllerUnitTest` uses in-module `ModelGateway` and `WorkspaceSession` fakes plus temporary event files to exercise orchestration, admission, trusted observations, budgets, errors and event ordering without concrete adapters.
+- `:core:session` owns the pure `SessionLifecyclePolicy`, `SessionAdmissionPolicy` and `SessionBudgetPolicy` with deterministic value-only tests (`SessionPolicyUnitTest`). `SessionEventJournalUnitTest` validates event envelopes with an in-memory sink. `SessionControllerUnitTest` uses in-module `ModelGateway`, `WorkspaceSession` and `EventSink` fakes instead of physical event files to exercise orchestration, admission, trusted observations, budgets, errors and event ordering without concrete adapters.
 - `:infra:workspace` owns write-tool schema validation and direct Workspace Manager policy/adapter tests. They use only `:core:contracts` types; the small Git fixture stays inside the infrastructure module.
 - `:app:cli` retains the real Session Controller + FakeModel + Workspace Manager integration tests, CLI scheduler tests, and sandbox E2E. These are intentionally not copied into the unit-test modules.
 
@@ -60,7 +61,7 @@ The root `checkArchitecture` task enforces the project dependency directions in 
 
 The JVM `unitTest` target contains only tagged pure tests; `integrationTest` runs tagged local filesystem, Git and mock-HTTP cases; `e2eTest` selects tagged sandbox checks. The existing `test` target remains **unfiltered**, preserving all existing coverage and the `./gradlew test installDist` workflow. CI retains the sandbox execution assertion, installed CLI E2E and independent protocol tests.
 
-The file-backed TaskStore now lives in `:infra:task-store`; the CLI composes it with `TaskService`, while `:core:tasks` ships a pure in-memory repository for use-case tests. The physical journal in `:core:session` remains deferred work (#29). See [Test tiers and architecture guardrails](TEST_SUITES.md) for detailed classification, commands and exceptions.
+The file-backed TaskStore now lives in `:infra:task-store`; the CLI composes it with `TaskService`, while `:core:tasks` ships a pure in-memory repository for use-case tests. The physical journal lives in `:infra:journal` (#29); event envelope semantics stay in `:core:session`. See [Test tiers and architecture guardrails](TEST_SUITES.md) for detailed classification, commands and exceptions.
 
 ## Task repository (issue #27)
 
