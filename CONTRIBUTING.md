@@ -13,3 +13,9 @@ Before proposing a change, verify that edited documentation contains no non-Engl
 Keep task execution, session state, authorization, tool runtime, checkpoints, and evaluation owned by Recursive Coder. A third-party API, git host, IDE, or model endpoint may be configured as an optional integration, never as a mandatory orchestration dependency.
 
 Documentation describing planned behavior must explicitly distinguish it from working functionality.
+
+## JVM test tiers
+
+Every JUnit Jupiter test must have an effective `@Tag("unit")`, `@Tag("integration")` or `@Tag("e2e")`. Apply it to the test class for a uniform suite, or to individual methods when appropriate. Pure `unit` tests use only in-memory inputs and fakes; anything invoking a file, Git, HTTP, socket, subprocess or Koog belongs to a higher tier. A class tagged `integration` may give one method `e2e`; the focused integration suite excludes that method.
+
+Before opening a PR, run `./gradlew checkTestTiers unitTest` and the guard's independent regression cases with `python3 -m unittest discover -s tests -p 'test_test_tiers.py' -v`. The original `./gradlew test installDist` remains unfiltered. See [test tier policy](docs/architecture/TEST_SUITES.md) for the supported JUnit annotations, diagnostics and static-check limitations.
