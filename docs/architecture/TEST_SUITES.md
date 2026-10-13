@@ -40,9 +40,12 @@ using the pinned Gradle 9.8.1 installation.
 
 The same isolated Gradle 9.8.1 regression suite additionally proves invalidation
 after three changes **outside product module build scripts**. It starts with a
-valid graph and an explicitly reused configuration-cache entry; each case
-restores its changed input, verifies the graph succeeds again, and confirms
-another cache hit before the next mutation:
+valid graph and an explicitly reused configuration-cache entry. Each mutation
+follows a confirmed cache hit and is followed by restoring the changed input
+and verifying the valid graph succeeds again. Before the second and third
+mutations, a cache hit is verified using the restored run itself if it reused
+a valid entry, or one additional warm-up run if restoration reconfigured.
+After the final properties restoration, no extra cache hit is required:
 
 - **Build logic:** removing `:core:contracts` from the `:core:tasks` allowlist
   in the copied `ArchitectureGraph.kt` causes the existing
@@ -56,7 +59,8 @@ another cache hit before the next mutation:
   `:core:tasks` to `:infra:workspace`. No JVM or daemon property is changed.
 
 Each negative run requires a configuration-cache miss, an input-specific
-indicator in Gradle output, and an actionable architecture diagnostic. The
+indicator in Gradle's cache invalidation reason, and an actionable architecture
+diagnostic. The
 restored run needs to **pass**, not necessarily report an invalidation:
 Gradle is free to reuse an earlier valid entry. No production build logic,
 repository input or remote endpoint is modified by these tests.
