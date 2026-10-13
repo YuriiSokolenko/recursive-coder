@@ -1,5 +1,7 @@
 package ai.yuriilab.recursivecoder
 
+import org.junit.jupiter.api.Tag
+
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
@@ -13,6 +15,7 @@ import org.junit.jupiter.api.io.TempDir
  * Session-core tests use only contract interfaces. Concrete model and workspace
  * adapters are exercised by their own modules and the app:cli integration suite.
  */
+@Tag("integration")
 class SessionControllerUnitTest {
     @TempDir lateinit var temp: Path
 

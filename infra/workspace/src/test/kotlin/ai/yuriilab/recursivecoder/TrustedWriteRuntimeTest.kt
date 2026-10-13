@@ -1,5 +1,7 @@
 package ai.yuriilab.recursivecoder
 
+import org.junit.jupiter.api.Tag
+
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
@@ -11,6 +13,7 @@ import org.junit.jupiter.api.condition.EnabledOnOs
 import org.junit.jupiter.api.condition.OS
 
 @EnabledOnOs(OS.LINUX)
+@Tag("integration")
 class TrustedWriteRuntimeTest {
     @TempDir lateinit var temp: Path
 
@@ -417,6 +420,7 @@ class TrustedWriteRuntimeTest {
         }
     }
 
+    @Tag("e2e")
     @Test fun realSeparatelyExecutedSandboxedTestPassesIfHostSupportsUserNamespaces() {
         val f = fixture()
         val python = Path.of("/usr/bin/python3")
@@ -488,6 +492,7 @@ class TrustedWriteRuntimeTest {
 }
 
 
+@Tag("unit")
 class TrustedWriteToolSchemaTest {
     @Test fun strictlyDecodeOnlyScopedWriteCommands() {
         val edit = TrustedWriteToolSchema.decode(

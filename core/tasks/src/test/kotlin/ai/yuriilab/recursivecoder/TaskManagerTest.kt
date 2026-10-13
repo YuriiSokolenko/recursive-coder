@@ -1,5 +1,7 @@
 package ai.yuriilab.recursivecoder
 
+import org.junit.jupiter.api.Tag
+
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
@@ -16,6 +18,7 @@ import org.junit.jupiter.api.io.TempDir
 // Scheduler unit tests use an injected, deterministic runner; cross-module execution is tested in :app:cli.
 private val schedulerTestRunner = TaskRunner { _, _ -> "succeeded" }
 
+@Tag("integration")
 class TaskManagerTest {
     @TempDir lateinit var temp: Path
 

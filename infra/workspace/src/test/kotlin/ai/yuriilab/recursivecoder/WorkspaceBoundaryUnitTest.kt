@@ -1,5 +1,7 @@
 package ai.yuriilab.recursivecoder
 
+import org.junit.jupiter.api.Tag
+
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
@@ -10,6 +12,7 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 
 /** Tests for infrastructure-owned validation and workspace access, without session/model modules. */
+@Tag("integration")
 class WorkspaceBoundaryUnitTest {
     @TempDir lateinit var temp: Path
 

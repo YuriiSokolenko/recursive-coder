@@ -44,7 +44,7 @@ With Gradle 9.8.1 and JDK 21 installed:
 ./gradlew test installDist
 ```
 
-The independent [GitHub Actions CI](.github/workflows/ci.yml) runs JVM and protocol checks on GitHub-hosted runners. The fake-model integration tests do not require a network model endpoint, personal hardware, secrets, or an external runner. Optional live-model checks will be separately gated.
+The independent [GitHub Actions CI](.github/workflows/ci.yml) runs JVM and protocol checks on GitHub-hosted runners. The `checkArchitecture` Gradle task enforces production and test dependencies; `unitTest`, `integrationTest` and `e2eTest` provide focused suites while `test` remains complete. See [Testing architecture](docs/architecture/TEST_SUITES.md). The fake-model integration tests do not require a network model endpoint, personal hardware, secrets, or an external runner. Optional live-model checks will be separately gated.
 
 ## Documentation
 

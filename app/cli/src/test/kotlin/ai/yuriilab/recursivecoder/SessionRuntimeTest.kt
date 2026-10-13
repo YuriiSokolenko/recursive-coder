@@ -1,5 +1,7 @@
 package ai.yuriilab.recursivecoder
 
+import org.junit.jupiter.api.Tag
+
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
@@ -14,6 +16,7 @@ private val sessionTestWorkspaceOpener = WorkspaceOpener { request, audit, start
     WorkspaceManager.open(request, audit, start)
 }
 
+@Tag("integration")
 class SessionRuntimeTest {
     @TempDir lateinit var temp: Path
 
