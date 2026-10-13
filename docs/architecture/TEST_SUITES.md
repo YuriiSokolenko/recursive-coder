@@ -36,6 +36,31 @@ The fixture never modifies the checkout, resolves dependencies, or calls a
 model service. CI runs it together with the other architecture regressions
 using the pinned Gradle 9.8.1 installation.
 
+### Non-module configuration-cache inputs (issue #45)
+
+The same isolated Gradle 9.8.1 regression suite additionally proves invalidation
+after three changes **outside product module build scripts**. It starts with a
+valid graph and an explicitly reused configuration-cache entry; each case
+restores its changed input, verifies the graph succeeds again, and confirms
+another cache hit before the next mutation:
+
+- **Build logic:** removing `:core:contracts` from the `:core:tasks` allowlist
+  in the copied `ArchitectureGraph.kt` causes the existing
+  `:core:tasks:implementation -> :core:contracts` edge to be rejected.
+- **Settings:** including a temporary `:architectureUnclassified` project
+  through the copied `settings.gradle.kts` triggers an
+  `Unclassified module` diagnostic; the directory is entirely fixture-local.
+- **Properties:** a fixture-only `architectureFixtureIllegalEdge` property
+  is read during module configuration. Changing only that property from
+  `false` to `true` introduces a forbidden declared edge from
+  `:core:tasks` to `:infra:workspace`. No JVM or daemon property is changed.
+
+Each negative run requires a configuration-cache miss, an input-specific
+indicator in Gradle output, and an actionable architecture diagnostic. The
+restored run needs to **pass**, not necessarily report an invalidation:
+Gradle is free to reuse an earlier valid entry. No production build logic,
+repository input or remote endpoint is modified by these tests.
+
 **Scope and existing exceptions:** The rules cover Gradle project dependencies and selected external framework groups, not imports or the implementation of port interfaces. The included `build-logic` build belongs to Gradle tooling, not product modules. Current `:core:tasks` has a file-backed `TaskStore` and `:core:session` still writes a physical event journal internally. These are *existing extraction debts* tracked by issues #27 and #29, not permissions for core to depend on infrastructure or CLI. This task deliberately does not refactor production code.
 
 ## Test taxonomy
