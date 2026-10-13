@@ -10,7 +10,7 @@ Issue #22 introduced six modules; issue #27 adds the task persistence adapter; t
 | `:infra:model` | Offline FakeModel and optional OpenAI-compatible HTTP adapter | `:core:contracts` |
 | `:infra:workspace` | Workspace Manager, restricted Git and trusted write/check runtime | `:core:contracts` |
 | `:infra:task-store` | Durable tasks.json snapshot, file locks and atomic replacement | `:core:tasks`, `:core:contracts` |
-| `:app:cli` | Clikt command entry point, configuration and concrete dependency composition | all five libraries |
+| `:app:cli` | Clikt command entry point, configuration and concrete dependency composition | all six libraries |
 
 ```text
                       :app:cli  (only executable)

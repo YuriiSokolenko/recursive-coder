@@ -1,5 +1,7 @@
 package ai.yuriilab.recursivecoder
 
+import java.io.IOException
+import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -9,41 +11,34 @@ import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 
-/** The identical operations must be observable for both persistence adapters. */
+/** Run the same real TaskService/TaskPolicy decisions against both repository adapters. */
 @Tag("integration")
 class TaskRepositoryContractTest {
     @TempDir lateinit var temp: Path
 
-    @Test fun adaptersCommitRollbackAndSerializeClaimsTheSameWay() {
+    @Test fun adaptersRollbackAndAtomicallyClaimCancelRetryAndIgnoreStaleFinish() {
         val results = listOf(
             "memory" to InMemoryTaskRepository(),
             "file" to TaskStore(temp.resolve("store"))
         ).map { (name, repo) ->
-            val initial = Task(id = "only", requestTemplate = "{}", dependencies = emptyList(), priority = 50,
-                state = TaskState.READY)
+            val service = TaskService(repo)
+            val initial = Task(
+                id = "only", requestTemplate = "{}", dependencies = emptyList(),
+                priority = 50, state = TaskState.READY
+            )
             repo.update { TaskMutation(it.copy(tasks = listOf(initial)), Unit) }
             assertFailsWith<IllegalArgumentException>(name) {
-                repo.update<Int> {
-                    throw IllegalArgumentException("rejected transaction")
-                }
+                repo.update<Int> { throw IllegalArgumentException("rejected transaction") }
             }
-            assertEquals(initial, repo.read { it.tasks.single() }, name)
+            assertEquals(initial, service.show("only"), name)
+
             val start = CountDownLatch(1)
             val pool = Executors.newFixedThreadPool(8)
             val winners = try {
                 val jobs = (0 until 8).map {
                     pool.submit<Task?> {
                         start.await()
-                        repo.update { current ->
-                            val ready = current.tasks.single()
-                            if (ready.state != TaskState.READY) {
-                                TaskMutation(current, null)
-                            } else {
-                                val claimed = ready.copy(state = TaskState.RUNNING, attempt = 1,
-                                    sessionId = "session-only-1")
-                                TaskMutation(current.copy(tasks = listOf(claimed)), claimed)
-                            }
-                        }
+                        service.claim()
                     }
                 }
                 start.countDown()
@@ -52,21 +47,69 @@ class TaskRepositoryContractTest {
                 pool.shutdownNow()
             }
             assertEquals(1, winners.size, name)
-            repo.update { current ->
-                val cancelled = current.tasks.single().copy(state = TaskState.CANCELLED)
-                TaskMutation(current.copy(tasks = listOf(cancelled)), Unit)
-            }
-            // A stale finisher must not resurrect an already-cancelled attempt.
-            repo.update { current ->
-                val old = current.tasks.single()
-                val next = if (old.state == TaskState.RUNNING &&
-                    old.sessionId == "session-only-1") old.copy(state = TaskState.SUCCEEDED) else old
-                TaskMutation(current.copy(tasks = listOf(next)), Unit)
-            }
-            name to repo.read { it.tasks.single().state to it.tasks.single().attempt }
+            val first = winners.single()
+            assertEquals(1, first.attempt, name)
+            assertEquals(TaskState.RUNNING, service.show("only").state, name)
+
+            val cancelled = service.cancel("only")
+            assertEquals(TaskState.CANCELLED, cancelled.state, name)
+            // Invoke the REAL finish policy, not a hand-written version in the test.
+            assertEquals(cancelled, service.finish("only", first.sessionId!!, "succeeded"), name)
+            assertEquals(TaskState.CANCELLED, service.show("only").state, name)
+
+            service.retry("only")
+            val second = assertNotNull(service.claim(), name)
+            assertEquals(2, second.attempt, name)
+            assertNotEquals(first.sessionId, second.sessionId, name)
+            // Old generation cannot finish the newly-claimed attempt.
+            assertEquals(second, service.finish("only", first.sessionId!!, "succeeded"), name)
+            val finished = service.finish("only", second.sessionId!!, "succeeded")
+            assertEquals(TaskState.SUCCEEDED, finished.state, name)
+            name to Triple(finished.state, finished.attempt, finished.sessionId)
         }
         assertEquals(results[0].second, results[1].second)
-        assertEquals(TaskState.CANCELLED to 1, results[0].second)
+        assertEquals(TaskState.SUCCEEDED, results[0].second.first)
+        assertEquals(2, results[0].second.second)
+    }
+
+    @Test fun atomicRenameFailurePreservesPreviousSnapshotAndDoesNotTrustOrphanTemp() {
+        val repo = TaskStore(temp.resolve("rename-failure"))
+        repo.update { TaskMutation(it.copy(paused = true), Unit) }
+        val snapshot = repo.directory.resolve("tasks.json")
+        val backup = repo.directory.resolve("original.snapshot")
+        val before = Files.readAllBytes(snapshot)
+        try {
+            assertFailsWith<IOException> {
+                repo.update { current ->
+                    // The old snapshot was read under the OS lock. Force the destination
+                    // to reject replacing a directory with the newly fsynced temp file.
+                    Files.move(snapshot, backup)
+                    Files.createDirectory(snapshot)
+                    TaskMutation(current.copy(paused = false), Unit)
+                }
+            }
+        } finally {
+            if (Files.exists(backup)) {
+                Files.deleteIfExists(snapshot)
+                Files.move(backup, snapshot)
+            }
+        }
+        assertContentEquals(before, Files.readAllBytes(snapshot))
+        assertTrue(repo.read { it.paused }, "The abandoned .tmp must not be considered authoritative")
+        repo.update { TaskMutation(it.copy(paused = false), Unit) }
+        assertFalse(TaskStore(repo.directory).read { it.paused })
+    }
+
+    @Test fun differentFileStoreInstancesCannotHoldSchedulerLeaseSimultaneously() {
+        val root = temp.resolve("scheduler-lease")
+        val first = TaskStore(root)
+        val second = TaskStore(root)
+        first.withSchedulerLock {
+            assertFailsWith<IllegalStateException> {
+                second.withSchedulerLock { error("Should not enter a second scheduler") }
+            }
+        }
+        second.withSchedulerLock { assertFalse(second.read { it.paused }) }
     }
 
     @Test fun osLockHeldBySecondProcessBlocksTaskTransaction() {

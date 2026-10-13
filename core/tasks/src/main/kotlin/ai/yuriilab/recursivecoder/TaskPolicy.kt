@@ -48,7 +48,7 @@ data class Task(
 
 internal val safeTaskId = Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 
-/** Snapshot values are immutable to callers; mutable storage is an adapter concern. */
+/** Immutable queue state published only for implementations of the TaskRepository port. */
 data class TaskQueue(
     val paused: Boolean = false,
     val nextOrder: Long = 0,
@@ -59,7 +59,7 @@ data class TaskQueue(
 internal data class TaskClaim(val queue: TaskQueue, val task: Task?)
 internal data class TaskUpdate(val task: Task, val nextOrder: Long)
 
-/** Validate a decoded persistent snapshot before allowing it to overwrite state. */
+/** Validation entrypoint for persistence adapters decoding TaskQueue snapshots. */
 fun validateStoredTasks(tasks: List<Task>) {
     require(tasks.all { safeTaskId.matches(it.id) && it.priority in 0..100 &&
         it.attempt >= 0 && it.waitTurns >= 0 && it.queueOrder >= 0 &&
@@ -67,8 +67,8 @@ fun validateStoredTasks(tasks: List<Task>) {
     validateGraph(tasks)
 }
 
-/** Iterative DFS avoids stack overflows for large dependency chains. */
-fun validateGraph(tasks: List<Task>): List<String> {
+/** Internal DAG traversal; persistent adapters only need validateStoredTasks(). */
+internal fun validateGraph(tasks: List<Task>): List<String> {
     val byId = tasks.associateBy { it.id }
     require(byId.size == tasks.size) { "Duplicate task ID" }
     val marks = mutableMapOf<String, Int>()

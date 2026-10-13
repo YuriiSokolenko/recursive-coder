@@ -14,7 +14,9 @@ data class TaskMutation<T>(val next: TaskQueue, val value: T)
  *
  * withSchedulerLock excludes another scheduler for the complete lifecycle, including
  * interrupted-attempt recovery and all worker shutdown. No adapter is allowed to turn
- * process-wide exclusion into a per-instance monitor.
+ * process-wide exclusion into a per-instance monitor. TaskQueue and TaskMutation
+ * are public only because adapter implementations are separate Gradle modules;
+ * they are not external application state-management APIs.
  */
 interface TaskRepository {
     fun <T> read(operation: (TaskQueue) -> T): T

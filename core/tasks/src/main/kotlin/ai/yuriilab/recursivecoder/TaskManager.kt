@@ -74,29 +74,35 @@ class TaskService(val store: TaskRepository, private val clock: Clock = Clock.sy
         TaskMutation(next, next.find(id))
     }
 
-    /** Scheduler operations must remain one read-decide-write transaction. */
+    /**
+     * Scheduler-only integration API: atomically claim the next eligible Task.
+     * Kept public for cross-module adapter contracts; CLI callers should use TaskScheduler.
+     * This must remain a single repository transaction.
+     */
     fun claim(excludedTaskIds: Set<String> = emptySet()): Task? = store.update { queue ->
         val decision = TaskPolicy.claim(queue, excludedTaskIds, now())
         TaskMutation(decision.queue, decision.task)
     }
 
+    /** Scheduler-only completion; a stale session ID must never change a newer attempt. */
     fun finish(id: String, sessionId: String, resultStatus: String): Task = store.update { queue ->
         val next = TaskPolicy.finish(queue, id, sessionId, resultStatus, now())
         TaskMutation(next, next.find(id))
     }
 
-    /** Stopping a known attempt is different from user cancellation. */
+    /** Scheduler-only failure recovery: a stopped attempt is not user cancellation. */
     fun interruptAttempt(id: String, sessionId: String, reason: String): Task =
         store.update { queue ->
             val next = TaskPolicy.interrupt(queue, id, sessionId, reason, now())
             TaskMutation(next, next.find(id))
         }
 
-    /** Called only while holding the repository's exclusive scheduler lock. */
+    /** Scheduler-only recovery; caller MUST hold the repository's exclusive scheduler lease. */
     fun recoverInterrupted(): Unit = store.update {
         TaskMutation(TaskPolicy.recoverInterrupted(it, now()), Unit)
     }
 
+    /** Scheduler-only invocation preparation; not part of the user-facing Task command API. */
     fun requestFor(task: Task): SessionRequest {
         require(task.state == TaskState.RUNNING && task.sessionId != null)
         val source = Json.parseToJsonElement(task.requestTemplate).jsonObject
@@ -166,90 +172,90 @@ class TaskScheduler(
         require(concurrency in 1..32) { "Concurrency must be 1..32" }
         require(pollMillis in 1..1000)
         return service.store.withSchedulerLock {
-                if (stopping.get()) return@withSchedulerLock SchedulerReport(0, 0, service.isPaused())
-                service.recoverInterrupted()
-                val pool = Executors.newFixedThreadPool(concurrency)
-                var launched = 0
-                var completed = 0
-                try {
-                    while (!stopping.get()) {
-                        while (!stopping.get() && active.size < concurrency) {
-                            val occupiedTaskIds = active.values.mapTo(mutableSetOf()) { it.taskId }
-                            val task = service.claim(occupiedTaskIds) ?: break
-                            val sessionId = task.sessionId!!
+            if (stopping.get()) return@withSchedulerLock SchedulerReport(0, 0, service.isPaused())
+            service.recoverInterrupted()
+            val pool = Executors.newFixedThreadPool(concurrency)
+            var launched = 0
+            var completed = 0
+            try {
+                while (!stopping.get()) {
+                    while (!stopping.get() && active.size < concurrency) {
+                        val occupiedTaskIds = active.values.mapTo(mutableSetOf()) { it.taskId }
+                        val task = service.claim(occupiedTaskIds) ?: break
+                        val sessionId = task.sessionId!!
+                        if (stopping.get()) {
+                            service.interruptAttempt(task.id, sessionId,
+                                "scheduler stopped before session started")
+                            break
+                        }
+                        val cancellation = Cancellation()
+                        val future = pool.submit {
+                            cancellation.bind()
+                            val status = try {
+                                val current = service.show(task.id)
+                                if (current.sessionId != sessionId ||
+                                    current.state == TaskState.CANCELLED || stopping.get()) "cancelled"
+                                else runner.execute(service.requestFor(task), cancellation)
+                            } catch (_: InterruptedException) {
+                                "cancelled"
+                            } catch (_: Exception) {
+                                "failed"
+                            }
+                            // Clear worker interruption before locking the durable store.
+                            Thread.interrupted()
                             if (stopping.get()) {
                                 service.interruptAttempt(task.id, sessionId,
-                                    "scheduler stopped before session started")
-                                break
+                                    "scheduler stopped: reconcile unfinished attempt before retry")
+                            } else {
+                                service.finish(task.id, sessionId, status)
                             }
-                            val cancellation = Cancellation()
-                            val future = pool.submit {
-                                cancellation.bind()
-                                val status = try {
-                                    val current = service.show(task.id)
-                                    if (current.sessionId != sessionId ||
-                                        current.state == TaskState.CANCELLED || stopping.get()) "cancelled"
-                                    else runner.execute(service.requestFor(task), cancellation)
-                                } catch (_: InterruptedException) {
-                                    "cancelled"
-                                } catch (_: Exception) {
-                                    "failed"
-                                }
-                                // Clear worker interruption before locking the durable store.
-                                Thread.interrupted()
-                                if (stopping.get()) {
-                                    service.interruptAttempt(task.id, sessionId,
-                                        "scheduler stopped: reconcile unfinished attempt before retry")
-                                } else {
-                                    service.finish(task.id, sessionId, status)
-                                }
-                            }
-                            active[sessionId] = RunningAttempt(task.id, cancellation, future)
-                            launched++
-                            // A concurrent shutdown hook may have fired after the earlier check.
-                            if (stopping.get()) requestStop()
                         }
-                        if (stopping.get()) break
-                        val states = service.list().associateBy { it.id }
-                        active.forEach { (sessionId, attempt) ->
-                            val task = states[attempt.taskId]
-                            if (task?.state == TaskState.CANCELLED || task?.sessionId != sessionId)
-                                attempt.cancellation.cancel()
-                        }
-                        val finishedIds = active.entries.filter { it.value.future.isDone }.map { it.key }
-                        finishedIds.forEach { sessionId ->
-                            val attempt = active.getValue(sessionId)
-                            attempt.future.get()
-                            active.remove(sessionId)
-                            completed++
-                        }
-                        if (active.isEmpty()) {
-                            if (service.isPaused() || service.list().none { it.state == TaskState.READY })
-                                break
-                        }
-                        Thread.sleep(pollMillis)
+                        active[sessionId] = RunningAttempt(task.id, cancellation, future)
+                        launched++
+                        // A concurrent shutdown hook may have fired after the earlier check.
+                        if (stopping.get()) requestStop()
                     }
-                } finally {
-                    // Also runs if the scheduler loop fails, without inventing a user cancellation.
-                    try {
-                        if (active.isNotEmpty()) requestStop()
-                    } finally {
-                        pool.shutdownNow()
-                        // Keep the exclusive scheduler lock while any local worker remains alive.
-                        // Otherwise a fresh scheduler could start concurrent work on the same store.
-                        var interrupted = false
-                        var terminated = false
-                        while (!terminated) {
-                            try {
-                                terminated = pool.awaitTermination(1, TimeUnit.SECONDS)
-                            } catch (_: InterruptedException) {
-                                interrupted = true
-                            }
-                        }
-                        active.clear()
-                        if (interrupted) Thread.currentThread().interrupt()
+                    if (stopping.get()) break
+                    val states = service.list().associateBy { it.id }
+                    active.forEach { (sessionId, attempt) ->
+                        val task = states[attempt.taskId]
+                        if (task?.state == TaskState.CANCELLED || task?.sessionId != sessionId)
+                            attempt.cancellation.cancel()
                     }
+                    val finishedIds = active.entries.filter { it.value.future.isDone }.map { it.key }
+                    finishedIds.forEach { sessionId ->
+                        val attempt = active.getValue(sessionId)
+                        attempt.future.get()
+                        active.remove(sessionId)
+                        completed++
+                    }
+                    if (active.isEmpty()) {
+                        if (service.isPaused() || service.list().none { it.state == TaskState.READY })
+                            break
+                    }
+                    Thread.sleep(pollMillis)
                 }
+            } finally {
+                // Also runs if the scheduler loop fails, without inventing a user cancellation.
+                try {
+                    if (active.isNotEmpty()) requestStop()
+                } finally {
+                    pool.shutdownNow()
+                    // Keep the exclusive scheduler lock while any local worker remains alive.
+                    // Otherwise a fresh scheduler could start concurrent work on the same store.
+                    var interrupted = false
+                    var terminated = false
+                    while (!terminated) {
+                        try {
+                            terminated = pool.awaitTermination(1, TimeUnit.SECONDS)
+                        } catch (_: InterruptedException) {
+                            interrupted = true
+                        }
+                    }
+                    active.clear()
+                    if (interrupted) Thread.currentThread().interrupt()
+                }
+            }
             SchedulerReport(launched, completed, service.isPaused())
         }
     }
