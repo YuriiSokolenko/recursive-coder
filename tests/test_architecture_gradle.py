@@ -65,16 +65,16 @@ class ArchitectureBoundaryTest(unittest.TestCase):
 
     def test_unclassified_new_module(self):
         output = self.run_with_init_script(
-            "gradle.settingsEvaluated { settings -> settings.include(':unknown') }\\n"
+            "gradle.settingsEvaluated { settings -> settings.include(':unknown') }\n"
         )
         self.assertIn("Unclassified module :unknown", output)
 
     def test_forbidden_core_framework_in_test_configuration(self):
         output = self.run_with_init_script(
-            "gradle.projectsEvaluated {\\n"
-            "    def owner = gradle.rootProject.project(':core:session')\\n"
-            "    owner.dependencies.add('testImplementation', 'io.ktor:ktor-client:1.0')\\n"
-            "}\\n"
+            "gradle.projectsEvaluated {\n"
+            "    def owner = gradle.rootProject.project(':core:session')\n"
+            "    owner.dependencies.add('testImplementation', 'io.ktor:ktor-client:1.0')\n"
+            "}\n"
         )
         self.assertIn(
             "Forbidden core framework dependency :core:session:testImplementation -> io.ktor:ktor-client",
