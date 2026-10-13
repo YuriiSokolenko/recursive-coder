@@ -45,7 +45,8 @@ follows a confirmed cache hit and is followed by restoring the changed input
 and verifying the valid graph succeeds again. Before the second and third
 mutations, a cache hit is verified using the restored run itself if it reused
 a valid entry, or one additional warm-up run if restoration reconfigured.
-After the final properties restoration, no extra cache hit is required:
+After the final properties restoration, no extra cache hit is required.
+The three input changes are:
 
 - **Build logic:** removing `:core:contracts` from the `:core:tasks` allowlist
   in the copied `ArchitectureGraph.kt` causes the existing
