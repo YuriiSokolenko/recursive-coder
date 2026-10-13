@@ -3,25 +3,61 @@ package ai.yuriilab.recursivecoder
 import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
 import org.koin.test.verify.verify
+import org.koin.dsl.module
+import org.koin.dsl.onClose
 import kotlin.test.*
 
-/** All definitions are exercised with in-memory ports, no filesystem or global Koin. */
+/** Close-tracking in-memory port used to test resource lifetime. */
 private class CloseTrackingTaskRepository(
-    val events: MutableList<String> = mutableListOf()
+    val events: MutableList<String> = mutableListOf(),
+    private val onClose: () -> Unit = {}
 ) : TaskRepository by InMemoryTaskRepository(), AutoCloseable {
     var closeCount = 0
         private set
     var closeFailure: Throwable? = null
 
     override fun close() {
+        onClose()
         closeCount++
         events += "repository"
         closeFailure?.let { throw it }
     }
 }
 
+private class KoinCloseProbe
+
+/** All definitions are exercised with in-memory ports, no filesystem or global Koin. */
 @Tag("unit")
 class KoinBindingsTest {
+    @Test fun actualCompositionClosesKoinBeforeOwnedRepositoryExactlyOnce() {
+        val events = mutableListOf<String>()
+        val repository = CloseTrackingTaskRepository(events) {
+            assertEquals(
+                listOf("koin"), events,
+                "Koin's singleton onClose must fire before the repository closes"
+            )
+        }
+        // This event can only be emitted by the real Koin container, not by
+        // a callback manually called after TaskComposition.application.close().
+        val closeProbe = module {
+            single(createdAtStart = true) { KoinCloseProbe() } onClose {
+                events += "koin"
+            }
+        }
+        val composition = TaskComposition(
+            repository,
+            TaskRepositoryOwnership.OWNED,
+            additionalModules = listOf(closeProbe)
+        )
+        assertSame(repository, composition.service().store)
+        assertTrue(events.isEmpty())
+        composition.close()
+        composition.close()
+        assertEquals(listOf("koin", "repository"), events)
+        assertEquals(1, repository.closeCount)
+        assertFailsWith<IllegalStateException> { composition.queries() }
+    }
+
     @Test fun ownedCloseableRepositoryClosesOnlyOnce() {
         val repository = CloseTrackingTaskRepository()
         val composition = TaskComposition(repository, TaskRepositoryOwnership.OWNED)

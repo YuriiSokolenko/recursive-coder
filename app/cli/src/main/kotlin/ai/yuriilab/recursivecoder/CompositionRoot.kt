@@ -61,7 +61,8 @@ internal enum class TaskRepositoryOwnership { OWNED, BORROWED }
 /** Command lifetime: one shared repository for all task use cases and the scheduler. */
 internal class TaskComposition(
     private val repository: TaskRepository,
-    private val ownership: TaskRepositoryOwnership
+    private val ownership: TaskRepositoryOwnership,
+    private val additionalModules: List<Module> = emptyList()
 ) : AutoCloseable {
     private fun closeOwnedRepository() {
         if (ownership == TaskRepositoryOwnership.OWNED) {
@@ -70,7 +71,7 @@ internal class TaskComposition(
     }
 
     private val application = try {
-        koinApplication { modules(taskModule(repository)) }
+        koinApplication { modules(listOf(taskModule(repository)) + additionalModules) }
     } catch (failure: Throwable) {
         // A failed DI setup must not leak a newly created resource-owning adapter.
         try {
