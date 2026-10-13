@@ -31,8 +31,6 @@ import javax.crypto.spec.SecretKeySpec
  * Host-owned write capability. Never deserialize this type from an agent's tool arguments.
  * In particular, reviewedChange must come from an independent authenticated control plane.
  */
-enum class EngineeringRole { SDD, ATDD, TDD, DEVELOPER, REVIEWER }
-
 data class ReviewedChange(
     val changeRequestId: String,
     val requestedBy: String,
@@ -153,18 +151,18 @@ class TrustedWriteRuntime private constructor(
                 fail("INVALID_WRITE_POLICY")
             // Reject unwinnable Developer sessions before taking a workspace lease
             // or changing files. The trusted host, not the model, chooses test checks.
-            if (policy.role == EngineeringRole.DEVELOPER &&
-                ("git_diff_check" !in policy.requiredChecks ||
-                    policy.requiredChecks.none { it != "git_diff_check" }))
-                fail("TEST_CHECK_REQUIRED")
+            ToolAuthorizationPolicy.admitRequiredChecks(policy.role, policy.requiredChecks)
+                .deniedCode?.let(::fail)
             val review = policy.reviewedChange
-            if (review != null && (!idPattern.matches(review.changeRequestId) ||
-                review.requestedBy.isBlank() || review.reviewedBy.isBlank() ||
-                review.requestedBy == review.reviewedBy || review.role != policy.role ||
-                review.paths.isEmpty())) fail("INVALID_REVIEW_AUTHORIZATION")
-            if (policy.approvedArtifacts.any { (path, hash) -> !validPath(path) || !shaPattern.matches(hash) } ||
-                (review != null && review.paths.any { !validPath(it) || it !in policy.approvedArtifacts }))
-                fail("INVALID_WRITE_POLICY")
+            if (review != null) {
+                ToolAuthorizationPolicy.validateIndependentReview(ReviewedChangeFacts(
+                    review.changeRequestId, review.requestedBy, review.reviewedBy,
+                    policy.role, review.role, review.paths, policy.approvedArtifacts.keys
+                )).deniedCode?.let(::fail)
+            }
+            if (policy.approvedArtifacts.any { (path, hash) ->
+                    !validPath(path) || !shaPattern.matches(hash)
+                }) fail("INVALID_WRITE_POLICY")
             if (policy.checks.values.any {
                     !it.executable.isAbsolute || !Files.isRegularFile(it.executable) ||
                         !Files.isExecutable(it.executable) || it.timeoutMs !in 100..120_000 ||
@@ -247,11 +245,8 @@ class TrustedWriteRuntime private constructor(
                 .firstOrNull { it.isAbsolute && Files.isExecutable(it) } ?: fail("GIT_UNAVAILABLE")
         }
 
-        private fun validPath(path: String): Boolean = path.isNotEmpty() && path.length <= 4096 &&
-            !path.startsWith('/') && '\\' !in path && path.split('/').all {
-                it.isNotEmpty() && it != "." && it != ".." &&
-                    it.none { char -> char.code < 32 || char.code == 127 }
-            }
+        private fun validPath(path: String): Boolean =
+            ToolAuthorizationPolicy.validDeclaredPath(path)
 
         private fun folded(path: String): String =
             Normalizer.normalize(path, Normalizer.Form.NFC).lowercase(Locale.ROOT)
@@ -311,34 +306,20 @@ class TrustedWriteRuntime private constructor(
         if (currentIndex != indexHash) fail("INDEX_MUTATION_DENIED")
     }
 
-    private fun authorized(path: String) {
-        if (!validPath(path)) fail("INVALID_TOOL_PATH")
-        val parts = path.lowercase().split('/')
-        if (parts.any { it in setOf(".git", ".github", ".gradle", ".env",
-                    "secrets", "credentials") } ||
-            parts.last().startsWith(".env") ||
-            parts.last().endsWith(".key") || parts.last().endsWith(".pem") ||
-            parts.last().endsWith(".p12") || parts.last().endsWith(".jks") ||
-            parts.last() in setOf("gradle.properties", "local.properties", "build.gradle.kts",
-                "settings.gradle.kts", ".gitattributes", ".gitignore", ".gitmodules"))
-            fail("PROTECTED_PATH")
-        val allowed = when (policy.role) {
-            EngineeringRole.SDD -> path.startsWith("specs/")
-            EngineeringRole.ATDD -> path.startsWith("tests/acceptance/")
-            EngineeringRole.TDD -> path.startsWith("src/test/") || path.startsWith("tests/unit/")
-            EngineeringRole.DEVELOPER -> path.startsWith("src/main/")
-            EngineeringRole.REVIEWER -> false
-        }
-        if (!allowed) fail("ROLE_NOT_AUTHORIZED")
-        if (policy.role == EngineeringRole.DEVELOPER &&
-            parts.last().matches(Regex(".*(test|spec)\\.[a-z0-9]+")))
-            fail("PROTECTED_PATH")
-        if (tracked.any { (p, mode) -> mode == "160000" && path.startsWith(p + "/") })
-            fail("SUBMODULE_BOUNDARY")
-        if (tracked[path] != null && tracked[path] !in setOf("100644", "100755"))
-            fail("NONREGULAR_GIT_ENTRY")
-        if (path in policy.approvedArtifacts && path !in (policy.reviewedChange?.paths ?: emptySet()))
-            fail("APPROVED_ARTIFACT_IMMUTABLE")
+    private fun authorized(path: String, operation: WriteOperationKind) {
+        // These are logical facts only. Actual containment is rechecked by withParent/readFile,
+        // and verifyState fences Git, immutable artifacts, and unauthorized external mutations.
+        ToolAuthorizationPolicy.authorizeWrite(WriteAuthorizationFacts(
+            actorRole = policy.role,
+            operationKind = operation,
+            declaredPath = path,
+            trackedGitMode = tracked[path],
+            withinSubmodule = tracked.any { (entry, mode) ->
+                mode == "160000" && path.startsWith(entry + "/")
+            },
+            immutableArtifactPaths = policy.approvedArtifacts.keys,
+            independentlyReviewedPaths = policy.reviewedChange?.paths.orEmpty()
+        )).deniedCode?.let(::fail)
     }
 
     /**
@@ -445,7 +426,12 @@ class TrustedWriteRuntime private constructor(
     }
 
     private fun authorizedForVerification(path: String) {
-        authorized(path)
+        val kind = when {
+            path !in tracked -> WriteOperationKind.CREATE
+            accepted[path] == null -> WriteOperationKind.DELETE
+            else -> WriteOperationKind.EDIT
+        }
+        authorized(path, kind)
         if (path in accepted && tracked[path] == null && accepted[path] == null)
             fail("INVALID_MUTATION_SCOPE")
     }
@@ -463,7 +449,12 @@ class TrustedWriteRuntime private constructor(
             verifyState()
             val prior = linkedMapOf<String, String?>()
             for (op in operations) {
-                authorized(op.path)
+                val kind = when (op) {
+                    is WriteOperation.Create -> WriteOperationKind.CREATE
+                    is WriteOperation.Edit -> WriteOperationKind.EDIT
+                    is WriteOperation.Delete -> WriteOperationKind.DELETE
+                }
+                authorized(op.path, kind)
                 // Repositories may originate on case-sensitive media and be opened on
                 // case-insensitive media. Disallow any ambiguous tracked spelling.
                 if (tracked.keys.any { it != op.path && folded(it) == folded(op.path) })
@@ -634,6 +625,8 @@ class TrustedWriteRuntime private constructor(
             if (claimedToolId != null) fail("FORGED_TOOL_ID")
             if (sequence > policy.maxToolCalls) fail("TOOL_QUOTA_EXCEEDED")
             val manifest = verifyState()
+            ToolAuthorizationPolicy.authorizeCheck(checkId, policy.checks.keys)
+                .deniedCode?.let(::fail)
             if (checkId == "git_diff_check") {
                 // Fixed Git verb; no external diff tools, no shell, and an enforced deadline.
                 git.text(1024 * 1024, "diff", "--check", "--no-ext-diff", "--no-textconv", "HEAD")

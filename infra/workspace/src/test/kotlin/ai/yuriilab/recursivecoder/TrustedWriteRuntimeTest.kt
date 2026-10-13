@@ -174,6 +174,41 @@ class TrustedWriteRuntimeTest {
         }
     }
 
+    @Test fun everyMutationEntryPointRechecksImmutableOwnershipAndRole() {
+        val f = fixture()
+        val frozen = "src/test/FeatureTest.kt"
+        val frozenContent = Files.readString(f.root.resolve(frozen))
+        open(f, EngineeringRole.TDD).use { runtime ->
+            assertEquals("APPROVED_ARTIFACT_IMMUTABLE", runtime.apply(listOf(
+                WriteOperation.Delete(frozen, sha(frozenContent))
+            )).deniedCode)
+            assertEquals("ROLE_NOT_AUTHORIZED", runtime.apply(listOf(
+                WriteOperation.Create("src/main/Injected.kt", "not allowed")
+            )).deniedCode)
+            assertEquals("ROLE_NOT_AUTHORIZED", runtime.apply(listOf(
+                WriteOperation.Edit("src/main/Feature.kt", sha("fun value() = 1\n"), "tampered")
+            )).deniedCode)
+            assertEquals("ROLE_NOT_AUTHORIZED", runtime.apply(listOf(
+                WriteOperation.Delete("src/main/Delete.kt", sha("fun removeMe() = 1\n"))
+            )).deniedCode)
+            assertEquals(frozenContent, Files.readString(f.root.resolve(frozen)))
+            assertFalse(Files.exists(f.root.resolve("src/main/Injected.kt")))
+            assertEquals("NO_ACCEPTED_MUTATIONS", runtime.finish(emptyList()).deniedCode)
+        }
+        // Even a valid independent review for one frozen test cannot widen the role's scope.
+        val review = ReviewedChange("change-3", "author", "reviewer",
+            EngineeringRole.TDD, setOf(frozen))
+        open(f, EngineeringRole.TDD, review).use { runtime ->
+            assertEquals("ROLE_NOT_AUTHORIZED", runtime.apply(listOf(
+                WriteOperation.Delete("src/main/Delete.kt", sha("fun removeMe() = 1\n"))
+            )).deniedCode)
+            assertEquals("APPROVED_ARTIFACT_IMMUTABLE", runtime.apply(listOf(
+                WriteOperation.Delete("tests/unit/Rules.kt", sha("test contract\n"))
+            )).deniedCode)
+            assertEquals(frozenContent, Files.readString(f.root.resolve(frozen)))
+        }
+    }
+
     @Test fun reversingAnEditAndNoOpEditsAreNotPoisonous() {
         val f = fixture()
         val head = "fun value() = 1\n"
