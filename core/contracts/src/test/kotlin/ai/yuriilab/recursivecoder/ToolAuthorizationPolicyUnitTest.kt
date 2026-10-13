@@ -15,28 +15,27 @@ class ToolAuthorizationPolicyUnitTest {
 
     @TestFactory
     fun allRoleAndWriteOperationCombinations(): List<DynamicTest> {
-        val owned = mapOf(
-            EngineeringRole.SDD to "specs/Next.md",
-            EngineeringRole.ATDD to "tests/acceptance/Next.md",
-            EngineeringRole.TDD to "src/test/NextTest.kt",
-            EngineeringRole.DEVELOPER to "src/main/Next.kt"
+        val paths = listOf(
+            "specs/Next.md", "tests/acceptance/Next.md", "src/test/NextTest.kt",
+            "tests/unit/Next.kt", "src/main/Next.kt"
         )
-        val samples = owned.values + "tests/unit/Next.kt"
-        val roles: List<EngineeringRole?> = EngineeringRole.entries + listOf(null)
-        return roles.flatMap { role ->
+        val denied = "ROLE_NOT_AUTHORIZED"
+        // Literal expected matrix: each column corresponds to one path above.
+        // Never derive the expected outcomes from the implementation's scope expressions.
+        val expected: List<Pair<EngineeringRole?, List<String?>>> = listOf(
+            EngineeringRole.SDD to listOf(null, denied, denied, denied, denied),
+            EngineeringRole.ATDD to listOf(denied, null, denied, denied, denied),
+            EngineeringRole.TDD to listOf(denied, denied, null, null, denied),
+            EngineeringRole.DEVELOPER to listOf(denied, denied, denied, denied, null),
+            EngineeringRole.REVIEWER to listOf(denied, denied, denied, denied, denied),
+            null to listOf(denied, denied, denied, denied, denied)
+        )
+        return expected.flatMap { (role, outcomes) ->
             WriteOperationKind.entries.flatMap { kind ->
-                samples.map { path ->
+                paths.mapIndexed { index, path ->
                     DynamicTest.dynamicTest("$role $kind $path") {
-                        val permitted = when (role) {
-                            EngineeringRole.SDD -> path.startsWith("specs/")
-                            EngineeringRole.ATDD -> path.startsWith("tests/acceptance/")
-                            EngineeringRole.TDD -> path.startsWith("src/test/") || path.startsWith("tests/unit/")
-                            EngineeringRole.DEVELOPER -> path.startsWith("src/main/")
-                            EngineeringRole.REVIEWER, null -> false
-                        }
-                        assertEquals(if (permitted) null else "ROLE_NOT_AUTHORIZED",
-                            code(ToolAuthorizationPolicy.authorizeWrite(
-                                WriteAuthorizationFacts(role, kind, path))))
+                        assertEquals(outcomes[index], code(ToolAuthorizationPolicy.authorizeWrite(
+                            WriteAuthorizationFacts(role, kind, path))))
                     }
                 }
             }
@@ -174,7 +173,7 @@ class ToolAuthorizationPolicyUnitTest {
     }
 
     @Test
-    fun precedenceAndImmutableReviewMatchLegacyWriteDenials() {
+    fun adversarialPrecedenceAndImmutableReviewDenials() {
         val base = WriteAuthorizationFacts(EngineeringRole.DEVELOPER, WriteOperationKind.EDIT,
             "src/main/Feature.kt")
         val cases = listOf(
