@@ -76,7 +76,13 @@ class JsonlEventSinkTest {
 
         assertFailsWith<EventSinkFailure> { journal.append("llm.request", "started") }
         assertEquals(0, journal.sequence)
-        journal.close()
+        // BufferedWriter may retry the unfinished buffered tail during close,
+        // which is also a hard failure after a partial write.
+        try {
+            assertFailsWith<EventSinkFailure> { journal.close() }
+        } finally {
+            file.close()
+        }
         val partial = Files.readString(path)
         assertTrue(partial.isNotEmpty())
         assertFalse(partial.endsWith(System.lineSeparator()))
