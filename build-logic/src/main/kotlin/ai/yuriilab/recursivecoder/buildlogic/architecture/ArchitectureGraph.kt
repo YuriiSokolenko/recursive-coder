@@ -11,9 +11,10 @@ object ArchitectureGraph {
         ":core:tasks" to setOf(":core:contracts"),
         ":infra:model" to setOf(":core:contracts"),
         ":infra:workspace" to setOf(":core:contracts"),
+        ":infra:task-store" to setOf(":core:tasks", ":core:contracts"),
         ":app:cli" to setOf(
             ":core:contracts", ":core:session", ":core:tasks",
-            ":infra:model", ":infra:workspace",
+            ":infra:model", ":infra:workspace", ":infra:task-store",
         ),
     )
 

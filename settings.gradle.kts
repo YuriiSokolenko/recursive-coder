@@ -12,4 +12,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "recursive-coder"
 include(":app:cli", ":core:contracts", ":core:session", ":core:tasks",
-    ":infra:model", ":infra:workspace")
+    ":infra:model", ":infra:workspace", ":infra:task-store")

@@ -64,7 +64,7 @@ and selected task). No policy decision reads the system clock, accesses a file,
 launches a process, runs a model or mutates shared state.
 
 `TaskService` remains the public use-case API. Inside each existing
-`TaskStore.transaction` it takes a snapshot, invokes the policy, and applies
+`TaskRepository.update` it takes a snapshot, invokes the policy, and applies
 the result under the same mutex and OS lock. `TaskScheduler` still owns
 worker execution, shutdown and polling, not the claim decision. Storage
 continues to serialize the existing v1 `tasks.json` fields, state names,
