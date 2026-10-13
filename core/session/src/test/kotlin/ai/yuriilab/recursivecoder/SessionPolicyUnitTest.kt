@@ -26,7 +26,7 @@ class SessionPolicyUnitTest {
         for (from in SessionPhase.entries) {
             for (to in SessionPhase.entries) {
                 val decision = SessionLifecyclePolicy.transition(from, to)
-                assertEquals(if (from to to in legal) PhaseDecision.Allowed else PhaseDecision.Denied,
+                assertEquals(if ((from to to) in legal) PhaseDecision.Allowed else PhaseDecision.Denied,
                     decision, "$from -> $to")
             }
         }
@@ -168,13 +168,13 @@ class SessionPolicyUnitTest {
             SessionBudgetPolicy.recordModel(empty, 3, 100, 0, true, null))
 
         val afterFirst = SessionBudgetPolicy.recordModel(
-            empty, 3, 100, 2, true, ModelUsage(4, 5)) as BudgetDecision.Allowed
+            empty, 3, 100, 2, true, ModelUsage(4, 5)) as BudgetDecision.Allowed<SessionBudgetState>
         assertEquals(2L, afterFirst.value.modelRequests)
         assertEquals(BudgetDecision.Allowed(false),
             SessionBudgetPolicy.beforeTurn(afterFirst.value, 3, 1))
         assertEquals(BudgetDecision.Denied(BudgetDenial.MODEL_REQUESTS),
             SessionBudgetPolicy.recordModel(afterFirst.value, 3, 100, 2, false, null))
-        val used = SessionBudgetPolicy.recordTool(empty, 1) as BudgetDecision.Allowed
+        val used = SessionBudgetPolicy.recordTool(empty, 1) as BudgetDecision.Allowed<SessionBudgetState>
         assertEquals(1L, used.value.toolCalls)
         assertEquals(BudgetDecision.Denied(BudgetDenial.TOOLS),
             SessionBudgetPolicy.recordTool(used.value, 1))
@@ -185,7 +185,7 @@ class SessionPolicyUnitTest {
     @Test fun tokenAccountingRejectsOverLimitNegativeAndOverflowWithoutSideEffects() {
         val empty = SessionBudgetState()
         val used = SessionBudgetPolicy.recordModel(
-            empty, 2, 10, 1, false, ModelUsage(4, 5)) as BudgetDecision.Allowed
+            empty, 2, 10, 1, false, ModelUsage(4, 5)) as BudgetDecision.Allowed<SessionBudgetState>
         assertEquals(9L, used.value.inputTokens + used.value.outputTokens)
         assertEquals(BudgetDecision.Denied(BudgetDenial.TOKENS),
             SessionBudgetPolicy.recordModel(used.value, 2, 10, 1, false, ModelUsage(2, 0)))
@@ -195,10 +195,10 @@ class SessionPolicyUnitTest {
                 SessionBudgetPolicy.recordModel(empty, 2, 10, 1, false, tokens))
         }
         val unknown = SessionBudgetPolicy.recordModel(
-            empty, 2, 10, 1, false, null) as BudgetDecision.Allowed
+            empty, 2, 10, 1, false, null) as BudgetDecision.Allowed<SessionBudgetState>
         assertFalse(unknown.value.completeUsage)
         val second = SessionBudgetPolicy.recordModel(
-            unknown.value, 2, 10, 1, false, ModelUsage(1, 1)) as BudgetDecision.Allowed
+            unknown.value, 2, 10, 1, false, ModelUsage(1, 1)) as BudgetDecision.Allowed<SessionBudgetState>
         assertFalse(second.value.completeUsage)
         assertEquals(2L, second.value.modelRequests)
     }
