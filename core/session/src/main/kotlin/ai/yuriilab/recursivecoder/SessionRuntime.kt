@@ -4,7 +4,6 @@ import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
-import java.security.MessageDigest
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
@@ -27,16 +26,6 @@ private fun canonicalDestination(path: Path): Path {
     }
     return missing.fold(realAncestor) { parent, part -> parent.resolve(part) }
 }
-
-private fun digest(bytes: ByteArray): String =
-    MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
-private fun digestFile(path: Path): String = digest(Files.readAllBytes(path))
-private fun artifact(path: Path): JsonObject = buildJsonObject {
-    put("path", path.toString())
-    put("sha256", digestFile(path))
-}
-private fun JsonObject.stringOrNull(key: String): String? =
-    if (this[key] == null || this[key] == JsonNull) null else textAt(key)
 
 /** Extract transport fields once; no trusted I/O or adapter decisions occur here. */
 private fun SessionRequest.admissionFacts(): SessionAdmissionFacts = SessionAdmissionFacts(
@@ -117,7 +106,7 @@ class SessionController(
             clock, eventSinkFactory.open(request.output("eventsPath")))
         var state = SessionPhase.CREATED
         var finalOutcome: SessionOutcome? = null
-        var error: JsonElement = JsonNull
+        var failure: SessionFailure? = null
         val deadline = SessionBudgetPolicy.effectiveDeadline(
             started, request.deadline, request.budgets.longAt("maxWallTimeMs"))
         val watchdog = Executors.newSingleThreadScheduledExecutor { task ->
@@ -270,16 +259,16 @@ class SessionController(
                 // Do not emit a terminal success event or produce a result.
                 throw e
             } catch (e: Refused) {
-                error = sessionError(e.code, e.category, e.explanation)
+                failure = SessionFailure(e.code, e.category, e.explanation)
                 finish(SessionEndReason.REFUSAL, "denied")
             } catch (e: Stopped) {
-                error = sessionError(if (e.timedOut) "SESSION_DEADLINE_EXCEEDED" else "SESSION_CANCELLED",
+                failure = SessionFailure(if (e.timedOut) "SESSION_DEADLINE_EXCEEDED" else "SESSION_CANCELLED",
                     if (e.timedOut) "timeout" else "cancellation",
                     if (e.timedOut) "Session deadline exceeded" else "Session cancelled")
                 finish(if (e.timedOut) SessionEndReason.TIMEOUT else SessionEndReason.CANCELLATION,
                     if (e.timedOut) "timed_out" else "cancelled")
             } catch (_: Exception) {
-                error = sessionError("SESSION_EXECUTION_FAILED", "infrastructure", "Session execution failed")
+                failure = SessionFailure("SESSION_EXECUTION_FAILED", "infrastructure", "Session execution failed")
                 finish(SessionEndReason.FAILURE, "failed")
             }
         } catch (e: Throwable) {
@@ -297,58 +286,25 @@ class SessionController(
         executionFailure?.let { throw it }
 
         val finishedAt = clock.instant()
-        val status = checkNotNull(finalOutcome).wire
-        val diagnostics = buildJsonObject {
-            put("sessionId", request.sessionId); put("status", status)
-            put("events", journal.sequence)
-            put("summary", when (status) {
-                "succeeded" -> "Read-only model session completed"
-                "cancelled" -> "Session cancelled"
-                "timed_out" -> "Session deadline exceeded"
-                "rejected" -> "Session rejected before model invocation"
-                else -> "Session failed"
-            })
-        }
-        Files.writeString(request.output("diagnosticsPath"), diagnostics.toString(),
+        val outcome = checkNotNull(finalOutcome)
+        val diagnosticsPath = request.output("diagnosticsPath")
+        val diagnostics = SessionResultMapper.diagnostics(request.sessionId, outcome, journal.sequence.toLong())
+        val diagnosticsContent = diagnostics.toString()
+        // Validate the full terminal result before publishing any diagnostics or result file.
+        val result = SessionResultMapper.encode(SessionRunResult(
+            outcome = outcome,
+            startedAt = started,
+            finishedAt = finishedAt,
+            lastEventSeq = journal.sequence.toLong(),
+            eventLog = SessionArtifact(request.output("eventsPath"), checkNotNull(eventDigest)),
+            diagnostics = SessionResultMapper.artifact(diagnosticsPath, diagnosticsContent),
+            failure = failure,
+            usage = budgetState
+        ), request)
+        Files.writeString(diagnosticsPath, diagnosticsContent,
             StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
-        val result = buildJsonObject {
-            put("kind", "session-result"); put("version", SessionProtocol.VERSION)
-            put("sessionId", request.sessionId); put("traceId", request.traceId)
-            put("requestId", request.requestId); put("status", status)
-            put("startedAt", started.toString()); put("finishedAt", finishedAt.toString())
-            put("durationMs", Duration.between(started, finishedAt).toMillis().coerceAtLeast(0))
-            put("lastEventSeq", journal.sequence)
-            put("provenance", buildJsonObject {
-                put("workspaceId", request.workspace.textAt("workspaceId"))
-                put("baselineSha", request.workspace.textAt("baselineSha"))
-                put("policySha256", request.policy.textAt("policySha256"))
-                put("fenceGeneration", request.raw.objectAt("resume").longAt("fenceGeneration"))
-            })
-            put("outputs", buildJsonObject {
-                put("eventLog", buildJsonObject {
-                    put("path", request.output("eventsPath").toString())
-                    put("sha256", checkNotNull(eventDigest))
-                })
-                put("diagnostics", artifact(request.output("diagnosticsPath")))
-                put("terminalReceipt", JsonNull); put("changeManifest", JsonNull)
-                put("checkpoint", JsonNull)
-            })
-            put("error", error)
-            put("usage", buildJsonObject {
-                put("inputTokens", budgetState.inputTokens); put("outputTokens", budgetState.outputTokens)
-                put("cacheReadTokens", 0); put("cacheWriteTokens", 0)
-                put("totalTokens", budgetState.inputTokens + budgetState.outputTokens)
-                put("completeness", if (budgetState.completeUsage) "complete" else "unknown")
-            })
-            put("invocation", request.invocation)
-        }
         Files.writeString(request.output("resultPath"), result.toString(),
             StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
         return result
     }
-}
-
-private fun sessionError(code: String, category: String, message: String): JsonObject = buildJsonObject {
-    put("code", code); put("category", category); put("retryable", false)
-    put("safeMessage", message)
 }

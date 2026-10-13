@@ -92,7 +92,7 @@ class TaskStore(directory: Path) : TaskRepository {
                     state = TaskState.fromWire(item.getValue("state").jsonPrimitive.content),
                     attempt = item.getValue("attempt").jsonPrimitive.int,
                     sessionId = item.optionalText("sessionId"),
-                    lastResultStatus = item.optionalText("lastResultStatus"),
+                    lastResultStatus = item.optionalText("lastResultStatus")?.let(SessionOutcome::fromWire),
                     reason = item.optionalText("reason"),
                     queueOrder = item.getValue("queueOrder").jsonPrimitive.long,
                     waitTurns = item.getValue("waitTurns").jsonPrimitive.long,
@@ -126,7 +126,7 @@ class TaskStore(directory: Path) : TaskRepository {
                         put("priority", task.priority); put("state", task.state.wire)
                         put("attempt", task.attempt)
                         put("sessionId", task.sessionId?.let(::JsonPrimitive) ?: JsonNull)
-                        put("lastResultStatus", task.lastResultStatus?.let(::JsonPrimitive) ?: JsonNull)
+                        put("lastResultStatus", task.lastResultStatus?.wire?.let(::JsonPrimitive) ?: JsonNull)
                         put("reason", task.reason?.let(::JsonPrimitive) ?: JsonNull)
                         put("queueOrder", task.queueOrder); put("waitTurns", task.waitTurns)
                         put("preserveOrderOnResume", task.preserveOrderOnResume)

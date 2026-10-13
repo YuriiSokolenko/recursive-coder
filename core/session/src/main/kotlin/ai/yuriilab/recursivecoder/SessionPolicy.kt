@@ -13,14 +13,6 @@ internal enum class SessionPhase(val wire: String, val terminal: Boolean = false
     FAILED("failed", true)
 }
 
-internal enum class SessionOutcome(val wire: String) {
-    SUCCEEDED("succeeded"),
-    REJECTED("rejected"),
-    FAILED("failed"),
-    CANCELLED("cancelled"),
-    TIMED_OUT("timed_out")
-}
-
 internal enum class SessionEndReason { SUCCESS, REFUSAL, CANCELLATION, TIMEOUT, FAILURE }
 
 internal sealed interface PhaseDecision {

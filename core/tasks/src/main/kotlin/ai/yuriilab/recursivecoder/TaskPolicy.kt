@@ -37,7 +37,7 @@ data class Task(
     val state: TaskState = TaskState.CREATED,
     val attempt: Int = 0,
     val sessionId: String? = null,
-    val lastResultStatus: String? = null,
+    val lastResultStatus: SessionOutcome? = null,
     val reason: String? = null,
     val queueOrder: Long = 0,
     val waitTurns: Long = 0,
@@ -258,17 +258,17 @@ internal object TaskPolicy {
         ), update.task)
     }
 
-    fun finish(queue: TaskQueue, id: String, sessionId: String, resultStatus: String, at: String): TaskQueue {
+    fun finish(queue: TaskQueue, id: String, sessionId: String, outcome: SessionOutcome, at: String): TaskQueue {
         val index = queue.index(id)
         val current = queue.tasks[index]
         if (current.state != TaskState.RUNNING || current.sessionId != sessionId) return queue
-        val target = when (resultStatus) {
-            "succeeded" -> TaskState.SUCCEEDED
-            "cancelled" -> TaskState.CANCELLED
-            else -> TaskState.FAILED
+        val target = when (outcome) {
+            SessionOutcome.SUCCEEDED -> TaskState.SUCCEEDED
+            SessionOutcome.CANCELLED -> TaskState.CANCELLED
+            SessionOutcome.REJECTED, SessionOutcome.FAILED, SessionOutcome.TIMED_OUT -> TaskState.FAILED
         }
-        val update = transition(current.copy(lastResultStatus = resultStatus), target,
-            if (target == TaskState.SUCCEEDED) null else resultStatus, queue.nextOrder, at)
+        val update = transition(current.copy(lastResultStatus = outcome), target,
+            if (target == TaskState.SUCCEEDED) null else outcome.wire, queue.nextOrder, at)
         return reconcile(queue.replace(index, update.task, update.nextOrder), at)
     }
 

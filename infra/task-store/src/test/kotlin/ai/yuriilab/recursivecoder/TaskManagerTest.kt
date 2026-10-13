@@ -292,6 +292,40 @@ class TaskManagerTest {
         assertEquals("{broken", Files.readString(path))
     }
 
+    @Test fun unknownStoredResultStatusRejectsAllReadsAndMutationsWithoutClobberingSnapshot() {
+        val service = service()
+        service.enqueue(request("one"))
+        val path = temp.resolve("store/tasks.json")
+        val original = Json.parseToJsonElement(Files.readString(path)).jsonObject
+        val tamperedTasks = buildJsonArray {
+            original.getValue("tasks").jsonArray.forEach { task ->
+                add(JsonObject(task.jsonObject + ("lastResultStatus" to JsonPrimitive("bogus"))))
+            }
+        }
+        val poisoned = JsonObject(original + ("tasks" to tamperedTasks)).toString()
+        Files.writeString(path, poisoned)
+
+        val failure = assertFailsWith<IllegalStateException> { service().list() }
+        assertEquals("Corrupt task store; refusing to overwrite it", failure.message)
+        assertEquals("Unsupported session result status", failure.cause?.message)
+        assertFailsWith<IllegalStateException> { service().pause() }
+        assertEquals(poisoned, Files.readString(path))
+    }
+
+    @Test fun schedulerConvertsUnknownRunnerStatusIntoDurableFailure() {
+        val service = service()
+        service.enqueue(request("one"))
+        val report = TaskScheduler(service, TaskRunner { _, _ -> "secret-invalid-status" },
+            pollMillis = 10).runUntilIdle()
+        assertEquals(1, report.launched)
+        assertEquals(1, report.completed)
+        val persisted = service().show("one")
+        assertEquals(TaskState.FAILED, persisted.state)
+        assertEquals(SessionOutcome.FAILED, persisted.lastResultStatus)
+        assertEquals(1, persisted.attempt)
+        assertFalse(Files.readString(temp.resolve("store/tasks.json")).contains("secret-invalid-status"))
+    }
+
     @Test fun retryRequeuesBehindAlreadyWaitingPeer() {
         val service = service()
         service.enqueue(request("first"), priority = 50)
@@ -496,10 +530,46 @@ class TaskManagerTest {
         assertEquals(128, stored.transitions.size)
         assertTrue(stored.prunedTransitions > 0)
         assertEquals(TaskState.READY, stored.state)
-        assertEquals(stored.prunedTransitions.toInt(),
-            stored.toPublicJson().getValue("prunedTransitions").jsonPrimitive.int)
+        val disk = Json.parseToJsonElement(Files.readString(temp.resolve("store/tasks.json"))).jsonObject
+        val persistedTask = disk.getValue("tasks").jsonArray.single().jsonObject
+        assertEquals(stored.prunedTransitions,
+            persistedTask.getValue("prunedTransitions").jsonPrimitive.long)
     }
 
+    @Test fun schedulerRejectsTamperedTaskTemplatesAtMappingBoundary() {
+        val service = service()
+        val bad = Task(id = "task", requestTemplate = "{}",
+            dependencies = emptyList(), priority = 50,
+            state = TaskState.RUNNING, attempt = 1, sessionId = "session-task-1")
+        assertFailsWith<Refused> { service.requestFor(bad) }
+        assertFailsWith<IllegalArgumentException> {
+            service.requestFor(bad.copy(state = TaskState.READY))
+        }
+    }
 
+    @Test fun scheduledAttemptRejectsValidTemplateBelongingToAnotherTask() {
+        val service = service()
+        service.enqueue(request("original"))
+        val running = service.claim()!!
+        val foreignTemplate = request("foreign")
+        val failure = assertFailsWith<IllegalArgumentException> {
+            service.requestFor(running.copy(requestTemplate = foreignTemplate))
+        }
+        assertEquals("Task template ID mismatch", failure.message)
+        assertEquals(TaskState.RUNNING, service.show("original").state)
+    }
+
+    @Test fun invalidRunnerResultIsRejectedBeforeAnyPersistentMutation() {
+        val service = service()
+        service.enqueue(request("one"))
+        val running = service.claim()!!
+        val snapshot = Files.readString(temp.resolve("store/tasks.json"))
+        val failure = assertFailsWith<IllegalArgumentException> {
+            service.finish(running.id, running.sessionId!!, "secret-user-text")
+        }
+        assertEquals("Unsupported session result status", failure.message)
+        assertEquals(snapshot, Files.readString(temp.resolve("store/tasks.json")))
+        assertEquals(TaskState.RUNNING, service.show("one").state)
+    }
 
 }

@@ -1,35 +1,11 @@
 package ai.yuriilab.recursivecoder
 
-import java.nio.charset.StandardCharsets
 import java.time.Clock
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
-import kotlinx.serialization.json.*
-
-/** Public JSON is an adapter projection, not part of the Task domain model. */
-fun Task.toPublicJson(): JsonObject = buildJsonObject {
-        put("taskId", id); put("state", state.wire); put("priority", priority)
-        put("dependencies", buildJsonArray { dependencies.forEach { add(it) } })
-        put("attempt", attempt)
-        put("prunedTransitions", prunedTransitions)
-        put("sessionId", sessionId?.let(::JsonPrimitive) ?: JsonNull)
-        put("lastResultStatus", lastResultStatus?.let(::JsonPrimitive) ?: JsonNull)
-        put("reason", reason?.let(::JsonPrimitive) ?: JsonNull)
-        put("transitions", buildJsonArray {
-            transitions.forEach { step ->
-                add(buildJsonObject {
-                    put("from", step.from?.wire?.let(::JsonPrimitive) ?: JsonNull)
-                    put("to", step.to.wire); put("at", step.occurredAt)
-                    put("attempt", step.attempt)
-                    put("sessionId", step.sessionId?.let(::JsonPrimitive) ?: JsonNull)
-                    put("reason", step.reason?.let(::JsonPrimitive) ?: JsonNull)
-                })
-            }
-        })
-    }
 
 /** Task use cases apply pure decisions inside a repository-owned atomic transaction. */
 class TaskService(val store: TaskRepository, private val clock: Clock = Clock.systemUTC()) {
@@ -42,13 +18,12 @@ class TaskService(val store: TaskRepository, private val clock: Clock = Clock.sy
         tasks.firstOrNull { it.id == id } ?: throw IllegalArgumentException("Unknown task")
 
     fun enqueue(requestJson: String, priority: Int = 50, dependencies: List<String> = emptyList()): Task {
-        require(requestJson.toByteArray(StandardCharsets.UTF_8).size <= 262144) { "Request too large" }
-        val request = SessionRequest.parse(requestJson)
-        val id = request.task.getValue("taskId").jsonPrimitive.content
+        val submission = TaskRequestMapper.submission(requestJson)
+        val id = submission.taskId
         require(safeTaskId.matches(id)) { "Unsafe task ID" }
         require(priority in 0..100) { "Priority must be 0..100" }
         return store.update { queue ->
-            val next = TaskPolicy.enqueue(queue, id, request.raw.toString(), priority, dependencies, now())
+            val next = TaskPolicy.enqueue(queue, id, submission.template, priority, dependencies, now())
             TaskMutation(next, next.find(id))
         }
     }
@@ -85,9 +60,13 @@ class TaskService(val store: TaskRepository, private val clock: Clock = Clock.sy
     }
 
     /** Scheduler-only completion; a stale session ID must never change a newer attempt. */
-    fun finish(id: String, sessionId: String, resultStatus: String): Task = store.update { queue ->
-        val next = TaskPolicy.finish(queue, id, sessionId, resultStatus, now())
-        TaskMutation(next, next.find(id))
+    fun finish(id: String, sessionId: String, resultStatus: String): Task {
+        // Keep the adapter-facing signature but validate before any transaction.
+        val outcome = SessionOutcome.fromWire(resultStatus)
+        return store.update { queue ->
+            val next = TaskPolicy.finish(queue, id, sessionId, outcome, now())
+            TaskMutation(next, next.find(id))
+        }
     }
 
     /** Scheduler-only failure recovery: a stopped attempt is not user cancellation. */
@@ -102,31 +81,9 @@ class TaskService(val store: TaskRepository, private val clock: Clock = Clock.sy
         TaskMutation(TaskPolicy.recoverInterrupted(it, now()), Unit)
     }
 
-    /** Scheduler-only invocation preparation; not part of the user-facing Task command API. */
-    fun requestFor(task: Task): SessionRequest {
-        require(task.state == TaskState.RUNNING && task.sessionId != null)
-        val source = Json.parseToJsonElement(task.requestTemplate).jsonObject
-        val runRoot = store.outputRoot(task)
-        val invocation = source.getValue("invocation").jsonObject
-        val adjustedInvocation = JsonObject(invocation + mapOf(
-            "source" to JsonPrimitive("scheduler"),
-            "attempt" to JsonPrimitive(task.attempt),
-            "invocationId" to JsonPrimitive("invoke-" + task.id + "-" + task.attempt)
-        ))
-        val outputs = buildJsonObject {
-            put("rootDir", runRoot.toString())
-            put("resultPath", runRoot.resolve("result.json").toString())
-            put("eventsPath", runRoot.resolve("events.jsonl").toString())
-            put("checkpointDir", runRoot.resolve("checkpoints").toString())
-            put("diagnosticsPath", runRoot.resolve("diagnostics.json").toString())
-        }
-        return SessionRequest.parse(JsonObject(source + mapOf(
-            "requestId" to JsonPrimitive("request-" + task.id + "-" + task.attempt),
-            "sessionId" to JsonPrimitive(task.sessionId),
-            "invocation" to adjustedInvocation,
-            "outputs" to outputs
-        )).toString())
-    }
+    /** Scheduler-only invocation preparation; the JSON projection is a mapper. */
+    fun requestFor(task: Task): SessionRequest =
+        TaskRequestMapper.forAttempt(task, store.outputRoot(task))
 }
 
 fun interface TaskRunner {
@@ -195,7 +152,7 @@ class TaskScheduler(
                                 val current = service.show(task.id)
                                 if (current.sessionId != sessionId ||
                                     current.state == TaskState.CANCELLED || stopping.get()) "cancelled"
-                                else runner.execute(service.requestFor(task), cancellation)
+                                else SessionOutcome.fromWire(runner.execute(service.requestFor(task), cancellation)).wire
                             } catch (_: InterruptedException) {
                                 "cancelled"
                             } catch (_: Exception) {
