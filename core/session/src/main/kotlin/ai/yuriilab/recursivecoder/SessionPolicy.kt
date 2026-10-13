@@ -170,6 +170,15 @@ internal object SessionBudgetPolicy {
 
     fun deadlineReached(now: Instant, deadline: Instant): Boolean = !now.isBefore(deadline)
 
+    /** Timeout wins when cancellation and deadline expiration race. */
+    fun interruption(
+        signals: CancellationSignals, now: Instant, deadline: Instant
+    ): SessionEndReason? = when {
+        signals.expired || deadlineReached(now, deadline) -> SessionEndReason.TIMEOUT
+        signals.requested -> SessionEndReason.CANCELLATION
+        else -> null
+    }
+
     /** Reserve one actual HTTP POST for each remaining model turn, including confirmation. */
     fun beforeTurn(state: SessionBudgetState, maxRequests: Long, turn: Int): BudgetDecision<Boolean> {
         if (turn !in 0..1 || state.modelRequests < 0 || state.modelRequests > maxRequests)
