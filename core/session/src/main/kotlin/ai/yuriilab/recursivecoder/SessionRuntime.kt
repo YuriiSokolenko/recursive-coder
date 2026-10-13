@@ -167,104 +167,104 @@ class SessionController(
         try {
             try {
                 workspaceManager = request.admit(workspaceOpener,
-                onAudit = { audit ->
-                    journal.append(if (audit.permitted) "tool.completed" else "policy.denied",
-                        if (audit.permitted) "completed" else "denied",
-                        toolId = audit.receiptId, started = audit.started,
+                    onAudit = { audit ->
+                        journal.append(if (audit.permitted) "tool.completed" else "policy.denied",
+                            if (audit.permitted) "completed" else "denied",
+                            toolId = audit.receiptId, started = audit.started,
+                            extra = buildJsonObject {
+                                put("tool", audit.tool)
+                                put("receiptId", audit.receiptId)
+                                put("bytes", audit.outputBytes)
+                                audit.code?.let { put("deniedCode", it) }
+                                audit.sha256?.let { put("sha256", it) }
+                            })
+                    },
+                    onStart = { receipt, tool, startedAt ->
+                        journal.append("tool.started", "started", toolId = receipt, started = startedAt,
+                            extra = buildJsonObject { put("tool", tool); put("receiptId", receipt) })
+                    }
+                )
+                checkActive()
+                val capabilities = model.negotiate(config, cancellation, deadline)
+                journal.append("llm.capabilities", "completed", extra = buildJsonObject {
+                    put("contextTokens", capabilities.contextTokens)
+                    put("maxOutputTokens", capabilities.maxOutputTokens)
+                    put("features", capabilities.features.sorted().joinToString(","))
+                })
+                transition(SessionPhase.ADMITTED)
+                transition(SessionPhase.RUNNING)
+                journal.append("agent.started", "started")
+                var observed: Pair<Int, String>? = null
+                // Only actual inference POSTs count; discovery GETs are not model requests.
+                val maxModelRequests = request.budgets["maxModelRequests"]?.let {
+                    request.budgets.longAt("maxModelRequests")
+                } ?: Long.MAX_VALUE
+                val maxTotalTokens = request.budgets.longAt("maxTotalTokens")
+                val maxToolCalls = request.budgets.longAt("maxToolCalls")
+                repeat(2) { turn ->
+                    checkActive()
+                    val permission = SessionBudgetPolicy.beforeTurn(budgetState, maxModelRequests, turn)
+                    val allowPreToolRetry = when (permission) {
+                        is BudgetDecision.Allowed -> permission.value
+                        is BudgetDecision.Denied -> throw Refused(
+                            permission.reason.code, "policy", "Model request budget exhausted")
+                    }
+                    val modelStart = clock.instant()
+                    journal.append("llm.request", "started", started = modelStart,
+                        extra = buildJsonObject { put("provider", config.provider); put("turn", turn + 1) })
+                    val response = try {
+                        model.next(config, request.taskPath, observed, cancellation, deadline, allowPreToolRetry)
+                    } catch (_: InterruptedException) { checkActive(); throw Stopped(false) }
+                    checkActive()
+                    // Reject adapter-reported usage and retries before trusted tool side effects.
+                    budgetState = when (val charged = SessionBudgetPolicy.recordModel(
+                        budgetState, maxModelRequests, maxTotalTokens,
+                        response.attempts, allowPreToolRetry, response.usage)) {
+                        is BudgetDecision.Allowed -> charged.value
+                        is BudgetDecision.Denied -> throw Refused(
+                            charged.reason.code, "policy", charged.reason.message)
+                    }
+                    journal.append("llm.response", "completed", started = modelStart,
                         extra = buildJsonObject {
-                            put("tool", audit.tool)
-                            put("receiptId", audit.receiptId)
-                            put("bytes", audit.outputBytes)
-                            audit.code?.let { put("deniedCode", it) }
-                            audit.sha256?.let { put("sha256", it) }
+                            put("provider", config.provider)
+                            put("turn", turn + 1)
+                            put("attempts", response.attempts)
+                            response.statusCode?.let { put("httpStatus", it) }
+                            response.usage?.let {
+                                put("inputTokens", it.input)
+                                put("outputTokens", it.output)
+                            }
                         })
-                },
-                onStart = { receipt, tool, startedAt ->
-                    journal.append("tool.started", "started", toolId = receipt, started = startedAt,
-                        extra = buildJsonObject { put("tool", tool); put("receiptId", receipt) })
-                }
-            )
-            checkActive()
-            val capabilities = model.negotiate(config, cancellation, deadline)
-            journal.append("llm.capabilities", "completed", extra = buildJsonObject {
-                put("contextTokens", capabilities.contextTokens)
-                put("maxOutputTokens", capabilities.maxOutputTokens)
-                put("features", capabilities.features.sorted().joinToString(","))
-            })
-            transition(SessionPhase.ADMITTED)
-            transition(SessionPhase.RUNNING)
-            journal.append("agent.started", "started")
-            var observed: Pair<Int, String>? = null
-            // Only actual inference POSTs count; discovery GETs are not model requests.
-            val maxModelRequests = request.budgets["maxModelRequests"]?.let {
-                request.budgets.longAt("maxModelRequests")
-            } ?: Long.MAX_VALUE
-            val maxTotalTokens = request.budgets.longAt("maxTotalTokens")
-            val maxToolCalls = request.budgets.longAt("maxToolCalls")
-            repeat(2) { turn ->
-                checkActive()
-                val permission = SessionBudgetPolicy.beforeTurn(budgetState, maxModelRequests, turn)
-                val allowPreToolRetry = when (permission) {
-                    is BudgetDecision.Allowed -> permission.value
-                    is BudgetDecision.Denied -> throw Refused(
-                        permission.reason.code, "policy", "Model request budget exhausted")
-                }
-                val modelStart = clock.instant()
-                journal.append("llm.request", "started", started = modelStart,
-                    extra = buildJsonObject { put("provider", config.provider); put("turn", turn + 1) })
-                val response = try {
-                    model.next(config, request.taskPath, observed, cancellation, deadline, allowPreToolRetry)
-                } catch (_: InterruptedException) { checkActive(); throw Stopped(false) }
-                checkActive()
-                // Reject adapter-reported usage and retries before trusted tool side effects.
-                budgetState = when (val charged = SessionBudgetPolicy.recordModel(
-                    budgetState, maxModelRequests, maxTotalTokens,
-                    response.attempts, allowPreToolRetry, response.usage)) {
-                    is BudgetDecision.Allowed -> charged.value
-                    is BudgetDecision.Denied -> throw Refused(
-                        charged.reason.code, "policy", charged.reason.message)
-                }
-                journal.append("llm.response", "completed", started = modelStart,
-                    extra = buildJsonObject {
-                        put("provider", config.provider)
-                        put("turn", turn + 1)
-                        put("attempts", response.attempts)
-                        response.statusCode?.let { put("httpStatus", it) }
-                        response.usage?.let {
-                            put("inputTokens", it.input)
-                            put("outputTokens", it.output)
+                    when (val decision = response.decision) {
+                        is ModelDecision.Read -> {
+                            if (turn != 0 || decision.path != request.taskPath) refuse("Unexpected fake tool call")
+                            checkActive()
+                            val relative = workspaceManager!!.taskRelativePath(decision.path)
+                            budgetState = when (val charged = SessionBudgetPolicy.recordTool(budgetState, maxToolCalls)) {
+                                is BudgetDecision.Allowed -> charged.value
+                                is BudgetDecision.Denied -> throw Refused(
+                                    charged.reason.code, "policy", charged.reason.message)
+                            }
+                            val outcome = workspaceManager.execute(WorkspaceTool.Read(relative))
+                            if (!outcome.permitted)
+                                throw Refused(outcome.deniedCode!!, "policy", "Read-only tool denied")
+                            val read = outcome.data as? ToolData.FileText
+                                ?: throw Refused("TOOL_RESULT_INVALID", "policy", "Unexpected tool result")
+                            if (read.sha256 != request.task.objectAt("taskInputRef").textAt("sha256"))
+                                throw Refused("TASK_CHANGED", "policy", "Task changed during execution")
+                            observed = read.bytes to read.sha256
                         }
-                    })
-                when (val decision = response.decision) {
-                    is ModelDecision.Read -> {
-                        if (turn != 0 || decision.path != request.taskPath) refuse("Unexpected fake tool call")
-                        checkActive()
-                        val relative = workspaceManager!!.taskRelativePath(decision.path)
-                        budgetState = when (val charged = SessionBudgetPolicy.recordTool(budgetState, maxToolCalls)) {
-                            is BudgetDecision.Allowed -> charged.value
-                            is BudgetDecision.Denied -> throw Refused(
-                                charged.reason.code, "policy", charged.reason.message)
+                        is ModelDecision.Done -> {
+                            if (turn != 1 || observed != (decision.bytes to decision.sha256))
+                                throw Refused("MODEL_INVALID_COMPLETION", "provider", "Model completion did not match trusted observation")
                         }
-                        val outcome = workspaceManager.execute(WorkspaceTool.Read(relative))
-                        if (!outcome.permitted)
-                            throw Refused(outcome.deniedCode!!, "policy", "Read-only tool denied")
-                        val read = outcome.data as? ToolData.FileText
-                            ?: throw Refused("TOOL_RESULT_INVALID", "policy", "Unexpected tool result")
-                        if (read.sha256 != request.task.objectAt("taskInputRef").textAt("sha256"))
-                            throw Refused("TASK_CHANGED", "policy", "Task changed during execution")
-                        observed = read.bytes to read.sha256
+                        ModelDecision.Refusal ->
+                            throw Refused("MODEL_REFUSAL", "provider", "Model declined the request")
                     }
-                    is ModelDecision.Done -> {
-                        if (turn != 1 || observed != (decision.bytes to decision.sha256))
-                            throw Refused("MODEL_INVALID_COMPLETION", "provider", "Model completion did not match trusted observation")
-                    }
-                    ModelDecision.Refusal ->
-                        throw Refused("MODEL_REFUSAL", "provider", "Model declined the request")
                 }
-            }
-            checkActive()
-            journal.append("agent.completed", "completed")
-            finish(SessionEndReason.SUCCESS)
+                checkActive()
+                journal.append("agent.completed", "completed")
+                finish(SessionEndReason.SUCCESS)
             } catch (e: EventSinkFailure) {
                 // A journal failure makes even an otherwise successful session unverifiable.
                 // Do not emit a terminal success event or produce a result.
