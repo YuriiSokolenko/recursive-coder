@@ -250,6 +250,27 @@ class TaskPolicyUnitTest {
         assertFailsWith<IllegalArgumentException> { TaskPolicy.retry(complete, "one", at) }
     }
 
+    @Test fun everyTerminalSessionOutcomeHasAnExplicitTaskDisposition() {
+        val expected = mapOf(
+            SessionOutcome.SUCCEEDED to TaskState.SUCCEEDED,
+            SessionOutcome.REJECTED to TaskState.FAILED,
+            SessionOutcome.FAILED to TaskState.FAILED,
+            SessionOutcome.CANCELLED to TaskState.CANCELLED,
+            SessionOutcome.TIMED_OUT to TaskState.FAILED
+        )
+        for ((outcome, target) in expected) {
+            val running = task("one", state = TaskState.RUNNING,
+                attempt = 1, sessionId = "session-one-1")
+            val result = TaskPolicy.finish(TaskQueue(tasks = listOf(running)), "one",
+                "session-one-1", outcome, at).tasks.single()
+            assertEquals(target, result.state, outcome.wire)
+            assertEquals(outcome, result.lastResultStatus)
+            assertEquals(if (outcome == SessionOutcome.SUCCEEDED) null else outcome.wire,
+                result.reason)
+            assertEquals(null, running.lastResultStatus, "Policy cannot mutate the input")
+        }
+    }
+
     @Test fun recoveryRequiresAttentionWithoutReplayingSessions() {
         val claimed = TaskPolicy.claim(TaskQueue(tasks = listOf(task("one")), nextOrder = 1),
             emptySet(), at)

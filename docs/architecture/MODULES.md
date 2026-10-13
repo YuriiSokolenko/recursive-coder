@@ -27,6 +27,27 @@ Production dependencies point from the composition root and adapters toward the 
 
 `:core:contracts` intentionally owns the shared `SessionRequest` parser and shape validation (approximately 190 lines) as well as `Cancellation`, `Refused` and `Stopped`. Both `:core:session` and the infrastructure adapters consume these stable types; moving them into `:core:session` would force the adapters to depend on the session runtime. Pure read/write/check authorization decisions and the SDD/ATDD/TDD/Developer/Reviewer ownership matrix now live in `:core:contracts` (`ToolAuthorizationPolicy`). The trusted workspace adapter still owns canonical-path/descriptor checks, Git state, sandbox execution, review provenance and mutation receipts. `contracts/v1` remains the authoritative transport schema.
 
+## Protocol-to-domain mapping inventory (issue #31)
+
+Session Protocol v1 is a **transport** contract, not a Task/Session aggregate.
+The existing module ownership is preserved; an additional empty domain or protocol module
+would introduce extra dependency edges without separating any working implementation.
+
+| Boundary | Transport coupling | Typed domain owner / mapping decision |
+| --- | --- | --- |
+| Incoming SessionRequest | `:core:contracts/SessionRequest.kt` parses and validates JSON and paths | Validated DTO shared by CLI, Task and workspace ports; `:core:session/SessionAdmissionPolicy` *independently* checks supported version, capabilities, model, budgets and policy |
+| Enqueue and scheduled attempt | `:core:tasks/TaskRequestMapper.kt` parses/substitutes v1 requests | `:core:tasks/TaskService` accepts validated submissions; `TaskPolicy` handles Task transitions without creating JSON |
+| Session termination | `:core:session/SessionResultMapper.kt` projects v1 result, diagnostics and artifact refs | `SessionLifecyclePolicy` decides typed `SessionOutcome`, budget is `SessionBudgetState`, and coordinator passes `SessionRunResult` |
+| Task completion | Runner/TaskService converts wire status via `SessionOutcome.fromWire` | `TaskPolicy.finish` receives only a typed outcome; unsupported values fail before transaction with a fixed, non-echoing diagnostic |
+| Task CLI output | `:app:cli/TaskJsonMapper.kt` | Typed `TaskState` and `SessionOutcome` stay in the core aggregate |
+| Durable tasks.json | `:infra:task-store/TaskStore.kt` persists state and status strings | Decodes them to typed values and rejects unknown statuses as corrupt snapshots |
+| Model/tool/event JSON | `:infra:model` handles model wire JSON; `:core:session` encodes journal event envelopes | Not part of Task lifecycle decisions; unrelated event/serialization rewrites remain deferred |
+
+Wire values, field names/order, CLI exit codes, Session Protocol v1 schema/fixtures,
+and tasks.json v1 format are not changed. Validation of JSON shape is never a substitute
+for Session admission or trusted workspace checks. Mapping exceptions use stable messages
+rather than echoing inbound request text.
+
 ## Koog dependency
 
 The previously unused `ai.koog:koog-agents:1.3.0` dependency was deliberately dropped from the original root application as part of this structural split. No production source imports it; therefore removing it changes dependency resolution checks, **not current runtime behavior**. The renamed JVM CI job no longer verifies Koog artifact availability. When Koog-backed orchestration is implemented in a future `:agent:runtime` module, restore a tested, module-scoped Koog dependency and CI coverage.
