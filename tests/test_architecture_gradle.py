@@ -1,12 +1,140 @@
 """Regression checks for architecture rules using temporary Gradle init scripts."""
 
+from contextlib import redirect_stdout
+import io
+import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
+import sys
 import tempfile
+import threading
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+
+def _stop_gradle_tree(process: subprocess.Popen[str], *, force: bool = False) -> None:
+    """Stop Gradle and its descendants, including children holding stdout."""
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGKILL if force else signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    elif process.poll() is None:
+        (process.kill if force else process.terminate)()
+
+
+def run_logged_gradle(
+    command: list[str],
+    *,
+    cwd: Path,
+    scenario: str,
+    phase: str,
+    sequence: int,
+    timeout: float,
+) -> subprocess.CompletedProcess[str]:
+    """Stream combined output now, retain an exact transcript for assertions."""
+    label = f"[gradle #{sequence:02d}] {scenario} | {phase}"
+    started = time.monotonic()
+    print(f"{label} START timeout={timeout:g}s", flush=True)
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            start_new_session=(os.name == "posix"),
+        )
+    except OSError as error:
+        print(
+            f"{label} END status=spawn-failed exit=n/a "
+            f"elapsed={time.monotonic() - started:.1f}s error={error}",
+            flush=True,
+        )
+        raise
+
+    output_lines: list[str] = []
+
+    def relay() -> None:
+        assert process.stdout is not None
+        for line in process.stdout:
+            output_lines.append(line)
+            print(line, end="", flush=True)
+
+    reader = threading.Thread(target=relay, daemon=True)
+    reader.start()
+    timed_out = False
+    try:
+        deadline = started + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            try:
+                process.wait(timeout=min(15, remaining))
+                break
+            except subprocess.TimeoutExpired:
+                if time.monotonic() >= deadline:
+                    timed_out = True
+                    break
+                print(
+                    f"{label} RUNNING elapsed={time.monotonic() - started:.1f}s",
+                    flush=True,
+                )
+    finally:
+        if timed_out:
+            _stop_gradle_tree(process)
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                _stop_gradle_tree(process, force=True)
+                process.wait()
+        reader.join(timeout=5)
+        if reader.is_alive():
+            # A descendant can outlive the parent and keep the pipe open.
+            _stop_gradle_tree(process, force=True)
+            reader.join(timeout=5)
+        if process.poll() is None:
+            _stop_gradle_tree(process, force=True)
+        process.wait()
+        assert process.stdout is not None
+        process.stdout.close()
+
+    transcript = "".join(output_lines)
+    elapsed = time.monotonic() - started
+    if timed_out:
+        print(
+            f"{label} END status=timeout exit={process.returncode} "
+            f"elapsed={elapsed:.1f}s",
+            flush=True,
+        )
+        raise AssertionError(
+            f"{label} timed out after {timeout:g}s (exit={process.returncode}). "
+            f"Captured output (last 8000 characters of {len(transcript)}):\n"
+            f"{transcript[-8000:]}"
+        )
+    if "Reusing configuration cache." in transcript:
+        cache = "reused"
+    elif "Calculating task graph as configuration cache cannot be reused" in transcript:
+        cache = "invalidated"
+    elif "Configuration cache entry stored." in transcript:
+        cache = "stored"
+    else:
+        cache = "not-reported"
+    status = "passed" if process.returncode == 0 else "failed"
+    print(
+        f"{label} END status={status} exit={process.returncode} "
+        f"elapsed={elapsed:.1f}s cache={cache}",
+        flush=True,
+    )
+    return subprocess.CompletedProcess(command, process.returncode, transcript)
 
 
 class ArchitectureBoundaryTest(unittest.TestCase):
@@ -118,9 +246,12 @@ class ArchitectureConfigurationCacheRegressionTest(unittest.TestCase):
             ignore=shutil.ignore_patterns(".gradle", "build", "__pycache__"),
         )
 
-    @staticmethod
-    def check_architecture(directory: Path) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
+    def check_architecture(
+        self, directory: Path, *, scenario: str, phase: str
+    ) -> subprocess.CompletedProcess[str]:
+        sequence = getattr(self, "_gradle_sequence", 0) + 1
+        self._gradle_sequence = sequence
+        return run_logged_gradle(
             [
                 str(ROOT / "gradlew"),
                 "--no-daemon",
@@ -130,11 +261,10 @@ class ArchitectureConfigurationCacheRegressionTest(unittest.TestCase):
                 "checkArchitecture",
             ],
             cwd=directory,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
+            scenario=scenario,
+            phase=phase,
+            sequence=sequence,
             timeout=240,
-            check=False,
         )
 
     def assert_valid(self, result: subprocess.CompletedProcess[str]) -> None:
@@ -143,23 +273,23 @@ class ArchitectureConfigurationCacheRegressionTest(unittest.TestCase):
             result.stdout, r"Architecture boundaries verified for [1-9]\d* modules\."
         )
 
-    def assert_cache_hit(self, fixture: Path) -> None:
-        warm = self.check_architecture(fixture)
+    def assert_cache_hit(self, fixture: Path, *, scenario: str) -> None:
+        warm = self.check_architecture(fixture, scenario=scenario, phase="cache-reuse")
         self.assert_valid(warm)
         self.assertIn("Reusing configuration cache.", warm.stdout)
 
-    def assert_restored_cache_ready(self, fixture: Path) -> None:
-        restored = self.check_architecture(fixture)
+    def assert_restored_cache_ready(self, fixture: Path, *, scenario: str) -> None:
+        restored = self.check_architecture(fixture, scenario=scenario, phase="restored")
         self.assert_valid(restored)
         # The restored run itself may reuse an earlier valid cache entry.
         # Only perform an extra warm-up if Gradle had to reconfigure.
         if "Reusing configuration cache." not in restored.stdout:
-            self.assert_cache_hit(fixture)
+            self.assert_cache_hit(fixture, scenario=scenario)
 
     def assert_cache_invalidated(
-        self, fixture: Path, diagnostic: str, input_pattern: str
+        self, fixture: Path, diagnostic: str, input_pattern: str, *, scenario: str
     ) -> None:
-        rejected = self.check_architecture(fixture)
+        rejected = self.check_architecture(fixture, scenario=scenario, phase="invalidated")
         self.assertNotEqual(0, rejected.returncode, rejected.stdout)
         self.assertIn(diagnostic, rejected.stdout)
         self.assertIn(
@@ -180,11 +310,11 @@ class ArchitectureConfigurationCacheRegressionTest(unittest.TestCase):
             fixture = Path(temporary)
             self.copy_fixture(fixture)
 
-            cold = self.check_architecture(fixture)
+            cold = self.check_architecture(fixture, scenario="module build.gradle.kts baseline", phase="cold-warmup")
             self.assert_valid(cold)
             self.assertIn("Configuration cache entry stored.", cold.stdout)
 
-            warm = self.check_architecture(fixture)
+            warm = self.check_architecture(fixture, scenario="module build.gradle.kts baseline", phase="cache-reuse")
             self.assert_valid(warm)
             self.assertIn("Reusing configuration cache.", warm.stdout)
 
@@ -204,7 +334,7 @@ class ArchitectureConfigurationCacheRegressionTest(unittest.TestCase):
                     )
                     build_file.write_text(original + injection, encoding="utf-8")
                     try:
-                        rejected = self.check_architecture(fixture)
+                        rejected = self.check_architecture(fixture, scenario=f"{relative.as_posix()} ({configuration} -> {target})", phase="invalidated")
                         self.assertNotEqual(0, rejected.returncode, rejected.stdout)
                         self.assertIn(
                             f"Forbidden project dependency {module}:{configuration} -> {target}",
@@ -222,7 +352,7 @@ class ArchitectureConfigurationCacheRegressionTest(unittest.TestCase):
 
                     # Restoring exactly the original build input must pass,
                     # regardless of whether Gradle reuses or rebuilds the entry.
-                    restored = self.check_architecture(fixture)
+                    restored = self.check_architecture(fixture, scenario=f"{relative.as_posix()} ({configuration} -> {target})", phase="restored")
                     self.assert_valid(restored)
                     self.assertEqual(original, build_file.read_text(encoding="utf-8"))
 
@@ -263,10 +393,10 @@ class ArchitectureConfigurationCacheRegressionTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            cold = self.check_architecture(fixture)
+            cold = self.check_architecture(fixture, scenario="non-module inputs baseline", phase="cold-warmup")
             self.assert_valid(cold)
             self.assertIn("Configuration cache entry stored.", cold.stdout)
-            self.assert_cache_hit(fixture)
+            self.assert_cache_hit(fixture, scenario='non-module inputs baseline')
 
             # 1. Change the compiled allowlist, not any module build script.
             # :core:tasks already declares :core:contracts; the new rule
@@ -292,13 +422,14 @@ class ArchitectureConfigurationCacheRegressionTest(unittest.TestCase):
                         "Forbidden project dependency "
                         ":core:tasks:implementation -> :core:contracts",
                         r"an input to task ':build-logic:compileKotlin' has changed",
+                        scenario="build-logic ArchitectureGraph.kt rules",
                     )
                 finally:
                     rules_file.write_text(original_rules, encoding="utf-8")
                 self.assertEqual(
                     original_rules, rules_file.read_text(encoding="utf-8")
                 )
-                self.assert_restored_cache_ready(fixture)
+                self.assert_restored_cache_ready(fixture, scenario='build-logic ArchitectureGraph.kt rules')
 
             # 2. Include a new fixture-local module through settings, rather
             # than injecting one with a Gradle init script.
@@ -318,6 +449,7 @@ class ArchitectureConfigurationCacheRegressionTest(unittest.TestCase):
                         fixture,
                         "Unclassified module :architectureUnclassified",
                         r"settings\.gradle\.kts",
+                        scenario="settings.gradle.kts",
                     )
                 finally:
                     settings_file.write_text(original_settings, encoding="utf-8")
@@ -325,7 +457,7 @@ class ArchitectureConfigurationCacheRegressionTest(unittest.TestCase):
                 self.assertEqual(
                     original_settings, settings_file.read_text(encoding="utf-8")
                 )
-                self.assert_restored_cache_ready(fixture)
+                self.assert_restored_cache_ready(fixture, scenario='settings.gradle.kts')
 
             # 3. Flip only the tracked fixture property. The build script and
             # Gradle daemon/JVM settings stay unchanged across the cache hit.
@@ -342,17 +474,56 @@ class ArchitectureConfigurationCacheRegressionTest(unittest.TestCase):
                         "Forbidden project dependency "
                         ":core:tasks:implementation -> :infra:workspace",
                         r"gradle\.properties|architectureFixtureIllegalEdge",
+                        scenario="gradle.properties (architectureFixtureIllegalEdge)",
                     )
                 finally:
                     properties_file.write_text(
                         properties_with_disabled_edge, encoding="utf-8"
                     )
-                restored = self.check_architecture(fixture)
+                restored = self.check_architecture(fixture, scenario="gradle.properties (architectureFixtureIllegalEdge)", phase="restored")
                 self.assert_valid(restored)
                 self.assertEqual(
                     properties_with_disabled_edge,
                     properties_file.read_text(encoding="utf-8"),
                 )
+
+
+class LoggedGradleSubprocessTest(unittest.TestCase):
+    """Fast runner checks that do not require Gradle."""
+
+    def test_combined_stream_and_failure_marker(self):
+        log = io.StringIO()
+        with redirect_stdout(log):
+            result = run_logged_gradle(
+                [
+                    sys.executable, "-u", "-c",
+                    "import sys; print('out', flush=True); "
+                    "print('err', file=sys.stderr, flush=True); sys.exit(7)",
+                ],
+                cwd=ROOT, scenario="module build.gradle.kts",
+                phase="invalidated", sequence=3, timeout=5,
+            )
+        self.assertEqual(7, result.returncode)
+        self.assertEqual("out\nerr\n", result.stdout)
+        self.assertLess(log.getvalue().index("START"), log.getvalue().index("out\n"))
+        self.assertLess(log.getvalue().index("err\n"), log.getvalue().index("END"))
+        self.assertIn("status=failed exit=7", log.getvalue())
+
+    def test_timeout_reports_scenario_and_partial_output(self):
+        log = io.StringIO()
+        with redirect_stdout(log):
+            with self.assertRaises(AssertionError) as error:
+                run_logged_gradle(
+                    [
+                        sys.executable, "-u", "-c",
+                        "import time; print('diagnostic', flush=True); time.sleep(60)",
+                    ],
+                    cwd=ROOT, scenario="settings.gradle.kts",
+                    phase="invalidated", sequence=2, timeout=0.5,
+                )
+        self.assertIn("settings.gradle.kts", str(error.exception))
+        self.assertIn("diagnostic", str(error.exception))
+        self.assertIn("END status=timeout", log.getvalue())
 
 
 if __name__ == "__main__":
