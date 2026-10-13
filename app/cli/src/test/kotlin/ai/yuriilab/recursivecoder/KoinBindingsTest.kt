@@ -6,8 +6,94 @@ import org.koin.test.verify.verify
 import kotlin.test.*
 
 /** All definitions are exercised with in-memory ports, no filesystem or global Koin. */
+private class CloseTrackingTaskRepository(
+    val events: MutableList<String> = mutableListOf()
+) : TaskRepository by InMemoryTaskRepository(), AutoCloseable {
+    var closeCount = 0
+        private set
+    var closeFailure: Throwable? = null
+
+    override fun close() {
+        closeCount++
+        events += "repository"
+        closeFailure?.let { throw it }
+    }
+}
+
 @Tag("unit")
 class KoinBindingsTest {
+    @Test fun ownedCloseableRepositoryClosesOnlyOnce() {
+        val repository = CloseTrackingTaskRepository()
+        val composition = TaskComposition(repository, TaskRepositoryOwnership.OWNED)
+        assertSame(repository, composition.service().store)
+        composition.close()
+        composition.close()
+        assertEquals(1, repository.closeCount)
+        assertFailsWith<IllegalStateException> { composition.queries() }
+    }
+
+    @Test fun borrowedCloseableRepositoryIsNeverClosedByComposition() {
+        val repository = CloseTrackingTaskRepository()
+        val composition = TaskComposition(repository, TaskRepositoryOwnership.BORROWED)
+        assertSame(repository, composition.service().store)
+        composition.close()
+        composition.close()
+        assertEquals(0, repository.closeCount)
+        assertTrue(repository.read { it.tasks.isEmpty() })
+    }
+
+    @Test fun ownedRepositoryCloseFailureIsNotRetried() {
+        val repository = CloseTrackingTaskRepository()
+        val closeError = IllegalStateException("repository close failed")
+        repository.closeFailure = closeError
+        val composition = TaskComposition(repository, TaskRepositoryOwnership.OWNED)
+        assertSame(closeError, assertFailsWith<IllegalStateException> { composition.close() })
+        composition.close()
+        assertEquals(1, repository.closeCount)
+    }
+
+    @Test fun dependencyCleanupRunsFirstAndBothFailuresAreRetained() {
+        val events = mutableListOf<String>()
+        val diFailure = IllegalStateException("DI close failed")
+        val repositoryFailure = IllegalArgumentException("repository close failed")
+        val caught = assertFailsWith<IllegalStateException> {
+            closeTaskCompositionResources(
+                closeApplication = { events += "koin"; throw diFailure },
+                closeRepository = { events += "repository"; throw repositoryFailure }
+            )
+        }
+        assertSame(diFailure, caught)
+        assertEquals(listOf(repositoryFailure), caught.suppressed.toList())
+        assertEquals(listOf("koin", "repository"), events)
+    }
+
+    @Test fun commandExceptionSurvivesRepositoryCleanupFailure() {
+        val repository = CloseTrackingTaskRepository()
+        val closeError = IllegalStateException("repository close failed")
+        repository.closeFailure = closeError
+        val commandError = IllegalArgumentException("command failed")
+        val caught = assertFailsWith<IllegalArgumentException> {
+            TaskComposition(repository, TaskRepositoryOwnership.OWNED).use {
+                assertTrue(it.queries().list().isEmpty())
+                throw commandError
+            }
+        }
+        assertSame(commandError, caught)
+        assertEquals(listOf(closeError), caught.suppressed.toList())
+        assertEquals(1, repository.closeCount)
+    }
+
+    @Test fun repositoryClosesOnExceptionalCommandExit() {
+        val repository = CloseTrackingTaskRepository()
+        assertFailsWith<IllegalStateException> {
+            TaskComposition(repository, TaskRepositoryOwnership.OWNED).use {
+                assertTrue(it.queries().list().isEmpty())
+                error("simulated failure")
+            }
+        }
+        assertEquals(1, repository.closeCount)
+    }
+
     @Test fun definitionsVerifyWithoutStartingGlobalKoin() {
         taskModule(InMemoryTaskRepository()).verify()
         sessionModule(FakeModel()).verify()
@@ -15,7 +101,7 @@ class KoinBindingsTest {
 
     @Test fun oneTaskCompositionSharesRepositoryAndClosesAfterCommand() {
         val repository = InMemoryTaskRepository()
-        val composition = TaskComposition(repository)
+        val composition = TaskComposition(repository, TaskRepositoryOwnership.BORROWED)
         try {
             val first = composition.service()
             val second = composition.service()
