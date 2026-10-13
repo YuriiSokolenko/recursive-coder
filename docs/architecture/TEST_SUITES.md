@@ -84,6 +84,8 @@ repository input or remote endpoint is modified by these tests.
 
 `SessionProtocolTest` and `TrustedWriteToolSchemaTest` are tagged *pure unit*. Despite historical names, `SessionControllerUnitTest` uses temporary files and `WorkspaceBoundaryUnitTest` invokes real Git; these run in the **integration** tier. `TaskManagerTest` also creates a real file-backed store and Git fixture. `ModelGatewayTest` uses a local mock HTTP server but no external inference service.
 
+`TaskPolicyUnitTest` (`:core:tasks`) is a new **pure unit** suite for immutable state transitions, DAG readiness, fairness and cancellation/retry decisions. The existing `TaskManagerTest` is still **integration**: it deliberately exercises file-backed snapshots, locks, Git fixtures, scheduler threads and restart/race behavior. Neither suite substitutes for the other.
+
 The sandbox method in `TrustedWriteRuntimeTest` inherits the class-level `integration` tag and adds `e2e`. `integrationTest` excludes `e2e` methods so its ordinary local I/O checks can run without bubblewrap. The dedicated `e2eTest` task selects that sandbox method; installed CLI E2E is instead handled by Python.
 
 ## Enforced classification and purity checks
