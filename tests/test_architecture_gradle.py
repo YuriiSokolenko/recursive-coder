@@ -710,9 +710,14 @@ class LoggedGradleSubprocessTest(unittest.TestCase):
                     if line.startswith("grandchild_pid="))
         pid = int(line.split("=", 1)[1])
         proc_stat = Path(f"/proc/{pid}/stat")
-        if proc_stat.exists():
-            # A defunct child may remain as a zombie until init reaps it.
-            self.assertEqual("Z", proc_stat.read_text().split(") ", 1)[1][0])
+        # Either the child was reaped or it is a zombie awaiting init.
+        # Reading /proc races with reaping, so ENOENT also means success.
+        try:
+            state = proc_stat.read_text().split(") ", 1)[1][0]
+        except FileNotFoundError:
+            pass
+        else:
+            self.assertEqual("Z", state)
 
     def test_windows_cleanup_targets_process_tree(self):
         process = mock.Mock(pid=1234)
