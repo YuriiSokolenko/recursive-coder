@@ -10,7 +10,6 @@ import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
 import java.time.Clock
-import java.time.Instant
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
@@ -20,45 +19,8 @@ import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 import kotlinx.serialization.json.*
 
-/** A cancellation is terminal; PAUSED represents a queued task, never a suspended session. */
-enum class TaskState(val wire: String) {
-    CREATED("created"), READY("ready"), BLOCKED("blocked"), RUNNING("running"),
-    PAUSED("paused"), SUCCEEDED("succeeded"), FAILED("failed"),
-    NEEDS_ATTENTION("needs-attention"), CANCELLED("cancelled");
-
-    companion object {
-        fun fromWire(value: String) = entries.firstOrNull { it.wire == value }
-            ?: error("Unknown task state")
-    }
-}
-
-data class TaskTransition(
-    val from: TaskState?,
-    val to: TaskState,
-    val occurredAt: String,
-    val attempt: Int,
-    val sessionId: String?,
-    val reason: String?
-)
-
-/** The template is an immutable SessionRequest v1 snapshot, not a path to a mutable request. */
-data class Task(
-    val id: String,
-    val requestTemplate: String,
-    val dependencies: List<String>,
-    val priority: Int,
-    val state: TaskState = TaskState.CREATED,
-    val attempt: Int = 0,
-    val sessionId: String? = null,
-    val lastResultStatus: String? = null,
-    val reason: String? = null,
-    val queueOrder: Long = 0,
-    val waitTurns: Long = 0,
-    val preserveOrderOnResume: Boolean = false,
-    val prunedTransitions: Long = 0,
-    val transitions: List<TaskTransition> = emptyList()
-) {
-    fun toPublicJson(): JsonObject = buildJsonObject {
+/** Public JSON is an adapter projection, not part of the Task domain model. */
+fun Task.toPublicJson(): JsonObject = buildJsonObject {
         put("taskId", id); put("state", state.wire); put("priority", priority)
         put("dependencies", buildJsonArray { dependencies.forEach { add(it) } })
         put("attempt", attempt)
@@ -78,7 +40,6 @@ data class Task(
             }
         })
     }
-}
 
 internal data class TaskDatabase(
     var paused: Boolean = false,
@@ -223,52 +184,27 @@ class TaskStore(directory: Path) {
     }
 }
 
-private val safeTaskId = Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 private fun JsonObject.optionalText(field: String): String? =
     this[field]?.takeUnless { it == JsonNull }?.jsonPrimitive?.content
 
-/** Iterative DFS avoids stack overflows for large dependency chains. */
-internal fun validateGraph(tasks: List<Task>): List<String> {
-    val byId = tasks.associateBy { it.id }
-    require(byId.size == tasks.size) { "Duplicate task ID" }
-    val marks = mutableMapOf<String, Int>()
-    val order = ArrayList<String>(tasks.size)
-    // An explicit frame stores the next dependency to visit.
-    val stack = ArrayDeque<Pair<String, Int>>()
-    for (task in tasks) {
-        if (marks[task.id] == 2) continue
-        stack.addLast(task.id to 0)
-        while (stack.isNotEmpty()) {
-            val (id, offset) = stack.removeLast()
-            if (marks[id] == 2) continue
-            val dependencies = byId.getValue(id).dependencies
-            if (offset == 0) {
-                require(dependencies.size == dependencies.toSet().size) { "Duplicate dependency" }
-                marks[id] = 1
-            }
-            if (offset == dependencies.size) {
-                marks[id] = 2
-                order.add(id)
-                continue
-            }
-            stack.addLast(id to (offset + 1))
-            val child = dependencies[offset]
-            require(byId.containsKey(child)) { "Unknown dependency: " + child }
-            when (marks[child]) {
-                1 -> error("Dependency cycle detected")
-                2 -> Unit
-                else -> stack.addLast(child to 0)
-            }
-        }
-    }
-    return order
-}
-
-/** Single service boundary for both the CLI and future API. */
+/** Task use cases adapt transactional storage and the injected clock to pure decisions. */
 class TaskService(val store: TaskStore, private val clock: Clock = Clock.systemUTC()) {
     fun list(): List<Task> = store.transaction(write = false) { it.tasks.toList() }
     fun show(id: String): Task = store.transaction(write = false) { db -> db.find(id) }
     fun isPaused(): Boolean = store.transaction(write = false) { it.paused }
+
+    private fun now(): String = clock.instant().toString()
+
+    private fun TaskDatabase.snapshot(): TaskQueue =
+        TaskQueue(paused, nextOrder, dispatches, tasks.toList())
+
+    private fun TaskDatabase.apply(next: TaskQueue) {
+        paused = next.paused
+        nextOrder = next.nextOrder
+        dispatches = next.dispatches
+        tasks.clear()
+        tasks.addAll(next.tasks)
+    }
 
     fun enqueue(requestJson: String, priority: Int = 50, dependencies: List<String> = emptyList()): Task {
         require(requestJson.toByteArray(StandardCharsets.UTF_8).size <= 262144) { "Request too large" }
@@ -277,130 +213,55 @@ class TaskService(val store: TaskStore, private val clock: Clock = Clock.systemU
         require(safeTaskId.matches(id)) { "Unsafe task ID" }
         require(priority in 0..100) { "Priority must be 0..100" }
         return store.transaction { db ->
-            require(db.tasks.none { it.id == id }) { "Task already exists" }
-            require(dependencies.distinct().size == dependencies.size) { "Duplicate dependency" }
-            require(dependencies.all { dep -> db.tasks.any { it.id == dep } }) { "Unknown dependency" }
-            val initial = Task(
-                id = id, requestTemplate = request.raw.toString(), dependencies = dependencies,
-                priority = priority, queueOrder = ++db.nextOrder,
-                transitions = listOf(TaskTransition(null, TaskState.CREATED,
-                    clock.instant().toString(), 0, null, "enqueued"))
-            )
-            db.tasks.add(initial)
-            validateGraph(db.tasks)
-            reconcile(db)
+            db.apply(TaskPolicy.enqueue(db.snapshot(), id, request.raw.toString(), priority, dependencies, now()))
             db.find(id)
         }
     }
 
     /** An explicit graph-edit seam; only tasks not yet attempted can change their prerequisites. */
     fun replaceDependencies(id: String, dependencies: List<String>): Task = store.transaction { db ->
-        val index = db.index(id)
-        require(db.tasks[index].attempt == 0) { "Cannot edit dependencies after execution" }
-        db.tasks[index] = db.tasks[index].copy(dependencies = dependencies)
-        validateGraph(db.tasks)
-        reconcile(db)
+        db.apply(TaskPolicy.replaceDependencies(db.snapshot(), id, dependencies, now()))
         db.find(id)
     }
 
-    fun pause(): Unit = store.transaction { db -> db.paused = true; reconcile(db) }
-    fun resume(): Unit = store.transaction { db -> db.paused = false; reconcile(db) }
+    fun pause(): Unit = store.transaction { db -> db.apply(TaskPolicy.pause(db.snapshot(), now())) }
+    fun resume(): Unit = store.transaction { db -> db.apply(TaskPolicy.resume(db.snapshot(), now())) }
 
     fun cancel(id: String): Task = store.transaction { db ->
-        val index = db.index(id)
-        if (db.tasks[index].state !in setOf(TaskState.SUCCEEDED, TaskState.FAILED, TaskState.CANCELLED)) {
-            transition(db, index, TaskState.CANCELLED, "cancelled by user")
-            reconcile(db)
-        }
+        db.apply(TaskPolicy.cancel(db.snapshot(), id, now()))
         db.find(id)
     }
 
     fun cancelAll(): Unit = store.transaction { db ->
-        db.paused = true
-        db.tasks.indices.forEach { index ->
-            if (db.tasks[index].state !in setOf(TaskState.SUCCEEDED, TaskState.FAILED, TaskState.CANCELLED))
-                transition(db, index, TaskState.CANCELLED, "global cancellation")
-        }
-        reconcile(db)
+        db.apply(TaskPolicy.cancelAll(db.snapshot(), now()))
     }
 
     fun retry(id: String): Task = store.transaction { db ->
-        val index = db.index(id)
-        require(db.tasks[index].state in setOf(TaskState.FAILED, TaskState.CANCELLED,
-            TaskState.NEEDS_ATTENTION)) { "Only terminal/attention tasks can be retried" }
-        require(db.tasks[index].state != TaskState.NEEDS_ATTENTION ||
-            db.tasks[index].reason?.startsWith("dependency:") != true) {
-            "Retry the failed prerequisite first; this task is blocked by a dependency"
-        }
-        // Previous attempt/session remain in history. A retry receives a fresh session ID.
-        db.tasks[index] = db.tasks[index].copy(sessionId = null)
-        transition(db, index, TaskState.BLOCKED, "manual retry")
-        reconcile(db)
+        db.apply(TaskPolicy.retry(db.snapshot(), id, now()))
         db.find(id)
     }
 
     internal fun claim(excludedTaskIds: Set<String> = emptySet()): Task? = store.transaction { db ->
-        reconcile(db)
-        if (db.paused) return@transaction null
-        val eligible = db.tasks.withIndex().filter {
-            it.value.state == TaskState.READY && it.value.id !in excludedTaskIds
-        }
-        val selected = if (db.dispatches % 8L == 7L) {
-            eligible.minByOrNull { it.value.queueOrder }
-        } else {
-            eligible.maxWithOrNull(compareBy<IndexedValue<Task>> {
-                it.value.priority.toLong() + (it.value.waitTurns.coerceAtMost(1000L) * 10L)
-            }.thenBy { -it.value.queueOrder })
-        } ?: return@transaction null
-        db.dispatches++
-        db.tasks.indices.forEach { index ->
-            if (index != selected.index && db.tasks[index].state == TaskState.READY)
-                db.tasks[index] = db.tasks[index].copy(waitTurns =
-                    (db.tasks[index].waitTurns + 1).coerceAtMost(1000L))
-        }
-        val current = db.tasks[selected.index]
-        val attempt = current.attempt + 1
-        db.tasks[selected.index] = current.copy(attempt = attempt,
-            sessionId = "session-" + current.id + "-" + attempt)
-        transition(db, selected.index, TaskState.RUNNING, "claimed by local scheduler")
-        db.tasks[selected.index]
+        val decision = TaskPolicy.claim(db.snapshot(), excludedTaskIds, now())
+        db.apply(decision.queue)
+        decision.task
     }
 
     internal fun finish(id: String, sessionId: String, resultStatus: String): Task = store.transaction { db ->
-        val index = db.index(id)
-        val current = db.tasks[index]
-        if (current.state == TaskState.RUNNING && current.sessionId == sessionId) {
-            val target = when (resultStatus) {
-                "succeeded" -> TaskState.SUCCEEDED
-                "cancelled" -> TaskState.CANCELLED
-                else -> TaskState.FAILED
-            }
-            db.tasks[index] = current.copy(lastResultStatus = resultStatus)
-            transition(db, index, target, if (target == TaskState.SUCCEEDED) null else resultStatus)
-            reconcile(db)
-        }
+        db.apply(TaskPolicy.finish(db.snapshot(), id, sessionId, resultStatus, now()))
         db.find(id)
     }
 
     /** Stop/recovery of a known attempt is not a user-requested task cancellation. */
     internal fun interruptAttempt(id: String, sessionId: String, reason: String): Task =
         store.transaction { db ->
-            val index = db.index(id)
-            val task = db.tasks[index]
-            if (task.state == TaskState.RUNNING && task.sessionId == sessionId) {
-                transition(db, index, TaskState.NEEDS_ATTENTION, reason)
-                reconcile(db)
-            }
+            db.apply(TaskPolicy.interrupt(db.snapshot(), id, sessionId, reason, now()))
             db.find(id)
         }
 
     /** Called only with the exclusive process-wide scheduler lock held. Never silently replay effects. */
-    internal fun recoverInterrupted() = store.transaction { db ->
-        db.tasks.indices.forEach { index ->
-            if (db.tasks[index].state == TaskState.RUNNING)
-                transition(db, index, TaskState.NEEDS_ATTENTION, "interrupted: reconcile before retry")
-        }
-        reconcile(db)
+    internal fun recoverInterrupted(): Unit = store.transaction { db ->
+        db.apply(TaskPolicy.recoverInterrupted(db.snapshot(), now()))
     }
 
     internal fun requestFor(task: Task): SessionRequest {
@@ -427,56 +288,6 @@ class TaskService(val store: TaskStore, private val clock: Clock = Clock.systemU
             "invocation" to adjustedInvocation,
             "outputs" to outputs
         )).toString())
-    }
-
-    private fun reconcile(db: TaskDatabase) {
-        val order = validateGraph(db.tasks)
-        val indexById = db.tasks.indices.associateBy { db.tasks[it].id }
-        for (id in order) {
-            val index = indexById.getValue(id)
-            val task = db.tasks[index]
-            if (task.state in setOf(TaskState.RUNNING, TaskState.SUCCEEDED,
-                    TaskState.FAILED, TaskState.CANCELLED)) continue
-            if (task.state == TaskState.NEEDS_ATTENTION &&
-                task.reason?.startsWith("dependency:") != true) continue
-            val prerequisites = task.dependencies.map { db.tasks[indexById.getValue(it)] }
-            val missing = prerequisites.firstOrNull {
-                it.state in setOf(TaskState.FAILED, TaskState.CANCELLED, TaskState.NEEDS_ATTENTION)
-            }
-            val next = when {
-                missing != null -> TaskState.NEEDS_ATTENTION
-                db.paused -> TaskState.PAUSED
-                prerequisites.all { it.state == TaskState.SUCCEEDED } -> TaskState.READY
-                else -> TaskState.BLOCKED
-            }
-            val reason = if (missing == null) null else "dependency:" + missing.id + ":" + missing.state.wire
-            transition(db, index, next, reason)
-        }
-    }
-
-    private fun transition(db: TaskDatabase, index: Int, state: TaskState, reason: String?) {
-        val current = db.tasks[index]
-        if (current.state == state && current.reason == reason) return
-        val becameReady = state == TaskState.READY && current.state != TaskState.READY &&
-            (current.state != TaskState.PAUSED || !current.preserveOrderOnResume)
-        val events = current.transitions + TaskTransition(current.state, state,
-            clock.instant().toString(), current.attempt, current.sessionId, reason)
-        val removed = (events.size - MAX_TRANSITIONS).coerceAtLeast(0)
-        db.tasks[index] = current.copy(
-            state = state, reason = reason,
-            queueOrder = if (becameReady) ++db.nextOrder else current.queueOrder,
-            waitTurns = if (becameReady) 0 else current.waitTurns,
-            preserveOrderOnResume = when (state) {
-                TaskState.PAUSED -> current.state == TaskState.READY
-                else -> false
-            },
-            prunedTransitions = current.prunedTransitions + removed,
-            transitions = events.drop(removed)
-        )
-    }
-
-    private companion object {
-        const val MAX_TRANSITIONS = 128
     }
 
     private fun TaskDatabase.index(id: String): Int =
