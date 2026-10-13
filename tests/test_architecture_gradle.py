@@ -143,6 +143,38 @@ class ArchitectureConfigurationCacheRegressionTest(unittest.TestCase):
             result.stdout, r"Architecture boundaries verified for [1-9]\d* modules\."
         )
 
+    def assert_cache_hit(self, fixture: Path) -> None:
+        warm = self.check_architecture(fixture)
+        self.assert_valid(warm)
+        self.assertIn("Reusing configuration cache.", warm.stdout)
+
+    def assert_restored_cache_ready(self, fixture: Path) -> None:
+        restored = self.check_architecture(fixture)
+        self.assert_valid(restored)
+        # The restored run itself may reuse an earlier valid cache entry.
+        # Only perform an extra warm-up if Gradle had to reconfigure.
+        if "Reusing configuration cache." not in restored.stdout:
+            self.assert_cache_hit(fixture)
+
+    def assert_cache_invalidated(
+        self, fixture: Path, diagnostic: str, input_pattern: str
+    ) -> None:
+        rejected = self.check_architecture(fixture)
+        self.assertNotEqual(0, rejected.returncode, rejected.stdout)
+        self.assertIn(diagnostic, rejected.stdout)
+        self.assertIn(
+            "Calculating task graph as configuration cache cannot be reused",
+            rejected.stdout,
+        )
+        self.assertNotIn("Reusing configuration cache.", rejected.stdout)
+        # Name the changed input in the invalidation reason, rather than
+        # matching an unrelated Gradle progress message.
+        self.assertRegex(
+            rejected.stdout.replace("\\", "/"),
+            r"Calculating task graph as configuration cache cannot be reused because [^\n]*"
+            + input_pattern,
+        )
+
     def test_changed_build_script_invalidates_cache_for_production_and_test_edges(self):
         with tempfile.TemporaryDirectory(prefix="architecture-cache-") as temporary:
             fixture = Path(temporary)
@@ -194,26 +226,6 @@ class ArchitectureConfigurationCacheRegressionTest(unittest.TestCase):
                     self.assert_valid(restored)
                     self.assertEqual(original, build_file.read_text(encoding="utf-8"))
 
-
-    def assert_cache_hit(self, fixture: Path) -> None:
-        warm = self.check_architecture(fixture)
-        self.assert_valid(warm)
-        self.assertIn("Reusing configuration cache.", warm.stdout)
-
-    def assert_cache_invalidated(
-        self, fixture: Path, diagnostic: str, input_pattern: str
-    ) -> None:
-        rejected = self.check_architecture(fixture)
-        self.assertNotEqual(0, rejected.returncode, rejected.stdout)
-        self.assertIn(diagnostic, rejected.stdout)
-        self.assertIn(
-            "Calculating task graph as configuration cache cannot be reused",
-            rejected.stdout,
-        )
-        self.assertNotIn("Reusing configuration cache.", rejected.stdout)
-        # A specific build input must explain the miss, not just a generic
-        # "has changed" message that could hide unrelated daemon/JVM changes.
-        self.assertRegex(rejected.stdout, input_pattern)
 
     def test_non_module_inputs_invalidate_a_warmed_configuration_cache(self):
         with tempfile.TemporaryDirectory(prefix="architecture-input-cache-") as temporary:
@@ -274,16 +286,14 @@ class ArchitectureConfigurationCacheRegressionTest(unittest.TestCase):
                         fixture,
                         "Forbidden project dependency "
                         ":core:tasks:implementation -> :core:contracts",
-                        r"build-logic",
+                        r"ArchitectureGraph\.kt",
                     )
                 finally:
                     rules_file.write_text(original_rules, encoding="utf-8")
-                restored = self.check_architecture(fixture)
-                self.assert_valid(restored)
                 self.assertEqual(
                     original_rules, rules_file.read_text(encoding="utf-8")
                 )
-                self.assert_cache_hit(fixture)
+                self.assert_restored_cache_ready(fixture)
 
             # 2. Include a new fixture-local module through settings, rather
             # than injecting one with a Gradle init script.
@@ -307,12 +317,10 @@ class ArchitectureConfigurationCacheRegressionTest(unittest.TestCase):
                 finally:
                     settings_file.write_text(original_settings, encoding="utf-8")
                     shutil.rmtree(unknown_module)
-                restored = self.check_architecture(fixture)
-                self.assert_valid(restored)
                 self.assertEqual(
                     original_settings, settings_file.read_text(encoding="utf-8")
                 )
-                self.assert_cache_hit(fixture)
+                self.assert_restored_cache_ready(fixture)
 
             # 3. Flip only the tracked fixture property. The build script and
             # Gradle daemon/JVM settings stay unchanged across the cache hit.
