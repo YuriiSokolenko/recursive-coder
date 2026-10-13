@@ -35,6 +35,31 @@ class ArchitectureGraphTest {
     }
 
     @Test
+    fun taskStoreEdgeIsAllowedButReverseCoreEdgeIsRejected() {
+        val allowed = ArchitectureGraph.allowedProjectDependencies.keys
+        val permitted = ArchitectureGraph.violations(
+            modules = allowed,
+            projectEdges = listOf(
+                ProjectEdge(":infra:task-store", "implementation", ":core:tasks"),
+                ProjectEdge(":infra:task-store", "implementation", ":core:contracts"),
+                ProjectEdge(":app:cli", "implementation", ":infra:task-store"),
+            ),
+            externalEdges = emptyList(),
+        )
+        assertTrue(permitted.isEmpty(), permitted.joinToString())
+
+        val forbidden = ArchitectureGraph.violations(
+            modules = allowed,
+            projectEdges = listOf(ProjectEdge(":core:tasks", "testImplementation", ":infra:task-store")),
+            externalEdges = emptyList(),
+        )
+        assertTrue(forbidden.any {
+            it.contains("Forbidden project dependency :core:tasks:testImplementation -> :infra:task-store")
+        }, forbidden.joinToString())
+        assertTrue(forbidden.any { it.contains("Project dependency cycle") }.not())
+    }
+
+    @Test
     fun detectsCycleEvenWhenEveryEdgeIsAllowed() {
         val permitted = mapOf(
             ":fixture:a" to setOf(":fixture:b"),

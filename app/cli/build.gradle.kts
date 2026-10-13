@@ -9,6 +9,7 @@ dependencies {
     implementation(project(":core:tasks"))
     implementation(project(":infra:model"))
     implementation(project(":infra:workspace"))
+    implementation(project(":infra:task-store"))
     implementation("com.github.ajalt.clikt:clikt:5.1.0")
 }
 

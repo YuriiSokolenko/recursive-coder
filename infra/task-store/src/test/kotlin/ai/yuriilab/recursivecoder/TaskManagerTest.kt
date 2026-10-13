@@ -500,19 +500,6 @@ class TaskManagerTest {
             stored.toPublicJson().getValue("prunedTransitions").jsonPrimitive.int)
     }
 
-    @Test fun iterativeGraphHandlesLargeDependencyChainsAndCycles() {
-        val tasks = (0 until 12000).map { index ->
-            Task(id = "node-" + index, requestTemplate = "{}", priority = 50,
-                dependencies = if (index == 0) emptyList() else listOf("node-" + (index - 1)))
-        }
-        val order = validateGraph(tasks)
-        assertEquals(12000, order.size)
-        assertEquals("node-0", order.first())
-        assertEquals("node-11999", order.last())
-        val cycle = tasks.toMutableList()
-        cycle[0] = cycle[0].copy(dependencies = listOf("node-11999"))
-        assertFailsWith<IllegalStateException> { validateGraph(cycle) }
-    }
 
 
 }

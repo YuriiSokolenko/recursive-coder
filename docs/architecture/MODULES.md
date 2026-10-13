@@ -1,20 +1,21 @@
 # Gradle multi-module boundaries
 
-Issue #22 introduces six implemented modules; the Gradle root remains `recursive-coder` and is not an executable module.
+Issue #22 introduced six modules; issue #27 adds the task persistence adapter; the Gradle root remains `recursive-coder` and is not an executable module.
 
 | Module | Ownership | Production project dependencies |
 | --- | --- | --- |
 | `:core:contracts` | Session Protocol support, request validation, model/workspace contracts and cross-module value types | none |
 | `:core:session` | Session Controller, deadline/budget enforcement, admission policy and event journal | `:core:contracts` |
-| `:core:tasks` | Durable Task Manager, dependency DAG, scheduler and task execution interface | `:core:contracts` |
+| `:core:tasks` | Task policy, repository port, scheduler and task execution interface | `:core:contracts` |
 | `:infra:model` | Offline FakeModel and optional OpenAI-compatible HTTP adapter | `:core:contracts` |
 | `:infra:workspace` | Workspace Manager, restricted Git and trusted write/check runtime | `:core:contracts` |
-| `:app:cli` | Clikt command entry point, configuration and concrete dependency composition | all five libraries |
+| `:infra:task-store` | Durable tasks.json snapshot, file locks and atomic replacement | `:core:tasks`, `:core:contracts` |
+| `:app:cli` | Clikt command entry point, configuration and concrete dependency composition | all six libraries |
 
 ```text
                       :app:cli  (only executable)
                     /     |        |          \
-           :core:session :core:tasks :infra:model :infra:workspace
+           :core:session :core:tasks :infra:model :infra:workspace :infra:task-store
                     \     |        |          /
                          :core:contracts
 ```
@@ -59,4 +60,8 @@ The root `checkArchitecture` task enforces the project dependency directions in 
 
 The JVM `unitTest` target contains only tagged pure tests; `integrationTest` runs tagged local filesystem, Git and mock-HTTP cases; `e2eTest` selects tagged sandbox checks. The existing `test` target remains **unfiltered**, preserving all existing coverage and the `./gradlew test installDist` workflow. CI retains the sandbox execution assertion, installed CLI E2E and independent protocol tests.
 
-The current file-backed TaskStore in `:core:tasks` and physical journal in `:core:session` are explicitly deferred internal extraction work (#27 and #29), **not** cross-module dependency exemptions. See [Test tiers and architecture guardrails](TEST_SUITES.md) for detailed classification, commands and exceptions.
+The file-backed TaskStore now lives in `:infra:task-store`; the CLI composes it with `TaskService`, while `:core:tasks` ships a pure in-memory repository for use-case tests. The physical journal in `:core:session` remains deferred work (#29). See [Test tiers and architecture guardrails](TEST_SUITES.md) for detailed classification, commands and exceptions.
+
+## Task repository (issue #27)
+
+The TaskRepository port owns atomic reads, read-decide-write mutations, the process-wide scheduler lease and run output-root resolution. TaskService depends only on that port; the CLI is the sole owner of the TaskStore selection. Both adapters implement the same transactional interface. The filesystem adapter preserves tasks.json v1 bytes, corruption rejection, POSIX/OS file locks, fsync and atomic rename. An explicit cross-process lock regression and shared transaction contract guard semantics. The core test graph does not depend on an infrastructure project.

@@ -13,7 +13,8 @@ Run `./gradlew checkArchitecture` or `./gradlew checkArchitecture --configuratio
 | `:core:tasks` | `:core:contracts` |
 | `:infra:model` | `:core:contracts` |
 | `:infra:workspace` | `:core:contracts` |
-| `:app:cli` | All five modules above |
+| `:infra:task-store` | `:core:tasks`, `:core:contracts` |
+| `:app:cli` | All six modules above |
 
 The checker also rejects unclassified new modules and direct core dependencies on Koog, Clikt and common HTTP framework dependency groups. Each forbidden edge diagnostic identifies its module, configuration and target. The Gradle task snapshots declared module/configuration/target coordinates during configuration and consumes only serializable inputs during execution; it never resolves dependencies. A standalone pure Kotlin graph verifier also tests an all-allowed synthetic cycle independently of the allowlist. CI covers illegal production and test dependencies, a test-only cycle, unknown modules, a forbidden core framework group, and valid graphs.
 
@@ -69,7 +70,7 @@ restored run needs to **pass**, not necessarily report an invalidation:
 Gradle is free to reuse an earlier valid entry. No production build logic,
 repository input or remote endpoint is modified by these tests.
 
-**Scope and existing exceptions:** The rules cover Gradle project dependencies and selected external framework groups, not imports or the implementation of port interfaces. The included `build-logic` build belongs to Gradle tooling, not product modules. Current `:core:tasks` has a file-backed `TaskStore` and `:core:session` still writes a physical event journal internally. These are *existing extraction debts* tracked by issues #27 and #29, not permissions for core to depend on infrastructure or CLI. This task deliberately does not refactor production code.
+**Scope and existing exceptions:** The rules cover Gradle project dependencies and selected external framework groups, not imports or the implementation of port interfaces. The included `build-logic` build belongs to Gradle tooling, not product modules. `TaskStore` was extracted into `:infra:task-store` in issue #27, with its `TaskRepository` contract in `:core:tasks`; only the CLI composition root selects the filesystem adapter. `:core:session` still writes a physical event journal internally (existing extraction debt #29). Neither case permits core to depend on infrastructure or CLI. The original issue #25 architecture guardrails remain enforced across all modules.
 
 ## Test taxonomy
 
@@ -84,7 +85,7 @@ repository input or remote endpoint is modified by these tests.
 
 `SessionProtocolTest` and `TrustedWriteToolSchemaTest` are tagged *pure unit*. Despite historical names, `SessionControllerUnitTest` uses temporary files and `WorkspaceBoundaryUnitTest` invokes real Git; these run in the **integration** tier. `TaskManagerTest` also creates a real file-backed store and Git fixture. `ModelGatewayTest` uses a local mock HTTP server but no external inference service.
 
-`TaskPolicyUnitTest` (`:core:tasks`) is a new **pure unit** suite for immutable state transitions, DAG readiness, fairness and cancellation/retry decisions. The existing `TaskManagerTest` is still **integration**: it deliberately exercises file-backed snapshots, locks, Git fixtures, scheduler threads and restart/race behavior. Neither suite substitutes for the other.
+`TaskPolicyUnitTest` and `TaskRepositoryUnitTest` (`:core:tasks`) are **pure unit** suites for immutable transitions, DAG readiness, fairness, cancellation/retry decisions and in-memory transaction semantics. `TaskManagerTest` and `TaskRepositoryContractTest` (`:infra:task-store`) are **integration** suites for file-backed snapshots, locks, Git fixtures, concurrent claims, adapter parity, restart/races and atomic rename failure. Neither tier substitutes for the other.
 
 The sandbox method in `TrustedWriteRuntimeTest` inherits the class-level `integration` tag and adds `e2e`. `integrationTest` excludes `e2e` methods so its ordinary local I/O checks can run without bubblewrap. The dedicated `e2eTest` task selects that sandbox method; installed CLI E2E is instead handled by Python.
 
