@@ -26,7 +26,7 @@ CLI / future API (composition root)
                 |
       Application use case contracts
  EnqueueTaskUseCase | RunSessionUseCase
-       (remaining cases: #59)
+       (all task operations injected through #59)
                 |
       Concrete implementations
    DefaultEnqueueTaskUseCase
@@ -111,7 +111,7 @@ Use typed domain states/outcomes where meaningful. Treat serialized wire DTOs as
 A future Koog module may depend on core contracts and application services, while the core must never depend on Koog. Infrastructure adapter selection happens at an application composition root.
 
 
-### Explicit Use Case interfaces and CLI DI (issue #58, initial slice)
+### Explicit Use Case interfaces and CLI DI (issues #58 and #59)
 
 The application boundary is represented by interface + implementation pairs within their owning bounded contexts, **not** by a new empty Gradle module:
 
@@ -119,14 +119,16 @@ The application boundary is represented by interface + implementation pairs with
 | --- | --- | --- | --- |
 | `EnqueueTaskUseCase.invoke(requestJson, priority, dependencies): Task` | `DefaultEnqueueTaskUseCase` in `:core:tasks` | Shape/priority admission, then atomic repository update applying `TaskPolicy.enqueue` | `tasks enqueue` via Koin; existing `TaskService.enqueue` delegates for compatibility |
 | `RunSessionUseCase.invoke(request, cancellation): SessionExecutionResult` | `DefaultRunSessionUseCase` in `:core:session` | Workspace and protocol admission, trusted model/tool execution, budgets, terminal events and verified result publication | `recursive-coder run` and scheduler's `TaskRunner` via Koin; existing `SessionController` delegates for compatibility |
+| `TaskQueriesUseCase`, `CancelTaskUseCase`, `RetryTaskUseCase`, `PauseTaskQueueUseCase`, `ResumeTaskQueueUseCase`, `ReplaceTaskDependenciesUseCase`, `CancelAllTasksUseCase` | Separate `Default*` implementations in `:core:tasks` | Read-only task inspection or one policy-backed atomic command per business intent | Task CLI through command-scoped Koin; `TaskService` delegates for compatibility |
+| `ClaimNextTaskUseCase`, `CompleteTaskAttemptUseCase`, `InterruptTaskAttemptUseCase`, `RecoverInterruptedAttemptsUseCase`, `PrepareTaskAttemptUseCase` | Separate `Default*` implementations in `:core:tasks` | Atomic claim, stale-session fencing, interruption, recovery and attempt projection | `TaskScheduler` via injected interfaces; the compatibility constructor bridges old callers |
 
 The input reuses the existing validated `SessionRequest`; the public Use Case returns an immutable `SessionExecutionResult(outcome, protocol)` containing the typed terminal `SessionOutcome` and the **already-validated, already-published** Session Protocol v1 `JsonObject`. The Use Case serializes and validates exactly once before publishing `result.json`; the CLI and compatibility façade reuse that same value without encoding again. Detailed `SessionRunResult`, `SessionArtifact`, `SessionFailure` and `SessionBudgetState` stay `internal` to `:core:session` and are **not** supported public contracts.
 
-`:app:cli/CompositionRoot.kt` owns Koin definitions. `io.insert-koin:koin-core:4.2.2` and `koin-test:4.2.2` share the `koin` version in the Gradle catalog. Koin 4.2.2 is a stable Kotlin 2.x-compatible line; no annotations or code generation are used. Factories explicitly bind `EnqueueTaskUseCase` / `RunSessionUseCase` to concrete implementations, while `TaskRepository`, `ModelGateway`, `WorkspaceOpener`, `EventSinkFactory` and `Clock` are injected through constructors. `koinApplication { modules(...) }` builds **local** containers, always closed in `finally` or `AutoCloseable.close()`; there is no process-global `startKoin` or service-locator call inside the core.
+`:app:cli/CompositionRoot.kt` owns Koin definitions. `io.insert-koin:koin-core:4.2.2` and `koin-test:4.2.2` share the `koin` version in the Gradle catalog. Koin 4.2.2 is a stable Kotlin 2.x-compatible line; no annotations or code generation are used. Factories explicitly bind Task and Session Use Case interfaces to concrete implementations, while `TaskRepository`, `ModelGateway`, `WorkspaceOpener`, `EventSinkFactory` and `Clock` are injected through constructors. `koinApplication { modules(...) }` builds **local** containers, always closed in `finally` or `AutoCloseable.close()`; there is no process-global `startKoin` or service-locator call inside the core.
 
 Lifetime rules: one `TaskComposition` and `TaskRepository` are shared across operations of a parsed task CLI command and closed in `executeCli`'s `finally`. Session compositions are created for individual direct or scheduled session invocations and closed on normal or exceptional exit; no Koin container survives its work. Use Cases are factories. The model provider is selected per invocation. `Cancellation`, the admitted workspace, journal, watchdog and all session execution state belong to each individual `RunSessionUseCase.invoke`, **not** singleton Koin definitions. Unit tests instantiate implementations directly with in-memory repositories/fakes and fixed clocks; the `KoinBindingsTest` pure unit suite verifies graph definitions and task composition identity/closure using in-memory repositories only, with no global Koin state.
 
-`TaskService` still owns task read/query, cancel/retry, pause/resume, claim/finish and interruption/recovery orchestration; `TaskScheduler` continues using its compatibility API. Follow-up [#59](https://github.com/YuriiSokolenko/recursive-coder/issues/59) tracks extraction of those remaining business intents and scheduler interface injection. Compatibility façades are not the desired long-term application API. The original transactional, policy, authorization and durability rules remain in place.
+Issue [#59](https://github.com/YuriiSokolenko/recursive-coder/issues/59) completes task-command and scheduler injection. `TaskScheduler` accepts the repository lease port plus task query, claim, completion, interruption, recovery and attempt-projection Use Case interfaces; the CLI constructs it through Koin without calling `TaskService`. `TaskService` remains a documented compatibility façade whose methods delegate to independent implementations; its legacy scheduler constructor remains available only for existing callers/tests. Every mutation runs `TaskPolicy` inside one `TaskRepository.update`, and completion validates wire outcome before transaction entry. The scheduler retains the exclusive lease through recovery, dispatch and worker shutdown. On-disk task snapshots and Session Protocol v1 are unchanged.
 
 ## 6. Testing architecture
 
