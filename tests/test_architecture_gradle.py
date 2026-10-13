@@ -149,23 +149,29 @@ class ArchitectureBoundaryTest(unittest.TestCase):
             "}\n"
         )
         init_script = init_script.replace("PLACEHOLDER", configuration)
-        return self.run_with_init_script(init_script)
+        return self.run_with_init_script(
+            init_script, scenario=f"{source}:{configuration} -> {target}"
+        )
 
-    def run_with_init_script(self, init_script: str) -> str:
+    def run_with_init_script(self, init_script: str, *, scenario: str = "") -> str:
         with tempfile.TemporaryDirectory() as directory:
             init_file = Path(directory) / "illegal-edge.gradle"
             init_file.write_text(init_script, encoding="utf-8")
-            run = subprocess.run(
+            run = run_logged_gradle(
                 [
-                    "./gradlew", "--no-daemon", "--offline", "--console=plain",
-                    "--init-script", str(init_file), "checkArchitecture",
+                    "./gradlew",
+                    "--no-daemon",
+                    "--offline",
+                    "--console=plain",
+                    "--init-script",
+                    str(init_file),
+                    "checkArchitecture",
                 ],
                 cwd=ROOT,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
+                scenario=scenario or f"init-script {self._testMethodName}",
+                phase="injected-architecture-check",
+                sequence=1,
                 timeout=180,
-                check=False,
             )
         self.assertNotEqual(0, run.returncode, run.stdout)
         return run.stdout
