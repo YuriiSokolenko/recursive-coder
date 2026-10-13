@@ -140,7 +140,7 @@ class ArchitectureConfigurationCacheRegressionTest(unittest.TestCase):
     def assert_valid(self, result: subprocess.CompletedProcess[str]) -> None:
         self.assertEqual(0, result.returncode, result.stdout)
         self.assertRegex(
-            result.stdout, r"Architecture boundaries verified for [1-9]\\d* modules\\."
+            result.stdout, r"Architecture boundaries verified for [1-9]\d* modules\."
         )
 
     def test_changed_build_script_invalidates_cache_for_production_and_test_edges(self):
