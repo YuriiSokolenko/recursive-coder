@@ -84,7 +84,7 @@ the tiered suites, or `./gradlew test` for the full unfiltered suite.
 
 `tasks enqueue` now consumes the `EnqueueTaskUseCase` contract resolved from a command-local Koin composition root, with `DefaultEnqueueTaskUseCase(TaskRepository, Clock)` as the implementation. Submission parsing and priority admission occur before mutation; DAG/dependency checks and publication occur atomically under `TaskRepository.update`. A fixed-clock/in-memory test covers successful blocked/ready submissions, rejections with rollback and concurrent same-ID contention.
 
-`recursive-coder run` and scheduled task execution use `RunSessionUseCase` resolved through Koin at `:app:cli`. The implementation owns all existing session lifecycle coordination and verification; the old `SessionController` API delegates for compatibility. There is no global Koin container and no shared mutable session state.
+`recursive-coder run` and scheduled task execution use `RunSessionUseCase` resolved through Koin at `:app:cli`. The implementation owns all existing session lifecycle coordination and verification; the old `SessionController` API delegates for compatibility. There is no global Koin container and no shared mutable session state. A single task command-scoped `TaskComposition` owns the shared `TaskRepository` until command exit; session Koin containers are closed after each invocation.
 
 Remaining mappings to be migrated under [#59](https://github.com/YuriiSokolenko/recursive-coder/issues/59): cancel, retry, cancel-all, replace-dependencies, pause/resume, list/show, scheduler claim, completion, interrupt and recovery. Those retain their existing transactional semantics, direct `TaskService` entrypoints and existing integration tests until a focused follow-up migrates each meaningful intent.
 
@@ -168,5 +168,5 @@ until SessionController enforces its deadline. Per-workspace locks may
 serialize sessions even when the global concurrency limit exceeds one.
 
 The new `DefaultRunSessionUseCase` implements the read-only bootstrap
-engine behind `RunSessionUseCase`; `SessionController` is a compatibility façade. full Koog coding workflows, write tools, and checkpoint recovery
+engine behind `RunSessionUseCase`; `SessionController` is a compatibility façade. Full Koog coding workflows, write tools, and checkpoint recovery
 are separate milestones.
