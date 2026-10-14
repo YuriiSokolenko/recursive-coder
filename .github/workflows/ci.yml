@@ -152,7 +152,10 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: recursive-coder-junit-results
-          path: '**/build/test-results/test/TEST-*.xml'
+          path: |
+            **/build/test-results/test/TEST-*.xml
+            **/build/test-results/integrationTest/TEST-*.xml
+            **/build/test-results/e2eTest/TEST-*.xml
           if-no-files-found: error
 
       - name: Execute installed CLI and validate result/events against v1 schema
