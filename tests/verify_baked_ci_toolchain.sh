@@ -8,7 +8,7 @@ expected='schema=2 gradle=9.8.1 gradle_sha256=dce76f55f8e251a3a1f130eb120f30b3d2
   echo "::error::CI Golden Image v2 is required; baked toolchain manifest is absent or mismatched" >&2
   exit 1
 }
-[[ "\${GRADLE_USER_HOME:-}" = "$base/gradle-home" ]] || {
+[[ "${GRADLE_USER_HOME:-}" = "$base/gradle-home" ]] || {
   echo "::error::GRADLE_USER_HOME must point to the prewarmed cache" >&2
   exit 1
 }
