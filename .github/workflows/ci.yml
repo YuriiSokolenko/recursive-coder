@@ -24,23 +24,20 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '9.8.1'
+      # Golden Image v2 already contains Java, Gradle, Node, Python and dependencies.
+      # Do not run setup actions or download packages for disposable CI guests.
+      - name: Verify baked CI toolchain
+        run: bash tests/verify_baked_ci_toolchain.sh
       - name: Verify architecture and run pure unit tests
-        run: ./gradlew --no-daemon checkArchitecture checkTestTiers unitTest --stacktrace
+        run: ./gradlew --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g checkArchitecture checkTestTiers unitTest --stacktrace
       - name: Test independent architecture graph verifier
-        run: ./gradlew --no-daemon -p build-logic test --stacktrace
+        run: ./gradlew --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g -p build-logic test --stacktrace
       - name: Prove fresh and reused Gradle configuration cache
         run: |
           rm -rf .gradle/configuration-cache
-          ./gradlew --no-daemon --offline --console=plain --configuration-cache checkArchitecture | tee /tmp/architecture-cache-first.log
+          ./gradlew --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --offline --console=plain --configuration-cache checkArchitecture | tee /tmp/architecture-cache-first.log
           grep -F 'Configuration cache entry stored.' /tmp/architecture-cache-first.log
-          ./gradlew --no-daemon --offline --console=plain --configuration-cache checkArchitecture | tee /tmp/architecture-cache-second.log
+          ./gradlew --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --offline --console=plain --configuration-cache checkArchitecture | tee /tmp/architecture-cache-second.log
           grep -F 'Reusing configuration cache.' /tmp/architecture-cache-second.log
       - name: Reject illegal edges, cycles and stale configuration-cache snapshots
         run: python3 -m unittest discover -s tests -p 'test_architecture_gradle.py' -v
@@ -83,13 +80,10 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '9.8.1'
+      # Golden Image v2 already contains Java, Gradle, Node, Python and dependencies.
+      # Do not run setup actions or download packages for disposable CI guests.
+      - name: Verify baked CI toolchain
+        run: bash tests/verify_baked_ci_toolchain.sh
       # Provision bubblewrap and namespace permissions in the isolated runner
       # image/host. CI must never weaken host-wide security settings.
       - name: Check preinstalled sandbox prerequisites
@@ -161,11 +155,6 @@ jobs:
           path: '**/build/test-results/test/TEST-*.xml'
           if-no-files-found: error
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install canonical JSON Schema validator
-        run: python -m pip install jsonschema==4.25.1
       - name: Execute installed CLI and validate result/events against v1 schema
         # JAVA_TOOL_OPTIONS emits a JVM startup banner even when set to "".
         # Unset it only for these local/fake-model CLI contract tests so the
@@ -181,20 +170,16 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
+      # Golden Image v2 already contains Java, Gradle, Node, Python and dependencies.
+      # Do not run setup actions or download packages for disposable CI guests.
+      - name: Verify baked CI toolchain
+        run: bash tests/verify_baked_ci_toolchain.sh
       - name: Enforce English-only repository documentation
         run: |
           if LC_ALL=C.UTF-8 grep -nP '[\p{Cyrillic}]' README.md CONTRIBUTING.md contracts/README.md docs/architecture/*.md; then
             echo 'Documentation must use English only'
             exit 1
           fi
-      - name: Install JSON Schema 2020-12 validator
-        run: python -m pip install jsonschema==4.25.1
       - name: Validate full schema, fixtures and negative compatibility cases
         run: python -m unittest discover -s tests -p 'test_contract*.py' -v
       - name: Run standalone legacy compatibility cases and keyword guard
