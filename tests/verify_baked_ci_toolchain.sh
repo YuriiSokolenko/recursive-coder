@@ -16,11 +16,11 @@ expected='schema=2 gradle=9.8.1 gradle_sha256=dce76f55f8e251a3a1f130eb120f30b3d2
   echo "::error::Prewarmed Gradle cache is missing" >&2
   exit 1
 }
-[[ "$(command -v gradle)" = "$base/gradle-9.8.1/bin/gradle" ]]
-[[ "$(command -v node)" = "$base/node-v22.21.1-linux-x64/bin/node" ]]
-[[ "$(command -v python)" = "$base/python/bin/python" ]]
-java -version 2>&1 | grep -Eq 'version "21|openjdk version "21'
-gradle --version | grep -Fq 'Gradle 9.8.1'
-[[ "$(node --version)" = v22.21.1 ]]
-python -c 'import sys; from importlib.metadata import version; assert sys.version_info[:2] == (3,12) and version("jsonschema") == "4.25.1"'
+[[ -x "$base/gradle-9.8.1/bin/gradle" && "$(command -v gradle)" = "$base/gradle-9.8.1/bin/gradle" ]] || { echo "::error::Preinstalled Gradle is inaccessible or PATH selects another executable" >&2; exit 1; }
+[[ -x "$base/node-v22.21.1-linux-x64/bin/node" && "$(command -v node)" = "$base/node-v22.21.1-linux-x64/bin/node" ]] || { echo "::error::Preinstalled Node is inaccessible or PATH selects another executable" >&2; exit 1; }
+[[ -x "$base/python/bin/python" && "$(command -v python)" = "$base/python/bin/python" ]] || { echo "::error::Preinstalled Python virtualenv is inaccessible or PATH selects another executable; check permissions under /opt/recursive-coder-kvm/python" >&2; exit 1; }
+java -version 2>&1 | grep -Eq 'version "21|openjdk version "21' || { echo "::error::Expected Java 21 on PATH" >&2; exit 1; }
+gradle --version | grep -F 'Gradle 9.8.1' || { echo "::error::Expected Gradle 9.8.1" >&2; exit 1; }
+[[ "$(node --version)" = v22.21.1 ]] || { echo "::error::Expected Node v22.21.1" >&2; exit 1; }
+python -c 'import sys; from importlib.metadata import version; assert sys.version_info[:2] == (3,12) and version("jsonschema") == "4.25.1"' || { echo "::error::Expected Python 3.12 with jsonschema 4.25.1" >&2; exit 1; }
 echo "Validated baked Gradle, Java 21, Node 22, Python 3.12 and offline-ready Gradle cache."
