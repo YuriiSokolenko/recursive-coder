@@ -108,7 +108,9 @@ jobs:
       - name: Compile and test standalone Gradle modules and distribution
         env:
           CI: 'true'
-        run: ./gradlew --no-daemon clean test integrationTest e2eTest installDist --stacktrace
+        # N150 KVM guests have 4 GiB RAM; default Gradle concurrency/heap caused
+        # a guest OOM. One worker with a 1 GiB heap passed all 524 test cases.
+        run: ./gradlew --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g clean test integrationTest e2eTest installDist --stacktrace
       - name: Confirm sandbox integration test was not skipped
         run: |
           python3 - <<'PY'
