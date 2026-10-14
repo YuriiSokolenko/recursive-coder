@@ -23,7 +23,7 @@ jobs:
     runs-on: [self-hosted, linux, x64, n150, recursive-coder-ci]
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Golden Image v2 already contains Java, Gradle, Node, Python and dependencies.
       # Do not run setup actions or download packages for disposable CI guests.
       - name: Verify baked CI toolchain
@@ -79,7 +79,7 @@ jobs:
     runs-on: [self-hosted, linux, x64, n150, recursive-coder-ci]
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Golden Image v2 already contains Java, Gradle, Node, Python and dependencies.
       # Do not run setup actions or download packages for disposable CI guests.
       - name: Verify baked CI toolchain
@@ -149,7 +149,7 @@ jobs:
           PY
       - name: Publish Kotlin JUnit results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: recursive-coder-junit-results
           path: '**/build/test-results/test/TEST-*.xml'
@@ -169,7 +169,7 @@ jobs:
     runs-on: [self-hosted, linux, x64, n150, recursive-coder-ci]
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Golden Image v2 already contains Java, Gradle, Node, Python and dependencies.
       # Do not run setup actions or download packages for disposable CI guests.
       - name: Verify baked CI toolchain
