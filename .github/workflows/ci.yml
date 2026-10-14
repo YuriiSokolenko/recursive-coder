@@ -167,6 +167,11 @@ jobs:
       - name: Install canonical JSON Schema validator
         run: python -m pip install jsonschema==4.25.1
       - name: Execute installed CLI and validate result/events against v1 schema
+        # The guest's JAVA_TOOL_OPTIONS proxy settings make Java print a startup
+        # banner on stderr; these local/fake-model CLI contracts require clean stderr.
+        # Scope the override to this step so Gradle and network setup keep proxying.
+        env:
+          JAVA_TOOL_OPTIONS: ''
         run: python -m unittest discover -s tests -p 'test_cli_runtime_v1.py' -v
 
   contracts:
