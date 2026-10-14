@@ -23,24 +23,21 @@ jobs:
     runs-on: [self-hosted, linux, x64, n150, recursive-coder-ci]
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '9.8.1'
+      - uses: actions/checkout@v7
+      # Golden Image v2 already contains Java, Gradle, Node, Python and dependencies.
+      # Do not run setup actions or download packages for disposable CI guests.
+      - name: Verify baked CI toolchain
+        run: bash tests/verify_baked_ci_toolchain.sh
       - name: Verify architecture and run pure unit tests
-        run: ./gradlew --no-daemon checkArchitecture checkTestTiers unitTest --stacktrace
+        run: ./gradlew --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g checkArchitecture checkTestTiers unitTest --stacktrace
       - name: Test independent architecture graph verifier
-        run: ./gradlew --no-daemon -p build-logic test --stacktrace
+        run: ./gradlew --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g -p build-logic test --stacktrace
       - name: Prove fresh and reused Gradle configuration cache
         run: |
           rm -rf .gradle/configuration-cache
-          ./gradlew --no-daemon --offline --console=plain --configuration-cache checkArchitecture | tee /tmp/architecture-cache-first.log
+          ./gradlew --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --offline --console=plain --configuration-cache checkArchitecture | tee /tmp/architecture-cache-first.log
           grep -F 'Configuration cache entry stored.' /tmp/architecture-cache-first.log
-          ./gradlew --no-daemon --offline --console=plain --configuration-cache checkArchitecture | tee /tmp/architecture-cache-second.log
+          ./gradlew --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --offline --console=plain --configuration-cache checkArchitecture | tee /tmp/architecture-cache-second.log
           grep -F 'Reusing configuration cache.' /tmp/architecture-cache-second.log
       - name: Reject illegal edges, cycles and stale configuration-cache snapshots
         run: python3 -m unittest discover -s tests -p 'test_architecture_gradle.py' -v
@@ -82,14 +79,11 @@ jobs:
     runs-on: [self-hosted, linux, x64, n150, recursive-coder-ci]
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '9.8.1'
+      - uses: actions/checkout@v7
+      # Golden Image v2 already contains Java, Gradle, Node, Python and dependencies.
+      # Do not run setup actions or download packages for disposable CI guests.
+      - name: Verify baked CI toolchain
+        run: bash tests/verify_baked_ci_toolchain.sh
       # Provision bubblewrap and namespace permissions in the isolated runner
       # image/host. CI must never weaken host-wide security settings.
       - name: Check preinstalled sandbox prerequisites
@@ -108,7 +102,9 @@ jobs:
       - name: Compile and test standalone Gradle modules and distribution
         env:
           CI: 'true'
-        run: ./gradlew --no-daemon clean test integrationTest e2eTest installDist --stacktrace
+        # N150 KVM guests have 4 GiB RAM; default Gradle concurrency/heap caused
+        # a guest OOM. One worker with a 1 GiB heap passed all 524 test cases.
+        run: ./gradlew --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g clean test integrationTest e2eTest installDist --stacktrace
       - name: Confirm sandbox integration test was not skipped
         run: |
           python3 - <<'PY'
@@ -153,19 +149,20 @@ jobs:
           PY
       - name: Publish Kotlin JUnit results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: recursive-coder-junit-results
-          path: '**/build/test-results/test/TEST-*.xml'
+          path: |
+            **/build/test-results/test/TEST-*.xml
+            **/build/test-results/integrationTest/TEST-*.xml
+            **/build/test-results/e2eTest/TEST-*.xml
           if-no-files-found: error
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install canonical JSON Schema validator
-        run: python -m pip install jsonschema==4.25.1
       - name: Execute installed CLI and validate result/events against v1 schema
-        run: python -m unittest discover -s tests -p 'test_cli_runtime_v1.py' -v
+        # JAVA_TOOL_OPTIONS emits a JVM startup banner even when set to "".
+        # Unset it only for these local/fake-model CLI contract tests so the
+        # runner and Gradle retain their proxy configuration.
+        run: env -u JAVA_TOOL_OPTIONS python -m unittest discover -s tests -p 'test_cli_runtime_v1.py' -v
 
   contracts:
     name: Versioned session contracts
@@ -175,21 +172,17 @@ jobs:
     runs-on: [self-hosted, linux, x64, n150, recursive-coder-ci]
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
+      - uses: actions/checkout@v7
+      # Golden Image v2 already contains Java, Gradle, Node, Python and dependencies.
+      # Do not run setup actions or download packages for disposable CI guests.
+      - name: Verify baked CI toolchain
+        run: bash tests/verify_baked_ci_toolchain.sh
       - name: Enforce English-only repository documentation
         run: |
           if LC_ALL=C.UTF-8 grep -nP '[\p{Cyrillic}]' README.md CONTRIBUTING.md contracts/README.md docs/architecture/*.md; then
             echo 'Documentation must use English only'
             exit 1
           fi
-      - name: Install JSON Schema 2020-12 validator
-        run: python -m pip install jsonschema==4.25.1
       - name: Validate full schema, fixtures and negative compatibility cases
         run: python -m unittest discover -s tests -p 'test_contract*.py' -v
       - name: Run standalone legacy compatibility cases and keyword guard
