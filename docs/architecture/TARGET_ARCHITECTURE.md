@@ -1,7 +1,7 @@
 # Recursive Coder — Target Architecture
 
 > **Status:** Accepted architectural direction; incremental migration, not a claim that all components exist.  
-> **Date:** 2026-10-13  
+> **Decision date:** 2026-10-13; **implementation status verified:** 2026-11-11 (`dev@4ed9fe8`)  
 > **Target:** Kotlin/JVM + JetBrains Koog, independently runnable with a local or configured remote LLM.  
 > **Related:** [Current architecture](ARCHITECTURE.md) · [Gradle modules](MODULES.md) · [Session Protocol v1](../../contracts/README.md)
 
@@ -39,7 +39,7 @@ CLI / future API (composition root)
                 |
 Adapters: Task Store | Workspace/Git | Model | Event Journal | Clock
                          |
-             Koog orchestration adapter
+             Koog orchestration adapter (planned)
         (runs roles; not trusted policy authority)
 ```
 
@@ -77,11 +77,11 @@ Typical ports and their ownership:
 
 | Port / seam | Consumer | Concrete owner |
 | --- | --- | --- |
-| `TaskRepository` (transactions/claims) | Task use cases | Current file-backed `TaskStore`; optional `:infra:task-store` after extraction |
+| `TaskRepository` (transactions/claims) | Task use cases | `:infra:task-store` owns the file-backed `TaskStore`; a pure in-memory implementation exists in `:core:tasks` |
 | `TaskRunner` | Task scheduler | CLI/composition binding of Session execution |
 | `ModelGateway` | Session/agent runtime | `:infra:model` FakeModel / compatible HTTP client |
 | `WorkspaceOpener` / trusted workspace operations | Session/tool coordinator | `:infra:workspace` |
-| `EventSink` (append/flush/failure) | Session coordinator | JSONL journal adapter; optional `:infra:journal` |
+| `EventSink` (append/flush/failure) | Session coordinator | `:infra:journal` implements physical JSONL storage and verified checksums |
 | Time provider / explicit observed timestamps | Task and Session use cases | System clock in production; fixed clock in tests |
 
 A command to a use case may produce a **pure decision** (new state, rejection reason, authorized intended actions). The imperative shell validates and performs effects through trusted ports, records their observed outcomes, and applies subsequent transitions. This is not a promise of exactly-once side effects; recovery must reconcile uncertainty as specified in [issue #10](https://github.com/YuriiSokolenko/recursive-coder/issues/10).
@@ -90,26 +90,25 @@ Use typed domain states/outcomes where meaningful. Treat serialized wire DTOs as
 
 ## 5. Modules: actual vs. conditional target
 
-### Implemented modules
+### Implemented modules (eight)
 
-- `:core:contracts` — currently shared Kotlin contracts, request validation and cross-module types. Keep small; it must not become a repository of all business logic.
-- `:core:tasks` — Task use cases, domain transitions, scheduler decisions, and owned repository/runner ports.
-- `:core:session` — Session use cases, lifecycle and budget/admission decisions, owned event/workspace seams.
-- `:infra:model` — fake and HTTP-compatible model adapters; no core runtime ownership.
-- `:infra:workspace` — trusted filesystem/Git and currently trusted tool execution.
-- `:app:cli` — Clikt UI, configuration, concrete dependency assembly; the executable application.
+- `:core:contracts` — shared protocol/request types, model/workspace contracts and pure authorization policy.
+- `:core:tasks` — Task state/DAG policy, Use Cases, scheduler and repository ports.
+- `:core:session` — Session Use Cases, lifecycle/admission/budget policies and event envelopes.
+- `:infra:model` — FakeModel and strict OpenAI-compatible HTTP adapter.
+- `:infra:workspace` — descriptor-checked Git reads and the **separate** Linux trusted write/check runtime.
+- `:infra:task-store` — durable `tasks.json`, file locking and atomic snapshots.
+- `:infra:journal` — physical JSONL sink with flush/close/checksum handling.
+- `:app:cli` — Clikt CLI and command/session-scoped Koin composition; only executable module.
 
-### Conditional modules — add only with working implementations
+The included `build-logic` Gradle build is not a ninth product module. Core policy remains free of Koin, Koog and HTTP adapter dependencies. **Current CLI sessions are read-only**, even though the standalone write/check boundary is implemented.
 
-- `:infra:task-store` once concrete file snapshot/locking code is extracted from the Task core.
-- `:infra:journal` owns physical JSONL append/flush/close and checksum behavior; the Session core owns event envelopes and ordering.
-- `:agent:runtime` when Koog-backed recursive role execution is implemented (see [#9](https://github.com/YuriiSokolenko/recursive-coder/issues/9)).
-- `:infra:tools` when standalone sandbox/write/check execution warrants its own owned boundary.
+### Conditional future modules — add only with working implementations
 
-`:core:contracts` can continue hosting common stable ports while the first refactors are underway. Move contracts only when clear ownership and an acyclic dependency path are established. Do **not** create `:core:domain`, `:protocol` or empty layer-per-package modules for appearance.
+- `:agent:runtime` when Koog-backed recursive role execution is implemented ([#9](https://github.com/YuriiSokolenko/recursive-coder/issues/9)).
+- `:infra:tools` only if independently owned sandbox/write/check operations justify extraction from `:infra:workspace`.
 
-A future Koog module may depend on core contracts and application services, while the core must never depend on Koog. Infrastructure adapter selection happens at an application composition root.
-
+Do not create empty speculative modules. Task Store and Journal adapters are already extracted.
 
 ### Explicit Use Case interfaces and CLI DI (issues #58 and #59)
 
@@ -167,22 +166,17 @@ Test suites must remain offline/deterministic by default. Do not use flaky live-
 
 ## 8. Incremental roadmap and issue tracker
 
-Each row is intended as a **separate focused PR into `dev`**, unless a prerequisite is already completed.
+Architecture refactors [#24](https://github.com/YuriiSokolenko/recursive-coder/issues/24)–[#31](https://github.com/YuriiSokolenko/recursive-coder/issues/31), plus Use Case/Koin work [#58](https://github.com/YuriiSokolenko/recursive-coder/issues/58) and [#59](https://github.com/YuriiSokolenko/recursive-coder/issues/59), have been integrated into `dev`. The following issues remain open; dependency and priority are reflected explicitly rather than implied by row order.
 
-| Sequence / parallelism | Issue | Deliverable |
+| State | Issue | Deliverable |
 | --- | --- | --- |
-| Existing, start first | [#24](https://github.com/YuriiSokolenko/recursive-coder/issues/24) | Module-local Session and Workspace unit tests before Session refactor |
-| Foundation; parallel with #24 | [#25](https://github.com/YuriiSokolenko/recursive-coder/issues/25) | Enforce module boundaries and classify unit/integration/E2E suites |
-| Independent core workstream | [#26](https://github.com/YuriiSokolenko/recursive-coder/issues/26) | Pure Task state machine, DAG, fairness and retry/cancel policies |
-| After #26 | [#27](https://github.com/YuriiSokolenko/recursive-coder/issues/27) | TaskRepository port and concrete persistence adapter |
-| After #24 | [#28](https://github.com/YuriiSokolenko/recursive-coder/issues/28) | Pure Session state machine, admission and budget policies |
-| After #28 | [#29](https://github.com/YuriiSokolenko/recursive-coder/issues/29) | Session EventSink port and JSONL journal adapter |
-| Independent security workstream | [#30](https://github.com/YuriiSokolenko/recursive-coder/issues/30) | Pure Tool Authorization role/policy decisions |
-| After #26 and #28 | [#31](https://github.com/YuriiSokolenko/recursive-coder/issues/31) | Typed domain values and Session Protocol JSON mapping boundary |
-| Following stable boundaries | [#9](https://github.com/YuriiSokolenko/recursive-coder/issues/9) | Koog recursive five-stage agent graph (already tracked) |
-| After agent/workspace fundamentals | [#10](https://github.com/YuriiSokolenko/recursive-coder/issues/10) | Checkpoints, fencing, fault-tolerant recovery (already tracked) |
+| Next product milestone (P1) | [#9](https://github.com/YuriiSokolenko/recursive-coder/issues/9) | Koog-backed recursive five-stage graph; integrate existing trusted tools |
+| Depends on #9 (P1) | [#10](https://github.com/YuriiSokolenko/recursive-coder/issues/10) | Durable checkpoints, lease fencing, side-effect reconciliation and recovery |
+| Depends on #9/#10 (P1) | [#11](https://github.com/YuriiSokolenko/recursive-coder/issues/11) | Reproducible coding evaluation harness |
+| Later (P2) | [#12](https://github.com/YuriiSokolenko/recursive-coder/issues/12), [#13](https://github.com/YuriiSokolenko/recursive-coder/issues/13) | Release packaging, optional daemon/API and integrations |
+| Architecture and test follow-ups (P2/P3) | [#36](https://github.com/YuriiSokolenko/recursive-coder/issues/36), [#37](https://github.com/YuriiSokolenko/recursive-coder/issues/37), [#40](https://github.com/YuriiSokolenko/recursive-coder/issues/40), [#42](https://github.com/YuriiSokolenko/recursive-coder/issues/42), [#43](https://github.com/YuriiSokolenko/recursive-coder/issues/43), [#51](https://github.com/YuriiSokolenko/recursive-coder/issues/51), [#52](https://github.com/YuriiSokolenko/recursive-coder/issues/52), [#54](https://github.com/YuriiSokolenko/recursive-coder/issues/54), [#63](https://github.com/YuriiSokolenko/recursive-coder/issues/63) | Deterministic coverage, repository contracts and Gradle guardrail refinements |
 
-This plan deliberately **does not recreate** the finished multi-module refactor [#22](https://github.com/YuriiSokolenko/recursive-coder/issues/22), existing trusted-write task [#8](https://github.com/YuriiSokolenko/recursive-coder/issues/8), or the open unit-test task #24.
+A green CI job establishes that current checks passed, **not** that planned recursion or crash recovery already works.
 
 ## 9. Definition of done for an architecture-refactor PR
 

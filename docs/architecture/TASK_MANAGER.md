@@ -2,8 +2,7 @@
 
 The Task Manager is a local, first-party queue and dependency scheduler. It does not
 require GitHub Issues, GitHub Actions, a hosted API, or an external runner.
-It uses the existing SessionController and its configured FakeModel or explicitly
-authorized Model Gateway. No writable coding-agent capabilities are implied.
+It uses the current read-only `RunSessionUseCase` (`SessionController` remains a compatibility façade) and the configured FakeModel or explicitly authorized Model Gateway. No writable coding-agent capabilities are implied.
 
 ## Commands
 
@@ -166,5 +165,4 @@ until SessionController enforces its deadline. Per-workspace locks may
 serialize sessions even when the global concurrency limit exceeds one.
 
 The new `DefaultRunSessionUseCase` implements the read-only bootstrap
-engine behind `RunSessionUseCase`; `SessionController` is a compatibility façade. Full Koog coding workflows, write tools, and checkpoint recovery
-are separate milestones.
+engine behind `RunSessionUseCase`; `SessionController` is a compatibility façade. Full Koog coding workflows, **CLI integration of the existing standalone trusted write/check runtime**, and checkpoint recovery remain separate milestones. The standalone runtime exists in `:infra:workspace`; Task Manager cannot yet dispatch an autonomous write-capable development session.

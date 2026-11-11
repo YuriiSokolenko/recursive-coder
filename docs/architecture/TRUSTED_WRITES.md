@@ -69,8 +69,7 @@ no inherited environment, bounded output and deadline. If bubblewrap or kernel
 isolation is unavailable, the check fails; it never runs unsandboxed instead.
 The sandboxed check test also verifies that the checkout is read-only, the
 scratch directory is writable, external network send is denied, and large
-output returns CHECK_OUTPUT_LIMIT rather than CHECK_TIMEOUT. The GitHub-hosted
-Linux CI enables user namespaces on its disposable runner, probes bubblewrap,
+output returns CHECK_OUTPUT_LIMIT rather than CHECK_TIMEOUT. The dedicated self-hosted N150 CI uses isolated, ephemeral Linux KVM guests with user namespaces and preinstalled bubblewrap, probes real sandbox execution,
 and **fails** when the real sandboxed test cannot run. The test treats missing
 bubblewrap or namespaces as a failure when CI=true (or GITHUB_ACTIONS=true),
 but may skip on local Linux systems without these capabilities. The CI job
@@ -114,10 +113,9 @@ Neither a model-declared success nor a plausible JSON receipt is sufficient.
 - No claim that this prevents hostile same-UID processes from racing concurrent
   filesystem changes; production deployment must isolate the host and guard
   the workspace against concurrent non-agent writers.
-- The current bootstrap SessionController remains read-only; wiring write
-  sessions into the Koog agent graph is future work.
+- The current CLI `RunSessionUseCase`/`SessionController` path remains read-only; wiring this **already-implemented standalone runtime** into the Koog graph is future work ([#9](https://github.com/YuriiSokolenko/recursive-coder/issues/9)).
 
-Run ./gradlew test on Linux; negative tests include role boundaries,
+Run `./gradlew test` on Linux; negative tests include role boundaries,
 immutable tests/specs, schema rejection, a tracked symlink directory that
 reaches the NOFOLLOW guard, ignored Git paths, case-insensitive aliases,
 NUL input, reversible edits and no-ops, Git staging/renames, external

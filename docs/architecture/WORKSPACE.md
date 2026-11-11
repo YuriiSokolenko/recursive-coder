@@ -1,7 +1,6 @@
 # Workspace Manager and read-only tool runtime (issue #5)
 
-This implementation is the trusted local workspace boundary for the offline fake-agent
-session. It is independent of any GitHub runner, external project or model provider.
+This implementation is the trusted **read-only session workspace** boundary for the offline fake-agent or configured HTTP-model session. It is independent of any GitHub runner, external project or model provider. The **separate** Linux-only trusted write/check runtime is documented in [Trusted writes](TRUSTED_WRITES.md); it is not enabled in the CLI session path.
 
 ## Workspace admission and ownership
 
@@ -81,13 +80,10 @@ file contents or search matches. Durability of receipts is deferred to #10.
 
 ## Non-goals and security boundaries
 
-This milestone does not provide production file writes, shell execution,
-sandboxed tests, a multi-user security boundary, protected-branch enforcement,
-remote Git operations, or durable event-store recovery. The runtime runs as the
+This **read-only Workspace Manager milestone** does not provide file mutations, shell execution, sandboxed tests, a multi-user security boundary, protected-branch enforcement, remote Git operations, or durable event-store recovery. The standalone `TrustedWriteRuntime` separately implements host-authorized writes and sandboxed checks on Linux but is **not integrated into `recursive-coder run`**. The runtime runs as the
 current OS user; it is not a full operating-system container or protection
 against another process with the same account intentionally mutating inode
-metadata concurrently. Future write-capable tools require separate sandbox
-design, change manifest validation and independent check receipts.
+metadata concurrently. The separate trusted write/check runtime provides sandbox isolation, change-manifest validation and independently bound check receipts; connecting it to the agent session is future work.
 
 The initial task file is verified through the same trusted descriptor-based
 boundary before the fake model runs. The fake agent's subsequent read now

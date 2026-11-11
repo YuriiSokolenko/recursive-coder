@@ -1,6 +1,6 @@
 # Gradle multi-module boundaries
 
-Issue #22 introduced six modules; issues #27 and #29 add the task persistence and event journal adapters; the Gradle root remains `recursive-coder` and is not an executable module.
+**Current layout:** eight product modules are included in `settings.gradle.kts` (verified 2026-11-11 at `dev@4ed9fe8`). Issue #22 introduced six; #27 added `:infra:task-store` and #29 added `:infra:journal`. The Gradle root `recursive-coder` and the included `build-logic` build are not additional product modules.
 
 | Module | Ownership | Production project dependencies |
 | --- | --- | --- |
@@ -95,4 +95,8 @@ The file-backed TaskStore now lives in `:infra:task-store`; the CLI composes it 
 
 ## Task repository (issue #27)
 
-The TaskRepository port owns atomic reads, read-decide-write mutations, the process-wide scheduler lease and run output-root resolution. Task Use Cases and the TaskService compatibility façade depend only on that port; the CLI is the sole owner of TaskStore selection. Both adapters implement the same transactional interface. The CLI composition explicitly owns the constructed `TaskStore` and closes any future resource-owning `AutoCloseable` adapter after Koin shutdown. A borrowed repository is not closed by the composition; the current `TaskStore` uses only operation-scoped resources and needs no close method. The filesystem adapter preserves tasks.json v1 bytes, corruption rejection, POSIX/OS file locks, fsync and atomic rename. An explicit cross-process lock regression and shared transaction contract guard semantics. The core test graph does not depend on an infrastructure project.
+The TaskRepository port currently owns atomic reads, read-decide-write mutations, the process-wide scheduler lease and run output-root resolution; extraction of the path calculation into a separate strategy remains open in [#51](https://github.com/YuriiSokolenko/recursive-coder/issues/51). Task Use Cases and the TaskService compatibility façade depend only on that port; the CLI is the sole owner of TaskStore selection. Both adapters implement the same transactional interface. The CLI composition explicitly owns the constructed `TaskStore` and closes any future resource-owning `AutoCloseable` adapter after Koin shutdown. A borrowed repository is not closed by the composition; the current `TaskStore` uses only operation-scoped resources and needs no close method. The filesystem adapter preserves tasks.json v1 bytes, corruption rejection, POSIX/OS file locks, fsync and atomic rename. Cross-process lock regression and shared transaction-contract tests guard these semantics; portability improvements remain tracked in [#52](https://github.com/YuriiSokolenko/recursive-coder/issues/52). The core test graph does not depend on an infrastructure project.
+
+## CI ownership and runtime status
+
+The three jobs in [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) run on the dedicated self-hosted N150 KVM runner with prewarmed Golden Image v2; there is no GitHub-hosted fallback. Tests use fake/model-mock or local sandbox fixtures. Koog/recursive agent execution is **not** linked into the eight current modules. The Linux-only `TrustedWriteRuntime` belongs to `:infra:workspace`, where it is separately tested, but it is **not** an enabled CLI write session.
