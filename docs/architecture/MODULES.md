@@ -99,4 +99,4 @@ The TaskRepository port currently owns atomic reads, read-decide-write mutations
 
 ## CI ownership and runtime status
 
-The three jobs in [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) run on the dedicated self-hosted N150 KVM runner with prewarmed Golden Image v2; there is no GitHub-hosted fallback. Tests use fake/model-mock or local sandbox fixtures. Koog/recursive agent execution is **not** linked into the eight current modules. The Linux-only `TrustedWriteRuntime` belongs to `:infra:workspace`, where it is separately tested, but it is **not** an enabled CLI write session.
+[PR #71](https://github.com/YuriiSokolenko/recursive-coder/pull/71) migrates all three jobs in [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) to standard GitHub-hosted `ubuntu-24.04` runners with pinned Gradle/JDK and required Linux sandbox E2E; no N150 runner is selected. Tests use fake/model-mock or local sandbox fixtures. Koog/recursive agent execution is **not** linked into the eight current modules. The Linux-only `TrustedWriteRuntime` belongs to `:infra:workspace`, where it is separately tested, but it is **not** an enabled CLI write session.

@@ -36,4 +36,4 @@ python -m pip install jsonschema==4.25.1
 python -m unittest discover -s tests -p 'test_contract*.py' -v
 ```
 
-The independent [CI workflow](../.github/workflows/ci.yml) runs contract, architecture/unit and JVM/integration/sandbox/CLI suites on the dedicated self-hosted N150 KVM runner. Tests use repository-local fixtures and no live inference provider; executing CI still requires that runner.
+The independent [CI workflow](../.github/workflows/ci.yml) is moving to GitHub-hosted `ubuntu-24.04` in [PR #71](https://github.com/YuriiSokolenko/recursive-coder/pull/71). Its three jobs cover contracts, architecture/unit and JVM/integration/sandbox/installed CLI suites, using repository-local fixtures without a live inference provider. The real sandbox probe and E2E remain required.

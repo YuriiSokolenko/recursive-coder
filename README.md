@@ -44,7 +44,7 @@ With Gradle 9.8.1 and JDK 21 installed:
 ./gradlew test installDist
 ```
 
-[GitHub Actions CI](.github/workflows/ci.yml) runs **only on the dedicated self-hosted N150 KVM runner** labeled `self-hosted, linux, x64, n150, recursive-coder-ci`, using the prewarmed Golden Image v2. There is **no GitHub-hosted fallback**, and fork PRs are excluded from these jobs. The three jobs cover architecture/pure unit tests, full JVM/integration/mandatory sandbox E2E and installed CLI, plus versioned contracts. The last `dev` run on 2026-10-14 passed all three jobs. Tests need no live inference provider, but the GitHub CI workflow requires the configured self-hosted runner. See [Testing architecture](docs/architecture/TEST_SUITES.md).
+[GitHub Actions CI](.github/workflows/ci.yml) is migrating to **standard GitHub-hosted `ubuntu-24.04` runners** via [PR #71](https://github.com/YuriiSokolenko/recursive-coder/pull/71). All three jobs will run on fresh hosted VMs, including fork PRs, with JDK 21, pinned Gradle 9.8.1, Python 3.12 and Node.js 22 provisioned per job. They cover architecture/pure unit tests, full JVM/integration/mandatory sandbox E2E plus installed CLI, and versioned contracts. Sandbox isolation and the no-skip assertion remain mandatory; migration is not considered validated until hosted CI passes. Tests require no live model provider. See [Testing architecture](docs/architecture/TEST_SUITES.md).
 
 ## Documentation
 

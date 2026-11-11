@@ -69,7 +69,7 @@ no inherited environment, bounded output and deadline. If bubblewrap or kernel
 isolation is unavailable, the check fails; it never runs unsandboxed instead.
 The sandboxed check test also verifies that the checkout is read-only, the
 scratch directory is writable, external network send is denied, and large
-output returns CHECK_OUTPUT_LIMIT rather than CHECK_TIMEOUT. The dedicated self-hosted N150 CI uses isolated, ephemeral Linux KVM guests with user namespaces and preinstalled bubblewrap, probes real sandbox execution,
+output returns CHECK_OUTPUT_LIMIT rather than CHECK_TIMEOUT. [CI migration PR #71](https://github.com/YuriiSokolenko/recursive-coder/pull/71) uses GitHub-hosted ephemeral Ubuntu 24.04 VMs, installs bubblewrap and probes real namespace isolation,
 and **fails** when the real sandboxed test cannot run. The test treats missing
 bubblewrap or namespaces as a failure when CI=true (or GITHUB_ACTIONS=true),
 but may skip on local Linux systems without these capabilities. The CI job

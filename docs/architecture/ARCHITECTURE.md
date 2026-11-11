@@ -119,7 +119,7 @@ Git-host integrations (PR creation, reviews, webhooks), IDE extensions, and task
 
 ## 6. Independent CI and quality
 
-GitHub Actions is used **solely for this repository's CI**, not as an external agent dispatcher. All three jobs run on **ephemeral guests of the dedicated self-hosted N150 KVM runner**, labeled `self-hosted, linux, x64, n150, recursive-coder-ci`; there is no GitHub-hosted fallback. Fork PR code is excluded because the repository is public. Golden Image v2 preinstalls and verifies the toolchain.
+GitHub Actions is used **solely for this repository's CI**, not as an external agent dispatcher. [CI migration PR #71](https://github.com/YuriiSokolenko/recursive-coder/pull/71) moves all three jobs to fresh GitHub-hosted `ubuntu-24.04` VMs. The legacy dedicated N150 KVM runner is not selected, and fork PRs can be checked without running untrusted code on private hardware. Java, Gradle, Python and Node are set up through official actions; bubblewrap is installed on the disposable VM and its isolation must pass without bypassing the required E2E test.
 
 - **Architecture boundaries and pure unit tests:** Gradle dependency and test-tier policies, configuration-cache regressions and pure Kotlin tests.
 - **Full JVM integration and sandbox E2E:** module builds, local Git/filesystem and mock HTTP fixtures, mandatory real bubblewrap case, installed CLI and JUnit artifacts.
