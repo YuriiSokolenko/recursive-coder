@@ -65,7 +65,7 @@ With Gradle 9.8.1 and JDK 21 installed:
 
 | Milestone | Status | Issue |
 | --- | --- | --- |
-| CLI, read-only Session Runtime, Model Gateway, native Task Manager | Implemented baseline | [#4–#7](https://github.com/YuriiSokolenko/recursive-coder/issues/3) |
+| CLI, read-only Session Runtime, Model Gateway, native Task Manager | Implemented baseline | [#4](https://github.com/YuriiSokolenko/recursive-coder/issues/4), [#5](https://github.com/YuriiSokolenko/recursive-coder/issues/5), [#6](https://github.com/YuriiSokolenko/recursive-coder/issues/6), [#7](https://github.com/YuriiSokolenko/recursive-coder/issues/7) |
 | Standalone Linux trusted write/check security boundary | Implemented, not CLI-integrated | [#8](https://github.com/YuriiSokolenko/recursive-coder/issues/8) |
 | Recursive Koog SDD → ATDD → TDD → Developer → Reviewer graph | Planned | [#9](https://github.com/YuriiSokolenko/recursive-coder/issues/9) |
 | Durable checkpoints, fencing and crash recovery | Planned | [#10](https://github.com/YuriiSokolenko/recursive-coder/issues/10) |
