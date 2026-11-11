@@ -1,5 +1,7 @@
 # Model Gateway (issue #6)
 
+**Implemented** in `:infra:model` and selectable by the read-only CLI Session Runtime. This provider adapter is not a Koog agent runtime or a general coding-loop executor. The advertised discovery fields below are **required backend extensions**, not universal OpenAI API fields.
+
 The gateway is an injectable JVM interface: `ModelGateway.negotiate` checks compatibility,
 then `ModelGateway.next` proposes a tool call or a final read confirmation.
 **It does not execute tools.** Only `WorkspaceManager` can perform the authorized read.
@@ -112,7 +114,7 @@ and observed token counts are the only model-related event metadata.
 ## Validation and limitations
 
 Run `./gradlew test` for deterministic in-process HTTP test coverage.
-The CI suite has **no live-model dependency**. A live smoke test is optional
+The CI suite has **no live-model dependency** and runs on the dedicated self-hosted N150 KVM runner; the adapter itself is not tied to that hardware. A live smoke test is optional
 and must not become mandatory for pull-request admission.
 
 The current session engine is deliberately limited to two turns and one

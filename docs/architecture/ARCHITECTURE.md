@@ -1,14 +1,14 @@
 # Recursive Coder — Standalone Architecture
 
-> **Status:** target architecture, RFC 0.3  
-> **Technology:** Kotlin/JVM, JetBrains Koog, configurable local or compatible LLM APIs  
+> **Status:** target architecture, RFC 0.3; implementation reconciled with `dev@4ed9fe8` on 2026-11-11  
+> **Technology:** Kotlin/JVM now; JetBrains Koog planned; configurable local/compatible LLM APIs  
 > **Core principle:** Recursive Coder must own the complete coding-agent lifecycle. No external workflow, repository, or service may be a mandatory coordinator.
 
 ## 1. Mission
 
 Build a **fully independent software engineering agent** that can accept complex development tasks, recursively refine and implement them, validate the results, and preserve outcomes safely.
 
-Koog provides agent-building primitives, while Recursive Coder retains ownership of task queues, session lifecycles, nested agents, tools, budgets, recovery, event history, and terminal results.
+The planned Koog integration will provide agent-building primitives, while Recursive Coder retains ownership of task queues, session lifecycles, nested agents, tools, budgets, recovery, event history, and terminal results.
 
 This project is not a plugin for another orchestration platform. Cloud providers, source-control hosting, IDEs, and task trackers are optional integrations built on public interfaces.
 
@@ -21,7 +21,7 @@ This project is not a plugin for another orchestration platform. Cloud providers
                |
          Session Controller
                |
-    Recursive Agent Graph (Koog)
+    Recursive Agent Graph (Koog; planned)
        SDD → ATDD → TDD → Develop → Review
         |       |     |        |       |
         +-------+-----+--------+-------+
@@ -30,7 +30,7 @@ This project is not a plugin for another orchestration platform. Cloud providers
           /       |       \
     Workspace  Checks   Model Gateway
                |            |
-       Event Journal / Checkpoints
+       Event Journal / Checkpoints (checkpoints planned)
 ```
 
 ### Current Gradle module boundaries
@@ -47,7 +47,7 @@ A task can have one or more session attempts. The controller owns `sessionId`, d
 
 The canonical protocol represents transitions such as `created → accepted → running`, `running → checkpointing → running|paused`, and `paused → resuming → running`. Success, failure, cancellation, rejection, and timeout are terminal conditions. Status must be derived from verified runtime state, **not** from a model's final words.
 
-The bootstrap implementation in issue #4 handles one fake-model read-only session; the fuller state machine, nested agents, and durable recovery are future milestones.
+The read-only session engine supports FakeModel or a strict OpenAI-compatible provider, validated admission, lifecycle decisions, budgets and physical JSONL events. Nested-agent execution and checkpoint recovery remain future milestones; the schema includes more states than the fresh-session CLI can execute.
 
 ### Recursive Agent Graph
 
@@ -67,13 +67,15 @@ Tool permission is not inferred from prompt text. Every invocation must be check
 
 ### Workspace Manager
 
-Creates and protects an execution workspace, records the original Git baseline, validates the allowed mutation scope, and supports safe recovery after interruptions. Before accepting a result, the engine verifies the changed-file manifest and trusted check receipts. Supporting arbitrary directories without Git is a separate explicit future mode; no baseline SHA may be fabricated.
+The read-only session workspace adapter **admits an existing Git tree**, verifies its baseline, constrains descriptor-based reads and holds an exclusive lease. Separately, the Linux trusted write/check runtime validates host-approved changes, manifests and check receipts; it is **not yet integrated into CLI sessions**. Crash recovery is planned. Non-Git directories remain unsupported; no baseline SHA may be fabricated.
 
 ### Model Gateway
 
 Model selection is configured by Recursive Coder rather than by a hardcoded home network, GPU, server port, model, or cloud credential. Adapters may implement testable OpenAI-compatible endpoints and other providers. Before execution, the engine negotiates tool calling, structured output, streaming, token budgets, context limits, and provider-specific incompatibilities. The CI path uses an offline deterministic fake model.
 
 ### Event Journal and durable recovery
+
+**Implemented:** Session event envelopes and a physical `:infra:journal` JSONL sink with flush/close/checksum failure handling. **Planned:** persistent checkpoints, resume fencing, replay and side-effect reconciliation ([#10](https://github.com/YuriiSokolenko/recursive-coder/issues/10)).
 
 Model, tool, policy, resource-usage, recursion, and state events have structured identifiers and parent/child correlations. Events are append-only and versioned; secret or private content is redacted before persistence.
 
@@ -88,7 +90,7 @@ Checkpoints contain hashed state snapshots and a journal of side effects. Resumi
 - **SessionRequest:** invocation source (`cli|api|scheduler`), workspace, task, model, policy, budgets, outputs, and checkpoint/resume request.
 - **SessionResult:** terminal status, diagnostics, usage completeness, hashed artifact references, and provenance.
 - **SessionEvent:** correlation, agent/tool identity, action type, timing, redaction, and available observed metrics.
-- **SessionCheckpoint:** persisted state, generation/fencing, and side-effect journal.
+- **SessionCheckpoint:** schema/fixture for planned persisted state, generation/fencing and side-effect journal; not emitted by the current CLI.
 
 Session Protocol v1.0 is **pre-release**. Incompatible versions and unsupported required capabilities are rejected explicitly rather than silently downgraded. All compatibility changes require tests and review.
 
@@ -117,14 +119,13 @@ Git-host integrations (PR creation, reviews, webhooks), IDE extensions, and task
 
 ## 6. Independent CI and quality
 
-GitHub Actions is used **solely as CI for this repository**, never as the owner of an external engineering workflow. GitHub-hosted runners execute tests without private inference hardware:
+GitHub Actions is used **solely for this repository's CI**, not as an external agent dispatcher. All three jobs run on **ephemeral guests of the dedicated self-hosted N150 KVM runner**, labeled `self-hosted, linux, x64, n150, recursive-coder-ci`; there is no GitHub-hosted fallback. Fork PR code is excluded because the repository is public. Golden Image v2 preinstalls and verifies the toolchain.
 
-- Kotlin/JVM compilation and unit tests;
-- JSON Schema Draft 2020-12 conformance and negative protocol cases;
-- deterministic fake-model CLI/integration tests;
-- planned recursive-agent, tool-policy, sandbox, and recovery tests;
-- separately gated optional live-model and performance evaluations;
-- reproducible packaged CLI release artifacts and checksums.
+- **Architecture boundaries and pure unit tests:** Gradle dependency and test-tier policies, configuration-cache regressions and pure Kotlin tests.
+- **Full JVM integration and sandbox E2E:** module builds, local Git/filesystem and mock HTTP fixtures, mandatory real bubblewrap case, installed CLI and JUnit artifacts.
+- **Versioned session contracts:** English-language documentation guard, JSON Schema Draft 2020-12, negative fixtures and Node compatibility tests.
+
+The `dev@4ed9fe8` push run passed all three jobs on 2026-10-14. Tests do not call a live inference provider. Real-model evaluation and release packaging remain planned.
 
 Every new engine module must ship with relevant tests. Live model behavior does not replace security, sandbox, or recovery proofs; model benchmark scores do not demonstrate authorization correctness.
 
@@ -139,4 +140,4 @@ Every new engine module must ship with relevant tests. Live model behavior does 
 | Durability | Event Journal, checkpoints, fenced resume, and fail-closed recovery |
 | Product | First-party task scheduling, optional daemon/API and integrations, diagnostics UI, and releases |
 
-**Implementation status:** the foundation, first offline fake-model session, trusted read-only workspace, and strict injectable OpenAI-compatible Model Gateway are present. The native Task Manager supports local DAG scheduling and safe interrupted-task reconciliation. Production Koog agent orchestration, recursive multi-agent workflows, writable tools, and session checkpoint replay are not yet available. This architecture describes requirements rather than claiming those future capabilities are implemented.
+**Implementation status (2026-11-11):** eight Gradle modules, first-party Task Manager, Task/Session Use Cases with CLI-local Koin, pure policies, read-only sessions, strict Model Gateway, physical event journal and an **independent Linux-only trusted write/check runtime** exist. The CLI remains read-only. Koog five-stage execution, recursion, crash recovery, releases and optional daemon/API are planned. This target design is not evidence that planned components are executable.

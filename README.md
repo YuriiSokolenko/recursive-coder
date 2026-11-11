@@ -1,8 +1,8 @@
 # Recursive Coder
 
-**Recursive Coder** is a standalone open-source software engineering agent built with **Kotlin/JVM and JetBrains Koog**.
+**Recursive Coder** is an in-development, standalone open-source software engineering agent built with **Kotlin/JVM**. **JetBrains Koog** is the planned orchestration framework, not part of the current production runtime.
 
-> **Current status:** The first executable command-line session engine includes `SessionController`, a trusted read-only workspace, a deterministic FakeModel, and an injectable OpenAI-compatible Model Gateway with explicit capability checks. Native local task scheduling is implemented; full Koog agent execution, recursive development, and trusted code changes are **not yet implemented**.
+> **Implementation snapshot (2026-11-11, `dev@4ed9fe8`):** The CLI has native task scheduling, a read-only session engine, FakeModel, an optional strict OpenAI-compatible Model Gateway and a trusted workspace. A separate Linux-only trusted write/check runtime exists, but **is not integrated into CLI sessions**. Koog orchestration, recursive coding, checkpoints and crash-resume are **not implemented**.
 
 ## What we are building
 
@@ -30,13 +30,13 @@ Recursive Coder itself owns its tasks and sessions. Git can manage source worksp
 
 ## Build and test
 
-The current foundation uses Kotlin 2.4.21, JDK 21, Gradle 9.8.1, and Session Protocol `1.0`. Koog execution remains planned; the existing core does not link a Koog runtime.
+The current foundation uses Kotlin 2.4.21, JDK 21, Gradle 9.8.1, Koin 4.2.2 (CLI composition root only), and Session Protocol `1.0`. Core modules do not depend on Koog, HTTP adapters or Koin.
 
-The Gradle build has six modules with explicit boundaries. The **CLI is the only application module**; core session/task logic has no production dependency on Koog or HTTP model adapters. See [Gradle module ownership](docs/architecture/MODULES.md).
+The Gradle build has **eight product modules**: `:core:contracts`, `:core:session`, `:core:tasks`, `:infra:model`, `:infra:workspace`, `:infra:task-store`, `:infra:journal`, and the only executable module, `:app:cli`. `build-logic` is an included build, not a ninth product module. See [Gradle module ownership](docs/architecture/MODULES.md).
 
 The installed distribution remains at `build/install/recursive-coder/bin/recursive-coder`, preserving the existing CLI smoke-test path.
 
-The project includes an offline deterministic fake-model CLI, a native durable task scheduler, a trusted read-only workspace boundary, and an optional user-configured HTTP model adapter. CI uses only the fake model and deterministic mock HTTP servers. For setup, supported features, sample execution, and known limitations, see **[First executable session](docs/architecture/FIRST_SESSION.md)**.
+The project includes an offline deterministic fake-model CLI, durable task queue/scheduler, trusted read-only workspace, optional configured HTTP model adapter, and physical JSONL event sink. The separately callable Linux trusted write/check runtime is **not** an enabled write-capable CLI mode. See [First executable session](docs/architecture/FIRST_SESSION.md) and [Trusted writes](docs/architecture/TRUSTED_WRITES.md).
 
 With Gradle 9.8.1 and JDK 21 installed:
 
@@ -44,7 +44,7 @@ With Gradle 9.8.1 and JDK 21 installed:
 ./gradlew test installDist
 ```
 
-The independent [GitHub Actions CI](.github/workflows/ci.yml) runs JVM and protocol checks on GitHub-hosted runners. The `checkArchitecture` Gradle task enforces production and test dependencies; `unitTest`, `integrationTest` and `e2eTest` provide focused suites while `test` remains complete. See [Testing architecture](docs/architecture/TEST_SUITES.md). The fake-model integration tests do not require a network model endpoint, personal hardware, secrets, or an external runner. Optional live-model checks will be separately gated.
+[GitHub Actions CI](.github/workflows/ci.yml) runs **only on the dedicated self-hosted N150 KVM runner** labeled `self-hosted, linux, x64, n150, recursive-coder-ci`, using the prewarmed Golden Image v2. There is **no GitHub-hosted fallback**, and fork PRs are excluded from these jobs. The three jobs cover architecture/pure unit tests, full JVM/integration/mandatory sandbox E2E and installed CLI, plus versioned contracts. The last `dev` run on 2026-10-14 passed all three jobs. Tests need no live inference provider, but the GitHub CI workflow requires the configured self-hosted runner. See [Testing architecture](docs/architecture/TEST_SUITES.md).
 
 ## Documentation
 
@@ -63,11 +63,15 @@ The independent [GitHub Actions CI](.github/workflows/ci.yml) runs JVM and proto
 
 ## Implementation roadmap
 
-1. **Session Engine:** executable CLI, `SessionController`, deterministic FakeModel, observed read-only session, native durable Task Manager and scheduler.
-2. **Workspace and Model Gateway:** trusted workspace boundaries and a capability-negotiated real model adapter.
-3. **Task Manager and recursive Agent Graph:** first-party scheduling and SDD → ATDD → TDD → Develop → Independent Review.
-4. **Trusted Tooling:** immutable specs/tests, sandboxed writes and validation, independent evidence, and policy tests.
-5. **Durability:** checkpoints, crash recovery, idempotency, fencing, and fault injection.
-6. **Product interfaces and quality:** optional API, integrations, releases, and independently reproducible coding benchmarks.
+| Milestone | Status | Issue |
+| --- | --- | --- |
+| CLI, read-only Session Runtime, Model Gateway, native Task Manager | Implemented baseline | [#4–#7](https://github.com/YuriiSokolenko/recursive-coder/issues/3) |
+| Standalone Linux trusted write/check security boundary | Implemented, not CLI-integrated | [#8](https://github.com/YuriiSokolenko/recursive-coder/issues/8) |
+| Recursive Koog SDD → ATDD → TDD → Developer → Reviewer graph | Planned | [#9](https://github.com/YuriiSokolenko/recursive-coder/issues/9) |
+| Durable checkpoints, fencing and crash recovery | Planned | [#10](https://github.com/YuriiSokolenko/recursive-coder/issues/10) |
+| Independent coding evaluation harness | Planned | [#11](https://github.com/YuriiSokolenko/recursive-coder/issues/11) |
+| Release packaging and optional daemon/API | Planned | [#12](https://github.com/YuriiSokolenko/recursive-coder/issues/12), [#13](https://github.com/YuriiSokolenko/recursive-coder/issues/13) |
+
+See [Target architecture](docs/architecture/TARGET_ARCHITECTURE.md) for the engineering decisions and [the project epic](https://github.com/YuriiSokolenko/recursive-coder/issues/3) for detailed scope.
 
 **Core principle:** Recursive Coder is designed, built, and tested as a fully independent product. External services are optional integrations, not owners of its execution lifecycle.
