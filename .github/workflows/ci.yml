@@ -103,12 +103,23 @@ jobs:
           python-version: '3.12'
       - name: Install Python contract test dependencies
         run: python -m pip install --disable-pip-version-check 'jsonschema==4.25.1'
-      # Never weaken host-wide namespace restrictions or skip the sandbox E2E.
-      - name: Install bubblewrap on this ephemeral Ubuntu VM
+      # Ubuntu 24.04 AppArmor denies unprivileged userns capabilities needed
+      # to configure the private network loopback. Load the narrowly scoped
+      # distro bwrap profile, never disable AppArmor or share host networking.
+      - name: Install bubblewrap and its restricted AppArmor profile
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends bubblewrap
+          sudo apt-get install -y --no-install-recommends bubblewrap apparmor-profiles apparmor-utils
           test -x /usr/bin/bwrap
+          if [ ! -f /etc/apparmor.d/bwrap-userns-restrict ]; then
+            test -f /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+            sudo install -m 0644 \
+              /usr/share/apparmor/extra-profiles/bwrap-userns-restrict \
+              /etc/apparmor.d/bwrap-userns-restrict
+          fi
+          sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
+          sudo aa-status | grep -i bwrap
+          test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = 1
       - name: Verify bubblewrap isolation is executable
         run: |
           /usr/bin/bwrap --die-with-parent --new-session --unshare-all \
