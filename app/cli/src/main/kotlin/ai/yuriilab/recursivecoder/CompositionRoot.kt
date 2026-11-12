@@ -58,6 +58,14 @@ internal fun roleExecutionModule(model: ModelGateway, bridge: KoogPromptBridge):
     factory<StageRoleExecutor> { KoogStageRoleExecutor(get(), get()) }
 }
 
+/**
+ * Additional explicit host-only composition for #74. The default CLI/session
+ * modules and the Koog role executor never resolve this port.
+ */
+internal fun stageToolModule(lockDirectory: java.nio.file.Path): Module = module {
+    factory<StageToolSessionOpener> { LinuxStageToolSessionOpener(lockDirectory) }
+}
+
 internal val cliWorkspaceOpener: WorkspaceOpener = WorkspaceOpener { request, onAudit, onStart ->
     WorkspaceManager.open(request, onAudit, onStart)
 }
