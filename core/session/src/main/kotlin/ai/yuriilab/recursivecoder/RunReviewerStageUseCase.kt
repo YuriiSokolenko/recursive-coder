@@ -145,9 +145,9 @@ class RunReviewerStageUseCase(
         if (command.instruction.isBlank()) return denied("EMPTY_STAGE_INSTRUCTION")
         val ready = when (stage.state) {
             StageState.CREATED -> {
-                if (StageGraphPolicy.authorizeStageTransition(
-                        original, id, StageState.READY) != StageGateDecision.Permit)
-                    return denied("STAGE_NOT_READY")
+                val transition = StageGraphPolicy.authorizeStageTransition(
+                    original, id, StageState.READY)
+                if (transition is StageGateDecision.Deny) return denied(transition.code)
                 original.copy(stages = original.stages.map {
                     if (it.correlation.stageRunId == id)
                         it.copy(state = StageState.READY) else it
@@ -293,9 +293,12 @@ class RunReviewerStageUseCase(
             // The invocation may already have consumed tokens even if a later
             // identity, decoding, or workspace gate rejects its output.
             val returnedUsage = proposal.usage
-            spentUsage = if (returnedUsage.modelRequests >= 0 &&
-                returnedUsage.inputTokens?.let { it >= 0 } != false &&
-                returnedUsage.outputTokens?.let { it >= 0 } != false)
+            val observedInput = returnedUsage.inputTokens ?: 0L
+            val observedOutput = returnedUsage.outputTokens ?: 0L
+            spentUsage = if (returnedUsage.modelRequests in 0..1 &&
+                observedInput in 0..running.budget.maxTokens &&
+                observedOutput >= 0 && observedOutput <= command.model.maxOutputTokens &&
+                observedOutput <= running.budget.maxTokens - observedInput)
                 returnedUsage else StageRoleUsage()
             checkpoint()?.let { return abort(it) }
             if (proposal.correlation != stage.correlation ||
