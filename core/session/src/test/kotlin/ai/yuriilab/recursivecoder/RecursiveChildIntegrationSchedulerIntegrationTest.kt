@@ -255,6 +255,93 @@ class RecursiveChildIntegrationSchedulerIntegrationTest {
         assertEquals(RecursiveExecutionOutcome.Completed, result)
     }
 
+    @Test fun unrelatedSiblingCancellationDoesNotInvalidateIntegrationOrCompletion() = runBlocking {
+        lateinit var scheduler: RecursiveGraphScheduler
+        lateinit var unrelated: RecursiveNode
+        var verificationReads = 0
+        val host = object : FakeTrustedHost() {
+            override fun manifestsFor(child: RecursiveNode): List<StageArtifactManifest>? {
+                verificationReads++
+                if (verificationReads == 2) {
+                    // Change a sibling while A's terminal evidence is being read.
+                    assertTrue(scheduler.cancel(unrelated.graphId))
+                }
+                return super.manifestsFor(child)
+            }
+        }
+        scheduler = scheduler(StageKind.SDD, host, mutableListOf())
+        val outcome = scheduler.execute(scheduler.rootGraphId, RecursiveStageExecutor { root ->
+            val first = assertIs<RecursiveDecision.Allowed>(root.requestChild(
+                proposal(root, "request-first", "first-task",
+                    setOf("specs/Parent.md", "specs/Leaf.md"), tokens = 80))).child
+            unrelated = assertIs<RecursiveDecision.Allowed>(root.requestChild(
+                proposal(root, "request-other", "other-task",
+                    setOf("specs/Root.md"), tokens = 40))).child
+            val firstOutcome = scheduler.execute(first.graphId, RecursiveStageExecutor { parent ->
+                val leaf = assertIs<RecursiveDecision.Allowed>(parent.requestChild(
+                    proposal(parent, "request-leaf", "leaf-task",
+                        setOf("specs/Leaf.md")))).child
+                assertEquals(RecursiveExecutionOutcome.Completed, scheduler.execute(
+                    leaf.graphId, RecursiveStageExecutor {
+                        host.accept(leaf, "specs/Leaf.md")
+                        RecursiveExecutionOutcome.Completed
+                    }))
+                assertIs<ChildIntegrationDecision.Accepted>(parent.integrateChildren())
+                host.accept(first, "specs/Parent.md")
+                RecursiveExecutionOutcome.Completed
+            })
+            assertEquals(RecursiveExecutionOutcome.Completed, firstOutcome)
+            assertEquals(RecursiveNodeState.CANCELLED,
+                scheduler.current().node(unrelated.graphId)?.state)
+            RecursiveExecutionOutcome.Completed
+        })
+        assertEquals(RecursiveExecutionOutcome.Failed("CHILD_WORK_INCOMPLETE"), outcome)
+        assertEquals(2, verificationReads)
+    }
+
+    @Test fun staleAttemptAndPreviousSuccessesCannotStrandNewChildIntegration() = runBlocking {
+        lateinit var scheduler: RecursiveGraphScheduler
+        lateinit var parentContext: RecursiveStageContext
+        var inserted: RecursiveNode? = null
+        val host = object : FakeTrustedHost() {
+            override fun manifestsFor(child: RecursiveNode): List<StageArtifactManifest>? {
+                if (inserted == null) {
+                    inserted = assertIs<RecursiveDecision.Allowed>(parentContext.requestChild(
+                        proposal(parentContext, "request-new", "new-task",
+                            setOf("specs/Leaf.md")))).child
+                }
+                return super.manifestsFor(child)
+            }
+        }
+        scheduler = scheduler(StageKind.SDD, host, mutableListOf())
+        val outcome = scheduler.execute(scheduler.rootGraphId, RecursiveStageExecutor { root ->
+            // Exhaust the old generation with accepted empty integrations.
+            repeat(16) { assertIs<ChildIntegrationDecision.Accepted>(root.integrateChildren()) }
+            val first = assertIs<RecursiveDecision.Allowed>(root.requestChild(
+                proposal(root, "request-first", "first-task",
+                    setOf("specs/Parent.md")))).child
+            assertEquals(RecursiveExecutionOutcome.Completed, scheduler.execute(
+                first.graphId, RecursiveStageExecutor {
+                    host.accept(first, "specs/Parent.md")
+                    RecursiveExecutionOutcome.Completed
+                }))
+            parentContext = root
+            // Admission from the host evidence callback invalidates the captured
+            // frame. Stale must not consume an irrecoverable integration budget.
+            assertEquals("CHILD_INTEGRATION_STALE",
+                assertIs<ChildIntegrationDecision.Denied>(root.integrateChildren()).code)
+            val next = requireNotNull(inserted)
+            assertEquals(RecursiveExecutionOutcome.Completed, scheduler.execute(
+                next.graphId, RecursiveStageExecutor {
+                    host.accept(next, "specs/Leaf.md")
+                    RecursiveExecutionOutcome.Completed
+                }))
+            assertIs<ChildIntegrationDecision.Accepted>(root.integrateChildren())
+            RecursiveExecutionOutcome.Completed
+        })
+        assertEquals(RecursiveExecutionOutcome.Completed, outcome)
+    }
+
     @Test fun swallowedEventWriteFailureIsVisibleToHost() = runBlocking {
         val scheduler = scheduler(StageKind.REVIEW, FakeTrustedHost(), mutableListOf(),
             RecursiveEventSink { error("Event sink unavailable") })
