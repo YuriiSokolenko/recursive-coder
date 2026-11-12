@@ -420,7 +420,7 @@ class StageToolSessionIntegrationTest {
         val fixture = fixture("review-denied")
         val frozen = graph(StageKind.SDD, fixture, freezeOwn = true)
         val base = snapshot(StageKind.SDD, fixture, frozen)
-        val valid = reviewedRevision(fixture, frozen)
+        val valid = reviewedRevision(frozen)
         val opener = LinuxStageToolSessionOpener(temp.resolve("locks"))
         fun denied(candidate: StageToolHostSnapshot): String =
             (opener.open(StageToolAuthoritySource { candidate }) as StageToolOpenResult.Denied).code
