@@ -81,3 +81,5 @@ With Gradle 9.8.1 and JDK 21 installed:
 See [Target architecture](docs/architecture/TARGET_ARCHITECTURE.md) for the engineering decisions and [the project epic](https://github.com/YuriiSokolenko/recursive-coder/issues/3) for detailed scope.
 
 **Core principle:** Recursive Coder is designed, built, and tested as a fully independent product. External services are optional integrations, not owners of its execution lifecycle.
+
+- [Independent Reviewer stage and bounded repair](docs/architecture/REVIEWER_STAGE.md)
