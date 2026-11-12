@@ -49,6 +49,7 @@ With Gradle 9.8.1 and JDK 21 installed:
 ## Documentation
 
 - [Architecture and engineering roadmap](docs/architecture/ARCHITECTURE.md)
+- [Stage graph contracts and policy gates (#72)](docs/architecture/STAGE_GRAPH.md)
 - [Gradle modules and dependency rules](docs/architecture/MODULES.md)
 - [First executable CLI session](docs/architecture/FIRST_SESSION.md)
 - [Native Task Manager and local scheduling](docs/architecture/TASK_MANAGER.md)
