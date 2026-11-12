@@ -38,9 +38,9 @@ sealed interface StageRoleOutcome {
 }
 
 data class StageRoleResult(
-    val correlation: StageCorrelation,
+    val correlation: StageCorrelation?,
     val role: EngineeringRole,
-    val agentId: AgentId,
+    val agentId: AgentId?,
     val outcome: StageRoleOutcome,
     val usage: StageRoleUsage
 )
