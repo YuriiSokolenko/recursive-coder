@@ -525,11 +525,12 @@ class StageToolSessionIntegrationTest {
         }
     }
 
-
     /**
      * The authority source deliberately changes on the specified read.
-     * Open checks it twice; write/check/verify each check it before and
-     * after accessing the trusted runtime. No threads or timing races.
+     * Read 1 = initial open; 2 = post-lease open; 3/4 = before/after write;
+     * 5/6 = before/after runCheck; 7/8 = before/after verify.
+     * The tests change authority on reads 2, 4, 6 and 8 respectively.
+     * This is deterministic and needs no threads or timing races.
      */
     private fun revokeOnRead(
         snapshot: StageToolHostSnapshot, changedOnRead: Int
@@ -651,6 +652,12 @@ class StageToolSessionIntegrationTest {
             StageToolHostSnapshot::class.java to setOf(
                 "hostAcceptedArtifactIds", "checks", "requiredChecks"),
             StageGraph::class.java to setOf("stages", "artifacts", "children"),
+            GraphCorrelation::class.java to emptySet(),
+            StageCorrelation::class.java to emptySet(),
+            StageArtifactManifest::class.java to emptySet(),
+            StageReviewDecision::class.java to emptySet(),
+            StageRevisionAuthorization::class.java to emptySet(),
+            StageBudget::class.java to emptySet(),
             StageNode::class.java to setOf(
                 "dependencies", "inputArtifacts", "outputArtifacts"),
             ChildGraphReference::class.java to setOf("dependsOnStages"),
