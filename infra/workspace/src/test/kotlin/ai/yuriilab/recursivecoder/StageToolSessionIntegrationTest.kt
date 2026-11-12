@@ -364,9 +364,6 @@ class StageToolSessionIntegrationTest {
         val opener = LinuxStageToolSessionOpener(temp.resolve("locks"))
         fun denied(state: StageToolHostSnapshot): String =
             (opener.open(StageToolAuthoritySource { state }) as StageToolOpenResult.Denied).code
-        val missing = valid.copy(graph = valid.graph.copy(stages = valid.graph.stages.map {
-            if (it.kind == StageKind.ATDD) it.copy(inputArtifacts = emptySet()) else it
-        }))
         // Use a separate clean fixture for denial cases because the first
         // successful write intentionally dirties its working tree.
         val clean = fixture("running-denied")
@@ -381,7 +378,7 @@ class StageToolSessionIntegrationTest {
     }
 
     private fun reviewedRevision(
-        f: Fixture, graph: StageGraph,
+        graph: StageGraph,
         digestOverride: String? = null,
         reviewer: String = "agent-reviewer"
     ): StageRevisionAuthorization {
@@ -404,7 +401,7 @@ class StageToolSessionIntegrationTest {
     @Test fun independentReviewAllowsOnlyTheExactFrozenRevision() {
         val fixture = fixture("review-positive")
         val frozen = graph(StageKind.SDD, fixture, freezeOwn = true)
-        val revision = reviewedRevision(fixture, frozen)
+        val revision = reviewedRevision(frozen)
         open(snapshot(StageKind.SDD, fixture, frozen).copy(revisionAuthorization = revision))
             .use { session ->
                 val previous = digest(fixture.contents.getValue("specs/Feature.md"))
