@@ -102,6 +102,31 @@ class RecursiveGraphScheduler(
         val version: Long
     )
 
+    /**
+     * Only topology, authority and terminal state affect artifact integration.
+     * Usage/delegation accounting never changes which trusted child outputs exist.
+     * The scheduler admits at most 512 children, so ancestry scans are bounded.
+     */
+    private fun evidenceNodes(source: RecursiveSnapshot, parentId: GraphId): List<RecursiveNode> {
+        val byId = source.nodes.associateBy { it.graphId }
+        return source.nodes.filter { node ->
+            var cursor: GraphId? = node.graphId
+            while (cursor != null && cursor != parentId) {
+                cursor = byId[cursor]?.parentGraphId
+            }
+            cursor == parentId
+        }.map { it.copy(spent = RecursiveUsage(), delegated = RecursiveUsage()) }
+    }
+
+    /** Unrelated sibling changes must not invalidate a parent's child evidence. */
+    private fun evidenceUnchanged(parentId: GraphId, frame: IntegrationFrame): Boolean {
+        if (mutationVersion == frame.version) return true
+        val before = evidenceNodes(frame.snapshot, parentId)
+        if (before != evidenceNodes(snapshot, parentId)) return false
+        val ids = before.mapTo(mutableSetOf()) { it.graphId }
+        return frame.nested.filterKeys { it in ids } == integrated.filterKeys { it in ids }
+    }
+
     /** A host-visible telemetry failure latch; persistent workflows must also verify journal.finish(). */
     val eventDeliveryFailed: Boolean get() = synchronized(lock) { eventSinkFailed }
 
@@ -219,8 +244,10 @@ class RecursiveGraphScheduler(
 
     /**
      * Reserve a bounded integration attempt under the lock, perform all host I/O
-     * outside it, then commit only if the authoritative graph version is intact.
-     * A repeated identical denial is journaled once per parent.
+     * outside it, then commit only if the relevant subtree evidence is intact.
+     * Rejected requests remain bounded; stale attempts are refunded, and admitting
+     * a new child starts a new integration generation. Identical denials are
+     * journaled only once within a generation.
      */
     internal fun integrateFrom(context: RecursiveStageContext): ChildIntegrationDecision {
         val frame = synchronized(lock) {
@@ -244,8 +271,8 @@ class RecursiveGraphScheduler(
         return synchronized(lock) {
             val parent = snapshot.node(context.graphId)
                 ?: return@synchronized ChildIntegrationDecision.Denied("UNKNOWN_PARENT")
-            val decision = if (mutationVersion != frame.version ||
-                parent.state != RecursiveNodeState.RUNNING) {
+            val decision = if (parent.state != RecursiveNodeState.RUNNING ||
+                !evidenceUnchanged(parent.graphId, frame)) {
                 ChildIntegrationDecision.Denied("CHILD_INTEGRATION_STALE")
             } else checked
             when (decision) {
@@ -253,14 +280,21 @@ class RecursiveGraphScheduler(
                     if (integrated[parent.graphId] != decision.results) {
                         integrated[parent.graphId] = decision.results
                         mutationVersion++
+                        emittedIntegrationDenials.remove(parent.graphId)
                         for (child in decision.results.childOrder) {
                             emit(parent, RecursiveEventKind.INTEGRATED,
                                 child = child, requestId = snapshot.node(child)?.requestId)
                         }
                     }
                 }
-                is ChildIntegrationDecision.Denied ->
+                is ChildIntegrationDecision.Denied -> {
+                    if (decision.code == "CHILD_INTEGRATION_STALE") {
+                        // A concurrent subtree mutation is not an executor retry.
+                        attemptedIntegrations[parent.graphId] = maxOf(0,
+                            (attemptedIntegrations[parent.graphId] ?: 0) - 1)
+                    }
                     emitIntegrationDenial(parent, decision.code)
+                }
             }
             decision
         }
@@ -345,6 +379,8 @@ class RecursiveGraphScheduler(
                     snapshot = candidate
                     mutationVersion++
                     integrated.remove(parent.graphId)
+                    attemptedIntegrations.remove(parent.graphId)
+                    emittedIntegrationDenials.remove(parent.graphId)
                     tokens[child.graphId] = Cancellation()
                     emit(child, RecursiveEventKind.CHILD_RESERVED, child = child.graphId)
                     decision
@@ -491,8 +527,8 @@ class RecursiveGraphScheduler(
         } catch (_: Exception) {
             RecursiveExecutionOutcome.Failed("STAGE_EXECUTOR_FAILED")
         }
-        // Re-verify physical evidence outside the scheduler lock. Any concurrent
-        // graph mutation invalidates the captured version at terminal commit.
+        // Re-verify physical evidence outside the scheduler lock. Only concurrent
+        // changes to this stage's subtree invalidate the frame at terminal commit.
         val completionFrame = synchronized(lock) {
             if (outcome == RecursiveExecutionOutcome.Completed && integrationHost != null &&
                 snapshot.nodes.any { it.parentGraphId == id } && integrated[id] != null)
@@ -525,7 +561,7 @@ class RecursiveGraphScheduler(
                 outcome == RecursiveExecutionOutcome.Completed && integrationHost != null &&
                     snapshot.nodes.any { it.parentGraphId == id } &&
                     (completionFrame == null ||
-                        mutationVersion != completionFrame.version ||
+                        !evidenceUnchanged(id, completionFrame) ||
                         (terminalEvidence as? ChildIntegrationDecision.Accepted)?.results !=
                             integrated[id]) ->
                     RecursiveExecutionOutcome.Failed("CHILD_INTEGRATION_STALE")
