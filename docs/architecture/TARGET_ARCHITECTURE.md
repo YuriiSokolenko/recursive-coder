@@ -90,8 +90,9 @@ Use typed domain states/outcomes where meaningful. Treat serialized wire DTOs as
 
 ## 5. Modules: actual vs. conditional target
 
-### Implemented modules (eight)
+### Implemented modules (nine)
 
+- `:agent:runtime` — opt-in minimal Koog single-role executor behind the `StageRoleExecutor` core port (issue #73); no trusted tools or production free-form model backend yet.
 - `:core:contracts` — shared protocol/request types, model/workspace contracts and pure authorization policy.
 - `:core:tasks` — Task state/DAG policy, Use Cases, scheduler and repository ports.
 - `:core:session` — Session Use Cases, lifecycle/admission/budget policies and event envelopes.
@@ -105,7 +106,7 @@ The included `build-logic` Gradle build is not a ninth product module. Core poli
 
 ### Conditional future modules — add only with working implementations
 
-- `:agent:runtime` when Koog-backed recursive role execution is implemented ([#9](https://github.com/YuriiSokolenko/recursive-coder/issues/9)).
+- Deeper role orchestration, recursive dispatch, and artifact acceptance may expand the existing `:agent:runtime` after #73; they are **not** implemented by the minimal single-role adapter ([#9](https://github.com/YuriiSokolenko/recursive-coder/issues/9)).
 - `:infra:tools` only if independently owned sandbox/write/check operations justify extraction from `:infra:workspace`.
 
 Do not create empty speculative modules. Task Store and Journal adapters are already extracted.

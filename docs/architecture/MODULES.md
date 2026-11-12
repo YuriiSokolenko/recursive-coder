@@ -1,9 +1,10 @@
 # Gradle multi-module boundaries
 
-**Current layout:** eight product modules are included in `settings.gradle.kts` (verified 2026-11-11 at `dev@4ed9fe8`). Issue #22 introduced six; #27 added `:infra:task-store` and #29 added `:infra:journal`. The Gradle root `recursive-coder` and the included `build-logic` build are not additional product modules.
+**Current layout:** nine product modules are included in `settings.gradle.kts` (issue #73). Issue #22 introduced six; #27 added `:infra:task-store`, #29 added `:infra:journal`, and #73 adds `:agent:runtime`. The Gradle root `recursive-coder` and the included `build-logic` build are not additional product modules.
 
 | Module | Ownership | Production project dependencies |
 | --- | --- | --- |
+| `:agent:runtime` | One role-scoped Koog execution adapter, offline fake prompt bridge, metering and sanitized proposal events | `:core:contracts` |
 | `:core:contracts` | Session Protocol support, request validation, model/workspace contracts, shared value types and pure tool authorization | none |
 | `:core:session` | `RunSessionUseCase` + `DefaultRunSessionUseCase`, compatibility Session Controller, deadline/budget enforcement, admission policy and event journal | `:core:contracts` |
 | `:core:tasks` | Task command/query and scheduler-attempt Use Case interfaces and implementations, TaskService façade, policy, repository port and scheduler | `:core:contracts` |
@@ -11,14 +12,18 @@
 | `:infra:workspace` | Workspace Manager, restricted Git and trusted write/check runtime | `:core:contracts` |
 | `:infra:task-store` | Durable tasks.json snapshot, file locks and atomic replacement | `:core:tasks`, `:core:contracts` |
 | `:infra:journal` | JSONL append/flush/close and physical event-log SHA-256 | `:core:session`, `:core:contracts` |
-| `:app:cli` | Clikt command entry point and Koin 4.2.2 interface-to-implementation bindings/composition | all seven libraries |
+| `:app:cli` | Clikt command entry point and Koin 4.2.2 interface-to-implementation bindings/composition | all eight libraries |
 
 ```text
-                      :app:cli  (only executable)
-                    /     |        |          \
-           :core:session :core:tasks :infra:model :infra:workspace :infra:task-store :infra:journal
-                    \     |        |          /
-                         :core:contracts
+:app:cli         -> :agent:runtime, :core:contracts, :core:session, :core:tasks,
+                    :infra:model, :infra:workspace, :infra:task-store, :infra:journal
+:agent:runtime   -> :core:contracts
+:core:session    -> :core:contracts
+:core:tasks      -> :core:contracts
+:infra:model     -> :core:contracts
+:infra:workspace -> :core:contracts
+:infra:task-store -> :core:tasks, :core:contracts
+:infra:journal   -> :core:session, :core:contracts
 ```
 
 Production dependencies point from the composition root and adapters toward the core contracts; no core module depends on the CLI, Koog, or the HTTP model implementation. The concrete workspace opener, model provider and JSONL EventSink are injected by `:app:cli` using Koin factories and constructor injection; Koin is not present in any core module. The scheduler accepts a `TaskRunner` instead of constructing a model adapter. Session Protocol JSON Schema and fixtures remain at the repository root under `contracts/v1/` and continue to be validated independently by Node/Python CI.
@@ -57,9 +62,16 @@ and tasks.json v1 format are not changed. Validation of JSON shape is never a su
 for Session admission or trusted workspace checks. Mapping exceptions use stable messages
 rather than echoing inbound request text.
 
-## Koog dependency
+## Koog dependency (issue #73)
 
-The previously unused `ai.koog:koog-agents:1.3.0` dependency was deliberately dropped from the original root application as part of this structural split. No production source imports it; therefore removing it changes dependency resolution checks, **not current runtime behavior**. The renamed JVM CI job no longer verifies Koog artifact availability. When Koog-backed orchestration is implemented in a future `:agent:runtime` module, restore a tested, module-scoped Koog dependency and CI coverage.
+The Koog dependency `ai.koog:koog-agents:1.3.0` is now confined to
+`:agent:runtime`, which implements an opt-in `StageRoleExecutor` port
+owned by `:core:contracts`. `:app:cli` binds this port in a separate
+Koin module but does not select it in any existing CLI/session route. This currently adds Koog transitive dependencies to `installDist`; decoupling packaging is deferred until a production caller/packaging profile exists.
+The adapter uses only a deterministic fake-model compatibility bridge
+until a production free-form role gateway is implemented and reviewed.
+See [Koog role execution](KOOG_STAGE_EXECUTION.md) for trust, metering,
+capability and test boundaries.
 
 ## Build and test
 
@@ -82,7 +94,7 @@ Shared Kotlin/JVM 21 and JUnit settings live in the `build-logic` included build
 
 ## Deliberately deferred
 
-The current code does not justify empty `:agent:runtime` or `:infra:tools` modules. When recursive Koog orchestration and an independently owned tool execution layer exist, those modules can be extracted with focused boundary tests. Until then the trusted write/check implementation remains alongside restricted Git in `:infra:workspace`.
+`:agent:runtime` is no longer speculative: issue #73 introduces a working, independently tested, fake-only Koog role adapter. A separate `:infra:tools` module is still deferred until a distinct trusted-tool layer exists. The trusted write/check implementation remains alongside restricted Git in `:infra:workspace`.
 
 
 ## Verified architecture and test tiers (issue #25)
@@ -99,4 +111,4 @@ The TaskRepository port currently owns atomic reads, read-decide-write mutations
 
 ## CI ownership and runtime status
 
-All three jobs in [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) run on GitHub-hosted `ubuntu-24.04` since merged [PR #71](https://github.com/YuriiSokolenko/recursive-coder/pull/71), with pinned Gradle/JDK and required Linux sandbox E2E; no N150 runner is selected. Tests use fake/model-mock or local sandbox fixtures. Koog/recursive agent execution is **not** linked into the eight current modules. The Linux-only `TrustedWriteRuntime` belongs to `:infra:workspace`, where it is separately tested, but it is **not** an enabled CLI write session.
+All three jobs in [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) run on GitHub-hosted `ubuntu-24.04` since merged [PR #71](https://github.com/YuriiSokolenko/recursive-coder/pull/71), with pinned Gradle/JDK and required Linux sandbox E2E; no N150 runner is selected. Tests use fake/model-mock or local sandbox fixtures. A minimal Koog role adapter is linked only through the opt-in CLI Koin binding; recursive orchestration is **not** enabled in CLI sessions. The current build has nine product modules. The Linux-only `TrustedWriteRuntime` belongs to `:infra:workspace`, where it is separately tested, but it is **not** an enabled CLI write session.

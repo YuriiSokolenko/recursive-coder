@@ -4,6 +4,7 @@ plugins {
 }
 
 dependencies {
+    implementation(project(":agent:runtime"))
     implementation(project(":core:contracts"))
     implementation(project(":core:session"))
     implementation(project(":core:tasks"))
