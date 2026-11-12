@@ -92,7 +92,7 @@ class RecursiveChildIntegrationPolicyUnitTest {
             listOf(rb.manifest)))
         denied("CHILD_ARTIFACT_ID_CONFLICT", decide(receipts = mapOf(
             a to listOf(ra), b to listOf(rb.copy(manifest = rb.manifest.copy(
-                id = ra.manifest.id)))))
+                id = ra.manifest.id))))))
         denied("CHILD_ARTIFACT_SCOPE_DENIED", decide(receipts = mapOf(
             a to listOf(ra.copy(manifest = ra.manifest.copy(
                 declaredPath = "src/main/Illegal.kt"))), b to listOf(rb))))
