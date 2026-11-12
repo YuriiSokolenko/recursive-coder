@@ -72,8 +72,13 @@ fun interface ReviewerDecisionSink {
  * verifyDeveloperEvidence MUST check real, host-retained receipt provenance,
  * exact check policy, tool/baseline identity, manifest and workspace digests,
  * not just StageCheckEvidence.passed or a model assertion. It must fail closed
- * if the checked workspace changed. finishStage must recheck this itself,
- * enforce ReviewerStageFinishPolicy and commit atomically under the generation.
+ * if the checked workspace changed. The finishStage CAS must recheck all
+ * frozen artifact digests, changed-file postimages, receipt provenance and
+ * lease state under the SAME serialization boundary as the commit. A
+ * separate pre-finish check is never sufficient: a concurrent edit between
+ * that check and CAS MUST deny the commit. On denial, no review is accepted;
+ * the caller must reconcile/abort the still-active lease.
+ * The host also enforces ReviewerStageFinishPolicy at commit time.
  * The reviewer is never allowed to approve its own review ID or grant a write.
  */
 interface ReviewerStageHost {
@@ -140,9 +145,15 @@ object ReviewerStageFinishPolicy {
         if (decision.verdict != ReviewerDisposition.ACCEPT &&
             (after.state != StageState.REJECTED ||
                 (decision.verdict == ReviewerDisposition.REJECT &&
-                    decision.scope != ReviewerCorrectionScope.IMPLEMENTATION_ONLY) ||
+                    (decision.scope != ReviewerCorrectionScope.IMPLEMENTATION_ONLY ||
+                        decision.reasonCode != "IMPLEMENTATION_DEFECT")) ||
                 (decision.verdict == ReviewerDisposition.NEEDS_HUMAN &&
-                    decision.scope == ReviewerCorrectionScope.IMPLEMENTATION_ONLY)))
+                    (decision.reasonCode !in setOf("FROZEN_ARTIFACT_CHANGE",
+                        "EVIDENCE_MISSING", "CHECK_FAILED", "OTHER_REQUIRES_HUMAN") ||
+                        (decision.reasonCode == "FROZEN_ARTIFACT_CHANGE" &&
+                            decision.scope != ReviewerCorrectionScope.FROZEN_INPUTS) ||
+                        (decision.reasonCode != "FROZEN_ARTIFACT_CHANGE" &&
+                            decision.scope != ReviewerCorrectionScope.NONE)))))
             return deny("INVALID_REJECTION")
         val checkIds = handoff.validation.requiredChecks.map { it.checkId }
         val refs = (handoff.changedFiles.map { "file:" + it.path } +
@@ -193,21 +204,25 @@ object ReviewerRepairPlanner {
             it.correlation.stageRunId == rejectedReviewId &&
                 it.kind == StageKind.REVIEW && it.supersededBy == null
         } ?: return deny("INVALID_REJECTED_REVIEW")
+        val record = review.review ?: return deny("UNAUTHORIZED_REPAIR")
         if (review.state != StageState.REJECTED ||
-            review.review?.verdict != ReviewVerdict.REQUEST_CHANGES ||
+            record.verdict != ReviewVerdict.REQUEST_CHANGES ||
             verifiedDecision.correlation != review.correlation ||
             verifiedDecision.verdict != ReviewerDisposition.REJECT ||
             verifiedDecision.scope != ReviewerCorrectionScope.IMPLEMENTATION_ONLY ||
-            verifiedDecision.reviewedManifestSha256 != review.review.reviewedSha256 ||
+            verifiedDecision.reasonCode != "IMPLEMENTATION_DEFECT" ||
+            verifiedDecision.reviewedManifestSha256 != record.reviewedSha256 ||
             rejectedReviewId !in hostVerifiedReviewIds ||
             StageGraphPolicy.authorizeReview(graph, rejectedReviewId,
                 hostVerifiedReviewIds) != StageGateDecision.Permit)
             return deny("UNAUTHORIZED_REPAIR")
         val developer = graph.stages.singleOrNull {
-            it.correlation.stageRunId == review.review.targetStageRunId &&
+            it.correlation.stageRunId == record.targetStageRunId &&
                 it.kind == StageKind.DEVELOP && it.state == StageState.ACCEPTED &&
                 it.supersededBy == null
         } ?: return deny("INVALID_DEVELOPER_HANDOFF")
+        // Every historical Developer attempt consumes one slot; the original
+        // attempt is free, additional attempts are bounded by maxDeveloperRetries.
         if (graph.stages.count { it.kind == StageKind.DEVELOP } > maxDeveloperRetries)
             return deny("RETRY_LIMIT_EXHAUSTED")
         if (nextDeveloper.stageRunId == nextReviewer.stageRunId ||
@@ -229,7 +244,7 @@ object ReviewerRepairPlanner {
             agentId = reviewerAgent,
             dependencies = (review.dependencies - developer.correlation.stageRunId) +
                 nextDeveloper.stageRunId,
-            inputArtifacts = review.inputArtifacts - review.review.implementationArtifactId,
+            inputArtifacts = review.inputArtifacts - record.implementationArtifactId,
             review = null, supersededBy = null
         )
         val next = graph.copy(stages = graph.stages.map {
