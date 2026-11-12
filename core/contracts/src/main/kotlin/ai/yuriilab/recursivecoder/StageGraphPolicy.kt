@@ -194,7 +194,7 @@ object StageGraphPolicy {
                 stage.outputArtifacts.any { id ->
                     val artifact = graph.artifacts.firstOrNull { it.id == id }
                     artifact?.approval != ArtifactApproval.ACCEPTED ||
-                        artifact.freeze != ArtifactFreeze.FROZEN ||
+                        artifact?.freeze != ArtifactFreeze.FROZEN ||
                         id !in hostAcceptedArtifactIds
                 })
                 return deny("UNACCEPTED_STAGE_OUTPUT")
