@@ -151,7 +151,20 @@ jobs:
               case.find(tag) is not None for case in cases for tag in ("skipped", "failure", "error")
           ):
               raise SystemExit("Sandbox integration MUST run and pass exactly once in CI")
-          print("Verified sandbox integration executed and passed (0 skips).")
+          stage_port = [
+              case
+              for path in files
+              for case in ET.parse(path).iter("testcase")
+              if case.get("name", "").startswith(
+                  "stageToolPortUsesRealIsolatedCheckWithoutSkippingInCi"
+              )
+          ]
+          if len(stage_port) != 1 or any(
+              case.find(tag) is not None
+              for case in stage_port for tag in ("skipped", "failure", "error")
+          ):
+              raise SystemExit("Stage tool sandbox E2E MUST pass with 0 skips")
+          print("Verified existing sandbox and stage tool sandbox E2E (0 skips).")
           PY
       - name: Verify focused integration excludes sandbox and E2E includes it once
         run: |
@@ -166,13 +179,23 @@ jobs:
           integration = read_cases("integrationTest")
           e2e = read_cases("e2eTest")
           sandbox = [case for case in e2e if case.get("name", "").startswith(marker)]
+          stage_port = [
+              case for case in e2e
+              if case.get("name", "").startswith(
+                  "stageToolPortUsesRealIsolatedCheckWithoutSkippingInCi")
+          ]
           if not integration or any(case.get("name", "").startswith(marker) for case in integration):
               raise SystemExit("integrationTest must run ordinary integration tests but exclude sandbox E2E")
           if len(sandbox) != 1 or any(
               case.find(tag) is not None for case in sandbox for tag in ("skipped", "failure", "error")
           ):
               raise SystemExit("e2eTest must select exactly one passing sandbox test")
-          print("Verified focused integration excludes sandbox; focused E2E runs it once.")
+          if len(stage_port) != 1 or any(
+              case.find(tag) is not None
+              for case in stage_port for tag in ("skipped", "failure", "error")
+          ):
+              raise SystemExit("Focused stage tool E2E must execute once without skips")
+          print("Verified focused integration excludes sandbox; focused E2E runs both once.")
           PY
       - name: Publish Kotlin JUnit results
         if: always()
