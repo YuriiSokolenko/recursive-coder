@@ -666,5 +666,4 @@ class StageToolSessionIntegrationTest {
                 "Review StageToolHostSnapshot.frozen() when " + type.simpleName + " changes")
         }
     }
-
 }
