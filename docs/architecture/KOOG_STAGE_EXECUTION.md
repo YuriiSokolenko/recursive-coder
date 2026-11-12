@@ -63,9 +63,10 @@ session/coroutine cancellation records to reconcile such attempts.
 
 ## Deferred work and trust
 
-This adapter deliberately provides **no workspace or write tools**. Scoped
-workspace tools and host revalidation belong to #74; artifact production,
-stage acceptance and independent review belong to #75–#77; recursion and
+This Koog adapter deliberately provides **no model-facing workspace or write tools**.
+Issue #74 separately provides a host-only, explicitly admitted stage tool
+port (see `STAGE_TOOL_AUTHORITY.md`), without changing this empty Koog registry;
+artifact production, stage acceptance and independent review belong to #75–#77; recursion and
 cross-stage budget reservation belong to #78; end-to-end correlated
 session event integration belongs to #79; durable recovery belongs to #10.
 
