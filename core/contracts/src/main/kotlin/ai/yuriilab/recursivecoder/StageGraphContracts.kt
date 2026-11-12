@@ -23,7 +23,8 @@ package ai.yuriilab.recursivecoder
 enum class StageArtifactKind { REQUIREMENTS, ACCEPTANCE_TESTS, UNIT_TESTS, IMPLEMENTATION }
 
 /**
- * Every role has a separate identity and explicit input/output contract.
+ * Each role has an explicit input/output contract and is assigned a distinct
+ * actor identity by graph validation, regardless of model backend.
  * REVIEW outputs a typed verdict, not an artifact that can approve itself.
  */
 enum class StageKind(
@@ -101,7 +102,9 @@ data class StageNode(
     val dependencies: Set<StageRunId> = emptySet(),
     val inputArtifacts: Set<ArtifactId> = emptySet(),
     val outputArtifacts: Set<ArtifactId> = emptySet(),
-    val review: StageReviewDecision? = null
+    val review: StageReviewDecision? = null,
+    /** Retains the terminal result as history while replacing this attempt with a later one. */
+    val supersededBy: StageRunId? = null
 )
 
 /**
