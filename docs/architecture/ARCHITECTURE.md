@@ -35,7 +35,7 @@ This project is not a plugin for another orchestration platform. Cloud providers
 
 ### Current Gradle module boundaries
 
-The implemented compile-time module graph is documented in [Gradle modules](MODULES.md). The CLI alone assembles session, task, model and workspace implementations; both core engines compile against shared contracts and do not import HTTP or Koog adapters. The `:agent:runtime` module contains the minimal Koog single-role adapter. Issue #74 adds an independently admitted Linux-only stage tool port over the existing trusted write/check runtime; it is not a model-facing Koog tool and the CLI remains read-only. See [Koog stage execution](KOOG_STAGE_EXECUTION.md), [stage tool authority](STAGE_TOOL_AUTHORITY.md), [host-approved SDD, ATDD and TDD preparation stages](PREPARATION_STAGES.md), and [Developer implementation stage](DEVELOPER_STAGE.md), plus the [independent Reviewer and bounded repair](REVIEWER_STAGE.md). The #75 preparation and #76 Developer use cases use trusted host CAS leases and produce verified, frozen handoffs. Issue #77 adds an independently leased, read-only `RunReviewerStageUseCase` and a pure bounded repair planner; five sequential roles are exercised in offline FakeModel tests. Production five-role orchestration is **not** exposed through the CLI. Recursive orchestration and a separate trusted-tool module remain future milestones.
+The implemented compile-time module graph is documented in [Gradle modules](MODULES.md). The CLI alone assembles session, task, model and workspace implementations; both core engines compile against shared contracts and do not import HTTP or Koog adapters. The `:agent:runtime` module contains the minimal Koog single-role adapter. Issue #74 adds an independently admitted Linux-only stage tool port over the existing trusted write/check runtime; it is not a model-facing Koog tool and the CLI remains read-only. See [Koog stage execution](KOOG_STAGE_EXECUTION.md), [stage tool authority](STAGE_TOOL_AUTHORITY.md), [host-approved SDD, ATDD and TDD preparation stages](PREPARATION_STAGES.md), and [Developer implementation stage](DEVELOPER_STAGE.md), plus the [independent Reviewer and bounded repair](REVIEWER_STAGE.md). The #75 preparation and #76 Developer use cases use trusted host CAS leases and produce verified, frozen handoffs. Issue #77 adds an independently leased, read-only `RunReviewerStageUseCase` and a pure bounded repair planner; five sequential roles are exercised in offline FakeModel tests. Production five-role orchestration is **not** exposed through the CLI. Issue #78 adds a bounded, in-memory, stage-owned recursive scheduler and pure graph policies for one root stage's subtree; it is not wired into a production five-role executor and does not persist child state or reconcile existing child references. See [bounded recursive stage requests](RECURSIVE_GRAPH.md). Integrated cross-stage recursion, production execution and a separate trusted-tool module remain future milestones.
 
 ### Task Manager
 
@@ -47,7 +47,7 @@ A task can have one or more session attempts. The controller owns `sessionId`, d
 
 The canonical protocol represents transitions such as `created → accepted → running`, `running → checkpointing → running|paused`, and `paused → resuming → running`. Success, failure, cancellation, rejection, and timeout are terminal conditions. Status must be derived from verified runtime state, **not** from a model's final words.
 
-The read-only session engine supports FakeModel or a strict OpenAI-compatible provider, validated admission, lifecycle decisions, budgets and physical JSONL events. Nested-agent execution and checkpoint recovery remain future milestones; the schema includes more states than the fresh-session CLI can execute.
+The read-only session engine supports FakeModel or a strict OpenAI-compatible provider, validated admission, lifecycle decisions, budgets and physical JSONL events. Standalone in-memory nested stage dispatch is implemented by #78, but it is not yet connected to production CLI sessions or durable recovery; the schema includes more states than the fresh-session CLI can execute.
 
 ### Recursive Agent Graph
 
@@ -59,7 +59,7 @@ Each stage is an independent agent role with separately enforced authority:
 4. **Developer** implements code against the previously approved specifications and tests.
 5. **Reviewer** independently evaluates the implementation, requests repair, or recommends decomposition.
 
-Recursion applies to **every stage**, not only Developer. A decomposed subtask receives its own bounded workflow and shares parent budgets. A nested reviewer may not rewrite the source requirements to conceal a failure.
+Recursion applies to **every stage**, not only Developer. #78 implements typed, bounded in-memory child requests for each origin, with role-scoped authority and reservations shared within the originating stage's subtree. A nested reviewer may not rewrite source requirements to conceal a failure. Shared budgets **across distinct root stages** and full child workflow integration remain for #79.
 
 ### Trusted Tool Runtime
 
