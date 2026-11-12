@@ -68,7 +68,10 @@ data class PreparationStageLease(
  * revoke authority and consume the generation. A stale lease is not reusable.
  * An exception during finish/abort has UNKNOWN outcome: caller must reload.
  *
- * approve is a PROMPT, bounded host decision, not a blocking wait for human
+ * approve is a synchronous, PROMPT, bounded host decision. Coroutine
+ * withTimeout cannot preempt uncooperative blocking implementation I/O:
+ * the host MUST enforce its own deadline and fence late results by generation.
+ * approve is not a blocking wait for human
  * input; interactive workflows must promptly return HUMAN_REVIEW_REQUIRED.
  * The host may remember a revocable, generation-fenced approval for finishStage
  * authorization, but approve MUST NOT commit irreversible external effects or

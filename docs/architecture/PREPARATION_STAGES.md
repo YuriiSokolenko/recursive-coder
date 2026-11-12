@@ -1,8 +1,8 @@
 # Host-approved preparation stages (issue #75)
 
-**Status:** In-process, explicitly opted-in SDD → ATDD → TDD. There is no
-Developer, Reviewer, child graph, persistence implementation, production model
-bridge or new CLI command. The existing CLI is read-only.
+**Status:** In-process, explicitly opted-in SDD → ATDD → TDD. Developer is now a separate opt-in stage (#76); there is no Reviewer,
+child graph, persistence implementation, production model bridge or new CLI command.
+See [Developer stage](DEVELOPER_STAGE.md) for its separate host workflow. The existing CLI is read-only.
 
 ## The independent roles and host-owned lease
 
