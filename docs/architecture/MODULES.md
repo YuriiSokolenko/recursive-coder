@@ -14,7 +14,7 @@
 | `:infra:journal` | JSONL append/flush/close and physical event-log SHA-256 | `:core:session`, `:core:contracts` |
 | `:app:cli` | Clikt command entry point and Koin 4.2.2 interface-to-implementation bindings/composition | all eight libraries |
 
-\`\`\`text
+```text
                       :app:cli (only executable)
                    /             |             \\
             :agent:runtime    :core:session   :core:tasks
@@ -23,7 +23,7 @@
                     ^           ^              ^
                     |           |              |
          :infra:model, :infra:workspace, :infra:task-store, :infra:journal
-\`\`\`
+```
 
 Production dependencies point from the composition root and adapters toward the core contracts; no core module depends on the CLI, Koog, or the HTTP model implementation. The concrete workspace opener, model provider and JSONL EventSink are injected by `:app:cli` using Koin factories and constructor injection; Koin is not present in any core module. The scheduler accepts a `TaskRunner` instead of constructing a model adapter. Session Protocol JSON Schema and fixtures remain at the repository root under `contracts/v1/` and continue to be validated independently by Node/Python CI.
 
