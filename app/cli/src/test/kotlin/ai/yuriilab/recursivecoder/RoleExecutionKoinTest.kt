@@ -43,4 +43,52 @@ class RoleExecutionKoinTest {
             writeEnabled.close()
         }
     }
+
+    @Test fun preparationStageRequiresExplicitHostAndBothPorts() {
+        val bridge = KoogPromptBridge { _, _ -> error("No role run in Koin test") }
+        val host = object : PreparationStageHost {
+            override fun readBytes(path: String): ByteArray? = null
+            override fun beginStage(
+                expectedGraph: StageGraph, stageRunId: StageRunId,
+                expectedAcceptedIds: Set<ArtifactId>
+            ): PreparationStageLease? = null
+            override fun beginHumanApproval(
+                expectedGraph: StageGraph, stageRunId: StageRunId,
+                expectedAcceptedIds: Set<ArtifactId>
+            ): PreparationStageLease? = null
+            override fun current(lease: PreparationStageLease): Boolean = false
+            override fun finishStage(
+                lease: PreparationStageLease, updatedGraph: StageGraph,
+                updatedAcceptedIds: Set<ArtifactId>,
+                pending: PreparationPendingApproval?
+            ): Boolean = false
+            override fun abortStage(
+                lease: PreparationStageLease, terminal: StageState
+            ): PreparationStageSnapshot? = null
+            override fun approve(
+                candidate: StageArtifactManifest, evidence: StageValidationEvidence,
+                usage: StageRoleUsage
+            ): PreparationApproval = PreparationApproval.REJECT
+        }
+        val readOnly = koinApplication { modules(roleExecutionModule(FakeModel(), bridge)) }
+        try {
+            assertNull(readOnly.koin.getOrNull<RunPreparationStageUseCase>())
+        } finally {
+            readOnly.close()
+        }
+        val enabled = koinApplication {
+            modules(
+                roleExecutionModule(FakeModel(), bridge),
+                stageToolModule(Path.of(System.getProperty("java.io.tmpdir"), "stage-75-locks")),
+                preparationStageModule(host)
+            )
+        }
+        try {
+            val first: RunPreparationStageUseCase = enabled.koin.get()
+            val second: RunPreparationStageUseCase = enabled.koin.get()
+            assertNotSame(first, second)
+        } finally {
+            enabled.close()
+        }
+    }
 }

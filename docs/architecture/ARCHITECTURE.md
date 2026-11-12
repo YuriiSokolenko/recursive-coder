@@ -35,7 +35,7 @@ This project is not a plugin for another orchestration platform. Cloud providers
 
 ### Current Gradle module boundaries
 
-The implemented compile-time module graph is documented in [Gradle modules](MODULES.md). The CLI alone assembles session, task, model and workspace implementations; both core engines compile against shared contracts and do not import HTTP or Koog adapters. The `:agent:runtime` module contains the minimal Koog single-role adapter. Issue #74 adds an independently admitted Linux-only stage tool port over the existing trusted write/check runtime; it is not a model-facing Koog tool and the CLI remains read-only. See [Koog stage execution](KOOG_STAGE_EXECUTION.md) and [stage tool authority](STAGE_TOOL_AUTHORITY.md). Recursive orchestration and a separate trusted-tool module remain future milestones.
+The implemented compile-time module graph is documented in [Gradle modules](MODULES.md). The CLI alone assembles session, task, model and workspace implementations; both core engines compile against shared contracts and do not import HTTP or Koog adapters. The `:agent:runtime` module contains the minimal Koog single-role adapter. Issue #74 adds an independently admitted Linux-only stage tool port over the existing trusted write/check runtime; it is not a model-facing Koog tool and the CLI remains read-only. See [Koog stage execution](KOOG_STAGE_EXECUTION.md), [stage tool authority](STAGE_TOOL_AUTHORITY.md), and [host-approved SDD, ATDD and TDD preparation stages](PREPARATION_STAGES.md). The #75 preparation use case uses a trusted host CAS lease and is not a five-role or CLI workflow. Recursive orchestration and a separate trusted-tool module remain future milestones.
 
 ### Task Manager
 

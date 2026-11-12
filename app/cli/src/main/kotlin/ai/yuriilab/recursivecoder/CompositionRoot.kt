@@ -67,6 +67,16 @@ internal fun stageToolModule(lockDirectory: Path): Module = module {
     factory<StageToolSessionOpener> { LinuxStageToolSessionOpener(lockDirectory) }
 }
 
+/**
+ * Explicit #75 composition: a trusted host must supply approval, workspace reads
+ * and an atomic host-owned stage lease / live authority source. This is absent from the default CLI.
+ * Callers must opt into this AND roleExecutionModule AND stageToolModule.
+ */
+internal fun preparationStageModule(host: PreparationStageHost): Module = module {
+    single<PreparationStageHost> { host }
+    factory { RunPreparationStageUseCase(get(), get(), get()) }
+}
+
 internal val cliWorkspaceOpener: WorkspaceOpener = WorkspaceOpener { request, onAudit, onStart ->
     WorkspaceManager.open(request, onAudit, onStart)
 }
