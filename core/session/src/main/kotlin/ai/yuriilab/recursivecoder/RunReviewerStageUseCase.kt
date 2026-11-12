@@ -43,7 +43,9 @@ sealed interface ReviewerStageOutcome {
 data class ReviewerStageResult(
     val graph: StageGraph?,
     val hostAcceptedArtifactIds: Set<ArtifactId>?,
-    val outcome: ReviewerStageOutcome
+    val outcome: ReviewerStageOutcome,
+    /** Accounting for completed model calls, even when the review is rejected or aborted. */
+    val usage: StageRoleUsage = StageRoleUsage()
 )
 
 /**
@@ -109,7 +111,12 @@ class RunReviewerStageUseCase(
             (code != "IMPLEMENTATION_DEFECT" ||
                 scope != ReviewerCorrectionScope.IMPLEMENTATION_ONLY) ||
             verdict == ReviewerDisposition.NEEDS_HUMAN &&
-            (code == "OK" || scope == ReviewerCorrectionScope.IMPLEMENTATION_ONLY))
+            (code !in setOf("FROZEN_ARTIFACT_CHANGE", "EVIDENCE_MISSING",
+                "CHECK_FAILED", "OTHER_REQUIRES_HUMAN") ||
+                (code == "FROZEN_ARTIFACT_CHANGE" &&
+                    scope != ReviewerCorrectionScope.FROZEN_INPUTS) ||
+                (code != "FROZEN_ARTIFACT_CHANGE" &&
+                    scope != ReviewerCorrectionScope.NONE)))
             return null
         val values = root["evidence"] as? JsonArray ?: return null
         if (values.isEmpty() || values.size > 32) return null
@@ -161,6 +168,7 @@ class RunReviewerStageUseCase(
                 ReviewerStageOutcome.ReconciliationRequired("REVIEW_BEGIN_UNCONFIRMED"))
         } ?: return denied("REVIEW_ADMISSION_REVOKED")
         val running = lease.graph
+        var spentUsage = StageRoleUsage()
 
         suspend fun abort(code: String): ReviewerStageResult {
             val terminal = if (code == "ROLE_TIMED_OUT" || code == "ROLE_CANCELLED")
@@ -171,9 +179,9 @@ class RunReviewerStageUseCase(
                 }
             } catch (_: Exception) { null }
             return if (snapshot == null) ReviewerStageResult(null, null,
-                ReviewerStageOutcome.ReconciliationRequired("REVIEW_ABORT_UNCONFIRMED"))
+                ReviewerStageOutcome.ReconciliationRequired("REVIEW_ABORT_UNCONFIRMED"), spentUsage)
             else ReviewerStageResult(snapshot.graph, snapshot.acceptedIds,
-                ReviewerStageOutcome.Failed(code))
+                ReviewerStageOutcome.Failed(code), spentUsage)
         }
         suspend fun checkpoint(): String? {
             currentCoroutineContext().ensureActive()
@@ -282,6 +290,13 @@ class RunReviewerStageUseCase(
                 accepted, command.model, prompt, command.deadline, command.cancellation,
                 requestedTools = emptySet(), maxModelRequests = 1
             ), roleEvents)
+            // The invocation may already have consumed tokens even if a later
+            // identity, decoding, or workspace gate rejects its output.
+            val returnedUsage = proposal.usage
+            spentUsage = if (returnedUsage.modelRequests >= 0 &&
+                returnedUsage.inputTokens?.let { it >= 0 } != false &&
+                returnedUsage.outputTokens?.let { it >= 0 } != false)
+                returnedUsage else StageRoleUsage()
             checkpoint()?.let { return abort(it) }
             if (proposal.correlation != stage.correlation ||
                 proposal.role != EngineeringRole.REVIEWER || proposal.agentId != stage.agentId)
@@ -333,10 +348,11 @@ class RunReviewerStageUseCase(
                 }
             } catch (_: Exception) {
                 return ReviewerStageResult(null, null,
-                    ReviewerStageOutcome.ReconciliationRequired("REVIEW_FINISH_UNCONFIRMED"))
+                    ReviewerStageOutcome.ReconciliationRequired("REVIEW_FINISH_UNCONFIRMED"),
+                    spentUsage)
             }
             if (!committed) return ReviewerStageResult(null, null,
-                ReviewerStageOutcome.ReconciliationRequired("STALE_REVIEW_LEASE"))
+                ReviewerStageOutcome.ReconciliationRequired("STALE_REVIEW_LEASE"), spentUsage)
             try { decisionEvents.emit(decision) }
             catch (_: Exception) { /* Host CAS remains authoritative. */ }
             val outcome = when (decision.verdict) {
@@ -344,7 +360,7 @@ class RunReviewerStageUseCase(
                 ReviewerDisposition.REJECT -> ReviewerStageOutcome.Rejected(decision, usage)
                 ReviewerDisposition.NEEDS_HUMAN -> ReviewerStageOutcome.NeedsHuman(decision, usage)
             }
-            return ReviewerStageResult(updated, accepted, outcome)
+            return ReviewerStageResult(updated, accepted, outcome, spentUsage)
         } catch (cancelled: CancellationException) {
             withContext(NonCancellable) {
                 try { abort("ROLE_CANCELLED") }
