@@ -20,7 +20,6 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.awaitCancellation
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Tag
@@ -209,7 +208,7 @@ class KoogStageRoleExecutorTest {
         assertEquals(StageRoleEventKind.FAILED, sinkEvents.last().kind)
     }
 
-    @Test fun cancellationDeadlineAndJournalFailuresNeverClaimSuccess() = runBlocking {
+    @Test fun cancellationDeadlineAndEventSinkFailuresNeverClaimSuccess() = runBlocking {
         val gateway = OfflineGateway()
         var opened = 0
         val runner = KoogStageRoleExecutor(gateway, KoogPromptBridge { _, _ ->
