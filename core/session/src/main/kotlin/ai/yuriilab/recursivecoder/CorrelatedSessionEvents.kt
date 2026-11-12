@@ -49,7 +49,8 @@ class CorrelatedRecursiveSessionEvents(
             correlationId = event.requestId ?: event.stageRunId.value,
             actor = SessionEventActor(
                 agentId = if (event.kind == RecursiveEventKind.CHILD_RESERVED)
-                    requireNotNull(parentActorId) else "agent-" + event.stageRunId.value,
+                    requireNotNull(parentActorId) { "CHILD_RESERVED requires an admitted parent actor" }
+                    else "agent-" + event.stageRunId.value,
                 parentAgentId = if (event.kind == RecursiveEventKind.CHILD_RESERVED)
                     null else parentActorId,
                 childAgentId = childActorId
