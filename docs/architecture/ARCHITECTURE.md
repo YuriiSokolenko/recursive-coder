@@ -1,6 +1,6 @@
 # Recursive Coder — Standalone Architecture
 
-> **Status:** target architecture, RFC 0.3; implementation includes single-role adapter from PR #81 on 2026-11-12  
+> **Status:** target architecture, RFC 0.3; implementation includes Koog single-role execution (#73) and the opt-in host tool port (#74) as of 2026-11-12  
 > **Technology:** Kotlin/JVM; isolated opt-in Koog single-role execution; configurable local/compatible LLM APIs  
 > **Core principle:** Recursive Coder must own the complete coding-agent lifecycle. No external workflow, repository, or service may be a mandatory coordinator.
 
@@ -140,4 +140,4 @@ Every new engine module must ship with relevant tests. Live model behavior does 
 | Durability | Event Journal, checkpoints, fenced resume, and fail-closed recovery |
 | Product | First-party task scheduling, optional daemon/API and integrations, diagnostics UI, and releases |
 
-**Implementation status (2026-11-12, PR #82):** nine Gradle product modules, first-party Task Manager, Task/Session Use Cases with CLI-local Koin, pure policies, read-only sessions, strict Model Gateway, physical event journal and an **independent Linux-only trusted write/check runtime** exist. The CLI remains read-only. An opt-in fake-only Koog stage adapter exists, but Koog five-stage execution, recursion, crash recovery, releases and optional daemon/API are planned. This target design is not evidence that planned components are executable.
+**Implementation status (2026-11-12, PR #82):** nine Gradle product modules, first-party Task Manager, Task/Session Use Cases with CLI-local Koin, pure policies, read-only sessions, strict Model Gateway, physical event journal and an **independent Linux-only trusted write/check runtime** with an **opt-in host-only stage tool port** exist. The port is not exposed to Koog or ordinary CLI routes; the CLI remains read-only. An opt-in fake-only Koog stage adapter exists, but Koog five-stage execution, recursion, crash recovery, releases and optional daemon/API are planned. This target design is not evidence that planned components are executable.
