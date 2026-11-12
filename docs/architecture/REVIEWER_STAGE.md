@@ -85,3 +85,13 @@ sandbox E2E, architecture and Session Protocol v1 CI gates are unchanged.
 
 These contracts are in-process only and require explicit
 `reviewerStageModule(host)` composition. The default CLI remains read-only.
+
+`ReviewerStageResult.usage` retains validated model usage for rejected, failed,
+and CAS-uncertain post-invocation outcomes. Only the trusted host can confirm
+an accepted review; in-process preflight reads cannot close the final TOCTOU
+window. Production hosts MUST recheck receipt and byte integrity atomically
+with their compare-and-swap commit.
+
+Pure Reviewer policies are independently tested in `ReviewerStagePolicyUnitTest`
+(`@Tag("unit")`), including literal denial codes and the historical-attempt
+retry boundary, separate from the offline integration/E2E tests.
