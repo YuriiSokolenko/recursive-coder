@@ -234,9 +234,11 @@ class RunReviewerStageIntegrationTest {
         assertEquals(nextDev.stageRunId, planned.stages.single {
             it.correlation.stageRunId == ids.getValue(StageKind.DEVELOP)
         }.supersededBy)
-        assertIs<ReviewerRepairResult.Denied>(ReviewerRepairPlanner.plan(
-            host.graph, reviewId, setOf(reviewId), initial.decision, 0,
-            nextDev, AgentId("developer-retry-77"), nextReview, AgentId("reviewer-retry-77")))
+        assertEquals(ReviewerRepairResult.Denied("RETRY_LIMIT_EXHAUSTED"),
+            ReviewerRepairPlanner.plan(
+                host.graph, reviewId, setOf(reviewId), initial.decision, 0,
+                nextDev, AgentId("developer-retry-77"),
+                nextReview, AgentId("reviewer-retry-77")))
 
         // Offline host emulates the NEXT independently validated Developer attempt.
         // The real retry uses RunDeveloperStageUseCase and its existing sandbox checks.
@@ -331,6 +333,16 @@ class RunReviewerStageIntegrationTest {
             StageCorrelation(sessionId, graphId, StageRunId("reviewer-another"),
                 "req-another-review", "corr-another-review"), AgentId("another-reviewer"))
         assertEquals(ReviewerRepairResult.Denied("UNAUTHORIZED_REPAIR"), plan)
+    }
+
+    @Test fun acceptanceWithoutWriteReceiptOrAllChecksIsRejected() = runBlocking {
+        val host = FakeHost()
+        val fake = FakeModel().apply {
+            response = """{"verdict":"ACCEPT","code":"OK","scope":"NONE","evidence":["check:git_diff_check","check:offline"]}"""
+        }
+        assertEquals("INCOMPLETE_REVIEW_EVIDENCE",
+            assertIs<ReviewerStageOutcome.Failed>(run(host, fake).outcome).code)
+        assertNull(host.committedDecision)
     }
 
     @Test fun frozenInputMutationAndHostEvidenceRevocationFailBeforeCommit() = runBlocking {
