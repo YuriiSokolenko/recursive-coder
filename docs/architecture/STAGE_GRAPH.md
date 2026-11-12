@@ -1,8 +1,10 @@
 # Stage graph contracts and policy gates (issue #72)
 
-**Status:** Pure Kotlin contracts and deterministic host-side decisions implemented in
-:core:contracts. Agent execution, recursion scheduling, physical writes, recovery and
-event emission are not implemented by this change.
+**Status:** The original #72 graph contracts and deterministic host-side decisions live
+in :core:contracts. Stage execution is implemented separately for #75–#77;
+bounded in-memory recursion and typed events are now provided by #78
+(see [RECURSIVE_GRAPH.md](RECURSIVE_GRAPH.md)). Physical write authority,
+persistent child scheduling and crash recovery are separate boundaries.
 
 ## The five roles and their immutable handoffs
 
@@ -74,11 +76,13 @@ manifest output or write authority.
   invalidation and stale review revocation require authoritative host revision
   records and are deferred to #75/#78/#79. Artifact-ID membership alone is not
   a cryptographic attestation of a **specific** revision.
-- StageBudget and ChildGraphReference contain typed, checked depth, dependency,
-  token, time and child-count *metadata*. The graph contract checks coherence,
-  duplicates and DAG cycles, but does not dispatch children, decrement budgets,
-  **sum child reservations**, merge results or implement recursive scheduling.
-  Those tasks are owned by #78.
+- StageBudget and ChildGraphReference remain snapshot *metadata*; their
+  validation does not authorize any physical operation. #78 adds separate
+  `RecursiveGraphPolicy` and `RecursiveGraphScheduler` contracts for bounded,
+  in-memory recursive stage requests, independent child DAGs, stable IDs,
+  reservations, usage, deadlines and cancellation. The child scheduler does not
+  implicitly mutate StageGraph manifests, write to the workspace, or persist a
+  recovery log. See [RECURSIVE_GRAPH.md](RECURSIVE_GRAPH.md).
 
 ## Trust and serialization boundary
 
@@ -115,5 +119,5 @@ reviews and reviewer rejection.
 
 **Follow-on ownership:** #73 Koog and role execution; #74 host-adapter write
 integration; #75–#77 artifact production, Developer and Reviewer execution;
-#78 recursion and shared budget enforcement; #79 integration and correlated
-event E2E; #10 durable recovery.
+#78 bounded in-memory recursive execution (implemented separately);
+#79 integrated execution and correlated event E2E; #10 durable recovery.

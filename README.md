@@ -73,7 +73,7 @@ With Gradle 9.8.1 and JDK 21 installed:
 | CLI, read-only Session Runtime, Model Gateway, native Task Manager | Implemented baseline | [#4](https://github.com/YuriiSokolenko/recursive-coder/issues/4), [#5](https://github.com/YuriiSokolenko/recursive-coder/issues/5), [#6](https://github.com/YuriiSokolenko/recursive-coder/issues/6), [#7](https://github.com/YuriiSokolenko/recursive-coder/issues/7) |
 | Standalone Linux trusted write/check security boundary | Implemented, not CLI-integrated | [#8](https://github.com/YuriiSokolenko/recursive-coder/issues/8) |
 | Minimal Koog single-role adapter (fake only) | Implemented, opt-in | [#73](https://github.com/YuriiSokolenko/recursive-coder/issues/73) |
-| Recursive Koog SDD → ATDD → TDD → Developer → Reviewer graph | Planned | [#9](https://github.com/YuriiSokolenko/recursive-coder/issues/9) |
+| Recursive Koog SDD → ATDD → TDD → Developer → Reviewer graph | Partially implemented: five role stages and bounded in-memory recursive subtree; integrated CLI workflow planned | [#9](https://github.com/YuriiSokolenko/recursive-coder/issues/9), [#78](https://github.com/YuriiSokolenko/recursive-coder/issues/78) |
 | Durable checkpoints, fencing and crash recovery | Planned | [#10](https://github.com/YuriiSokolenko/recursive-coder/issues/10) |
 | Independent coding evaluation harness | Planned | [#11](https://github.com/YuriiSokolenko/recursive-coder/issues/11) |
 | Release packaging and optional daemon/API | Planned | [#12](https://github.com/YuriiSokolenko/recursive-coder/issues/12), [#13](https://github.com/YuriiSokolenko/recursive-coder/issues/13) |
@@ -83,3 +83,4 @@ See [Target architecture](docs/architecture/TARGET_ARCHITECTURE.md) for the engi
 **Core principle:** Recursive Coder is designed, built, and tested as a fully independent product. External services are optional integrations, not owners of its execution lifecycle.
 
 - [Independent Reviewer stage and bounded repair](docs/architecture/REVIEWER_STAGE.md)
+- [Bounded recursive stage requests and subtree budgets](docs/architecture/RECURSIVE_GRAPH.md)
