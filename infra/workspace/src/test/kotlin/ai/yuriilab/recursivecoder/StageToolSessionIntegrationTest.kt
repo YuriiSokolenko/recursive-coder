@@ -286,10 +286,16 @@ class StageToolSessionIntegrationTest {
         val available = Files.isExecutable(sandbox) && Files.isExecutable(python)
         if (ci) assertTrue(available, "CI must install bwrap and Python")
         else Assumptions.assumeTrue(available, "Local sandbox unavailable")
-        val probe = ProcessBuilder(sandbox.toString(), "--die-with-parent", "--new-session",
-            "--unshare-all", "--tmpfs", "/", "--proc", "/proc", "--dev", "/dev",
-            "--ro-bind", "/usr", "/usr", "--", "/usr/bin/true")
-            .redirectErrorStream(true).start()
+        val probeArgs = mutableListOf(sandbox.toString(), "--die-with-parent",
+            "--new-session", "--unshare-all", "--tmpfs", "/",
+            "--proc", "/proc", "--dev", "/dev")
+        for (directory in listOf("/usr", "/bin", "/lib", "/lib64")) {
+            if (Files.exists(Path.of(directory))) {
+                probeArgs.addAll(listOf("--ro-bind", directory, directory))
+            }
+        }
+        probeArgs.addAll(listOf("--", "/usr/bin/true"))
+        val probe = ProcessBuilder(probeArgs).redirectErrorStream(true).start()
         val probeSuccess = probe.waitFor() == 0
         if (ci) assertTrue(probeSuccess, "CI namespaces must be usable")
         else Assumptions.assumeTrue(probeSuccess, "Local namespaces unavailable")
