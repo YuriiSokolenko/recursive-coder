@@ -35,7 +35,7 @@ This project is not a plugin for another orchestration platform. Cloud providers
 
 ### Current Gradle module boundaries
 
-The implemented compile-time module graph is documented in [Gradle modules](MODULES.md). The CLI alone assembles session, task, model and workspace implementations; both core engines compile against shared contracts and do not import HTTP or Koog adapters. The `:agent:runtime` module now contains the minimal Koog single-role adapter; recursive orchestration and an independently extracted trusted-tool module remain future milestones. See [Koog stage execution](KOOG_STAGE_EXECUTION.md).
+The implemented compile-time module graph is documented in [Gradle modules](MODULES.md). The CLI alone assembles session, task, model and workspace implementations; both core engines compile against shared contracts and do not import HTTP or Koog adapters. The `:agent:runtime` module contains the minimal Koog single-role adapter. Issue #74 adds an independently admitted Linux-only stage tool port over the existing trusted write/check runtime; it is not a model-facing Koog tool and the CLI remains read-only. See [Koog stage execution](KOOG_STAGE_EXECUTION.md) and [stage tool authority](STAGE_TOOL_AUTHORITY.md). Recursive orchestration and a separate trusted-tool module remain future milestones.
 
 ### Task Manager
 
@@ -140,4 +140,4 @@ Every new engine module must ship with relevant tests. Live model behavior does 
 | Durability | Event Journal, checkpoints, fenced resume, and fail-closed recovery |
 | Product | First-party task scheduling, optional daemon/API and integrations, diagnostics UI, and releases |
 
-**Implementation status (2026-11-12, PR #81):** nine Gradle product modules, first-party Task Manager, Task/Session Use Cases with CLI-local Koin, pure policies, read-only sessions, strict Model Gateway, physical event journal and an **independent Linux-only trusted write/check runtime** exist. The CLI remains read-only. An opt-in fake-only Koog stage adapter exists, but Koog five-stage execution, recursion, crash recovery, releases and optional daemon/API are planned. This target design is not evidence that planned components are executable.
+**Implementation status (2026-11-12, PR #82):** nine Gradle product modules, first-party Task Manager, Task/Session Use Cases with CLI-local Koin, pure policies, read-only sessions, strict Model Gateway, physical event journal and an **independent Linux-only trusted write/check runtime** exist. The CLI remains read-only. An opt-in fake-only Koog stage adapter exists, but Koog five-stage execution, recursion, crash recovery, releases and optional daemon/API are planned. This target design is not evidence that planned components are executable.
