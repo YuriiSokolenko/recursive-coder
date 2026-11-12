@@ -51,6 +51,13 @@ internal fun sessionModule(model: ModelGateway): Module = module {
     factory<RunSessionUseCase> { DefaultRunSessionUseCase(get(), get(), get(), get()) }
 }
 
+/** Opt-in, in-process role execution. No existing CLI route calls this binding. */
+internal fun roleExecutionModule(model: ModelGateway, bridge: KoogPromptBridge): Module = module {
+    single<ModelGateway> { model }
+    single<KoogPromptBridge> { bridge }
+    factory<StageRoleExecutor> { KoogStageRoleExecutor(get(), get()) }
+}
+
 internal val cliWorkspaceOpener: WorkspaceOpener = WorkspaceOpener { request, onAudit, onStart ->
     WorkspaceManager.open(request, onAudit, onStart)
 }
