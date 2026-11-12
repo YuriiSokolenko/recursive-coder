@@ -83,6 +83,11 @@ The separate `stageToolModule(lockDirectory)` in the CLI composition root
 requires an explicit trusted caller; ordinary `sessionModule` and the
 Koog `roleExecutionModule` never register write authority.
 The opt-in `RunPreparationStageUseCase` in `:core:session` coordinates independently leased SDD/ATDD/TDD proposals and trusted artifact handoffs (issue #75); the Koin `preparationStageModule` must be explicitly included by a trusted host. See [Preparation stages](PREPARATION_STAGES.md) for the CAS and acceptance boundary.
+The separately opted-in `RunDeveloperStageUseCase` uses the same host-owned
+lease plus the #74 restricted write/check port. Its `developerStageModule`
+factory is absent from normal CLI sessions; it returns a typed implementation
+manifest, checks and changed-file hashes for independent review. See
+[Developer stage](DEVELOPER_STAGE.md).
 See [Stage tool authority](STAGE_TOOL_AUTHORITY.md) for admission,
 lifetime, immutable artifacts, sandboxing and E2E guarantees.
 

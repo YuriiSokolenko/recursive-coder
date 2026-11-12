@@ -3,6 +3,7 @@ package ai.yuriilab.recursivecoder
 import java.nio.file.Path
 import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.io.TempDir
 import org.koin.dsl.koinApplication
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -12,6 +13,7 @@ import kotlin.test.assertTrue
 /** Role adapter is only made available when a caller explicitly selects its module. */
 @Tag("integration")
 class RoleExecutionKoinTest {
+    @TempDir lateinit var testDirectory: Path
     @Test fun optInModuleResolvesFreshRoleExecutorsWithInjectedGateway() {
         val bridge = KoogPromptBridge { _, _ -> error("No role was selected for execution") }
         val application = koinApplication { modules(roleExecutionModule(FakeModel(), bridge)) }
@@ -73,6 +75,7 @@ class RoleExecutionKoinTest {
         val readOnly = koinApplication { modules(roleExecutionModule(FakeModel(), bridge)) }
         try {
             assertNull(readOnly.koin.getOrNull<RunPreparationStageUseCase>())
+            assertNull(readOnly.koin.getOrNull<RunDeveloperStageUseCase>())
         } finally {
             readOnly.close()
         }
@@ -89,6 +92,22 @@ class RoleExecutionKoinTest {
             assertNotSame(first, second)
         } finally {
             enabled.close()
+        }
+        val developerEnabled = koinApplication {
+            modules(
+                roleExecutionModule(FakeModel(), bridge),
+                stageToolModule(testDirectory.resolve("stage-76-locks")),
+                preparationStageModule(host), developerStageModule(host)
+            )
+        }
+        try {
+            val first: RunDeveloperStageUseCase = developerEnabled.koin.get()
+            val second: RunDeveloperStageUseCase = developerEnabled.koin.get()
+            assertNotSame(first, second)
+            assertNotNull(developerEnabled.koin.get<RunPreparationStageUseCase>())
+            assertTrue(developerEnabled.koin.get<PreparationStageHost>() === host)
+        } finally {
+            developerEnabled.close()
         }
     }
 }

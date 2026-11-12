@@ -77,6 +77,12 @@ internal fun preparationStageModule(host: PreparationStageHost): Module = module
     factory { RunPreparationStageUseCase(get(), get(), get()) }
 }
 
+/** Explicit Developer opt-in; read-only CLI and preparation routes remain unchanged. */
+internal fun developerStageModule(host: PreparationStageHost): Module = module {
+    single<PreparationStageHost> { host }
+    factory { RunDeveloperStageUseCase(get(), get(), get()) }
+}
+
 internal val cliWorkspaceOpener: WorkspaceOpener = WorkspaceOpener { request, onAudit, onStart ->
     WorkspaceManager.open(request, onAudit, onStart)
 }

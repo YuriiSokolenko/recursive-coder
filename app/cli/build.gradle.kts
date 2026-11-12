@@ -15,6 +15,7 @@ dependencies {
     implementation("com.github.ajalt.clikt:clikt:5.1.0")
     implementation(libs.koin.core)
     testImplementation(libs.koin.test)
+    testImplementation(libs.coroutines.core)
 }
 
 application {

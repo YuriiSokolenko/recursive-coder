@@ -164,7 +164,22 @@ jobs:
               for case in stage_port for tag in ("skipped", "failure", "error")
           ):
               raise SystemExit("Stage tool sandbox E2E MUST pass with 0 skips")
-          print("Verified existing sandbox and stage tool sandbox E2E (0 skips).")
+          developer_markers = (
+              "realSandboxAndReceiptsAcceptOnlyHostApprovedSourceChanges",
+              "realSandboxFailedCheckLeavesUnapprovedDirtyWorkspace",
+          )
+          for marker in developer_markers:
+              selected = [
+                  case for path in files
+                  for case in ET.parse(path).iter("testcase")
+                  if case.get("name", "").startswith(marker)
+              ]
+              if len(selected) != 1 or any(
+                  case.find(tag) is not None for case in selected
+                  for tag in ("skipped", "failure", "error")
+              ):
+                  raise SystemExit(f"Developer sandbox {marker} MUST pass once with no skips")
+          print("Verified all four sandbox cases in unfiltered tests (0 skips).")
           PY
       - name: Verify focused integration excludes sandbox and E2E includes it once
         run: |
@@ -184,8 +199,15 @@ jobs:
               if case.get("name", "").startswith(
                   "stageToolPortUsesRealIsolatedCheckWithoutSkippingInCi")
           ]
-          if not integration or any(case.get("name", "").startswith(marker) for case in integration):
-              raise SystemExit("integrationTest must run ordinary integration tests but exclude sandbox E2E")
+          developer_markers = (
+              "realSandboxAndReceiptsAcceptOnlyHostApprovedSourceChanges",
+              "realSandboxFailedCheckLeavesUnapprovedDirtyWorkspace",
+          )
+          if not integration or any(
+              case.get("name", "").startswith((marker, *developer_markers))
+              for case in integration
+          ):
+              raise SystemExit("integrationTest must exclude all real-sandbox E2E tests")
           if len(sandbox) != 1 or any(
               case.find(tag) is not None for case in sandbox for tag in ("skipped", "failure", "error")
           ):
@@ -195,7 +217,17 @@ jobs:
               for case in stage_port for tag in ("skipped", "failure", "error")
           ):
               raise SystemExit("Focused stage tool E2E must execute once without skips")
-          print("Verified focused integration excludes sandbox; focused E2E runs both once.")
+          for developer_marker in developer_markers:
+              selected = [
+                  case for case in e2e
+                  if case.get("name", "").startswith(developer_marker)
+              ]
+              if len(selected) != 1 or any(
+                  case.find(tag) is not None
+                  for case in selected for tag in ("skipped", "failure", "error")
+              ):
+                  raise SystemExit(f"Focused Developer sandbox {developer_marker} must pass once")
+          print("Verified focused integration excludes sandbox; four E2E cases run once.")
           PY
       - name: Publish Kotlin JUnit results
         if: always()

@@ -88,6 +88,12 @@ repository input or remote endpoint is modified by these tests.
 
 `TaskPolicyUnitTest` and `TaskRepositoryUnitTest` (`:core:tasks`) are **pure unit** suites for immutable transitions, DAG readiness, fairness, cancellation/retry decisions and in-memory transaction semantics. `TaskManagerTest` and `TaskRepositoryContractTest` (`:infra:task-store`) are **integration** suites for file-backed snapshots, locks, Git fixtures, concurrent claims, adapter parity, restart/races and atomic rename failure. Neither tier substitutes for the other.
 
+The `DeveloperLinuxStageIntegrationTest` is tagged `e2e` and exercises
+real Developer-to-Linux sandbox success and failed-check cases. Neither is
+selected by the focused `integrationTest` tier. CI asserts both appear
+exactly once, without skips, in the unfiltered `test` and focused
+`e2eTest` XML outputs.
+
 The sandbox method in `TrustedWriteRuntimeTest` inherits the class-level `integration` tag and adds `e2e`. `integrationTest` excludes `e2e` methods so its ordinary local I/O checks can run without bubblewrap. The dedicated `e2eTest` task selects that sandbox method; installed CLI E2E is instead handled by Python.
 
 ## Enforced classification and purity checks
