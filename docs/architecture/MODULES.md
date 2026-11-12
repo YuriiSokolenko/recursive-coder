@@ -5,11 +5,11 @@
 | Module | Ownership | Production project dependencies |
 | --- | --- | --- |
 | `:agent:runtime` | One role-scoped Koog execution adapter, offline fake prompt bridge, metering and sanitized proposal events | `:core:contracts` |
-| `:core:contracts` | Session Protocol support, request validation, model/workspace contracts, shared value types and pure tool authorization | none |
+| `:core:contracts` | Session Protocol support, request validation, model/workspace contracts, graph policy, host-only stage tool ports and typed evidence, shared value types and pure tool authorization | none |
 | `:core:session` | `RunSessionUseCase` + `DefaultRunSessionUseCase`, compatibility Session Controller, deadline/budget enforcement, admission policy and event journal | `:core:contracts` |
 | `:core:tasks` | Task command/query and scheduler-attempt Use Case interfaces and implementations, TaskService façade, policy, repository port and scheduler | `:core:contracts` |
 | `:infra:model` | Offline FakeModel and optional OpenAI-compatible HTTP adapter | `:core:contracts` |
-| `:infra:workspace` | Workspace Manager, restricted Git and trusted write/check runtime | `:core:contracts` |
+| `:infra:workspace` | Workspace Manager, restricted Git, trusted write/check runtime and LinuxStageToolSessionOpener | `:core:contracts` |
 | `:infra:task-store` | Durable tasks.json snapshot, file locks and atomic replacement | `:core:tasks`, `:core:contracts` |
 | `:infra:journal` | JSONL append/flush/close and physical event-log SHA-256 | `:core:session`, `:core:contracts` |
 | `:app:cli` | Clikt command entry point and Koin 4.2.2 interface-to-implementation bindings/composition | all eight libraries |
@@ -73,6 +73,18 @@ until a production free-form role gateway is implemented and reviewed.
 See [Koog role execution](KOOG_STAGE_EXECUTION.md) for trust, metering,
 capability and test boundaries.
 
+## Host-only stage tool authority (issue #74)
+
+The `:core:contracts` module now declares `StageToolSessionOpener`,
+`StageToolAuthoritySource`, `StageWrite`, and typed check/verification
+evidence. `:infra:workspace` implements `LinuxStageToolSessionOpener`
+using the existing `TrustedWriteRuntime` (no second writer or process runner).
+The separate `stageToolModule(lockDirectory)` in the CLI composition root
+requires an explicit trusted caller; ordinary `sessionModule` and the
+Koog `roleExecutionModule` never register write authority.
+See [Stage tool authority](STAGE_TOOL_AUTHORITY.md) for admission,
+lifetime, immutable artifacts, sandboxing and E2E guarantees.
+
 ## Build and test
 
 With JDK 21 and Gradle 9.8.1 installed, run from the repository root:
@@ -111,4 +123,4 @@ The TaskRepository port currently owns atomic reads, read-decide-write mutations
 
 ## CI ownership and runtime status
 
-All three jobs in [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) run on GitHub-hosted `ubuntu-24.04` since merged [PR #71](https://github.com/YuriiSokolenko/recursive-coder/pull/71), with pinned Gradle/JDK and required Linux sandbox E2E; no N150 runner is selected. Tests use fake/model-mock or local sandbox fixtures. A minimal Koog role adapter is linked only through the opt-in CLI Koin binding; recursive orchestration is **not** enabled in CLI sessions. The current build has nine product modules. The Linux-only `TrustedWriteRuntime` belongs to `:infra:workspace`, where it is separately tested, but it is **not** an enabled CLI write session.
+All three jobs in [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) run on GitHub-hosted `ubuntu-24.04` since merged [PR #71](https://github.com/YuriiSokolenko/recursive-coder/pull/71), with pinned Gradle/JDK and required Linux sandbox E2E; no N150 runner is selected. Tests use fake/model-mock or local sandbox fixtures. A minimal Koog role adapter is linked only through the opt-in CLI Koin binding; recursive orchestration is **not** enabled in CLI sessions. The current build has nine product modules. The Linux-only `TrustedWriteRuntime` and its new host-only `LinuxStageToolSessionOpener` belong to `:infra:workspace`, but neither is an enabled CLI write session or a Koog tool.

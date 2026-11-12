@@ -2,7 +2,7 @@
 
 **Recursive Coder** is an in-development, standalone open-source software engineering agent built with **Kotlin/JVM**. **JetBrains Koog** is integrated as an opt-in, fake-model-only single-role adapter; recursive production orchestration remains planned.
 
-> **Implementation snapshot (2026-11-12, PR #81 / issue #73):** The CLI has native task scheduling, a read-only session engine, FakeModel, an optional strict OpenAI-compatible Model Gateway and a trusted workspace. A separate Linux-only trusted write/check runtime exists, but **is not integrated into CLI sessions**. A minimal isolated Koog stage runner is implemented in `:agent:runtime` but is **not selected by CLI sessions**. Five-role orchestration, recursive coding, checkpoints and crash-resume are **not implemented**.
+> **Implementation snapshot (2026-11-12, PR #82 / issue #74):** The CLI has native task scheduling, a read-only session engine, FakeModel, an optional strict OpenAI-compatible Model Gateway and a trusted workspace. A Linux-only trusted write/check runtime has an **opt-in host-controlled stage port (#74)**, but remains disabled for CLI sessions and Koog. A minimal isolated Koog stage runner is implemented in `:agent:runtime` but is **not selected by CLI sessions**. Five-role orchestration, recursive coding, checkpoints and crash-resume are **not implemented**.
 
 ## What we are building
 
@@ -36,7 +36,7 @@ The Gradle build has **nine product modules**: `:agent:runtime`, `:core:contract
 
 The installed distribution remains at `build/install/recursive-coder/bin/recursive-coder`, preserving the existing CLI smoke-test path.
 
-The project includes an offline deterministic fake-model CLI, durable task queue/scheduler, trusted read-only workspace, optional configured HTTP model adapter, and physical JSONL event sink. The separately callable Linux trusted write/check runtime is **not** an enabled write-capable CLI mode. See [First executable session](docs/architecture/FIRST_SESSION.md) and [Trusted writes](docs/architecture/TRUSTED_WRITES.md).
+The project includes an offline deterministic fake-model CLI, durable task queue/scheduler, trusted read-only workspace, optional configured HTTP model adapter, and physical JSONL event sink. The standalone Linux trusted write/check runtime now also has an **opt-in, host-only stage tool port**, but neither CLI sessions nor the Koog tool registry can grant it automatically. See [First executable session](docs/architecture/FIRST_SESSION.md) and [Trusted writes](docs/architecture/TRUSTED_WRITES.md).
 
 With Gradle 9.8.1 and JDK 21 installed:
 
@@ -51,6 +51,7 @@ With Gradle 9.8.1 and JDK 21 installed:
 - [Architecture and engineering roadmap](docs/architecture/ARCHITECTURE.md)
 - [Stage graph contracts and policy gates (#72)](docs/architecture/STAGE_GRAPH.md)
 - [Koog single-role execution boundary (#73)](docs/architecture/KOOG_STAGE_EXECUTION.md)
+- [Host-controlled stage tool authority and isolated checks (#74)](docs/architecture/STAGE_TOOL_AUTHORITY.md)
 - [Gradle modules and dependency rules](docs/architecture/MODULES.md)
 - [First executable CLI session](docs/architecture/FIRST_SESSION.md)
 - [Native Task Manager and local scheduling](docs/architecture/TASK_MANAGER.md)

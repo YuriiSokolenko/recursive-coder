@@ -1,0 +1,232 @@
+package ai.yuriilab.recursivecoder
+
+import java.nio.file.Path
+
+/**
+ * Freeze nested collection values at admission. A host may use mutable backing
+ * collections; retaining their aliases would let in-place mutation redefine
+ * the already-admitted authority without invalidating equality.
+ */
+private fun StageToolHostSnapshot.frozen(): StageToolHostSnapshot = copy(
+    graph = graph.copy(
+        stages = graph.stages.map { node ->
+            node.copy(
+                dependencies = node.dependencies.toSet(),
+                inputArtifacts = node.inputArtifacts.toSet(),
+                outputArtifacts = node.outputArtifacts.toSet()
+            )
+        },
+        artifacts = graph.artifacts.toList(),
+        children = graph.children.map { it.copy(dependsOnStages = it.dependsOnStages.toSet()) }
+    ),
+    hostAcceptedArtifactIds = hostAcceptedArtifactIds.toSet(),
+    checks = checks.mapValues { (_, check) -> check.copy(arguments = check.arguments.toList()) },
+    requiredChecks = requiredChecks.toSet(),
+    revisionAuthorization = revisionAuthorization?.let { authorization ->
+        authorization.copy(review = authorization.review.copy(
+            paths = authorization.review.paths.toSet(),
+            approvedArtifactPaths = authorization.review.approvedArtifactPaths.toSet()
+        ))
+    }
+)
+
+/**
+ * The only stage-to-filesystem bridge. All physical writes, path traversal,
+ * Git baseline checks, bubblewrap execution and HMAC receipt validation remain
+ * in TrustedWriteRuntime. No Koog/model surface is registered here.
+ */
+class LinuxStageToolSessionOpener(
+    private val lockDirectory: Path =
+        Path.of(System.getProperty("user.home"), ".recursive-coder", "locks")
+) : StageToolSessionOpener {
+
+    override fun open(authority: StageToolAuthoritySource): StageToolOpenResult {
+        val snapshot = try { authority.current()?.frozen() }
+            catch (_: Exception) { null }
+            ?: return StageToolOpenResult.Denied("STAGE_AUTHORITY_UNAVAILABLE")
+        if (!ToolAuthorizationPolicy.validHostIdentifier(snapshot.requestId))
+            return StageToolOpenResult.Denied("INVALID_REQUEST_ID")
+        val graph = snapshot.graph
+        val stage = graph.stages.firstOrNull {
+            it.correlation.stageRunId == snapshot.stageRunId
+        } ?: return StageToolOpenResult.Denied("UNKNOWN_STAGE")
+        if (stage.correlation.requestId != snapshot.requestId)
+            return StageToolOpenResult.Denied("REQUEST_CORRELATION_MISMATCH")
+        if (stage.kind.role == EngineeringRole.REVIEWER)
+            return StageToolOpenResult.Denied("ROLE_NOT_AUTHORIZED")
+        if (stage.state != StageState.READY && stage.state != StageState.RUNNING)
+            return StageToolOpenResult.Denied("STAGE_NOT_READY")
+        val actor = stage.agentId ?: return StageToolOpenResult.Denied("MISSING_STAGE_ACTOR")
+
+        // A RUNNING stage has already crossed the READY -> RUNNING boundary.
+        // Recheck the same prerequisites as an admission; do not transition it.
+        val admissionGraph = if (stage.state == StageState.RUNNING)
+            graph.copy(stages = graph.stages.map {
+                if (it.correlation.stageRunId == snapshot.stageRunId)
+                    it.copy(state = StageState.READY) else it
+            })
+        else graph
+        val admitted = StageGraphPolicy.admitStage(
+            admissionGraph, snapshot.stageRunId, snapshot.hostAcceptedArtifactIds)
+        if (admitted is StageGateDecision.Deny)
+            return StageToolOpenResult.Denied(admitted.code)
+
+        val manifests = graph.artifacts.associateBy { it.id }
+        if (snapshot.hostAcceptedArtifactIds.any { id ->
+                manifests[id]?.approval != ArtifactApproval.ACCEPTED ||
+                    manifests[id]?.freeze != ArtifactFreeze.FROZEN
+            })
+            return StageToolOpenResult.Denied("INVALID_HOST_ACCEPTANCE")
+
+        val revision = snapshot.revisionAuthorization
+        val reviewed = if (revision == null) null else {
+            val artifact = manifests[revision.artifactId]
+                ?: return StageToolOpenResult.Denied("UNKNOWN_ARTIFACT")
+            if (artifact.freeze != ArtifactFreeze.FROZEN)
+                return StageToolOpenResult.Denied("INVALID_REVISION_AUTHORIZATION")
+            val decision = StageGraphPolicy.authorizeArtifactRevision(
+                graph, revision.artifactId, stage.kind.role, revision)
+            if (decision is StageGateDecision.Deny)
+                return StageToolOpenResult.Denied(decision.code)
+            ReviewedChange(revision.review.changeRequestId, revision.review.requestedBy,
+                revision.review.reviewedBy, stage.kind.role, setOf(artifact.declaredPath))
+        }
+        // Pin every frozen manifest, including historical/superseded artifacts.
+        // The host-accepted ID set is a separate trust fact and is never inferred
+        // from model text or a manifest's self-reported approval.
+        val pinned = graph.artifacts.filter { it.freeze == ArtifactFreeze.FROZEN }
+            .associate { it.declaredPath to it.sha256 }
+        val policy = TrustedWritePolicy(
+            sessionId = graph.correlation.sessionId,
+            root = snapshot.root,
+            baselineHead = snapshot.baselineHead,
+            branch = snapshot.branch,
+            role = stage.kind.role,
+            approvedArtifacts = pinned,
+            reviewedChange = reviewed,
+            checks = snapshot.checks.mapValues { (_, check) ->
+                TrustedCheck(check.executable, check.arguments, check.timeoutMs, check.maxOutputBytes)
+            },
+            requiredChecks = snapshot.requiredChecks,
+            maxToolCalls = snapshot.maxToolCalls
+        )
+        val runtime = try {
+            TrustedWriteRuntime.open(policy, lockDirectory = lockDirectory)
+        } catch (error: Refused) {
+            return StageToolOpenResult.Denied(error.code)
+        } catch (_: Exception) {
+            return StageToolOpenResult.Denied("STAGE_TOOL_UNAVAILABLE")
+        }
+        // The host may revoke authority while a filesystem lease is being opened.
+        // Do not return a live session without validating it a second time.
+        val stillCurrent = try { authority.current()?.frozen() == snapshot }
+            catch (_: Exception) { false }
+        if (!stillCurrent) {
+            runtime.close()
+            return StageToolOpenResult.Denied("STALE_STAGE_AUTHORITY")
+        }
+        return StageToolOpenResult.Granted(
+            LinuxStageToolSession(authority, snapshot, actor, stage.correlation, runtime)
+        )
+    }
+}
+
+private class LinuxStageToolSession(
+    private val authority: StageToolAuthoritySource,
+    private val admitted: StageToolHostSnapshot,
+    private val actor: AgentId,
+    private val correlation: StageCorrelation,
+    private val runtime: TrustedWriteRuntime
+) : StageToolSession {
+    private val passed = linkedMapOf<String, Pair<TrustedCheckReceipt, StageCheckEvidence>>()
+    private val attempted = mutableMapOf<String, StageCheckEvidence>()
+    private var revoked = false
+    private var finished = false
+    private var closed = false
+
+    private fun currentDenial(): String? {
+        if (closed) return "WRITE_SESSION_INVALID"
+        if (revoked) return "STALE_STAGE_AUTHORITY"
+        if (finished) return "STAGE_TOOL_FINISHED"
+        val now = try { authority.current()?.frozen() } catch (_: Exception) { null }
+        if (now == null || now != admitted) {
+            revoked = true
+            passed.clear()
+            attempted.clear()
+            return "STALE_STAGE_AUTHORITY"
+        }
+        return null
+    }
+
+    @Synchronized
+    override fun write(operations: List<StageWrite>): StageWriteEvidence {
+        currentDenial()?.let { return StageWriteEvidence(null, it) }
+        val writes = operations.map { op ->
+            when (op) {
+                is StageWrite.Create -> WriteOperation.Create(op.path, op.content)
+                is StageWrite.Edit -> WriteOperation.Edit(op.path, op.expectedSha256, op.content)
+                is StageWrite.Delete -> WriteOperation.Delete(op.path, op.expectedSha256)
+            }
+        }
+        val result = runtime.apply(writes)
+        // Conservative: even a rejected attempt cannot reuse older stage-check evidence.
+        passed.clear()
+        attempted.clear()
+        val stale = currentDenial()
+        return StageWriteEvidence(result.toolId, stale ?: result.deniedCode)
+    }
+
+    @Synchronized
+    override fun runCheck(checkId: String): StageCheckEvidence {
+        currentDenial()?.let { return StageCheckEvidence(checkId, null, deniedCode = it) }
+        passed.remove(checkId)
+        attempted.remove(checkId)
+        val result = runtime.runCheck(checkId)
+        // A check may have taken seconds. Revoke results when approval was
+        // withdrawn during execution; never report a stale check as passed.
+        currentDenial()?.let { denial ->
+            return StageCheckEvidence(checkId, result.toolId, deniedCode = denial)
+        }
+        val receipt = result.receipt
+        val evidence = if (result.passed && receipt != null)
+            StageCheckEvidence(checkId, result.toolId, receipt.baselineHead,
+                receipt.policyHash, receipt.manifestHash)
+        else StageCheckEvidence(checkId, result.toolId, deniedCode =
+            result.deniedCode ?: "CHECK_UNAVAILABLE")
+        attempted[checkId] = evidence
+        if (receipt != null && evidence.passed) passed[checkId] = receipt to evidence
+        return evidence
+    }
+
+    private fun checkEvidence(denial: String? = null): List<StageCheckEvidence> =
+        admitted.requiredChecks.sorted().map { id ->
+            if (denial != null) StageCheckEvidence(id, null, deniedCode = denial)
+            else attempted[id] ?: StageCheckEvidence(id, null, deniedCode = "CHECK_NOT_RUN")
+        }
+
+    @Synchronized
+    override fun verify(): StageValidationEvidence {
+        currentDenial()?.let { denial ->
+            return StageValidationEvidence(correlation, actor, checkEvidence(denial), false, denial)
+        }
+        // Evidence is in deterministic check-ID order; missing/failed checks
+        // have their own denial instead of being omitted from the report.
+        val receipts = admitted.requiredChecks.sorted().mapNotNull { passed[it]?.first }
+        val result = runtime.finish(receipts)
+        currentDenial()?.let { denial ->
+            return StageValidationEvidence(correlation, actor, checkEvidence(denial), false, denial)
+        }
+        if (result.successful) finished = true
+        return StageValidationEvidence(correlation, actor, checkEvidence(),
+            result.successful, result.deniedCode)
+    }
+
+    @Synchronized
+    override fun close() {
+        if (closed) return
+        closed = true
+        passed.clear()
+        attempted.clear()
+        runtime.close()
+    }
+}

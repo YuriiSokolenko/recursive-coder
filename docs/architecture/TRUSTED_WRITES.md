@@ -113,7 +113,7 @@ Neither a model-declared success nor a plausible JSON receipt is sufficient.
 - No claim that this prevents hostile same-UID processes from racing concurrent
   filesystem changes; production deployment must isolate the host and guard
   the workspace against concurrent non-agent writers.
-- The current CLI `RunSessionUseCase`/`SessionController` path remains read-only; wiring this **already-implemented standalone runtime** into the Koog graph is future work ([#9](https://github.com/YuriiSokolenko/recursive-coder/issues/9)).
+- The current CLI `RunSessionUseCase`/`SessionController` path remains read-only. Issue #74 provides a separately admitted host-only stage tool port over this runtime (see `STAGE_TOOL_AUTHORITY.md`); Koog still has no model-facing write tools, and automatic graph execution remains future work (#75–#79).
 
 Run `./gradlew test` on Linux; negative tests include role boundaries,
 immutable tests/specs, schema rejection, a tracked symlink directory that
