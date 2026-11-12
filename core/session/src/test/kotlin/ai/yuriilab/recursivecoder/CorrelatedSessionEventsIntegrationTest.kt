@@ -3,6 +3,9 @@ package ai.yuriilab.recursivecoder
 import java.time.Clock
 import java.time.Instant
 import java.time.ZoneOffset
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
@@ -12,6 +15,7 @@ import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import kotlin.test.assertFailsWith
 
 /** The stage-event adapters only emit metadata allowed by Session Protocol v1. */
 @Tag("integration")
@@ -63,14 +67,15 @@ class CorrelatedSessionEventsIntegrationTest {
         assertEquals(listOf("request-child-79", "request-child-79",
             "request-child-79", "request-review-79"),
             sink.events.map { it["correlationId"]?.jsonPrimitive?.content })
-        assertEquals("agent-stage-child-79",
-            sink.events[1]["actor"]!!.jsonObject["agentId"]!!.jsonPrimitive.content)
         assertEquals("agent-stage-parent-79",
-            sink.events[1]["actor"]!!.jsonObject["parentAgentId"]!!.jsonPrimitive.content)
+            sink.events[1]["actor"]!!.jsonObject["agentId"]!!.jsonPrimitive.content)
+        assertEquals(JsonNull, sink.events[1]["actor"]!!.jsonObject["parentAgentId"])
         assertEquals("graph-child-79",
             sink.events[1]["metadata"]!!.jsonObject["childGraphId"]!!.jsonPrimitive.content)
-        assertEquals("agent-stage-graph-child-79",
+        assertEquals("agent-stage-child-79",
             sink.events[1]["actor"]!!.jsonObject["childAgentId"]!!.jsonPrimitive.content)
+        assertEquals("session.transition",
+            sink.events[1]["type"]!!.jsonPrimitive.content)
         assertEquals(JsonNull,
             sink.events[1]["actor"]!!.jsonObject["childSessionId"])
         assertFalse(sink.events[0]["metadata"]!!.jsonObject.containsKey("inputTokens"))
@@ -101,4 +106,89 @@ class CorrelatedSessionEventsIntegrationTest {
         assertEquals("request-79", event["correlationId"]!!.jsonPrimitive.content)
         journal.finish()
     }
+    @Test fun accountingAndIntegrationNeverMasqueradeAsAgentCompletion() {
+        val sink = MemorySink()
+        val journal = SessionEventJournal("status-79", "trace-79", "request-79",
+            clock, sink)
+        val graph = GraphId("graph-79")
+        val stage = StageRunId("stage-79")
+        val emitter = CorrelatedRecursiveSessionEvents(journal)
+        fun emit(kind: RecursiveEventKind, child: GraphId? = null) {
+            emitter.emit(RecursiveEvent(kind, graph, stage, null, null,
+                "request-79", StageKind.DEVELOP, RecursiveUsage(1, 1),
+                RecursiveUsage(0, 0), RecursiveUsage(10, 10),
+                childGraphId = child))
+        }
+        emit(RecursiveEventKind.USAGE_CHARGED)
+        emit(RecursiveEventKind.INTEGRATED, GraphId("graph-child-79"))
+        emit(RecursiveEventKind.SUCCEEDED)
+        assertEquals(listOf("tool.completed", "tool.completed", "agent.completed"),
+            sink.events.map { it["type"]!!.jsonPrimitive.content })
+        assertEquals("agent-stage-graph-child-79",
+            sink.events[1]["actor"]!!.jsonObject["childAgentId"]!!.jsonPrimitive.content)
+        journal.finish()
+    }
+
+    @Test fun rejectedPreparationWithNoCodeDoesNotAppearStarted() {
+        val sink = MemorySink()
+        val journal = SessionEventJournal("state-79", "trace-79", "request-79",
+            clock, sink)
+        val correlation = StageCorrelation("state-79", GraphId("graph-79"),
+            StageRunId("stage-79"), "request-79", "correlation-79")
+        val adapter = CorrelatedPreparationSessionEvents(journal)
+        for (state in listOf(StageState.REJECTED, StageState.FAILED,
+            StageState.CANCELLED)) {
+            adapter.emit(PreparationStageEvent(correlation, StageKind.SDD,
+                state, null, null, null))
+        }
+        assertEquals(listOf("denied", "failed", "cancelled"),
+            sink.events.map { it["status"]!!.jsonPrimitive.content })
+        journal.finish()
+    }
+
+    @Test fun concurrentProducersRetainUniqueSequenceAndCausationChain() {
+        val sink = MemorySink()
+        val journal = SessionEventJournal("parallel-79", "trace-79", "request-79",
+            clock, sink)
+        val n = 24
+        val start = CountDownLatch(1)
+        val done = CountDownLatch(n)
+        val errors = ConcurrentLinkedQueue<Throwable>()
+        val workers = (1..n).map {
+            Thread {
+                try {
+                    start.await()
+                    journal.append("agent.started", "started")
+                } catch (e: Throwable) {
+                    errors += e
+                } finally {
+                    done.countDown()
+                }
+            }.apply { start() }
+        }
+        start.countDown()
+        assertTrue(done.await(10, TimeUnit.SECONDS))
+        workers.forEach { it.join() }
+        assertTrue(errors.isEmpty(), errors.toString())
+        assertEquals((1..n).toList(),
+            sink.events.map { it["sequence"]!!.jsonPrimitive.content.toInt() })
+        for (index in 1 until n) {
+            assertEquals(sink.events[index - 1]["eventId"],
+                sink.events[index]["causationId"])
+        }
+        journal.finish()
+    }
+
+    @Test fun malformedActorIsRejectedBeforeAppending() {
+        val sink = MemorySink()
+        val journal = SessionEventJournal("guard-79", "trace-79", "request-79",
+            clock, sink)
+        assertFailsWith<IllegalArgumentException> {
+            journal.append("agent.started", "started",
+                actor = SessionEventActor("bad/agent"))
+        }
+        assertTrue(sink.events.isEmpty())
+        journal.finish()
+    }
+
 }
