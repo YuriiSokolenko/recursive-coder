@@ -1,14 +1,14 @@
 # Recursive Coder — Standalone Architecture
 
-> **Status:** target architecture, RFC 0.3; implementation reconciled with `dev@4ed9fe8` on 2026-11-11  
-> **Technology:** Kotlin/JVM now; JetBrains Koog planned; configurable local/compatible LLM APIs  
+> **Status:** target architecture, RFC 0.3; implementation includes single-role adapter from PR #81 on 2026-11-12  
+> **Technology:** Kotlin/JVM; isolated opt-in Koog single-role execution; configurable local/compatible LLM APIs  
 > **Core principle:** Recursive Coder must own the complete coding-agent lifecycle. No external workflow, repository, or service may be a mandatory coordinator.
 
 ## 1. Mission
 
 Build a **fully independent software engineering agent** that can accept complex development tasks, recursively refine and implement them, validate the results, and preserve outcomes safely.
 
-The planned Koog integration will provide agent-building primitives, while Recursive Coder retains ownership of task queues, session lifecycles, nested agents, tools, budgets, recovery, event history, and terminal results.
+The minimal Koog role adapter provides agent-building primitives for one fake-model stage; a complete five-role orchestrator remains planned, while Recursive Coder retains ownership of task queues, session lifecycles, nested agents, tools, budgets, recovery, event history, and terminal results.
 
 This project is not a plugin for another orchestration platform. Cloud providers, source-control hosting, IDEs, and task trackers are optional integrations built on public interfaces.
 
@@ -21,7 +21,7 @@ This project is not a plugin for another orchestration platform. Cloud providers
                |
          Session Controller
                |
-    Recursive Agent Graph (Koog; planned)
+    Recursive Agent Graph (full Koog flow planned)
        SDD → ATDD → TDD → Develop → Review
         |       |     |        |       |
         +-------+-----+--------+-------+
@@ -35,7 +35,7 @@ This project is not a plugin for another orchestration platform. Cloud providers
 
 ### Current Gradle module boundaries
 
-The implemented compile-time module graph is documented in [Gradle modules](MODULES.md). The CLI alone assembles session, task, model and workspace implementations; both core engines compile against shared contracts and do not import HTTP or Koog adapters. Future recursive-agent and trusted-tool modules are intentionally not created yet.
+The implemented compile-time module graph is documented in [Gradle modules](MODULES.md). The CLI alone assembles session, task, model and workspace implementations; both core engines compile against shared contracts and do not import HTTP or Koog adapters. The `:agent:runtime` module now contains the minimal Koog single-role adapter; recursive orchestration and an independently extracted trusted-tool module remain future milestones. See [Koog stage execution](KOOG_STAGE_EXECUTION.md).
 
 ### Task Manager
 
@@ -140,4 +140,4 @@ Every new engine module must ship with relevant tests. Live model behavior does 
 | Durability | Event Journal, checkpoints, fenced resume, and fail-closed recovery |
 | Product | First-party task scheduling, optional daemon/API and integrations, diagnostics UI, and releases |
 
-**Implementation status (2026-11-11):** eight Gradle modules, first-party Task Manager, Task/Session Use Cases with CLI-local Koin, pure policies, read-only sessions, strict Model Gateway, physical event journal and an **independent Linux-only trusted write/check runtime** exist. The CLI remains read-only. Koog five-stage execution, recursion, crash recovery, releases and optional daemon/API are planned. This target design is not evidence that planned components are executable.
+**Implementation status (2026-11-12, PR #81):** nine Gradle product modules, first-party Task Manager, Task/Session Use Cases with CLI-local Koin, pure policies, read-only sessions, strict Model Gateway, physical event journal and an **independent Linux-only trusted write/check runtime** exist. The CLI remains read-only. An opt-in fake-only Koog stage adapter exists, but Koog five-stage execution, recursion, crash recovery, releases and optional daemon/API are planned. This target design is not evidence that planned components are executable.
