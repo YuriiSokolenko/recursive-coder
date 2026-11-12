@@ -9,6 +9,8 @@ import java.time.Instant
 data class StageRoleRequest(
     val graph: StageGraph,
     val stageRunId: StageRunId,
+    /** Host-issued request identity, including for unknown stage IDs. */
+    val requestId: String,
     val expectedRole: EngineeringRole,
     val hostAcceptedArtifactIds: Set<ArtifactId>,
     val model: ModelConfig,
@@ -51,7 +53,8 @@ enum class StageRoleEventKind { STARTED, PROPOSED, DENIED, FAILED, CANCELLED, TI
 data class StageRoleEvent(
     val correlation: StageCorrelation,
     val role: EngineeringRole,
-    val agentId: AgentId,
+    /** Unknown stage or unassigned actor has no verified agent identity. */
+    val agentId: AgentId?,
     val kind: StageRoleEventKind,
     val usage: StageRoleUsage,
     val code: String? = null
