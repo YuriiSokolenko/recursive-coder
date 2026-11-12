@@ -110,4 +110,44 @@ class RoleExecutionKoinTest {
             developerEnabled.close()
         }
     }
+
+    @Test fun reviewerRequiresDistinctOptInHostAndProvidesNoWriteTools() {
+        val bridge = KoogPromptBridge { _, _ -> error("No reviewer run in Koin test") }
+        val host = object : ReviewerStageHost {
+            override fun beginStage(
+                expectedGraph: StageGraph, stageRunId: StageRunId,
+                expectedAcceptedIds: Set<ArtifactId>
+            ): ReviewerStageLease? = null
+            override fun current(lease: ReviewerStageLease): Boolean = false
+            override fun readBytes(path: String): ByteArray? = null
+            override fun verifyDeveloperEvidence(lease: ReviewerStageLease): Boolean = false
+            override fun finishStage(
+                lease: ReviewerStageLease, updatedGraph: StageGraph,
+                acceptedIds: Set<ArtifactId>, decision: ReviewerDecisionRecord
+            ): Boolean = false
+            override fun abortStage(
+                lease: ReviewerStageLease, terminal: StageState
+            ): ReviewerStageSnapshot? = null
+        }
+        val readOnly = koinApplication { modules(roleExecutionModule(FakeModel(), bridge)) }
+        try {
+            assertNull(readOnly.koin.getOrNull<RunReviewerStageUseCase>())
+            assertNull(readOnly.koin.getOrNull<ReviewerStageHost>())
+        } finally {
+            readOnly.close()
+        }
+        val enabled = koinApplication {
+            modules(roleExecutionModule(FakeModel(), bridge), reviewerStageModule(host))
+        }
+        try {
+            val first: RunReviewerStageUseCase = enabled.koin.get()
+            val second: RunReviewerStageUseCase = enabled.koin.get()
+            assertNotSame(first, second)
+            assertTrue(enabled.koin.get<ReviewerStageHost>() === host)
+            assertNull(enabled.koin.getOrNull<StageToolSessionOpener>())
+        } finally {
+            enabled.close()
+        }
+    }
+
 }
