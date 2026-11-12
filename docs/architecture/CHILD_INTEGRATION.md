@@ -17,11 +17,19 @@ those facts. A model response, a manifest with `ACCEPTED`, or a successful
 child is **never** sufficient alone.
 
 After a child finishes, its parent calls `integrateChildren()`. Integration
-attempts are capped per parent and identical denial telemetry is deduplicated.
-Authoritative host file reads run outside the scheduler's mutation lock; the
-captured graph version is rechecked at commit. Concurrent mutations cause
-`CHILD_INTEGRATION_STALE` rather than accepting an out-of-date snapshot.
-Parent completion also performs host evidence checks outside that lock. The pure
+attempts are capped per parent per child-admission generation. New child
+admission starts a fresh attempt budget; concurrent-stale attempts are refunded.
+Identical denial telemetry is deduplicated within a generation, and the ledger
+resets after a changed accepted result. Authoritative host file reads run
+outside the scheduler's mutation lock; at commit, the scheduler compares only
+the relevant subtree's topology, authorization, terminal states and nested
+integration evidence. Changes solely to resource usage or unrelated sibling
+subtrees do not cause false `CHILD_INTEGRATION_STALE` results.
+Parent completion uses the same narrow snapshot comparison and rereads child
+evidence outside that lock. **The scheduler's graph comparison does not fence
+external workspace writes**: a production host must provide its own versioned
+workspace snapshot/lease or equivalent atomic write fencing across the
+read-to-commit interval; a digest alone cannot guarantee that race is absent. The pure
 policy walks a deterministic sibling topological order (lexical tie-breaking),
 requires all direct children to have succeeded, checks exact child stage/role
 provenance, accepted/frozen manifests, independent host acceptance, live
@@ -44,8 +52,16 @@ The existing `RecursiveEventSink` is best-effort telemetry. A swallowed event
 sink failure latches `eventDeliveryFailed` for the host to inspect; physical
 journal completion must additionally pass `SessionEventJournal.finish()`.
 The shared journal serializes concurrent producer appends, and invalid actor
-identities are rejected before journal mutation. Production
-persistent Session Protocol v1 correlation and a full installed CLI workflow
+identities are rejected before journal mutation. A malformed
+`CHILD_RESERVED` event without a parent identity is rejected explicitly and
+is reflected in the host-visible event failure latch. Session Protocol v1
+event names remain schema-compatible, but `session.transition` for child
+reservations and early preparation states is **metadata-only**, without a
+session `transition` object. Similarly, `tool.completed` for accounting or
+integration is a metadata marker, not a claim that a physical tool executed:
+`toolExecutionId` stays null. Consumers must inspect `metadata.recursiveEvent`
+or `metadata.stageState`; they must not infer execution from the event type
+alone. Production persistent Session Protocol v1 correlation and a full installed CLI workflow
 are still required for completing #79.
 
 ## Verification
