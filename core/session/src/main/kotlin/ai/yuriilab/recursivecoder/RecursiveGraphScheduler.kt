@@ -161,7 +161,23 @@ class RecursiveGraphScheduler(
             ?: return ChildIntegrationDecision.Denied("CHILD_INTEGRATION_UNAVAILABLE")
         return try {
             val byChild = mutableMapOf<GraphId, List<VerifiedChildArtifact>>()
+            val nested = mutableMapOf<GraphId, IntegratedChildResults>()
             for (child in snapshot.nodes.filter { it.parentGraphId == parentId }) {
+                integrated[child.graphId]?.let { results ->
+                    for (receipt in results.artifacts) {
+                        val producer = snapshot.node(receipt.childGraphId)
+                            ?: return ChildIntegrationDecision.Denied("UNKNOWN_CHILD_ARTIFACT")
+                        if (host.manifestsFor(producer)?.contains(receipt.manifest) != true)
+                            return ChildIntegrationDecision.Denied("CHILD_EVIDENCE_REVOKED")
+                        val currentBytes = host.readBytes(receipt.manifest.declaredPath)
+                            ?: return ChildIntegrationDecision.Denied("CHILD_ARTIFACT_MISSING")
+                        val actual = MessageDigest.getInstance("SHA-256")
+                            .digest(currentBytes).joinToString("") { "%02x".format(it) }
+                        if (actual != receipt.observedSha256)
+                            return ChildIntegrationDecision.Denied("CHILD_ARTIFACT_DIGEST_MISMATCH")
+                    }
+                    nested[child.graphId] = results
+                }
                 val manifests = host.manifestsFor(child)
                     ?: return ChildIntegrationDecision.Denied("CHILD_EVIDENCE_UNAVAILABLE")
                 val receipts = mutableListOf<VerifiedChildArtifact>()
@@ -177,7 +193,7 @@ class RecursiveGraphScheduler(
                 byChild[child.graphId] = receipts
             }
             RecursiveChildIntegrationPolicy.integrate(snapshot, parentId,
-                byChild, host.acceptedArtifactIds(), host.reservedParentArtifacts(parent))
+                byChild, host.acceptedArtifactIds(), host.reservedParentArtifacts(parent), nested)
         } catch (_: Exception) {
             ChildIntegrationDecision.Denied("CHILD_EVIDENCE_UNAVAILABLE")
         }
