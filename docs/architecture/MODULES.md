@@ -82,6 +82,7 @@ using the existing `TrustedWriteRuntime` (no second writer or process runner).
 The separate `stageToolModule(lockDirectory)` in the CLI composition root
 requires an explicit trusted caller; ordinary `sessionModule` and the
 Koog `roleExecutionModule` never register write authority.
+The opt-in `RunPreparationStageUseCase` in `:core:session` coordinates independently leased SDD/ATDD/TDD proposals and trusted artifact handoffs (issue #75); the Koin `preparationStageModule` must be explicitly included by a trusted host. See [Preparation stages](PREPARATION_STAGES.md) for the CAS and acceptance boundary.
 See [Stage tool authority](STAGE_TOOL_AUTHORITY.md) for admission,
 lifetime, immutable artifacts, sandboxing and E2E guarantees.
 

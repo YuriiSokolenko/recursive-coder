@@ -97,7 +97,7 @@ class KoogStageRoleExecutor(
         if (request.maxModelRequests != 1 || request.graph.budget.maxTokens < 1 ||
             request.model.maxOutputTokens < 1 || request.model.contextTokens < 1 ||
             request.instruction.isBlank() ||
-            request.instruction.toByteArray(Charsets.UTF_8).size > 16_384)
+            request.instruction.toByteArray(Charsets.UTF_8).size > StageRoleLimits.MAX_INSTRUCTION_BYTES)
             return terminal(StageRoleOutcome.Denied("INVALID_ROLE_BUDGET_OR_INPUT"),
                 StageRoleEventKind.DENIED, "INVALID_ROLE_BUDGET_OR_INPUT")
         // The fake-v1 feature set is the legacy gateway's mandatory protocol
@@ -177,7 +177,7 @@ class KoogStageRoleExecutor(
                     }
                     request.cancellation.check(request.deadline)
                     if (proposed.isBlank() ||
-                        proposed.toByteArray(Charsets.UTF_8).size > 32_768)
+                        proposed.toByteArray(Charsets.UTF_8).size > StageRoleLimits.MAX_PROPOSAL_BYTES)
                         throw RoleExecutionError("MODEL_INVALID_RESPONSE")
                     StageRoleOutcome.Proposed(proposed)
                 } finally {

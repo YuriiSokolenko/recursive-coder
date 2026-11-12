@@ -39,7 +39,14 @@ object ArchitectureGraph {
             problems += "Unclassified module $it; update architecture allowlist"
         }
 
-        val projects = projectEdges.sortedWith(
+        // Gradle java-test-fixtures injects these two self references for the
+        // core:contracts fixture variant; they are variant wiring, not genuine
+        // project-to-project edges or a product dependency cycle.
+        // Keep every other self edge (including implementation) forbidden.
+        val projects = projectEdges.filterNot { edge ->
+            edge.module == ":core:contracts" && edge.target == edge.module &&
+                edge.configuration in setOf("testFixturesApi", "testImplementation")
+        }.sortedWith(
             compareBy(ProjectEdge::module, ProjectEdge::configuration, ProjectEdge::target),
         )
         projects.forEach { edge ->

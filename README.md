@@ -52,6 +52,7 @@ With Gradle 9.8.1 and JDK 21 installed:
 - [Stage graph contracts and policy gates (#72)](docs/architecture/STAGE_GRAPH.md)
 - [Koog single-role execution boundary (#73)](docs/architecture/KOOG_STAGE_EXECUTION.md)
 - [Host-controlled stage tool authority and isolated checks (#74)](docs/architecture/STAGE_TOOL_AUTHORITY.md)
+- [Host-approved SDD, ATDD and TDD preparation stages (#75)](docs/architecture/PREPARATION_STAGES.md)
 - [Gradle modules and dependency rules](docs/architecture/MODULES.md)
 - [First executable CLI session](docs/architecture/FIRST_SESSION.md)
 - [Native Task Manager and local scheduling](docs/architecture/TASK_MANAGER.md)

@@ -21,6 +21,22 @@ class ArchitectureGraphTest {
     }
 
     @Test
+    fun fixtureSelfWiringIsNotAProjectCycleButOtherSelfEdgesAreStillIllegal() {
+        val modules = ArchitectureGraph.allowedProjectDependencies.keys
+        val fixtureEdges = listOf(
+            ProjectEdge(":core:contracts", "testFixturesApi", ":core:contracts"),
+            ProjectEdge(":core:contracts", "testImplementation", ":core:contracts"),
+            ProjectEdge(":core:session", "testImplementation", ":core:contracts"),
+        )
+        assertTrue(ArchitectureGraph.violations(modules, fixtureEdges, emptyList()).isEmpty())
+        val illegal = ArchitectureGraph.violations(modules, fixtureEdges + listOf(
+            ProjectEdge(":core:contracts", "implementation", ":core:contracts")
+        ), emptyList())
+        assertTrue(illegal.any { it.contains("Forbidden project dependency") })
+        assertTrue(illegal.any { it.contains("Project dependency cycle") })
+    }
+
+    @Test
     fun rejectsForbiddenProductionAndTestDependencies() {
         val violations = ArchitectureGraph.violations(
             modules = ArchitectureGraph.allowedProjectDependencies.keys,
