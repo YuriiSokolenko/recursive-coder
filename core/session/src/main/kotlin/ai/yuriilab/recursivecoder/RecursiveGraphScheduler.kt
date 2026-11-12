@@ -91,6 +91,20 @@ class RecursiveGraphScheduler(
     private val seenRequests = mutableSetOf<Triple<GraphId, StageRunId, String>>()
     /** Each subtree has its own bounded retry ledger; siblings cannot exhaust it. */
     private val attemptedRequests = mutableMapOf<GraphId, Int>()
+    private val attemptedIntegrations = mutableMapOf<GraphId, Int>()
+    private val emittedIntegrationDenials = mutableMapOf<GraphId, MutableSet<String>>()
+    private var mutationVersion = 0L
+    private var eventSinkFailed = false
+
+    private data class IntegrationFrame(
+        val snapshot: RecursiveSnapshot,
+        val nested: Map<GraphId, IntegratedChildResults>,
+        val version: Long
+    )
+
+    /** A host-visible telemetry failure latch; persistent workflows must also verify journal.finish(). */
+    val eventDeliveryFailed: Boolean get() = synchronized(lock) { eventSinkFailed }
+
     private val rootId = root.graph.correlation.graphId
     private var snapshot: RecursiveSnapshot
 
@@ -154,7 +168,11 @@ class RecursiveGraphScheduler(
     }
 
     /** Every receipt and byte digest is re-read at parent commit; no partial merges. */
-    private fun verifyIntegration(parentId: GraphId): ChildIntegrationDecision {
+    private fun verifyIntegration(
+        parentId: GraphId,
+        evidence: IntegrationFrame
+    ): ChildIntegrationDecision {
+        val snapshot = evidence.snapshot
         val parent = snapshot.node(parentId)
             ?: return ChildIntegrationDecision.Denied("UNKNOWN_PARENT")
         val host = integrationHost
@@ -163,7 +181,7 @@ class RecursiveGraphScheduler(
             val byChild = mutableMapOf<GraphId, List<VerifiedChildArtifact>>()
             val nested = mutableMapOf<GraphId, IntegratedChildResults>()
             for (child in snapshot.nodes.filter { it.parentGraphId == parentId }) {
-                integrated[child.graphId]?.let { results ->
+                evidence.nested[child.graphId]?.let { results ->
                     for (receipt in results.artifacts) {
                         val producer = snapshot.node(receipt.childGraphId)
                             ?: return ChildIntegrationDecision.Denied("UNKNOWN_CHILD_ARTIFACT")
@@ -199,17 +217,42 @@ class RecursiveGraphScheduler(
         }
     }
 
-    internal fun integrateFrom(context: RecursiveStageContext): ChildIntegrationDecision =
-        synchronized(lock) {
+    /**
+     * Reserve a bounded integration attempt under the lock, perform all host I/O
+     * outside it, then commit only if the authoritative graph version is intact.
+     * A repeated identical denial is journaled once per parent.
+     */
+    internal fun integrateFrom(context: RecursiveStageContext): ChildIntegrationDecision {
+        val frame = synchronized(lock) {
+            val parent = snapshot.node(context.graphId)
+                ?: return ChildIntegrationDecision.Denied("UNKNOWN_PARENT")
+            if (parent.stageRunId != context.stageRunId || parent.origin != context.origin)
+                return ChildIntegrationDecision.Denied("STAGE_OWNERSHIP_MISMATCH")
+            if (parent.state != RecursiveNodeState.RUNNING)
+                return ChildIntegrationDecision.Denied("PARENT_NOT_RUNNING")
+            val attemptLimit = maxOf(16, graphBudget.maxChildren.coerceAtMost(
+                RecursiveGraphPolicy.MAX_TOTAL_CHILDREN) * 4)
+            val attempted = attemptedIntegrations[parent.graphId] ?: 0
+            if (attempted >= attemptLimit) {
+                emitIntegrationDenial(parent, "INTEGRATION_ATTEMPT_LIMIT")
+                return ChildIntegrationDecision.Denied("INTEGRATION_ATTEMPT_LIMIT")
+            }
+            attemptedIntegrations[parent.graphId] = attempted + 1
+            IntegrationFrame(snapshot, integrated.toMap(), mutationVersion)
+        }
+        val checked = verifyIntegration(context.graphId, frame)
+        return synchronized(lock) {
             val parent = snapshot.node(context.graphId)
                 ?: return@synchronized ChildIntegrationDecision.Denied("UNKNOWN_PARENT")
-            if (parent.stageRunId != context.stageRunId || parent.origin != context.origin)
-                return@synchronized ChildIntegrationDecision.Denied("STAGE_OWNERSHIP_MISMATCH")
-            val decision = verifyIntegration(parent.graphId)
+            val decision = if (mutationVersion != frame.version ||
+                parent.state != RecursiveNodeState.RUNNING) {
+                ChildIntegrationDecision.Denied("CHILD_INTEGRATION_STALE")
+            } else checked
             when (decision) {
                 is ChildIntegrationDecision.Accepted -> {
                     if (integrated[parent.graphId] != decision.results) {
                         integrated[parent.graphId] = decision.results
+                        mutationVersion++
                         for (child in decision.results.childOrder) {
                             emit(parent, RecursiveEventKind.INTEGRATED,
                                 child = child, requestId = snapshot.node(child)?.requestId)
@@ -217,15 +260,22 @@ class RecursiveGraphScheduler(
                     }
                 }
                 is ChildIntegrationDecision.Denied ->
-                    emit(parent, RecursiveEventKind.DENIED, decision.code)
+                    emitIntegrationDenial(parent, decision.code)
             }
             decision
         }
+    }
+
+    private fun emitIntegrationDenial(parent: RecursiveNode, code: String) {
+        val codes = emittedIntegrationDenials.getOrPut(parent.graphId) { mutableSetOf() }
+        if (codes.add(code)) emit(parent, RecursiveEventKind.DENIED, code)
+    }
 
     private fun replace(node: RecursiveNode) {
         snapshot = snapshot.copy(nodes = snapshot.nodes.map {
             if (it.graphId == node.graphId) node else it
         })
+        mutationVersion++
     }
 
     private fun emit(
@@ -239,7 +289,9 @@ class RecursiveGraphScheduler(
             events.emit(RecursiveEvent(kind, node.graphId, node.stageRunId,
                 node.parentGraphId, node.parentStageRunId, requestId,
                 node.origin, node.spent, node.delegated, node.granted, code, child))
-        } catch (_: Exception) { /* Host-owned snapshots are authoritative. */ }
+        } catch (_: Exception) {
+            eventSinkFailed = true // The host must not publish an unverified journal.
+        }
     }
 
     internal fun requestFrom(
@@ -291,6 +343,7 @@ class RecursiveGraphScheduler(
                     denied("INVALID_CHILD_ADMISSION_STATE")
                 } else {
                     snapshot = candidate
+                    mutationVersion++
                     integrated.remove(parent.graphId)
                     tokens[child.graphId] = Cancellation()
                     emit(child, RecursiveEventKind.CHILD_RESERVED, child = child.graphId)
@@ -438,6 +491,14 @@ class RecursiveGraphScheduler(
         } catch (_: Exception) {
             RecursiveExecutionOutcome.Failed("STAGE_EXECUTOR_FAILED")
         }
+        // Re-verify physical evidence outside the scheduler lock. Any concurrent
+        // graph mutation invalidates the captured version at terminal commit.
+        val completionFrame = synchronized(lock) {
+            if (outcome == RecursiveExecutionOutcome.Completed && integrationHost != null &&
+                snapshot.nodes.any { it.parentGraphId == id } && integrated[id] != null)
+                IntegrationFrame(snapshot, integrated.toMap(), mutationVersion) else null
+        }
+        val terminalEvidence = completionFrame?.let { verifyIntegration(id, it) }
         return synchronized(lock) {
             runningJobs.remove(id)?.complete()
             val node = snapshot.node(id)!!
@@ -463,8 +524,10 @@ class RecursiveGraphScheduler(
                     RecursiveExecutionOutcome.Failed("CHILD_RESULTS_NOT_INTEGRATED")
                 outcome == RecursiveExecutionOutcome.Completed && integrationHost != null &&
                     snapshot.nodes.any { it.parentGraphId == id } &&
-                    (verifyIntegration(id) as? ChildIntegrationDecision.Accepted)?.results !=
-                        integrated[id] ->
+                    (completionFrame == null ||
+                        mutationVersion != completionFrame.version ||
+                        (terminalEvidence as? ChildIntegrationDecision.Accepted)?.results !=
+                            integrated[id]) ->
                     RecursiveExecutionOutcome.Failed("CHILD_INTEGRATION_STALE")
                 else -> outcome
             }
