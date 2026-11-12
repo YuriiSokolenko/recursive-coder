@@ -101,6 +101,8 @@ class RecursiveChildIntegrationPolicyUnitTest {
     }
 
     @Test fun cycleAndReviewerEmptyReceiptsHaveExplicitOutcomes() {
+        denied("UNKNOWN_CHILD_DEPENDENCY", decide(snapshot = RecursiveSnapshot(
+            listOf(root, first.copy(dependencies = setOf(GraphId("not-a-sibling"))), second))))
         denied("CYCLIC_CHILD_DEPENDENCY", decide(snapshot = RecursiveSnapshot(
             listOf(root, first.copy(dependencies = setOf(b)), second))))
         val reviewerRoot = root.copy(origin = StageKind.REVIEW, writablePaths = emptySet())
