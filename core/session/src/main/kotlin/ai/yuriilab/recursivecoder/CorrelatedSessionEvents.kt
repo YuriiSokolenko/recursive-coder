@@ -11,35 +11,48 @@ import kotlinx.serialization.json.put
  * Model prompts, response bodies, workspace bytes, tool output and credentials
  * never reach any of these sinks.
  *
- * These are synchronous, fail-closed durability boundaries when used directly:
- * a journal failure is propagated, never reported as a successful event write.
+ * These adapters propagate journal failures when invoked directly. The recursive
+ * scheduler deliberately treats its event sink as best-effort telemetry, so
+ * hosts must also inspect eventDeliveryFailed and verify journal.finish().
  */
 class CorrelatedRecursiveSessionEvents(
     private val journal: SessionEventJournal
 ) : RecursiveEventSink {
     override fun emit(event: RecursiveEvent) {
         val kind = when (event.kind) {
-            RecursiveEventKind.STARTED, RecursiveEventKind.CHILD_RESERVED -> "agent.started"
+            RecursiveEventKind.STARTED -> "agent.started"
+            RecursiveEventKind.CHILD_RESERVED -> "session.transition"
             RecursiveEventKind.DENIED -> "policy.denied"
+            RecursiveEventKind.USAGE_CHARGED, RecursiveEventKind.INTEGRATED -> "tool.completed"
+            RecursiveEventKind.SUCCEEDED, RecursiveEventKind.CANCELLED,
+            RecursiveEventKind.TIMED_OUT -> "agent.completed"
             RecursiveEventKind.FAILED -> "session.error"
-            else -> "agent.completed"
         }
         val status = when (event.kind) {
             RecursiveEventKind.STARTED, RecursiveEventKind.CHILD_RESERVED -> "started"
             RecursiveEventKind.DENIED -> "denied"
+            RecursiveEventKind.USAGE_CHARGED, RecursiveEventKind.INTEGRATED,
+            RecursiveEventKind.SUCCEEDED -> "completed"
             RecursiveEventKind.FAILED -> "failed"
             RecursiveEventKind.CANCELLED -> "cancelled"
             RecursiveEventKind.TIMED_OUT -> "timed_out"
-            else -> "completed"
+        }
+        val parentActorId = event.parentStageRunId?.let { "agent-" + it.value }
+        val childActorId = when (event.kind) {
+            RecursiveEventKind.CHILD_RESERVED -> "agent-" + event.stageRunId.value
+            RecursiveEventKind.INTEGRATED -> event.childGraphId?.let {
+                "agent-" + RecursiveGraphPolicy.childStageId(it).value
+            }
+            else -> null // Denied proposals do not identify an admitted agent.
         }
         journal.append(kind, status,
             correlationId = event.requestId ?: event.stageRunId.value,
             actor = SessionEventActor(
-                agentId = "agent-" + event.stageRunId.value,
-                parentAgentId = event.parentStageRunId?.let { "agent-" + it.value },
-                childAgentId = event.childGraphId?.let {
-                    "agent-" + RecursiveGraphPolicy.childStageId(it).value
-                }
+                agentId = if (event.kind == RecursiveEventKind.CHILD_RESERVED)
+                    requireNotNull(parentActorId) else "agent-" + event.stageRunId.value,
+                parentAgentId = if (event.kind == RecursiveEventKind.CHILD_RESERVED)
+                    null else parentActorId,
+                childAgentId = childActorId
                 // A child graph is not necessarily a distinct Session v1.
                 // Unknown child session identity must remain null.
             ),
@@ -49,7 +62,8 @@ class CorrelatedRecursiveSessionEvents(
                 put("stageRunId", event.stageRunId.value)
                 put("origin", event.origin.name)
                 put("role", event.origin.role.name)
-                put("budgetId", event.graphId.value)
+                // Graph scope is not a host-issued budget correlation identifier.
+                put("budgetScopeGraphId", event.graphId.value)
                 put("grantTokens", event.granted.tokens)
                 put("grantToolCalls", event.granted.toolCalls)
                 put("spentTokens", event.usage.tokens)
@@ -103,9 +117,22 @@ class CorrelatedPreparationSessionEvents(
     private val journal: SessionEventJournal
 ) : PreparationStageEventSink {
     override fun emit(event: PreparationStageEvent) {
-        val success = event.state == StageState.ACCEPTED
-        journal.append(if (event.code != null) "policy.denied" else "agent.completed",
-            if (event.code != null) "denied" else if (success) "completed" else "started",
+        val type = when (event.state) {
+            StageState.CREATED, StageState.READY -> "session.transition"
+            StageState.RUNNING -> "agent.started"
+            StageState.ACCEPTED -> "agent.completed"
+            StageState.REJECTED -> "policy.denied"
+            StageState.FAILED -> "session.error"
+            StageState.CANCELLED -> "agent.completed"
+        }
+        val status = when (event.state) {
+            StageState.CREATED, StageState.READY, StageState.RUNNING -> "started"
+            StageState.ACCEPTED -> "completed"
+            StageState.REJECTED -> "denied"
+            StageState.FAILED -> "failed"
+            StageState.CANCELLED -> "cancelled"
+        }
+        journal.append(type, status,
             correlationId = event.correlation.requestId,
             extra = buildJsonObject {
                 put("stageRunId", event.correlation.stageRunId.value)
