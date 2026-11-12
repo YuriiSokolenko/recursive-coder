@@ -51,7 +51,15 @@ Events retain only role, available agent ID, stage/graph/session/request correla
 status, safe error code and usage counters. Prompts, raw outputs, credentials
 and exceptions are never included. A host-issued request ID is required, so
 unknown stage IDs still emit a correlated denial with no invented actor ID.
+Before any event emission, the host request ID is validated against the shared
+host-identifier grammar; an invalid caller-supplied ID is **never** recorded
+verbatim, and unknown-stage denials use the safe `invalid-request-id` marker.
 A failed event sink suppresses success.
+
+Caller coroutine cancellation propagates immediately rather than returning a
+stage result. Consequently a preceding `STARTED` event may **not** have a
+matching terminal event; later journal consumers (#79) must use their own
+session/coroutine cancellation records to reconcile such attempts.
 
 ## Deferred work and trust
 
