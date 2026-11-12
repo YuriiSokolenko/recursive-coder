@@ -86,7 +86,10 @@ class StageGraphPolicyUnitTest {
         val graph = fixture()
         assertEquals(StageGateDecision.Permit, StageGraphPolicy.validate(graph))
         for (kind in StageKind.entries) {
-            val awaiting = graph.replaceNode(kind) { it.copy(state = StageState.READY) }
+            val awaiting = graph.replaceNode(kind) {
+                it.copy(state = StageState.READY,
+                    review = if (kind == StageKind.REVIEW) null else it.review)
+            }
             assertEquals(StageGateDecision.Permit, StageGraphPolicy.admitStage(
                 awaiting, stageIds.getValue(kind), acceptedIds()), kind.name)
         }
