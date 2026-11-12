@@ -21,6 +21,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -46,16 +48,24 @@ class KoogStageRoleExecutor(
 
     override suspend fun execute(request: StageRoleRequest, events: StageRoleEventSink): StageRoleResult {
         val stage = request.graph.stages.firstOrNull { it.correlation.stageRunId == request.stageRunId }
-        val correlation = stage?.correlation
+        // Preserve host-issued graph/stage/request identity even when no stage exists.
+        // Do not invent an actor for an unknown or unassigned stage.
+        val graphIdentity = request.graph.correlation
+        val correlation = stage?.correlation ?: StageCorrelation(
+            graphIdentity.sessionId, graphIdentity.graphId, request.stageRunId,
+            request.requestId, graphIdentity.correlationId, graphIdentity.causationId
+        )
         val agentId = stage?.agentId
         var usage = StageRoleUsage()
         fun result(outcome: StageRoleOutcome) =
             StageRoleResult(correlation, request.expectedRole, agentId, outcome, usage)
         fun emit(kind: StageRoleEventKind, code: String? = null): Boolean {
-            if (correlation == null || agentId == null) return true
             return try {
                 events.emit(StageRoleEvent(correlation, request.expectedRole, agentId, kind, usage, code))
                 true
+            } catch (e: CancellationException) {
+                // A host-owned event sink must not conceal structured cancellation.
+                throw e
             } catch (_: Exception) { false }
         }
         fun terminal(outcome: StageRoleOutcome, kind: StageRoleEventKind, code: String? = null): StageRoleResult =
@@ -68,6 +78,10 @@ class KoogStageRoleExecutor(
             request.graph, request.stageRunId, request.hostAcceptedArtifactIds)
         if (gate is StageGateDecision.Deny)
             return terminal(StageRoleOutcome.Denied(gate.code), StageRoleEventKind.DENIED, gate.code)
+        if (!ToolAuthorizationPolicy.validHostIdentifier(request.requestId) ||
+            stage?.correlation?.requestId != request.requestId)
+            return terminal(StageRoleOutcome.Denied("REQUEST_CORRELATION_MISMATCH"),
+                StageRoleEventKind.DENIED, "REQUEST_CORRELATION_MISMATCH")
         if (stage == null || agentId == null || stage.kind.role != request.expectedRole)
             return terminal(StageRoleOutcome.Denied("ROLE_IDENTITY_MISMATCH"),
                 StageRoleEventKind.DENIED, "ROLE_IDENTITY_MISMATCH")
@@ -80,6 +94,8 @@ class KoogStageRoleExecutor(
             request.instruction.toByteArray(Charsets.UTF_8).size > 16_384)
             return terminal(StageRoleOutcome.Denied("INVALID_ROLE_BUDGET_OR_INPUT"),
                 StageRoleEventKind.DENIED, "INVALID_ROLE_BUDGET_OR_INPUT")
+        // The fake-v1 feature set is the legacy gateway's mandatory protocol
+        // marker, NOT a grant to expose any tools through Koog.
         // Fake is the ONLY tested compatibility bridge. Do not silently use the
         // legacy read-only HTTP gateway with a new free-form role prompt.
         if (request.model.provider != "fake" || request.model.modelId != "fake-v1" ||
@@ -106,6 +122,8 @@ class KoogStageRoleExecutor(
                 throw RoleExecutionError("MODEL_CAPABILITY_UNSUPPORTED")
             val binding = bridge.open(request.model, request.expectedRole)
             try {
+                // One-stage quota, NOT shared-graph reservations; #78 will own
+                // aggregate budget accounting before multiple roles can dispatch.
                 val accounted = MeteredKoogExecutor(
                     binding.executor, request.graph.budget.maxTokens,
                     request.model.maxOutputTokens, request.cancellation, request.deadline)
@@ -162,16 +180,25 @@ class KoogStageRoleExecutor(
             } finally {
                 binding.executor.close()
             }
-        } catch (_: TimeoutCancellationException) {
+        } catch (e: TimeoutCancellationException) {
+            // The *caller's* timeout must propagate through structured concurrency.
+            currentCoroutineContext().ensureActive()
             StageRoleOutcome.TimedOut
         } catch (_: Stopped) {
             if (request.cancellation.signals().expired ||
                 !Instant.now().isBefore(request.deadline)) StageRoleOutcome.TimedOut
             else StageRoleOutcome.Cancelled
-        } catch (_: CancellationException) {
-            if (request.cancellation.signals().expired ||
-                !Instant.now().isBefore(request.deadline)) StageRoleOutcome.TimedOut
-            else StageRoleOutcome.Cancelled
+        } catch (e: CancellationException) {
+            // An orchestrator cancelling its coroutine owns that cancellation.
+            // Only the explicit stage cancellation/deadline may be normalized.
+            currentCoroutineContext().ensureActive()
+            val signals = request.cancellation.signals()
+            when {
+                signals.expired || !Instant.now().isBefore(request.deadline) ->
+                    StageRoleOutcome.TimedOut
+                signals.requested -> StageRoleOutcome.Cancelled
+                else -> throw e
+            }
         } catch (e: RoleExecutionError) {
             StageRoleOutcome.Failed(e.safeCode)
         } catch (e: Refused) {
@@ -208,7 +235,7 @@ class KoogStageRoleExecutor(
     }
 }
 
-private class RoleExecutionError(val safeCode: String) : RuntimeException()
+internal class RoleExecutionError(val safeCode: String) : RuntimeException()
 
 /**
  * A metered Koog PromptExecutor boundary. The model must provide real usage
@@ -216,7 +243,7 @@ private class RoleExecutionError(val safeCode: String) : RuntimeException()
  * Missing usage, extra requests, tool calls, streaming and unsupported operations
  * fail closed. No raw response is retained in diagnostics.
  */
-private class MeteredKoogExecutor(
+internal class MeteredKoogExecutor(
     private val underlying: PromptExecutor,
     private val maxTokens: Long,
     private val maxOutputTokens: Long,
