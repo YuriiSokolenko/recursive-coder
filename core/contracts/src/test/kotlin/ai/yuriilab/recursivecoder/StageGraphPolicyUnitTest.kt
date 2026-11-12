@@ -6,7 +6,6 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.TestFactory
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
-import kotlin.test.assertTrue
 
 /** Pure deterministic five-role fixture: no model, workspace, clock or persistence. */
 @Tag("unit")
@@ -153,10 +152,14 @@ class StageGraphPolicyUnitTest {
         val missing = base.replaceNode(StageKind.ATDD) { it.copy(inputArtifacts = emptySet()) }
         val pending = base.replaceNode(StageKind.SDD) { it.copy(state = StageState.RUNNING) }
         val notReady = base.replaceNode(StageKind.ATDD) { it.copy(state = StageState.CREATED) }
+        val noActor = base.replaceNode(StageKind.ATDD) { it.copy(agentId = null) }
+        val inactiveGraph = base.copy(state = StageGraphState.CREATED)
         val cases = listOf(
             Triple("missing input", missing, "MISSING_REQUIRED_ARTIFACT"),
             Triple("unaccepted predecessor", pending, "PREREQUISITE_STAGE_NOT_ACCEPTED"),
-            Triple("stage not ready", notReady, "STAGE_NOT_READY")
+            Triple("stage not ready", notReady, "STAGE_NOT_READY"),
+            Triple("missing actor", noActor, "MISSING_STAGE_ACTOR"),
+            Triple("graph is not running", inactiveGraph, "GRAPH_NOT_RUNNING")
         )
         return cases.map { (name, graph, expected) ->
             DynamicTest.dynamicTest(name) {
@@ -174,6 +177,15 @@ class StageGraphPolicyUnitTest {
         val cases = listOf(
             "duplicate stage id" to base.copy(stages = base.stages + base.stages.first()),
             "duplicate artifact id" to base.copy(artifacts = base.artifacts + base.artifacts.first()),
+            "duplicate declared path" to base.replaceArtifact(StageArtifactKind.ACCEPTANCE_TESTS) {
+                it.copy(declaredPath = base.artifacts.first().declaredPath)
+            },
+            "shared agent across roles" to base.replaceNode(StageKind.ATDD) {
+                it.copy(agentId = agents.getValue(StageKind.SDD))
+            },
+            "invalid supersession" to base.replaceNode(StageKind.SDD) {
+                it.copy(supersededBy = stageIds.getValue(StageKind.REVIEW))
+            },
             "stage session mismatch" to base.replaceNode(StageKind.SDD) {
                 it.copy(correlation = it.correlation.copy(sessionId = "another-session"))
             },
@@ -207,9 +219,20 @@ class StageGraphPolicyUnitTest {
                     emptySet(), 1, StageBudget(200_000, 1, 0, 0))
             ))
         )
-        return cases.map { (label, graph) ->
+        val expected = listOf(
+            "DUPLICATE_GRAPH_ID", "DUPLICATE_GRAPH_ID",
+            "DUPLICATE_ARTIFACT_PATH", "SHARED_ROLE_ACTOR",
+            "INVALID_STAGE_SUPERSESSION",
+            "INVALID_STAGE_CORRELATION", "INVALID_STAGE_CORRELATION",
+            "INVALID_STAGE_DEPENDENCY", "CYCLIC_STAGE_DEPENDENCY",
+            "INVALID_ARTIFACT_MANIFEST", "INVALID_ARTIFACT_MANIFEST",
+            "UNACCEPTED_STAGE_OUTPUT", "INVALID_INPUT_PROVENANCE",
+            "INVALID_CHILD_REFERENCE", "INVALID_CHILD_REFERENCE"
+        )
+        return cases.zip(expected).map { (case, expectedCode) ->
+            val (label, graph) = case
             DynamicTest.dynamicTest(label) {
-                assertTrue(StageGraphPolicy.validate(graph) is StageGateDecision.Deny, label)
+                assertEquals(expectedCode, code(StageGraphPolicy.validate(graph)), label)
             }
         }
     }
@@ -285,6 +308,120 @@ class StageGraphPolicyUnitTest {
             StageGraphPolicy.authorizeArtifactRevision(graph, manifest.id,
                 EngineeringRole.SDD, auth.copy(review = reviewer.copy(
                     approvedArtifactPaths = emptySet())))))
+    }
+
+
+    @Test
+    fun rejectedReviewerMayBeSupersededByIndependentAcceptedRetry() {
+        val base = fixture()
+        val previous = base.stages.last()
+        val newId = StageRunId("review-retry")
+        val newAgent = AgentId("review-agent-retry")
+        val rejected = previous.copy(
+            state = StageState.REJECTED, supersededBy = newId,
+            review = previous.review!!.copy(verdict = ReviewVerdict.REJECT))
+        val retried = previous.copy(
+            correlation = previous.correlation.copy(stageRunId = newId,
+                requestId = "review-retry-request", correlationId = "review-retry-corr"),
+            agentId = newAgent, review = previous.review!!.copy(reviewedBy = newAgent))
+        val graph = base.copy(stages = base.stages.dropLast(1) + rejected + retried)
+        assertEquals(StageGateDecision.Permit, StageGraphPolicy.validate(graph))
+        assertEquals(StageGateDecision.Permit, StageGraphPolicy.authorizeGraphTransition(
+            graph, StageGraphState.SUCCEEDED, acceptedIds(), setOf(newId)))
+        assertEquals("UNVERIFIED_REVIEW", code(StageGraphPolicy.authorizeGraphTransition(
+            graph, StageGraphState.SUCCEEDED, acceptedIds(), verifiedReviews())))
+    }
+
+    @Test
+    fun failedDeveloperRetryRequiresNewImplementationAndUpdatedReviewerInputs() {
+        val base = fixture()
+        val original = base.stages.first { it.kind == StageKind.DEVELOP }
+        val originalManifest = base.artifacts.first {
+            it.kind == StageArtifactKind.IMPLEMENTATION
+        }
+        val retryId = StageRunId("develop-retry")
+        val retryArtifactId = ArtifactId("implementation-retry")
+        val retriedManifest = originalManifest.copy(
+            id = retryArtifactId, declaredPath = "src/main/FeatureRetry.kt",
+            sha256 = "f".repeat(64), producerStageRunId = retryId)
+        val oldNode = original.copy(state = StageState.FAILED,
+            supersededBy = retryId)
+        val retried = original.copy(
+            correlation = original.correlation.copy(stageRunId = retryId,
+                requestId = "develop-retry-request", correlationId = "develop-retry-corr"),
+            outputArtifacts = setOf(retryArtifactId))
+        val newReviewer = base.stages.last().let {
+            it.copy(
+                dependencies = (it.dependencies - original.correlation.stageRunId) + retryId,
+                inputArtifacts = (it.inputArtifacts - originalManifest.id) + retryArtifactId,
+                review = it.review!!.copy(targetStageRunId = retryId,
+                    implementationArtifactId = retryArtifactId,
+                    reviewedSha256 = retriedManifest.sha256))
+        }
+        val graph = base.copy(
+            stages = base.stages.dropLast(2) + oldNode + retried + newReviewer,
+            artifacts = base.artifacts.map {
+                if (it.id == originalManifest.id)
+                    it.copy(approval = ArtifactApproval.DRAFT, freeze = ArtifactFreeze.EDITABLE)
+                else it
+            } + retriedManifest)
+        val activeAcceptance = acceptedIds() - originalManifest.id + retryArtifactId
+        assertEquals(StageGateDecision.Permit, StageGraphPolicy.validate(graph))
+        assertEquals(StageGateDecision.Permit, StageGraphPolicy.authorizeGraphTransition(
+            graph, StageGraphState.SUCCEEDED, activeAcceptance, verifiedReviews()))
+        val staleReview = graph.copy(stages = graph.stages.map {
+            if (it.kind == StageKind.REVIEW) it.copy(
+                inputArtifacts = (it.inputArtifacts - retryArtifactId) + originalManifest.id,
+                dependencies = (it.dependencies - retryId) + original.correlation.stageRunId,
+                review = it.review!!.copy(targetStageRunId = original.correlation.stageRunId,
+                    implementationArtifactId = originalManifest.id,
+                    reviewedSha256 = originalManifest.sha256))
+            else it
+        })
+        assertEquals("GRAPH_NOT_ACCEPTED", code(StageGraphPolicy.authorizeGraphTransition(
+            staleReview, StageGraphState.SUCCEEDED, activeAcceptance, verifiedReviews())))
+    }
+
+    @Test
+    fun rejectedReviewRequiresItsOwnHostVerifiedEvidence() {
+        val id = stageIds.getValue(StageKind.REVIEW)
+        for (verdict in listOf(ReviewVerdict.REQUEST_CHANGES, ReviewVerdict.REJECT)) {
+            val graph = fixture().replaceNode(StageKind.REVIEW) {
+                it.copy(state = StageState.RUNNING, review = it.review!!.copy(verdict = verdict))
+            }
+            assertEquals("UNVERIFIED_REVIEW", code(StageGraphPolicy.authorizeStageTransition(
+                graph, id, StageState.REJECTED, acceptedIds(), emptySet())), verdict.name)
+            assertEquals(StageGateDecision.Permit, StageGraphPolicy.authorizeStageTransition(
+                graph, id, StageState.REJECTED, acceptedIds(), verifiedReviews()), verdict.name)
+        }
+    }
+
+    @Test
+    fun childMetadataAcceptsMaximumDepthButRejectsItsOverflow() {
+        val base = fixture()
+        val child = ChildGraphReference(
+            GraphId("nested-graph"), stageIds.getValue(StageKind.SDD),
+            setOf(stageIds.getValue(StageKind.ATDD)),
+            depth = 4, budget = StageBudget(10, 10, 0, 0))
+        assertEquals(StageGateDecision.Permit,
+            StageGraphPolicy.validate(base.copy(children = listOf(child))))
+        assertEquals("INVALID_CHILD_REFERENCE", code(StageGraphPolicy.validate(
+            base.copy(children = listOf(child.copy(depth = 5))))))
+    }
+
+    @Test
+    fun transitionAndRevisionRejectInactiveGraphs() {
+        val graph = fixture().copy(state = StageGraphState.CREATED)
+        val sdd = stageIds.getValue(StageKind.SDD)
+        val stageReady = graph.replaceNode(StageKind.SDD) {
+            it.copy(state = StageState.READY)
+        }
+        assertEquals("GRAPH_NOT_RUNNING", code(StageGraphPolicy.admitStage(
+            stageReady, sdd, acceptedIds())))
+        assertEquals("GRAPH_NOT_RUNNING", code(StageGraphPolicy.authorizeStageTransition(
+            stageReady, sdd, StageState.RUNNING, acceptedIds(), verifiedReviews())))
+        assertEquals("GRAPH_NOT_RUNNING", code(StageGraphPolicy.authorizeArtifactRevision(
+            graph, artifacts.getValue(StageArtifactKind.REQUIREMENTS), EngineeringRole.SDD)))
     }
 
     @Test
