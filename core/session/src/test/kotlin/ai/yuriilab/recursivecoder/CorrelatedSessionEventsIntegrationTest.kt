@@ -179,6 +179,22 @@ class CorrelatedSessionEventsIntegrationTest {
         journal.finish()
     }
 
+    @Test fun reservationWithoutAdmittedParentIsRejectedWithDistinctMessage() {
+        val sink = MemorySink()
+        val journal = SessionEventJournal("reserve-79", "trace-79", "request-79",
+            clock, sink)
+        val error = assertFailsWith<IllegalArgumentException> {
+            CorrelatedRecursiveSessionEvents(journal).emit(RecursiveEvent(
+                RecursiveEventKind.CHILD_RESERVED, GraphId("graph-child-79"),
+                StageRunId("stage-child-79"), null, null, "request-79",
+                StageKind.SDD, RecursiveUsage(), RecursiveUsage(), RecursiveUsage(),
+                childGraphId = GraphId("graph-child-79")))
+        }
+        assertEquals("CHILD_RESERVED requires an admitted parent actor", error.message)
+        assertTrue(sink.events.isEmpty())
+        journal.finish()
+    }
+
     @Test fun malformedActorIsRejectedBeforeAppending() {
         val sink = MemorySink()
         val journal = SessionEventJournal("guard-79", "trace-79", "request-79",
