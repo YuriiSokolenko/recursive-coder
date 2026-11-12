@@ -3,6 +3,7 @@ package ai.yuriilab.recursivecoder
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
+import java.security.MessageDigest
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableJob
 import kotlinx.coroutines.Job
@@ -11,7 +12,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
 enum class RecursiveEventKind {
-    STARTED, CHILD_RESERVED, DENIED, USAGE_CHARGED, SUCCEEDED, FAILED, CANCELLED, TIMED_OUT
+    STARTED, CHILD_RESERVED, DENIED, USAGE_CHARGED, INTEGRATED, SUCCEEDED, FAILED, CANCELLED, TIMED_OUT
 }
 
 /** No prompts, model output, credentials or raw tool errors are ever emitted. */
@@ -64,6 +65,9 @@ class RecursiveStageContext internal constructor(
 
     /** Host-measured usage only. Unknown usage must be charged at its granted upper bound. */
     fun charge(usage: RecursiveUsage): RecursiveDecision = scheduler.chargeFrom(this, usage)
+
+    /** Pull only host-accepted, frozen, digest-verified child outputs into this parent. */
+    fun integrateChildren(): ChildIntegrationDecision = scheduler.integrateFrom(this)
 }
 
 /**
@@ -76,12 +80,14 @@ class RecursiveGraphScheduler(
     root: RecursiveRootGrant,
     private val limits: RecursiveLimits,
     private val clock: Clock = Clock.systemUTC(),
-    private val events: RecursiveEventSink = RecursiveEventSink { }
+    private val events: RecursiveEventSink = RecursiveEventSink { },
+    private val integrationHost: RecursiveChildIntegrationHost? = null
 ) {
     private val lock = Any()
     private val graphBudget = root.graph.budget
     private val tokens = mutableMapOf<GraphId, Cancellation>()
     private val runningJobs = mutableMapOf<GraphId, CompletableJob>()
+    private val integrated = mutableMapOf<GraphId, IntegratedChildResults>()
     private val seenRequests = mutableSetOf<Triple<GraphId, StageRunId, String>>()
     /** Each subtree has its own bounded retry ledger; siblings cannot exhaust it. */
     private val attemptedRequests = mutableMapOf<GraphId, Int>()
@@ -142,6 +148,63 @@ class RecursiveGraphScheduler(
     fun current(): RecursiveSnapshot = synchronized(lock) {
         snapshot.copy(nodes = snapshot.nodes.toList())
     }
+
+    fun integratedResults(parentId: GraphId): IntegratedChildResults? = synchronized(lock) {
+        integrated[parentId]
+    }
+
+    /** Every receipt and byte digest is re-read at parent commit; no partial merges. */
+    private fun verifyIntegration(parentId: GraphId): ChildIntegrationDecision {
+        val parent = snapshot.node(parentId)
+            ?: return ChildIntegrationDecision.Denied("UNKNOWN_PARENT")
+        val host = integrationHost
+            ?: return ChildIntegrationDecision.Denied("CHILD_INTEGRATION_UNAVAILABLE")
+        return try {
+            val byChild = mutableMapOf<GraphId, List<VerifiedChildArtifact>>()
+            for (child in snapshot.nodes.filter { it.parentGraphId == parentId }) {
+                val manifests = host.manifestsFor(child)
+                    ?: return ChildIntegrationDecision.Denied("CHILD_EVIDENCE_UNAVAILABLE")
+                val receipts = mutableListOf<VerifiedChildArtifact>()
+                for (manifest in manifests) {
+                    // Read from the trusted workspace, never from model text or a
+                    // digest supplied by the child executor.
+                    val bytes = host.readBytes(manifest.declaredPath)
+                        ?: return ChildIntegrationDecision.Denied("CHILD_ARTIFACT_MISSING")
+                    val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
+                        .joinToString("") { "%02x".format(it) }
+                    receipts += VerifiedChildArtifact(child.graphId, manifest, digest)
+                }
+                byChild[child.graphId] = receipts
+            }
+            RecursiveChildIntegrationPolicy.integrate(snapshot, parentId,
+                byChild, host.acceptedArtifactIds(), host.reservedParentArtifacts(parent))
+        } catch (_: Exception) {
+            ChildIntegrationDecision.Denied("CHILD_EVIDENCE_UNAVAILABLE")
+        }
+    }
+
+    internal fun integrateFrom(context: RecursiveStageContext): ChildIntegrationDecision =
+        synchronized(lock) {
+            val parent = snapshot.node(context.graphId)
+                ?: return@synchronized ChildIntegrationDecision.Denied("UNKNOWN_PARENT")
+            if (parent.stageRunId != context.stageRunId || parent.origin != context.origin)
+                return@synchronized ChildIntegrationDecision.Denied("STAGE_OWNERSHIP_MISMATCH")
+            val decision = verifyIntegration(parent.graphId)
+            when (decision) {
+                is ChildIntegrationDecision.Accepted -> {
+                    if (integrated[parent.graphId] != decision.results) {
+                        integrated[parent.graphId] = decision.results
+                        for (child in decision.results.childOrder) {
+                            emit(parent, RecursiveEventKind.INTEGRATED,
+                                child = child, requestId = snapshot.node(child)?.requestId)
+                        }
+                    }
+                }
+                is ChildIntegrationDecision.Denied ->
+                    emit(parent, RecursiveEventKind.DENIED, decision.code)
+            }
+            decision
+        }
 
     private fun replace(node: RecursiveNode) {
         snapshot = snapshot.copy(nodes = snapshot.nodes.map {
@@ -212,6 +275,7 @@ class RecursiveGraphScheduler(
                     denied("INVALID_CHILD_ADMISSION_STATE")
                 } else {
                     snapshot = candidate
+                    integrated.remove(parent.graphId)
                     tokens[child.graphId] = Cancellation()
                     emit(child, RecursiveEventKind.CHILD_RESERVED, child = child.graphId)
                     decision
@@ -377,6 +441,15 @@ class RecursiveGraphScheduler(
                     snapshot.nodes.any { it.parentGraphId == id &&
                         it.state != RecursiveNodeState.SUCCEEDED } ->
                     RecursiveExecutionOutcome.Failed("CHILD_WORK_INCOMPLETE")
+                outcome == RecursiveExecutionOutcome.Completed && integrationHost != null &&
+                    snapshot.nodes.any { it.parentGraphId == id } &&
+                    integrated[id] == null ->
+                    RecursiveExecutionOutcome.Failed("CHILD_RESULTS_NOT_INTEGRATED")
+                outcome == RecursiveExecutionOutcome.Completed && integrationHost != null &&
+                    snapshot.nodes.any { it.parentGraphId == id } &&
+                    (verifyIntegration(id) as? ChildIntegrationDecision.Accepted)?.results !=
+                        integrated[id] ->
+                    RecursiveExecutionOutcome.Failed("CHILD_INTEGRATION_STALE")
                 else -> outcome
             }
             val terminal = when (final) {
