@@ -1,8 +1,8 @@
 # Recursive Coder
 
-**Recursive Coder** is an in-development, standalone open-source software engineering agent built with **Kotlin/JVM**. **JetBrains Koog** is the planned orchestration framework, not part of the current production runtime.
+**Recursive Coder** is an in-development, standalone open-source software engineering agent built with **Kotlin/JVM**. **JetBrains Koog** is integrated as an opt-in, fake-model-only single-role adapter; recursive production orchestration remains planned.
 
-> **Implementation snapshot (2026-11-11, `dev@4ed9fe8`):** The CLI has native task scheduling, a read-only session engine, FakeModel, an optional strict OpenAI-compatible Model Gateway and a trusted workspace. A separate Linux-only trusted write/check runtime exists, but **is not integrated into CLI sessions**. Koog orchestration, recursive coding, checkpoints and crash-resume are **not implemented**.
+> **Implementation snapshot (2026-11-12, PR #81 / issue #73):** The CLI has native task scheduling, a read-only session engine, FakeModel, an optional strict OpenAI-compatible Model Gateway and a trusted workspace. A separate Linux-only trusted write/check runtime exists, but **is not integrated into CLI sessions**. A minimal isolated Koog stage runner is implemented in `:agent:runtime` but is **not selected by CLI sessions**. Five-role orchestration, recursive coding, checkpoints and crash-resume are **not implemented**.
 
 ## What we are building
 
@@ -32,7 +32,7 @@ Recursive Coder itself owns its tasks and sessions. Git can manage source worksp
 
 The current foundation uses Kotlin 2.4.21, JDK 21, Gradle 9.8.1, Koin 4.2.2 (CLI composition root only), and Session Protocol `1.0`. Core modules do not depend on Koog, HTTP adapters or Koin.
 
-The Gradle build has **eight product modules**: `:core:contracts`, `:core:session`, `:core:tasks`, `:infra:model`, `:infra:workspace`, `:infra:task-store`, `:infra:journal`, and the only executable module, `:app:cli`. `build-logic` is an included build, not a ninth product module. See [Gradle module ownership](docs/architecture/MODULES.md).
+The Gradle build has **nine product modules**: `:agent:runtime`, `:core:contracts`, `:core:session`, `:core:tasks`, `:infra:model`, `:infra:workspace`, `:infra:task-store`, `:infra:journal`, and the only executable module, `:app:cli`. `build-logic` is an included build, not a product module. See [Gradle module ownership](docs/architecture/MODULES.md).
 
 The installed distribution remains at `build/install/recursive-coder/bin/recursive-coder`, preserving the existing CLI smoke-test path.
 
@@ -50,6 +50,7 @@ With Gradle 9.8.1 and JDK 21 installed:
 
 - [Architecture and engineering roadmap](docs/architecture/ARCHITECTURE.md)
 - [Stage graph contracts and policy gates (#72)](docs/architecture/STAGE_GRAPH.md)
+- [Koog single-role execution boundary (#73)](docs/architecture/KOOG_STAGE_EXECUTION.md)
 - [Gradle modules and dependency rules](docs/architecture/MODULES.md)
 - [First executable CLI session](docs/architecture/FIRST_SESSION.md)
 - [Native Task Manager and local scheduling](docs/architecture/TASK_MANAGER.md)
@@ -68,6 +69,7 @@ With Gradle 9.8.1 and JDK 21 installed:
 | --- | --- | --- |
 | CLI, read-only Session Runtime, Model Gateway, native Task Manager | Implemented baseline | [#4](https://github.com/YuriiSokolenko/recursive-coder/issues/4), [#5](https://github.com/YuriiSokolenko/recursive-coder/issues/5), [#6](https://github.com/YuriiSokolenko/recursive-coder/issues/6), [#7](https://github.com/YuriiSokolenko/recursive-coder/issues/7) |
 | Standalone Linux trusted write/check security boundary | Implemented, not CLI-integrated | [#8](https://github.com/YuriiSokolenko/recursive-coder/issues/8) |
+| Minimal Koog single-role adapter (fake only) | Implemented, opt-in | [#73](https://github.com/YuriiSokolenko/recursive-coder/issues/73) |
 | Recursive Koog SDD → ATDD → TDD → Developer → Reviewer graph | Planned | [#9](https://github.com/YuriiSokolenko/recursive-coder/issues/9) |
 | Durable checkpoints, fencing and crash recovery | Planned | [#10](https://github.com/YuriiSokolenko/recursive-coder/issues/10) |
 | Independent coding evaluation harness | Planned | [#11](https://github.com/YuriiSokolenko/recursive-coder/issues/11) |
