@@ -180,11 +180,16 @@ object StageGraphPolicy {
         val stage = graph.stages.firstOrNull { it.correlation.stageRunId == stageRunId }
             ?: return deny("UNKNOWN_STAGE")
         if (!legalStageEdge(stage.state, target)) return deny("ILLEGAL_STAGE_TRANSITION")
+        if (graph.state != StageGraphState.RUNNING && target != StageState.CANCELLED)
+            return deny("GRAPH_NOT_RUNNING")
         if (target == StageState.RUNNING)
             return admitStage(graph, stageRunId, hostAcceptedArtifactIds)
         if (target == StageState.ACCEPTED) {
-            if (stage.kind == StageKind.REVIEW)
+            if (stage.kind == StageKind.REVIEW) {
+                if (stage.review?.verdict != ReviewVerdict.ACCEPT)
+                    return deny("INVALID_STAGE_REVIEW")
                 return authorizeReview(graph, stageRunId, hostVerifiedReviewStageIds)
+            }
             if (stage.outputArtifacts.size != 1 ||
                 stage.outputArtifacts.any { id ->
                     val artifact = graph.artifacts.firstOrNull { it.id == id }
