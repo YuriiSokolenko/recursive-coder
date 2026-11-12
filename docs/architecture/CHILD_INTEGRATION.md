@@ -16,7 +16,12 @@ receipts, approval decisions, and live workspace authority before returning
 those facts. A model response, a manifest with `ACCEPTED`, or a successful
 child is **never** sufficient alone.
 
-After a child finishes, its parent calls `integrateChildren()`. The pure
+After a child finishes, its parent calls `integrateChildren()`. Integration
+attempts are capped per parent and identical denial telemetry is deduplicated.
+Authoritative host file reads run outside the scheduler's mutation lock; the
+captured graph version is rechecked at commit. Concurrent mutations cause
+`CHILD_INTEGRATION_STALE` rather than accepting an out-of-date snapshot.
+Parent completion also performs host evidence checks outside that lock. The pure
 policy walks a deterministic sibling topological order (lexical tie-breaking),
 requires all direct children to have succeeded, checks exact child stage/role
 provenance, accepted/frozen manifests, independent host acceptance, live
@@ -35,7 +40,11 @@ automatically convert a refusal into acceptance.
 
 The `INTEGRATED` event records the parent/child IDs, role origin and child
 request ID. It is metadata-only and carries no contents or credentials.
-The existing `RecursiveEventSink` is best-effort telemetry. Production
+The existing `RecursiveEventSink` is best-effort telemetry. A swallowed event
+sink failure latches `eventDeliveryFailed` for the host to inspect; physical
+journal completion must additionally pass `SessionEventJournal.finish()`.
+The shared journal serializes concurrent producer appends, and invalid actor
+identities are rejected before journal mutation. Production
 persistent Session Protocol v1 correlation and a full installed CLI workflow
 are still required for completing #79.
 
