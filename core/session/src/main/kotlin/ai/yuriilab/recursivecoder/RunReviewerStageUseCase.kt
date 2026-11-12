@@ -1,5 +1,8 @@
 package ai.yuriilab.recursivecoder
 
+import java.nio.ByteBuffer
+import java.nio.charset.CodingErrorAction
+import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.time.Clock
 import java.time.Instant
@@ -57,6 +60,13 @@ class RunReviewerStageUseCase(
     private fun sha(bytes: ByteArray): String =
         MessageDigest.getInstance("SHA-256").digest(bytes)
             .joinToString("") { "%02x".format(it) }
+
+    private fun utf8(bytes: ByteArray): String? = try {
+        StandardCharsets.UTF_8.newDecoder()
+            .onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT)
+            .decode(ByteBuffer.wrap(bytes)).toString()
+    } catch (_: Exception) { null }
 
     private fun escaped(text: String): String = text.replace("&", "&amp;")
         .replace("<", "&lt;").replace(">", "&gt;")
@@ -235,7 +245,7 @@ class RunReviewerStageUseCase(
                 for (artifact in requiredInputs + manifest) {
                     val bytes = host.readBytes(artifact.declaredPath)
                         ?: return abort("ARTIFACT_MISSING")
-                    val body = bytes.toString(Charsets.UTF_8)
+                    val body = utf8(bytes) ?: return abort("ARTIFACT_ENCODING_INVALID")
                     append("\n<artifact kind=\"").append(artifact.kind.name)
                         .append("\" sha256=\"").append(artifact.sha256).append("\">\n")
                     append(escaped(body)).append("\n</artifact>")
@@ -247,7 +257,8 @@ class RunReviewerStageUseCase(
                         .append("\" before-sha256=\"")
                         .append(change.beforeSha256 ?: "-").append("\" after-sha256=\"")
                         .append(change.afterSha256).append("\">\n")
-                    append(escaped(bytes.toString(Charsets.UTF_8)))
+                    val body = utf8(bytes) ?: return abort("CHANGED_FILE_ENCODING_INVALID")
+                    append(escaped(body))
                     append("\n</changed-file>")
                 }
                 checks.forEach {
@@ -277,8 +288,8 @@ class RunReviewerStageUseCase(
                 return abort("REVIEW_RESULT_IDENTITY_MISMATCH")
             val text = when (val outcome = proposal.outcome) {
                 is StageRoleOutcome.Proposed -> outcome.text
-                is StageRoleOutcome.Denied -> return abort(outcome.code)
-                is StageRoleOutcome.Failed -> return abort(outcome.code)
+                is StageRoleOutcome.Denied -> return abort("REVIEW_ROLE_DENIED")
+                is StageRoleOutcome.Failed -> return abort("REVIEW_ROLE_FAILED")
                 StageRoleOutcome.Cancelled -> return abort("ROLE_CANCELLED")
                 StageRoleOutcome.TimedOut -> return abort("ROLE_TIMED_OUT")
             }
