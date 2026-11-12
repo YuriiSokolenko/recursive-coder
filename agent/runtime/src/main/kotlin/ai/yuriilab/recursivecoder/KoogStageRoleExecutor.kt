@@ -51,9 +51,13 @@ class KoogStageRoleExecutor(
         // Preserve host-issued graph/stage/request identity even when no stage exists.
         // Do not invent an actor for an unknown or unassigned stage.
         val graphIdentity = request.graph.correlation
+        // Unknown-stage denials may be journaled verbatim: never forward a raw,
+        // unvalidated caller-provided request ID to the event sink.
+        val requestIdValid = ToolAuthorizationPolicy.validHostIdentifier(request.requestId)
         val correlation = stage?.correlation ?: StageCorrelation(
             graphIdentity.sessionId, graphIdentity.graphId, request.stageRunId,
-            request.requestId, graphIdentity.correlationId, graphIdentity.causationId
+            if (requestIdValid) request.requestId else "invalid-request-id",
+            graphIdentity.correlationId, graphIdentity.causationId
         )
         val agentId = stage?.agentId
         var usage = StageRoleUsage()
@@ -74,12 +78,14 @@ class KoogStageRoleExecutor(
 
         // A malformed graph, missing actor, role escalation or unaccepted input fails
         // BEFORE any model call. Admission is repeated by the host at commit time.
+        if (!requestIdValid)
+            return terminal(StageRoleOutcome.Denied("INVALID_REQUEST_ID"),
+                StageRoleEventKind.DENIED, "INVALID_REQUEST_ID")
         val gate = StageGraphPolicy.admitStage(
             request.graph, request.stageRunId, request.hostAcceptedArtifactIds)
         if (gate is StageGateDecision.Deny)
             return terminal(StageRoleOutcome.Denied(gate.code), StageRoleEventKind.DENIED, gate.code)
-        if (!ToolAuthorizationPolicy.validHostIdentifier(request.requestId) ||
-            stage?.correlation?.requestId != request.requestId)
+        if (stage?.correlation?.requestId != request.requestId)
             return terminal(StageRoleOutcome.Denied("REQUEST_CORRELATION_MISMATCH"),
                 StageRoleEventKind.DENIED, "REQUEST_CORRELATION_MISMATCH")
         if (stage == null || agentId == null || stage.kind.role != request.expectedRole)
