@@ -119,13 +119,13 @@ Git-host integrations (PR creation, reviews, webhooks), IDE extensions, and task
 
 ## 6. Independent CI and quality
 
-GitHub Actions is used **solely for this repository's CI**, not as an external agent dispatcher. [CI migration PR #71](https://github.com/YuriiSokolenko/recursive-coder/pull/71) moves all three jobs to fresh GitHub-hosted `ubuntu-24.04` VMs. The legacy dedicated N150 KVM runner is not selected, and fork PRs can be checked without running untrusted code on private hardware. Java, Gradle, Python and Node are set up through official actions; bubblewrap is installed on the disposable VM and its isolation must pass without bypassing the required E2E test.
+GitHub Actions is used **solely for this repository's CI**, not as an external agent dispatcher. Since merged [PR #71](https://github.com/YuriiSokolenko/recursive-coder/pull/71), all three jobs run on fresh GitHub-hosted `ubuntu-24.04` VMs. The legacy N150 KVM runner is not selected, and fork PRs run without exposing private hardware. JDK 21, Gradle 9.8.1, Python 3.12 and Node.js 22 are provisioned per job. The restricted `bwrap-userns-restrict` AppArmor profile permits bubblewrap's private-network namespace without disabling AppArmor; real isolation and required E2E must succeed.
 
 - **Architecture boundaries and pure unit tests:** Gradle dependency and test-tier policies, configuration-cache regressions and pure Kotlin tests.
 - **Full JVM integration and sandbox E2E:** module builds, local Git/filesystem and mock HTTP fixtures, mandatory real bubblewrap case, installed CLI and JUnit artifacts.
 - **Versioned session contracts:** English-language documentation guard, JSON Schema Draft 2020-12, negative fixtures and Node compatibility tests.
 
-The `dev@4ed9fe8` push run passed all three jobs on 2026-10-14. Tests do not call a live inference provider. Real-model evaluation and release packaging remain planned.
+The [CI migration run](https://github.com/YuriiSokolenko/recursive-coder/actions/runs/43120760211) on 2026-11-11 passed all three jobs, including non-skipped sandbox E2E. Tests do not call a live inference provider. Real-model evaluation and release packaging remain planned.
 
 Every new engine module must ship with relevant tests. Live model behavior does not replace security, sandbox, or recovery proofs; model benchmark scores do not demonstrate authorization correctness.
 

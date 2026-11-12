@@ -44,7 +44,7 @@ With Gradle 9.8.1 and JDK 21 installed:
 ./gradlew test installDist
 ```
 
-[GitHub Actions CI](.github/workflows/ci.yml) is migrating to **standard GitHub-hosted `ubuntu-24.04` runners** via [PR #71](https://github.com/YuriiSokolenko/recursive-coder/pull/71). All three jobs will run on fresh hosted VMs, including fork PRs, with JDK 21, pinned Gradle 9.8.1, Python 3.12 and Node.js 22 provisioned per job. They cover architecture/pure unit tests, full JVM/integration/mandatory sandbox E2E plus installed CLI, and versioned contracts. Sandbox isolation and the no-skip assertion remain mandatory; migration is not considered validated until hosted CI passes. Tests require no live model provider. See [Testing architecture](docs/architecture/TEST_SUITES.md).
+[GitHub Actions CI](.github/workflows/ci.yml) runs on **GitHub-hosted `ubuntu-24.04` runners** after merged [PR #71](https://github.com/YuriiSokolenko/recursive-coder/pull/71). The three jobs use fresh VMs, including for fork PRs, with JDK 21, Gradle 9.8.1, Python 3.12 and Node.js 22 provisioned as required. They cover architecture/pure unit tests, full JVM/integration/mandatory sandbox E2E plus installed CLI, and versioned contracts. Restricted AppArmor integration enables bubblewrap's private network namespace without disabling system protection; sandbox E2E and the no-skip assertion remain mandatory. The [CI migration run](https://github.com/YuriiSokolenko/recursive-coder/actions/runs/43120760211) passed all three jobs on 2026-11-11, including the sandbox E2E. Tests require no live model provider. See [Testing architecture](docs/architecture/TEST_SUITES.md).
 
 ## Documentation
 
