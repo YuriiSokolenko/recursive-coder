@@ -152,7 +152,7 @@ object ReviewerStageFinishPolicy {
             return deny("UNSUPPORTED_REVIEW_EVIDENCE")
         if (decision.verdict == ReviewerDisposition.ACCEPT &&
             !decision.evidenceIds.containsAll(
-                checkIds.map { "check:" + it } + "write:" + handoff.writeToolId
+                checkIds.map { "check:" + it } + ("write:" + handoff.writeToolId)
             )) return deny("INCOMPLETE_REVIEW_EVIDENCE")
         if (StageGraphPolicy.validate(next) != StageGateDecision.Permit)
             return deny("INVALID_REVIEW_GRAPH")
