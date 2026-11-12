@@ -125,6 +125,11 @@ object RecursiveChildIntegrationPolicy {
             val receipts = receiptsByChild.getValue(id)
             if (child.origin != StageKind.REVIEW && receipts.isEmpty())
                 return deny("CHILD_ARTIFACT_MISSING")
+            // An accepted stage has exactly one output manifest; Reviewer has none.
+            // Never admit a second artifact smuggled under an otherwise valid stage.
+            val expected = if (child.origin == StageKind.REVIEW) 0 else 1
+            if (receipts.size != expected)
+                return deny("INVALID_CHILD_ARTIFACT_COUNT")
             for (receipt in receipts.sortedWith(compareBy({ it.manifest.declaredPath },
                     { it.manifest.id.value }))) {
                 if (receipt.childGraphId != id)
