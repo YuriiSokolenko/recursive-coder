@@ -263,6 +263,39 @@ class KoogStageRoleExecutorTest {
         assertEquals(0, gateway.negotiations)
     }
 
+    @Test fun malformedRequestIdIsSanitizedBeforeAnyDenialEvent() = runBlocking {
+        val gateway = OfflineGateway()
+        var opened = false
+        val runner = KoogStageRoleExecutor(gateway, KoogPromptBridge { _, _ ->
+            opened = true
+            KoogPromptBinding(fake("must not run"), OpenAIModels.Chat.GPT4o)
+        })
+        val unsafeId = "malicious-request\\nSECRET_73"
+        val events = mutableListOf<StageRoleEvent>()
+        val malformed = request().copy(
+            stageRunId = StageRunId("missing-unsafe-73"),
+            requestId = unsafeId
+        )
+        val outcome = runner.execute(malformed, StageRoleEventSink { events += it })
+        assertEquals(StageRoleOutcome.Denied("INVALID_REQUEST_ID"), outcome.outcome)
+        assertEquals(1, events.size)
+        assertEquals(StageRoleEventKind.DENIED, events.single().kind)
+        assertEquals("invalid-request-id", events.single().correlation.requestId)
+        assertNull(events.single().agentId)
+        assertFalse(events.single().toString().contains(unsafeId))
+        assertFalse(events.single().toString().contains("SECRET_73"))
+        assertEquals(0, gateway.negotiations)
+        assertFalse(opened)
+
+        val knownStage = runner.execute(
+            request().copy(requestId = unsafeId),
+            StageRoleEventSink { events += it }
+        )
+        assertEquals(StageRoleOutcome.Denied("INVALID_REQUEST_ID"), knownStage.outcome)
+        assertEquals("request-sdd", events.last().correlation.requestId)
+        assertEquals(0, gateway.negotiations)
+    }
+
     @Test fun requestIdentityMismatchOversizedInputAndMultiRequestBudgetFailBeforeBridge() = runBlocking {
         val gateway = OfflineGateway()
         var opened = 0
