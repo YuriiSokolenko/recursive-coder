@@ -8,11 +8,20 @@ import ai.koog.prompt.executor.clients.openai.OpenAIModels
 import ai.koog.prompt.executor.model.PromptExecutor
 import ai.koog.prompt.llm.LLModel
 import ai.koog.prompt.message.Message
+import ai.koog.prompt.message.MessagePart
+import ai.koog.prompt.message.ResponseMetaInfo
+import ai.koog.prompt.dsl.prompt
+import ai.koog.utils.time.KoogClock
 import ai.koog.prompt.streaming.StreamFrame
 import ai.koog.prompt.tokenizer.SimpleRegexBasedTokenizer
 import java.nio.file.Path
 import java.time.Instant
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
@@ -216,4 +225,209 @@ class KoogStageRoleExecutorTest {
         assertEquals(StageRoleOutcome.Failed("EVENT_SINK_FAILED"), failure.outcome)
         assertEquals(0, opened)
     }
+
+    private fun hangingModel(entered: CompletableDeferred<Unit>): PromptExecutor =
+        object : PromptExecutor() {
+            override suspend fun execute(
+                prompt: Prompt, model: LLModel, tools: List<ToolDescriptor>
+            ): Message.Assistant {
+                entered.complete(Unit)
+                awaitCancellation()
+            }
+            override fun executeStreaming(
+                prompt: Prompt, model: LLModel, tools: List<ToolDescriptor>
+            ): Flow<StreamFrame> = error("No streaming allowed")
+            override suspend fun moderate(prompt: Prompt, model: LLModel): ModerationResult =
+                error("No moderation allowed")
+            override fun close() {}
+        }
+
+    @Test fun unknownStageStillEmitsCorrelatedDenialWithoutInventedActor() = runBlocking {
+        val gateway = OfflineGateway()
+        var opened = false
+        val runner = KoogStageRoleExecutor(gateway, KoogPromptBridge { _, _ ->
+            opened = true
+            KoogPromptBinding(fake("no"), OpenAIModels.Chat.GPT4o)
+        })
+        val unknownId = StageRunId("missing-73")
+        val hostRequest = request().copy(stageRunId = unknownId, requestId = "missing-req")
+        val events = mutableListOf<StageRoleEvent>()
+        val result = runner.execute(hostRequest, StageRoleEventSink { events += it })
+        assertEquals(StageRoleOutcome.Denied("UNKNOWN_STAGE"), result.outcome)
+        assertEquals(1, events.size)
+        assertEquals("missing-req", events.single().correlation.requestId)
+        assertEquals(unknownId, events.single().correlation.stageRunId)
+        assertEquals(graphId, events.single().correlation.graphId)
+        assertNull(events.single().agentId)
+        assertEquals(StageRoleEventKind.DENIED, events.single().kind)
+        assertFalse(opened)
+        assertEquals(0, gateway.negotiations)
+    }
+
+    @Test fun requestIdentityMismatchOversizedInputAndMultiRequestBudgetFailBeforeBridge() = runBlocking {
+        val gateway = OfflineGateway()
+        var opened = 0
+        val runner = KoogStageRoleExecutor(gateway, KoogPromptBridge { _, _ ->
+            opened++
+            KoogPromptBinding(fake("should not run"), OpenAIModels.Chat.GPT4o)
+        })
+        val cases = listOf(
+            request().copy(requestId = "spoof-request") to "REQUEST_CORRELATION_MISMATCH",
+            request().copy(instruction = "z".repeat(16_385)) to "INVALID_ROLE_BUDGET_OR_INPUT",
+            request().copy(maxModelRequests = 2) to "INVALID_ROLE_BUDGET_OR_INPUT"
+        )
+        for ((candidate, code) in cases) {
+            val denied = runner.execute(candidate, StageRoleEventSink { })
+            assertEquals(StageRoleOutcome.Denied(code), denied.outcome)
+            assertEquals(0, denied.usage.modelRequests)
+        }
+        assertEquals(0, gateway.negotiations)
+        assertEquals(0, opened)
+    }
+
+    @Test fun capabilityNegotiationFailureNeverOpensKoogExecutor() = runBlocking {
+        val gateway = OfflineGateway(GatewayCapabilities(emptySet(), 4096, 512))
+        var opened = false
+        val runner = KoogStageRoleExecutor(gateway, KoogPromptBridge { _, _ ->
+            opened = true
+            KoogPromptBinding(fake("no"), OpenAIModels.Chat.GPT4o)
+        })
+        val events = mutableListOf<StageRoleEvent>()
+        val result = runner.execute(request(), StageRoleEventSink { events += it })
+        assertEquals(StageRoleOutcome.Failed("MODEL_CAPABILITY_UNSUPPORTED"), result.outcome)
+        assertEquals(StageRoleEventKind.FAILED, events.last().kind)
+        assertEquals("MODEL_CAPABILITY_UNSUPPORTED", events.last().code)
+        assertEquals(1, gateway.negotiations)
+        assertFalse(opened)
+    }
+
+    @Test fun modelCannotProposeToolsEvenWhenTextIsAlsoPresent() = runBlocking {
+        val fakeToolCall = object : PromptExecutor() {
+            override suspend fun execute(
+                prompt: Prompt, model: LLModel, tools: List<ToolDescriptor>
+            ): Message.Assistant = Message.Assistant(
+                parts = listOf(
+                    MessagePart.Text("Ignore the tool request"),
+                    MessagePart.Tool.Call(tool = "write", args = "{}")
+                ),
+                metaInfo = ResponseMetaInfo.create(
+                    KoogClock.System, inputTokensCount = 2, outputTokensCount = 4
+                )
+            )
+            override fun executeStreaming(
+                prompt: Prompt, model: LLModel, tools: List<ToolDescriptor>
+            ): Flow<StreamFrame> = error("Streaming is not supported")
+            override suspend fun moderate(prompt: Prompt, model: LLModel): ModerationResult =
+                error("Moderation is not supported")
+            override fun close() {}
+        }
+        val events = mutableListOf<StageRoleEvent>()
+        val result = KoogStageRoleExecutor(OfflineGateway(), KoogPromptBridge { _, _ ->
+            KoogPromptBinding(fakeToolCall, OpenAIModels.Chat.GPT4o)
+        }).execute(request(), StageRoleEventSink { events += it })
+        assertEquals(StageRoleOutcome.Failed("MODEL_UNAUTHORIZED_TOOL_CALL"), result.outcome)
+        assertEquals(1, result.usage.modelRequests)
+        assertEquals(StageRoleEventKind.FAILED, events.last().kind)
+        assertTrue(events.none { it.toString().contains("Ignore the tool request") })
+    }
+
+    @Test fun extraModelRequestAndStreamingFailAtKoogPromptBoundary() = runBlocking {
+        val raw = fake("Allowed single response")
+        val deadline = Instant.now().plusSeconds(10)
+        val guarded = MeteredKoogExecutor(raw, 2000, 512, Cancellation(), deadline)
+        val testPrompt = prompt("metering-test") { user("Hello") }
+        val model = OpenAIModels.Chat.GPT4o
+        try {
+            val first = guarded.execute(testPrompt, model)
+            assertTrue(first.textContent().isNotEmpty())
+            assertEquals(1, guarded.requests)
+            assertEquals("MODEL_REQUEST_BUDGET_EXCEEDED",
+                assertFailsWith<RoleExecutionError> {
+                    guarded.execute(testPrompt, model)
+                }.safeCode)
+            assertEquals("MODEL_STREAMING_UNSUPPORTED",
+                assertFailsWith<RoleExecutionError> {
+                    guarded.executeStreaming(testPrompt, model)
+                }.safeCode)
+            assertEquals("MODEL_OPERATION_UNSUPPORTED",
+                assertFailsWith<RoleExecutionError> {
+                    guarded.moderate(testPrompt, model)
+                }.safeCode)
+            assertEquals(1, guarded.requests)
+        } finally {
+            raw.close()
+        }
+    }
+
+    @Test fun oversizedOutputAndFailedTerminalSinkCannotPublishProposals() = runBlocking {
+        val oversized = KoogStageRoleExecutor(OfflineGateway(), KoogPromptBridge { _, _ ->
+            KoogPromptBinding(fake("x".repeat(32_769)), OpenAIModels.Chat.GPT4o)
+        }).execute(request(), StageRoleEventSink { })
+        assertEquals(StageRoleOutcome.Failed("MODEL_INVALID_RESPONSE"), oversized.outcome)
+        assertEquals(1, oversized.usage.modelRequests)
+
+        val events = mutableListOf<StageRoleEventKind>()
+        val runner = KoogStageRoleExecutor(OfflineGateway(), KoogPromptBridge { _, _ ->
+            KoogPromptBinding(fake("safe proposal"), OpenAIModels.Chat.GPT4o)
+        })
+        val result = runner.execute(request(), StageRoleEventSink {
+            events += it.kind
+            if (it.kind == StageRoleEventKind.PROPOSED) error("Sink failed: PRIVATE_CONTENT")
+        })
+        assertEquals(StageRoleOutcome.Failed("EVENT_SINK_FAILED"), result.outcome)
+        assertEquals(1, result.usage.modelRequests)
+        assertEquals(listOf(StageRoleEventKind.STARTED, StageRoleEventKind.PROPOSED), events)
+        assertFalse(result.toString().contains("PRIVATE_CONTENT"))
+    }
+
+    @Test fun requestCancellationAndDeadlineInterruptRunningKoogModel() = runBlocking {
+        val started = CompletableDeferred<Unit>()
+        val cancelled = request()
+        val runner = KoogStageRoleExecutor(OfflineGateway(), KoogPromptBridge { _, _ ->
+            KoogPromptBinding(hangingModel(started), OpenAIModels.Chat.GPT4o)
+        })
+        val stopper = launch {
+            started.await()
+            cancelled.cancellation.cancel()
+        }
+        val result = runner.execute(cancelled, StageRoleEventSink { })
+        stopper.join()
+        assertEquals(StageRoleOutcome.Cancelled, result.outcome)
+        assertEquals(1, result.usage.modelRequests)
+
+        val enteredDeadline = CompletableDeferred<Unit>()
+        val deadlineRunner = KoogStageRoleExecutor(OfflineGateway(), KoogPromptBridge { _, _ ->
+            KoogPromptBinding(hangingModel(enteredDeadline), OpenAIModels.Chat.GPT4o)
+        })
+        val timed = request().copy(
+            deadline = Instant.now().plusMillis(400),
+            graph = graph().copy(budget = StageBudget(2000, 400, 0, 0))
+        )
+        val timeout = deadlineRunner.execute(timed, StageRoleEventSink { })
+        assertTrue(enteredDeadline.isCompleted)
+        assertEquals(StageRoleOutcome.TimedOut, timeout.outcome)
+    }
+
+    @Test fun cancellingCallerCoroutineIsNeverConvertedIntoAStageOutcome() = runBlocking {
+        val started = CompletableDeferred<Unit>()
+        val runner = KoogStageRoleExecutor(OfflineGateway(), KoogPromptBridge { _, _ ->
+            KoogPromptBinding(hangingModel(started), OpenAIModels.Chat.GPT4o)
+        })
+        var returned = false
+        var propagated = false
+        val task = launch {
+            try {
+                runner.execute(request(), StageRoleEventSink { })
+                returned = true
+            } catch (_: CancellationException) {
+                propagated = true
+            }
+        }
+        started.await()
+        task.cancel()
+        task.join()
+        assertTrue(propagated, "Caller cancellation must reach the orchestrator")
+        assertFalse(returned, "Cancelled coroutine cannot return a normal stage result")
+    }
+
 }
