@@ -149,5 +149,4 @@ class RoleExecutionKoinTest {
             enabled.close()
         }
     }
-
 }
