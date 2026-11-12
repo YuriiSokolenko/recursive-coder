@@ -112,7 +112,7 @@ class KoogStageRoleExecutorTest {
             KoogPromptBinding(testExecutor, OpenAIModels.Chat.GPT4o)
         })
         val events = mutableListOf<StageRoleEvent>()
-        val sink = StageRoleEventSink(events::add)
+        val sink = StageRoleEventSink { events.add(it) }
         val first = runner.execute(request(), sink)
         val second = runner.execute(request(StageKind.ATDD), sink)
 
@@ -179,7 +179,7 @@ class KoogStageRoleExecutorTest {
     @Test fun unsupportedProviderAndProviderErrorsFailClosedWithSanitizedEvents() = runBlocking {
         val gateway = OfflineGateway()
         val sinkEvents = mutableListOf<StageRoleEvent>()
-        val sink = StageRoleEventSink(sinkEvents::add)
+        val sink = StageRoleEventSink { sinkEvents.add(it) }
         val runner = KoogStageRoleExecutor(gateway, KoogPromptBridge { _, _ ->
             throw IllegalStateException("sensitive provider token: SECRET_123")
         })
