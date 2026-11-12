@@ -1,7 +1,7 @@
 package ai.yuriilab.recursivecoder
 
-import org.junit.jupiter.api.Tag
 import java.nio.file.Path
+import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
 import org.koin.dsl.koinApplication
 import kotlin.test.assertNotNull
@@ -24,6 +24,7 @@ class RoleExecutionKoinTest {
             application.close()
         }
     }
+
     @Test fun trustedStageToolsAreAbsentByDefaultAndRequireExplicitModule() {
         val bridge = KoogPromptBridge { _, _ -> error("Koog cannot open stage tools") }
         val readOnly = koinApplication { modules(roleExecutionModule(FakeModel(), bridge)) }
@@ -42,5 +43,4 @@ class RoleExecutionKoinTest {
             writeEnabled.close()
         }
     }
-
 }
