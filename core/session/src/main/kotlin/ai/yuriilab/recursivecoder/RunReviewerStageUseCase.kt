@@ -213,7 +213,7 @@ class RunReviewerStageUseCase(
                 it.id in stage.inputArtifacts && it.id != manifest.id
             }.sortedBy { it.kind.name }
             val verifiedPaths = (requiredInputs.map { it.declaredPath to it.sha256 } +
-                manifest.declaredPath to manifest.sha256 +
+                (manifest.declaredPath to manifest.sha256) +
                 evidence.changedFiles.map { it.path to it.afterSha256 })
             suspend fun intact(): Boolean = withContext(blockingDispatcher) {
                 host.verifyDeveloperEvidence(lease) && verifiedPaths.all { (path, digest) ->
