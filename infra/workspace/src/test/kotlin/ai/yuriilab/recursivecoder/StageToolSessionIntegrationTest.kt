@@ -3,6 +3,7 @@ package ai.yuriilab.recursivecoder
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
+import java.util.concurrent.TimeUnit
 import org.junit.jupiter.api.Assumptions
 import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
@@ -187,13 +188,19 @@ class StageToolSessionIntegrationTest {
     @Test fun crossRoleImmutableEditsSymlinksAndPathEscapesFailClosed() {
         val fixture = fixture("path-guards", withSymlink = true)
         open(snapshot(StageKind.DEVELOP, fixture)).use { session ->
-            for (path in listOf(
-                "specs/Feature.md", "tests/acceptance/Feature.md",
-                "tests/unit/FeatureTest.kt", "src/test/Injected.kt",
-                "src/main/FeatureTest.kt", "src/main/../src/test/Escape.kt",
-                "/tmp/escape.kt", "src/main/.env"
-            )) {
-                assertFalse(session.write(listOf(StageWrite.Create(path, "attack\n"))).permitted, path)
+            val attacks = mapOf(
+                "specs/Feature.md" to "ROLE_NOT_AUTHORIZED",
+                "tests/acceptance/Feature.md" to "ROLE_NOT_AUTHORIZED",
+                "tests/unit/FeatureTest.kt" to "ROLE_NOT_AUTHORIZED",
+                "src/test/Injected.kt" to "ROLE_NOT_AUTHORIZED",
+                "src/main/FeatureTest.kt" to "PROTECTED_PATH",
+                "src/main/../src/test/Escape.kt" to "INVALID_TOOL_PATH",
+                "/tmp/escape.kt" to "INVALID_TOOL_PATH",
+                "src/main/.env" to "PROTECTED_PATH"
+            )
+            for ((path, expected) in attacks) {
+                assertEquals(expected,
+                    session.write(listOf(StageWrite.Create(path, "attack\n"))).deniedCode, path)
             }
             assertEquals("UNSAFE_PATH_COMPONENT",
                 session.write(listOf(StageWrite.Create("src/main/escape/Escape.kt", "attack\n")))
@@ -215,7 +222,7 @@ class StageToolSessionIntegrationTest {
                 it.write(listOf(StageWrite.Create("specs/Stale.md", "unsafe"))).deniedCode)
             current = original
             assertEquals("STALE_STAGE_AUTHORITY", it.runCheck("git_diff_check").deniedCode)
-            assertFalse(it.verify().successful)
+            assertEquals("STALE_STAGE_AUTHORITY", it.verify().deniedCode)
             assertFalse(Files.exists(fixture.root.resolve("specs/Stale.md")))
         }
     }
@@ -261,7 +268,8 @@ class StageToolSessionIntegrationTest {
             assertTrue(session.write(listOf(StageWrite.Create("specs/First.md", "first\n"))).permitted)
             val first = session.runCheck("git_diff_check")
             assertTrue(first.passed)
-            assertFalse(session.runCheck("unlisted-check").passed)
+            assertEquals("CHECK_NOT_ALLOWLISTED",
+                session.runCheck("unlisted-check").deniedCode)
             assertTrue(session.write(listOf(StageWrite.Create("specs/Second.md", "second\n"))).permitted)
             assertEquals("REQUIRED_CHECK_MISSING", session.verify().deniedCode)
             val second = session.runCheck("git_diff_check")
@@ -295,8 +303,15 @@ class StageToolSessionIntegrationTest {
             }
         }
         probeArgs.addAll(listOf("--", "/usr/bin/true"))
-        val probe = ProcessBuilder(probeArgs).redirectErrorStream(true).start()
-        val probeSuccess = probe.waitFor() == 0
+        val probe = ProcessBuilder(probeArgs)
+            .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+            .redirectError(ProcessBuilder.Redirect.DISCARD).start()
+        val completed = probe.waitFor(10, TimeUnit.SECONDS)
+        if (!completed) {
+            probe.destroyForcibly()
+            probe.waitFor(5, TimeUnit.SECONDS)
+        }
+        val probeSuccess = completed && probe.exitValue() == 0
         if (ci) assertTrue(probeSuccess, "CI namespaces must be usable")
         else Assumptions.assumeTrue(probeSuccess, "Local namespaces unavailable")
 
@@ -333,4 +348,188 @@ class StageToolSessionIntegrationTest {
             assertTrue(evidence.requiredChecks.all { it.policyHash != null && it.manifestHash != null })
         }
     }
+
+    @Test fun runningStageIsRecheckedAgainstCurrentAcceptedInputs() {
+        val fixture = fixture("running")
+        val base = snapshot(StageKind.ATDD, fixture)
+        fun running(graph: StageGraph): StageGraph = graph.copy(stages = graph.stages.map {
+            if (it.kind == StageKind.ATDD) it.copy(state = StageState.RUNNING) else it
+        })
+        val valid = base.copy(graph = running(base.graph))
+        open(valid).use { session ->
+            assertTrue(session.write(listOf(
+                StageWrite.Create("tests/acceptance/Next.md", "accepted\n")
+            )).permitted)
+        }
+        val opener = LinuxStageToolSessionOpener(temp.resolve("locks"))
+        fun denied(state: StageToolHostSnapshot): String =
+            (opener.open(StageToolAuthoritySource { state }) as StageToolOpenResult.Denied).code
+        val missing = valid.copy(graph = valid.graph.copy(stages = valid.graph.stages.map {
+            if (it.kind == StageKind.ATDD) it.copy(inputArtifacts = emptySet()) else it
+        }))
+        // Use a separate clean fixture for denial cases because the first
+        // successful write intentionally dirties its working tree.
+        val clean = fixture("running-denied")
+        val pristine = snapshot(StageKind.ATDD, clean).let { it.copy(graph = running(it.graph)) }
+        val missingClean = pristine.copy(graph = pristine.graph.copy(stages =
+            pristine.graph.stages.map {
+                if (it.kind == StageKind.ATDD) it.copy(inputArtifacts = emptySet()) else it
+            }))
+        assertEquals("MISSING_REQUIRED_ARTIFACT", denied(missingClean))
+        assertEquals("ARTIFACT_NOT_ACCEPTED",
+            denied(pristine.copy(hostAcceptedArtifactIds = emptySet())))
+    }
+
+    private fun reviewedRevision(
+        f: Fixture, graph: StageGraph,
+        digestOverride: String? = null,
+        reviewer: String = "agent-reviewer"
+    ): StageRevisionAuthorization {
+        val artifact = graph.artifacts.single { it.kind == StageArtifactKind.REQUIREMENTS }
+        val path = artifact.declaredPath
+        return StageRevisionAuthorization(
+            artifact.id, digestOverride ?: artifact.sha256, artifact.revision,
+            ReviewedChangeFacts(
+                changeRequestId = "review-74",
+                requestedBy = agentId(StageKind.SDD).value,
+                reviewedBy = reviewer,
+                actorRole = EngineeringRole.SDD,
+                reviewedRole = EngineeringRole.SDD,
+                paths = setOf(path),
+                approvedArtifactPaths = setOf(path)
+            )
+        )
+    }
+
+    @Test fun independentReviewAllowsOnlyTheExactFrozenRevision() {
+        val fixture = fixture("review-positive")
+        val frozen = graph(StageKind.SDD, fixture, freezeOwn = true)
+        val revision = reviewedRevision(fixture, frozen)
+        open(snapshot(StageKind.SDD, fixture, frozen).copy(revisionAuthorization = revision))
+            .use { session ->
+                val previous = digest(fixture.contents.getValue("specs/Feature.md"))
+                assertTrue(session.write(listOf(
+                    StageWrite.Edit("specs/Feature.md", previous, "reviewed requirements\n")
+                )).permitted)
+                assertTrue(session.runCheck("git_diff_check").passed)
+                val verified = session.verify()
+                assertTrue(verified.successful, verified.deniedCode)
+                assertEquals("reviewed requirements\n",
+                    Files.readString(fixture.root.resolve("specs/Feature.md")))
+            }
+    }
+
+    @Test fun invalidRevisionAttestationsNeverAcquireWriteAccess() {
+        val fixture = fixture("review-denied")
+        val frozen = graph(StageKind.SDD, fixture, freezeOwn = true)
+        val base = snapshot(StageKind.SDD, fixture, frozen)
+        val valid = reviewedRevision(fixture, frozen)
+        val opener = LinuxStageToolSessionOpener(temp.resolve("locks"))
+        fun denied(candidate: StageToolHostSnapshot): String =
+            (opener.open(StageToolAuthoritySource { candidate }) as StageToolOpenResult.Denied).code
+        assertEquals("UNKNOWN_ARTIFACT", denied(base.copy(
+            revisionAuthorization = valid.copy(artifactId = ArtifactId("missing-artifact")))))
+        val draft = frozen.copy(artifacts = frozen.artifacts.map {
+            it.copy(approval = ArtifactApproval.DRAFT, freeze = ArtifactFreeze.EDITABLE)
+        })
+        assertEquals("INVALID_REVISION_AUTHORIZATION",
+            denied(base.copy(graph = draft, hostAcceptedArtifactIds = emptySet(),
+                revisionAuthorization = valid)))
+        assertEquals("FROZEN_ARTIFACT", denied(base.copy(
+            revisionAuthorization = valid.copy(expectedSha256 = "f".repeat(64)))))
+        assertEquals("FROZEN_ARTIFACT", denied(base.copy(
+            revisionAuthorization = valid.copy(expectedRevision = 2))))
+        assertEquals("INVALID_INDEPENDENT_REVIEW", denied(base.copy(
+            revisionAuthorization = valid.copy(review =
+                valid.review.copy(reviewedBy = valid.review.requestedBy)))))
+    }
+
+    @Test fun badOrRevokedAuthorityAndMissingActorFailBeforeLeaseAcquisition() {
+        val fixture = fixture("missing-authority")
+        val base = snapshot(StageKind.SDD, fixture)
+        val opener = LinuxStageToolSessionOpener(temp.resolve("locks"))
+        fun denied(source: StageToolAuthoritySource) =
+            (opener.open(source) as StageToolOpenResult.Denied).code
+        assertEquals("STAGE_AUTHORITY_UNAVAILABLE", denied(StageToolAuthoritySource { null }))
+        assertEquals("STAGE_AUTHORITY_UNAVAILABLE",
+            denied(StageToolAuthoritySource { error("unavailable") }))
+        assertEquals("INVALID_REQUEST_ID",
+            denied(StageToolAuthoritySource { base.copy(requestId = "invalid id") }))
+        assertEquals("UNKNOWN_STAGE",
+            denied(StageToolAuthoritySource { base.copy(stageRunId = StageRunId("unassigned")) }))
+        val notReady = base.graph.copy(stages = base.graph.stages.map {
+            if (it.kind == StageKind.SDD) it.copy(state = StageState.CREATED) else it
+        })
+        assertEquals("STAGE_NOT_READY",
+            denied(StageToolAuthoritySource { base.copy(graph = notReady) }))
+        val withoutActor = base.graph.copy(stages = base.graph.stages.map {
+            if (it.kind == StageKind.SDD) it.copy(agentId = null) else it
+        })
+        assertEquals("MISSING_STAGE_ACTOR",
+            denied(StageToolAuthoritySource { base.copy(graph = withoutActor) }))
+        assertFalse(Files.exists(temp.resolve("locks")))
+
+        var current: StageToolHostSnapshot? = base
+        var failRead = false
+        val source = StageToolAuthoritySource {
+            if (failRead) error("host crashed")
+            current
+        }
+        val session = (opener.open(source) as StageToolOpenResult.Granted).session
+        session.use {
+            current = null
+            assertEquals("STALE_STAGE_AUTHORITY", it.runCheck("git_diff_check").deniedCode)
+            current = base
+            assertEquals("STALE_STAGE_AUTHORITY",
+                it.write(listOf(StageWrite.Create("specs/Late.md", "late"))).deniedCode)
+        }
+        val second = (opener.open(source) as StageToolOpenResult.Granted).session
+        second.use {
+            failRead = true
+            assertEquals("STALE_STAGE_AUTHORITY", it.verify().deniedCode)
+        }
+    }
+
+    @Test fun quotaClosedSessionAndRepeatedVerificationAreNonSuccess() {
+        val fixture = fixture("quota")
+        val base = snapshot(StageKind.SDD, fixture).copy(maxToolCalls = 1)
+        val session = open(base)
+        assertTrue(session.write(listOf(StageWrite.Create("specs/One.md", "one\n"))).permitted)
+        assertEquals("TOOL_QUOTA_EXCEEDED",
+            session.write(listOf(StageWrite.Create("specs/Two.md", "two\n"))).deniedCode)
+        // An exhausted stage cannot turn its check into success.
+        assertEquals("TOOL_QUOTA_EXCEEDED", session.runCheck("git_diff_check").deniedCode)
+        val failed = session.verify()
+        assertFalse(failed.successful)
+        assertEquals("TOOL_QUOTA_EXCEEDED", failed.requiredChecks.single().deniedCode)
+        session.close()
+        assertEquals("WRITE_SESSION_INVALID", session.runCheck("git_diff_check").deniedCode)
+        assertEquals("WRITE_SESSION_INVALID", session.verify().deniedCode)
+
+        val clean = fixture("verify-twice")
+        open(snapshot(StageKind.SDD, clean)).use { valid ->
+            assertTrue(valid.write(listOf(StageWrite.Create("specs/New.md", "content\n"))).permitted)
+            assertEquals("CHECK_NOT_RUN", valid.verify().requiredChecks.single().deniedCode)
+            assertTrue(valid.runCheck("git_diff_check").passed)
+            assertTrue(valid.verify().successful)
+            val repeated = valid.verify()
+            assertFalse(repeated.successful)
+            assertEquals("STAGE_TOOL_FINISHED", repeated.deniedCode)
+            assertEquals("STAGE_TOOL_FINISHED", repeated.requiredChecks.single().deniedCode)
+        }
+    }
+
+    @Test fun mutableHostCollectionChangesCannotSilentlyRewriteAdmittedSnapshot() {
+        val fixture = fixture("mutable-authority")
+        val base = snapshot(StageKind.SDD, fixture)
+        val acceptance = mutableSetOf<ArtifactId>()
+        val current = base.copy(hostAcceptedArtifactIds = acceptance)
+        val session = (LinuxStageToolSessionOpener(temp.resolve("locks"))
+            .open(StageToolAuthoritySource { current }) as StageToolOpenResult.Granted).session
+        session.use {
+            acceptance.add(ArtifactId("unexpected"))
+            assertEquals("STALE_STAGE_AUTHORITY", it.runCheck("git_diff_check").deniedCode)
+        }
+    }
+
 }
