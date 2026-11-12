@@ -67,6 +67,8 @@ class RecursiveChildIntegrationPolicyUnitTest {
             listOf(root, first, second.copy(state = RecursiveNodeState.FAILED)))))
         denied("CHILD_ARTIFACT_MISSING", decide(receipts =
             mapOf(a to listOf(ra), b to emptyList())))
+        denied("INVALID_CHILD_ARTIFACT_COUNT", decide(receipts =
+            mapOf(a to listOf(ra, ra), b to listOf(rb))))
     }
 
     @Test fun acceptanceAndDigestMustBeIndependentlyConfirmed() {
