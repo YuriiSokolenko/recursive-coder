@@ -83,6 +83,13 @@ internal fun developerStageModule(host: PreparationStageHost): Module = module {
     factory { RunDeveloperStageUseCase(get(), get(), get()) }
 }
 
+
+/** Reviewer is a separate, strictly read-only opt-in role and host contract. */
+internal fun reviewerStageModule(host: ReviewerStageHost): Module = module {
+    single<ReviewerStageHost> { host }
+    factory { RunReviewerStageUseCase(get(), get()) }
+}
+
 internal val cliWorkspaceOpener: WorkspaceOpener = WorkspaceOpener { request, onAudit, onStart ->
     WorkspaceManager.open(request, onAudit, onStart)
 }
