@@ -26,14 +26,20 @@ class RoleExecutionKoinTest {
     }
     @Test fun trustedStageToolsAreAbsentByDefaultAndRequireExplicitModule() {
         val bridge = KoogPromptBridge { _, _ -> error("Koog cannot open stage tools") }
-        koinApplication { modules(roleExecutionModule(FakeModel(), bridge)) }.use { app ->
-            assertNull(app.koin.getOrNull<StageToolSessionOpener>())
+        val readOnly = koinApplication { modules(roleExecutionModule(FakeModel(), bridge)) }
+        try {
+            assertNull(readOnly.koin.getOrNull<StageToolSessionOpener>())
+        } finally {
+            readOnly.close()
         }
-        koinApplication {
+        val writeEnabled = koinApplication {
             modules(roleExecutionModule(FakeModel(), bridge),
                 stageToolModule(Path.of(System.getProperty("java.io.tmpdir"), "stage-74-koin-locks")))
-        }.use { app ->
-            assertNotNull(app.koin.get<StageToolSessionOpener>())
+        }
+        try {
+            assertNotNull(writeEnabled.koin.get<StageToolSessionOpener>())
+        } finally {
+            writeEnabled.close()
         }
     }
 
