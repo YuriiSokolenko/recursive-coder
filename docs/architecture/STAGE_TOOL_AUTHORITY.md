@@ -30,8 +30,12 @@ Reviewer stages cannot open a write session.
 
 An admitted stage must be READY or RUNNING, active, correctly correlated, and
 have accepted, frozen inputs from accepted predecessors. A RUNNING stage is
-checked against the same prerequisite gate without changing its state. Every
-host-accepted ID must reference an actually accepted and frozen manifest.
+checked against the same prerequisite gate without changing its state. For
+production orchestration, transition READY → RUNNING **before** opening the
+stage tool session. A READY-stage open is permitted for explicit host preflight
+or standalone callers, but any subsequent stage state change invalidates its
+live tool session and requires a fresh admission. Every host-accepted ID must
+reference an actually accepted and frozen manifest.
 Every frozen manifest is pinned by its SHA-256; missing or changed files deny
 admission. Frozen edits require the existing `StageRevisionAuthorization`
 for that exact artifact ID, revision, digest and independent reviewer, in
@@ -48,11 +52,17 @@ aliases or submodules. The runtime rechecks Git HEAD/branch/index, approved
 bytes, exact SHA preconditions and the descriptor-relative filesystem before
 each operation.
 
-The authority source is consulted again before each write, check and final
-verification. If the host snapshot changes or is unavailable, the session
-latches `STALE_STAGE_AUTHORITY` and cannot regain access merely because an
-older snapshot reappears. Reopening requires a new trusted admission and a
-clean workspace. Each attempted write conservatively discards the stage's
+The authority source is consulted before and after each write/check and final
+verification. Admission freezes nested host-owned collections into a
+**detached, value-equal snapshot**, not a `toString()` fingerprint. Staleness
+deliberately compares the **whole snapshot** (including sibling stages) to
+fail closed even for unrelated graph changes. The host must keep the graph
+snapshot stable for the live session; any workflow transition, approval change,
+policy change or unavailable source latches `STALE_STAGE_AUTHORITY`. An older
+snapshot returning later cannot restore access. Reopening requires a new
+trusted admission and a clean workspace. Writes performed before an in-flight
+revocation may leave a dirty working tree, but cannot return success after the
+post-operation recheck. Each attempted write conservatively discards the stage's
 previous check evidence.
 
 Only the host-selected IDs `git_diff_check` and explicitly allowlisted
@@ -67,10 +77,16 @@ agent**. The adapter keeps actual `TrustedCheckReceipt` instances privately
 and invokes `TrustedWriteRuntime.finish` with the current required set.
 Only successful final verification returns
 `StageValidationEvidence.successful = true`, after which the session
-disallows further writes and checks. Failed checks, expired receipts, changed
-manifests, stale host authority or unavailable sandbox produce non-success.
-Evidence is not portable authorization; downstream graph gates must still
-recheck the current host state, stage identity, artifact hashes and review.
+disallows further writes and checks. Repeating `verify()` after success
+returns `STAGE_TOOL_FINISHED` rather than replaying a success. Reports always
+include one `StageCheckEvidence` per required check in sorted ID order,
+including `CHECK_NOT_RUN` or the actual denial for missing/failed checks.
+Check results are additionally revalidated against host authority immediately
+after execution; a stale result never becomes passed evidence. Failed checks,
+expired receipts, changed manifests, stale host authority or unavailable
+sandbox produce non-success. Evidence is not portable authorization; downstream
+graph gates must still recheck the current host state, stage identity, artifact
+hashes and review.
 
 ## Verification and limits
 
@@ -80,9 +96,11 @@ recheck the current host state, stage identity, artifact hashes and review.
 ```
 
 The stage-port integration suite checks four role ownership boundaries,
-immutable artifacts, cross-role edits, symlink/path escapes, stale host
-snapshots, Git baselines, frozen digests, missing approval and check
-requirements, receipt invalidation, and read-only Koin defaults. CI requires
+immutable artifacts (including independently reviewed revisions), RUNNING
+readmission and denied prerequisites, cross-role edits, symlink/path escapes,
+stale host snapshots and mutable backing collections, Git baselines, frozen
+digests, missing approval and check requirements, quota exhaustion, diagnostic
+denial codes, receipt invalidation, and read-only Koin defaults. CI requires
 the port's real bubblewrap E2E to pass **with zero skips**, in addition to the
 existing standalone trusted-write sandbox test.
 
