@@ -11,11 +11,14 @@ import kotlin.test.assertTrue
 class RoleExecutionKoinTest {
     @Test fun optInModuleResolvesFreshRoleExecutorsWithInjectedGateway() {
         val bridge = KoogPromptBridge { _, _ -> error("No role was selected for execution") }
-        koinApplication { modules(roleExecutionModule(FakeModel(), bridge)) }.use { application ->
+        val application = koinApplication { modules(roleExecutionModule(FakeModel(), bridge)) }
+        try {
             val first: StageRoleExecutor = application.koin.get()
             val second: StageRoleExecutor = application.koin.get()
             assertTrue(first is KoogStageRoleExecutor)
             assertNotSame(first, second)
+        } finally {
+            application.close()
         }
     }
 }
