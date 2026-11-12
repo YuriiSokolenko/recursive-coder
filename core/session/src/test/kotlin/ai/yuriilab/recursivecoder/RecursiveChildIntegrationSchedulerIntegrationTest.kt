@@ -4,6 +4,9 @@ import java.security.MessageDigest
 import java.time.Clock
 import java.time.Instant
 import java.time.ZoneOffset
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
@@ -31,7 +34,7 @@ class RecursiveChildIntegrationSchedulerIntegrationTest {
     private fun digest(bytes: ByteArray) = MessageDigest.getInstance("SHA-256")
         .digest(bytes).joinToString("") { "%02x".format(it) }
 
-    private inner class FakeTrustedHost : RecursiveChildIntegrationHost {
+    private inner open class FakeTrustedHost : RecursiveChildIntegrationHost {
         val approved = mutableSetOf<ArtifactId>()
         val byChild = mutableMapOf<GraphId, List<StageArtifactManifest>>()
         val bytes = mutableMapOf<String, ByteArray>()
@@ -53,7 +56,8 @@ class RecursiveChildIntegrationSchedulerIntegrationTest {
     }
 
     private fun scheduler(kind: StageKind, host: FakeTrustedHost,
-        events: MutableList<RecursiveEvent>): RecursiveGraphScheduler {
+        events: MutableList<RecursiveEvent>,
+        sink: RecursiveEventSink = RecursiveEventSink { events += it }): RecursiveGraphScheduler {
         val id = GraphId("root-" + kind.name.lowercase())
         val stage = StageRunId("stage-root-" + kind.name.lowercase())
         val graph = StageGraph(
@@ -67,7 +71,7 @@ class RecursiveChildIntegrationSchedulerIntegrationTest {
         return RecursiveGraphScheduler(
             RecursiveRootGrant(graph, stage, "root-task", paths(kind).toSet(),
                 setOf("specs/Frozen.md")), RecursiveLimits(12, 8, 12_000,
-                now.plusSeconds(60)), clock, RecursiveEventSink { events += it }, host)
+                now.plusSeconds(60)), clock, sink, host)
     }
 
     private fun proposal(ctx: RecursiveStageContext, requestId: String,
@@ -198,4 +202,67 @@ class RecursiveChildIntegrationSchedulerIntegrationTest {
         })
         assertEquals(RecursiveExecutionOutcome.Completed, result)
     }
+    @Test fun untrustedIntegrationRetriesAreBoundedAndDeniedOnlyOnce() = runBlocking {
+        val events = mutableListOf<RecursiveEvent>()
+        val scheduler = scheduler(StageKind.SDD, FakeTrustedHost(), events)
+        val result = scheduler.execute(scheduler.rootGraphId, RecursiveStageExecutor { root ->
+            repeat(16) { assertIs<ChildIntegrationDecision.Accepted>(root.integrateChildren()) }
+            repeat(8) {
+                assertEquals("INTEGRATION_ATTEMPT_LIMIT",
+                    assertIs<ChildIntegrationDecision.Denied>(root.integrateChildren()).code)
+            }
+            RecursiveExecutionOutcome.Completed
+        })
+        assertEquals(RecursiveExecutionOutcome.Completed, result)
+        assertEquals(1, events.count { it.kind == RecursiveEventKind.DENIED &&
+            it.code == "INTEGRATION_ATTEMPT_LIMIT" })
+    }
+
+    @Test fun hostEvidenceReadsDoNotHoldGlobalSchedulerLock() = runBlocking {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val host = object : FakeTrustedHost() {
+            override fun manifestsFor(child: RecursiveNode): List<StageArtifactManifest>? {
+                entered.countDown()
+                if (!release.await(5, TimeUnit.SECONDS)) error("Test evidence read timed out")
+                return super.manifestsFor(child)
+            }
+        }
+        val scheduler = scheduler(StageKind.SDD, host, mutableListOf())
+        val result = scheduler.execute(scheduler.rootGraphId, RecursiveStageExecutor { root ->
+            val node = assertIs<RecursiveDecision.Allowed>(
+                root.requestChild(proposal(root, "request-child", "child-task",
+                    setOf("specs/Parent.md")))).child
+            assertEquals(RecursiveExecutionOutcome.Completed, scheduler.execute(node.graphId,
+                RecursiveStageExecutor {
+                    host.accept(node, "specs/Parent.md")
+                    RecursiveExecutionOutcome.Completed
+                }))
+            val integrate = CompletableFuture.supplyAsync { root.integrateChildren() }
+            try {
+                assertTrue(entered.await(3, TimeUnit.SECONDS))
+                val readSnapshot = CompletableFuture.supplyAsync {
+                    scheduler.current().nodes.size
+                }
+                assertEquals(2, readSnapshot.get(3, TimeUnit.SECONDS))
+            } finally {
+                release.countDown()
+            }
+            assertIs<ChildIntegrationDecision.Accepted>(
+                integrate.get(5, TimeUnit.SECONDS))
+            RecursiveExecutionOutcome.Completed
+        })
+        assertEquals(RecursiveExecutionOutcome.Completed, result)
+    }
+
+    @Test fun swallowedEventWriteFailureIsVisibleToHost() = runBlocking {
+        val scheduler = scheduler(StageKind.REVIEW, FakeTrustedHost(), mutableListOf(),
+            RecursiveEventSink { error("Event sink unavailable") })
+        assertEquals(RecursiveExecutionOutcome.Completed, scheduler.execute(
+            scheduler.rootGraphId, RecursiveStageExecutor {
+                RecursiveExecutionOutcome.Completed
+            }))
+        assertTrue(scheduler.eventDeliveryFailed)
+    }
+
 }
