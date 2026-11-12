@@ -55,13 +55,13 @@ class SessionEventJournal(
     private val clock: Clock,
     private val sink: EventSink
 ) : AutoCloseable {
-    var sequence: Int = 0
+    @Volatile var sequence: Int = 0
         private set
     private var previous: String? = null
     private var closed = false
     private var writeFailure: EventSinkFailure? = null
 
-    fun append(type: String, status: String, transition: Pair<String, String>? = null,
+    @Synchronized fun append(type: String, status: String, transition: Pair<String, String>? = null,
                toolId: String? = null, started: Instant? = null, extra: JsonObject? = null,
                actor: SessionEventActor? = null, correlationId: String? = null) {
         check(!closed) { "Session event journal is already closed" }
@@ -112,7 +112,7 @@ class SessionEventJournal(
     }
 
     /** Close and verify the recorded bytes before the result can be published. */
-    fun finish(): String {
+    @Synchronized fun finish(): String {
         check(!closed) { "Session event journal is already closed" }
         closed = true
         writeFailure?.let { original ->
@@ -131,7 +131,7 @@ class SessionEventJournal(
     }
 
     /** Abort path: clean up a sink without publishing a checksum. */
-    override fun close() {
+    @Synchronized override fun close() {
         if (!closed) {
             closed = true
             try { sink.close() } catch (e: Exception) { throw EventSinkFailure(e) }
