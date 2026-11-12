@@ -52,6 +52,8 @@ object RecursiveChildIntegrationPolicy {
 
         // Kahn ordering restricted to direct siblings. Invalid/cyclic edges never
         // produce a partially accepted batch.
+        if (children.any { child -> child.dependencies.any { it !in byId } })
+            return deny("UNKNOWN_CHILD_DEPENDENCY")
         val order = mutableListOf<GraphId>()
         val remaining = children.map { it.graphId }.toMutableSet()
         while (remaining.isNotEmpty()) {
