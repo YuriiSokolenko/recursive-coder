@@ -69,6 +69,10 @@ class CorrelatedSessionEventsIntegrationTest {
             sink.events[1]["actor"]!!.jsonObject["parentAgentId"]!!.jsonPrimitive.content)
         assertEquals("graph-child-79",
             sink.events[1]["metadata"]!!.jsonObject["childGraphId"]!!.jsonPrimitive.content)
+        assertEquals("agent-stage-graph-child-79",
+            sink.events[1]["actor"]!!.jsonObject["childAgentId"]!!.jsonPrimitive.content)
+        assertEquals(JsonNull,
+            sink.events[1]["actor"]!!.jsonObject["childSessionId"])
         assertFalse(sink.events[0]["metadata"]!!.jsonObject.containsKey("inputTokens"))
         assertFalse(sink.events[0]["metadata"]!!.jsonObject.containsKey("outputTokens"))
         assertEquals("ACCEPT",
