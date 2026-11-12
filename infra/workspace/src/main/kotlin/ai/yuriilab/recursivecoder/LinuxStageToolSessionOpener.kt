@@ -3,6 +3,34 @@ package ai.yuriilab.recursivecoder
 import java.nio.file.Path
 
 /**
+ * Freeze nested collection values at admission. A host may use mutable backing
+ * collections; retaining their aliases would let in-place mutation redefine
+ * the already-admitted authority without invalidating equality.
+ */
+private fun StageToolHostSnapshot.frozen(): StageToolHostSnapshot = copy(
+    graph = graph.copy(
+        stages = graph.stages.map { node ->
+            node.copy(
+                dependencies = node.dependencies.toSet(),
+                inputArtifacts = node.inputArtifacts.toSet(),
+                outputArtifacts = node.outputArtifacts.toSet()
+            )
+        },
+        artifacts = graph.artifacts.toList(),
+        children = graph.children.map { it.copy(dependsOnStages = it.dependsOnStages.toSet()) }
+    ),
+    hostAcceptedArtifactIds = hostAcceptedArtifactIds.toSet(),
+    checks = checks.mapValues { (_, check) -> check.copy(arguments = check.arguments.toList()) },
+    requiredChecks = requiredChecks.toSet(),
+    revisionAuthorization = revisionAuthorization?.let { authorization ->
+        authorization.copy(review = authorization.review.copy(
+            paths = authorization.review.paths.toSet(),
+            approvedArtifactPaths = authorization.review.approvedArtifactPaths.toSet()
+        ))
+    }
+)
+
+/**
  * The only stage-to-filesystem bridge. All physical writes, path traversal,
  * Git baseline checks, bubblewrap execution and HMAC receipt validation remain
  * in TrustedWriteRuntime. No Koog/model surface is registered here.
@@ -13,7 +41,7 @@ class LinuxStageToolSessionOpener(
 ) : StageToolSessionOpener {
 
     override fun open(authority: StageToolAuthoritySource): StageToolOpenResult {
-        val snapshot = try { authority.current() }
+        val snapshot = try { authority.current()?.frozen() }
             catch (_: Exception) { null }
             ?: return StageToolOpenResult.Denied("STAGE_AUTHORITY_UNAVAILABLE")
         if (!ToolAuthorizationPolicy.validHostIdentifier(snapshot.requestId))
@@ -28,6 +56,7 @@ class LinuxStageToolSessionOpener(
             return StageToolOpenResult.Denied("ROLE_NOT_AUTHORIZED")
         if (stage.state != StageState.READY && stage.state != StageState.RUNNING)
             return StageToolOpenResult.Denied("STAGE_NOT_READY")
+        val actor = stage.agentId ?: return StageToolOpenResult.Denied("MISSING_STAGE_ACTOR")
 
         // A RUNNING stage has already crossed the READY -> RUNNING boundary.
         // Recheck the same prerequisites as an admission; do not transition it.
@@ -88,13 +117,16 @@ class LinuxStageToolSessionOpener(
         } catch (_: Exception) {
             return StageToolOpenResult.Denied("STAGE_TOOL_UNAVAILABLE")
         }
-        val actor = stage.agentId ?: run {
+        // The host may revoke authority while a filesystem lease is being opened.
+        // Do not return a live session without validating it a second time.
+        val stillCurrent = try { authority.current()?.frozen() == snapshot }
+            catch (_: Exception) { false }
+        if (!stillCurrent) {
             runtime.close()
-            return StageToolOpenResult.Denied("MISSING_STAGE_ACTOR")
+            return StageToolOpenResult.Denied("STALE_STAGE_AUTHORITY")
         }
         return StageToolOpenResult.Granted(
-            LinuxStageToolSession(authority, snapshot, actor, stage.correlation,
-                runtime, snapshot.toString())
+            LinuxStageToolSession(authority, snapshot, actor, stage.correlation, runtime)
         )
     }
 }
@@ -104,10 +136,10 @@ private class LinuxStageToolSession(
     private val admitted: StageToolHostSnapshot,
     private val actor: AgentId,
     private val correlation: StageCorrelation,
-    private val runtime: TrustedWriteRuntime,
-    private val admittedFingerprint: String
+    private val runtime: TrustedWriteRuntime
 ) : StageToolSession {
     private val passed = linkedMapOf<String, Pair<TrustedCheckReceipt, StageCheckEvidence>>()
+    private val attempted = mutableMapOf<String, StageCheckEvidence>()
     private var revoked = false
     private var finished = false
     private var closed = false
@@ -116,10 +148,11 @@ private class LinuxStageToolSession(
         if (closed) return "WRITE_SESSION_INVALID"
         if (revoked) return "STALE_STAGE_AUTHORITY"
         if (finished) return "STAGE_TOOL_FINISHED"
-        val now = try { authority.current() } catch (_: Exception) { null }
-        if (now == null || now != admitted || now.toString() != admittedFingerprint) {
+        val now = try { authority.current()?.frozen() } catch (_: Exception) { null }
+        if (now == null || now != admitted) {
             revoked = true
             passed.clear()
+            attempted.clear()
             return "STALE_STAGE_AUTHORITY"
         }
         return null
@@ -138,35 +171,53 @@ private class LinuxStageToolSession(
         val result = runtime.apply(writes)
         // Conservative: even a rejected attempt cannot reuse older stage-check evidence.
         passed.clear()
-        return StageWriteEvidence(result.toolId, result.deniedCode)
+        attempted.clear()
+        val stale = currentDenial()
+        return StageWriteEvidence(result.toolId, stale ?: result.deniedCode)
     }
 
     @Synchronized
     override fun runCheck(checkId: String): StageCheckEvidence {
         currentDenial()?.let { return StageCheckEvidence(checkId, null, deniedCode = it) }
         passed.remove(checkId)
+        attempted.remove(checkId)
         val result = runtime.runCheck(checkId)
+        // A check may have taken seconds. Revoke results when approval was
+        // withdrawn during execution; never report a stale check as passed.
+        currentDenial()?.let { denial ->
+            return StageCheckEvidence(checkId, result.toolId, deniedCode = denial)
+        }
         val receipt = result.receipt
         val evidence = if (result.passed && receipt != null)
             StageCheckEvidence(checkId, result.toolId, receipt.baselineHead,
                 receipt.policyHash, receipt.manifestHash)
         else StageCheckEvidence(checkId, result.toolId, deniedCode =
             result.deniedCode ?: "CHECK_UNAVAILABLE")
+        attempted[checkId] = evidence
         if (receipt != null && evidence.passed) passed[checkId] = receipt to evidence
         return evidence
     }
 
+    private fun checkEvidence(denial: String? = null): List<StageCheckEvidence> =
+        admitted.requiredChecks.sorted().map { id ->
+            if (denial != null) StageCheckEvidence(id, null, deniedCode = denial)
+            else attempted[id] ?: StageCheckEvidence(id, null, deniedCode = "CHECK_NOT_RUN")
+        }
+
     @Synchronized
     override fun verify(): StageValidationEvidence {
-        val denied = currentDenial()
-        if (denied != null)
-            return StageValidationEvidence(correlation, actor, emptyList(), false, denied)
-        // Deliberately preserve the host-declared check order for diagnostics.
-        val evidence = admitted.requiredChecks.sorted().mapNotNull { passed[it]?.second }
+        currentDenial()?.let { denial ->
+            return StageValidationEvidence(correlation, actor, checkEvidence(denial), false, denial)
+        }
+        // Evidence is in deterministic check-ID order; missing/failed checks
+        // have their own denial instead of being omitted from the report.
         val receipts = admitted.requiredChecks.sorted().mapNotNull { passed[it]?.first }
         val result = runtime.finish(receipts)
+        currentDenial()?.let { denial ->
+            return StageValidationEvidence(correlation, actor, checkEvidence(denial), false, denial)
+        }
         if (result.successful) finished = true
-        return StageValidationEvidence(correlation, actor, evidence,
+        return StageValidationEvidence(correlation, actor, checkEvidence(),
             result.successful, result.deniedCode)
     }
 
@@ -175,6 +226,7 @@ private class LinuxStageToolSession(
         if (closed) return
         closed = true
         passed.clear()
+        attempted.clear()
         runtime.close()
     }
 }
