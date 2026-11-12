@@ -59,6 +59,7 @@ class KoogStageRoleExecutorTest {
     ): StageRoleRequest = StageRoleRequest(
         graph = graph(kind),
         stageRunId = if (kind == StageKind.SDD) sddId else atddId,
+        requestId = if (kind == StageKind.SDD) "request-sdd" else "request-atdd",
         expectedRole = kind.role,
         hostAcceptedArtifactIds = accepted,
         model = ModelConfig("fake", "fake-v1", "http://localhost:12345/v1",
@@ -68,12 +69,15 @@ class KoogStageRoleExecutorTest {
         cancellation = Cancellation()
     )
 
-    private class OfflineGateway : ModelGateway {
+    private class OfflineGateway(
+        private val capabilities: GatewayCapabilities =
+            GatewayCapabilities(setOf("tool_calls"), 4096, 512)
+    ) : ModelGateway {
         var negotiations = 0
         override fun negotiate(config: ModelConfig, cancellation: Cancellation, deadline: Instant): GatewayCapabilities {
             negotiations++
             cancellation.check(deadline)
-            return GatewayCapabilities(setOf("tool_calls"), 4096, 512)
+            return capabilities
         }
         override fun next(
             config: ModelConfig, task: Path, observed: Pair<Int, String>?,
@@ -113,7 +117,8 @@ class KoogStageRoleExecutorTest {
         })
         val events = mutableListOf<StageRoleEvent>()
         val sink = StageRoleEventSink { events.add(it) }
-        val first = runner.execute(request(), sink)
+        val firstRequest = request()
+        val first = runner.execute(firstRequest, sink)
         val second = runner.execute(request(StageKind.ATDD), sink)
 
         assertEquals(2, gateway.negotiations)
@@ -139,7 +144,8 @@ class KoogStageRoleExecutorTest {
         assertEquals(listOf(StageRoleEventKind.STARTED, StageRoleEventKind.PROPOSED,
             StageRoleEventKind.STARTED, StageRoleEventKind.PROPOSED), events.map { it.kind })
         assertTrue(events.all { it.code == null && it.usage.modelRequests in 0..1 })
-        assertEquals(StageState.READY, request().graph.stages.single().state)
+        assertEquals(StageState.READY, firstRequest.graph.stages.single().state)
+        assertTrue(firstRequest.graph.artifacts.isEmpty())
     }
 
     @Test fun identityToolEscalationAndUnacceptedInputsFailBeforeModelAccess() = runBlocking {
