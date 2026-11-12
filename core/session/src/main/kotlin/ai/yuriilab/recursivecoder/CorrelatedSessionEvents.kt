@@ -37,8 +37,11 @@ class CorrelatedRecursiveSessionEvents(
             actor = SessionEventActor(
                 agentId = "agent-" + event.stageRunId.value,
                 parentAgentId = event.parentStageRunId?.let { "agent-" + it.value },
-                childAgentId = event.childGraphId?.let { "agent-" + it.value },
-                childSessionId = event.childGraphId?.value
+                childAgentId = event.childGraphId?.let {
+                    "agent-" + RecursiveGraphPolicy.childStageId(it).value
+                }
+                // A child graph is not necessarily a distinct Session v1.
+                // Unknown child session identity must remain null.
             ),
             extra = buildJsonObject {
                 put("recursiveEvent", event.kind.name)
