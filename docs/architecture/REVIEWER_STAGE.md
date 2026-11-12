@@ -74,8 +74,10 @@ scheduling, nested graphs and crash checkpoints remain separate issues.
 
 ## Verification and compatibility
 
-The offline `RunReviewerStageIntegrationTest` covers five-role graph
-acceptance, independent FakeModel verdicts, rejection and bounded replan,
+The offline `FiveRoleFakeModelWorkflowIntegrationTest` executes all five
+use cases in order with FakeModel and trusted fake tool/host ports. Separately,
+`RunReviewerStageIntegrationTest` covers five-role graph acceptance,
+independent FakeModel verdicts, rejection and bounded replan,
 a repaired second review, receipt missing/failure, unsupported evidence,
 self-review, frozen-input tampering, attempted frozen-test revision, host
 evidence revocation and uncertain finish. Existing unit, integration, physical
