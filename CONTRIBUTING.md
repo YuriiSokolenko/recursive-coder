@@ -19,3 +19,11 @@ Documentation describing planned behavior must explicitly distinguish it from wo
 Every JUnit Jupiter test must have an effective `@Tag("unit")`, `@Tag("integration")` or `@Tag("e2e")`. Apply it to the test class for a uniform suite, or to individual methods when appropriate. Pure `unit` tests use only in-memory inputs and fakes; anything invoking a file, Git, HTTP, socket, subprocess or Koog belongs to a higher tier. A class tagged `integration` may give one method `e2e`; the focused integration suite excludes that method.
 
 Before opening a PR, run `./gradlew checkTestTiers unitTest` and the guard's independent regression cases with `python3 -m unittest discover -s tests -p 'test_test_tiers.py' -v`. The original `./gradlew test installDist` remains unfiltered. See [test tier policy](docs/architecture/TEST_SUITES.md) for the supported JUnit annotations, diagnostics and static-check limitations.
+
+## Development and documentation workflow
+
+- Branch from `dev` and open PRs into `dev`; use `main` for intentional release integration.
+- Distinguish **implemented and CLI-integrated**, **implemented standalone**, and **planned** features. In particular, the Linux trusted write runtime is not yet part of the read-only CLI Session Runtime; Koog orchestration is planned.
+- Verify the eight product modules against `settings.gradle.kts`, build versions against the version catalog, and CI claims against `.github/workflows/ci.yml`.
+- CI runs all jobs on GitHub-hosted `ubuntu-24.04` since merged [PR #71](https://github.com/YuriiSokolenko/recursive-coder/pull/71). Fork PR code executes on GitHub-managed ephemeral VMs, never on private N150 hardware. Tests remain offline from any live inference provider. Required sandbox E2E must not be skipped.
+- For documentation PRs, check relative links, versioned commands, security/portability claims, roadmap status and canonical protocol compatibility. A passing CI run does not replace editorial review.

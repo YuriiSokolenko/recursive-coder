@@ -1,5 +1,7 @@
 # First executable session (issue #4)
 
+**Current scope (`dev@4ed9fe8`):** This guide runs fresh **read-only** CLI sessions. It does not invoke the standalone Trusted Write Runtime, nested Koog roles or checkpoint recovery. FakeModel and the strict optional OpenAI-compatible adapter share the same session boundary.
+
 The standalone pre-release CLI accepts one **SessionRequest v1** JSON file:
 
 1. Install JDK 21 and Gradle 9.8.1.
@@ -50,6 +52,6 @@ finish a terminal result; durable recovery is deferred to issue #10.
 ## Explicit scope limitations
 
 The bootstrap still has a fully offline fake-model path and is **not** full Koog agent execution.
-Issue #6 adds the injectable HTTP Model Gateway with fail-closed capability discovery; Koog agent orchestration remains a separate milestone. Trusted read-only workspace tools and descriptor-based containment are implemented in issue #5; see [Workspace Manager](WORKSPACE.md). The `gradlew` executable is
+Issue #6 **implemented** the injectable HTTP Model Gateway with fail-closed capability discovery; Koog agent orchestration remains a separate milestone. Trusted read-only workspace tools and descriptor-based containment were implemented in issue #5; see [Workspace Manager](WORKSPACE.md). The separate trusted write/check runtime from #8 is documented in [Trusted writes](TRUSTED_WRITES.md) and has **not** been integrated into `run`. The `gradlew` executable is
 a temporary delegate to an installed Gradle 9.8.1, not a downloaded
 self-contained wrapper; complete packaging is part of issue #12.
