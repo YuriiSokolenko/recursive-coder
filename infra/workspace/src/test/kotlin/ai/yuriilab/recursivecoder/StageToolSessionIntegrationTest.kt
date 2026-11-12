@@ -377,19 +377,15 @@ class StageToolSessionIntegrationTest {
             denied(pristine.copy(hostAcceptedArtifactIds = emptySet())))
     }
 
-    private fun reviewedRevision(
-        graph: StageGraph,
-        digestOverride: String? = null,
-        reviewer: String = "agent-reviewer"
-    ): StageRevisionAuthorization {
+    private fun reviewedRevision(graph: StageGraph): StageRevisionAuthorization {
         val artifact = graph.artifacts.single { it.kind == StageArtifactKind.REQUIREMENTS }
         val path = artifact.declaredPath
         return StageRevisionAuthorization(
-            artifact.id, digestOverride ?: artifact.sha256, artifact.revision,
+            artifact.id, artifact.sha256, artifact.revision,
             ReviewedChangeFacts(
                 changeRequestId = "review-74",
                 requestedBy = agentId(StageKind.SDD).value,
-                reviewedBy = reviewer,
+                reviewedBy = "agent-reviewer",
                 actorRole = EngineeringRole.SDD,
                 reviewedRole = EngineeringRole.SDD,
                 paths = setOf(path),
@@ -526,6 +522,148 @@ class StageToolSessionIntegrationTest {
         session.use {
             acceptance.add(ArtifactId("unexpected"))
             assertEquals("STALE_STAGE_AUTHORITY", it.runCheck("git_diff_check").deniedCode)
+        }
+    }
+
+
+    /**
+     * The authority source deliberately changes on the specified read.
+     * Open checks it twice; write/check/verify each check it before and
+     * after accessing the trusted runtime. No threads or timing races.
+     */
+    private fun revokeOnRead(
+        snapshot: StageToolHostSnapshot, changedOnRead: Int
+    ): StageToolAuthoritySource {
+        var reads = 0
+        val revoked = snapshot.copy(maxToolCalls = snapshot.maxToolCalls + 1)
+        return StageToolAuthoritySource {
+            if (++reads >= changedOnRead) revoked else snapshot
+        }
+    }
+
+    @Test fun revokedDuringOpenReleasesExclusiveWorkspaceLease() {
+        val fixture = fixture("revoke-open")
+        val snapshot = snapshot(StageKind.SDD, fixture)
+        val opener = LinuxStageToolSessionOpener(temp.resolve("locks"))
+        val refused = opener.open(revokeOnRead(snapshot, changedOnRead = 2))
+        assertEquals("STALE_STAGE_AUTHORITY", (refused as StageToolOpenResult.Denied).code)
+        val fresh = opener.open(StageToolAuthoritySource { snapshot })
+        // A leaked lease would return WORKSPACE_LOCKED here.
+        assertTrue(fresh is StageToolOpenResult.Granted, "Lease not released: $fresh")
+        (fresh as StageToolOpenResult.Granted).session.close()
+    }
+
+    @Test fun revokedDuringWriteCannotReportSuccessfulMutation() {
+        val fixture = fixture("revoke-write")
+        val original = snapshot(StageKind.SDD, fixture)
+        val opened = LinuxStageToolSessionOpener(temp.resolve("locks"))
+            .open(revokeOnRead(original, changedOnRead = 4))
+        (opened as StageToolOpenResult.Granted).session.use { session ->
+            val outcome = session.write(listOf(
+                StageWrite.Create("specs/DuringWrite.md", "written before revocation\n")
+            ))
+            assertEquals("STALE_STAGE_AUTHORITY", outcome.deniedCode)
+            assertFalse(outcome.permitted)
+            // Revocation is not rollback: the changed workspace must be reconciled.
+            assertTrue(Files.exists(fixture.root.resolve("specs/DuringWrite.md")))
+            assertEquals("STALE_STAGE_AUTHORITY", session.verify().deniedCode)
+        }
+    }
+
+    @Test fun revokedDuringCheckNeverReturnsPassedEvidence() {
+        val fixture = fixture("revoke-check")
+        val original = snapshot(StageKind.SDD, fixture)
+        val opened = LinuxStageToolSessionOpener(temp.resolve("locks"))
+            .open(revokeOnRead(original, changedOnRead = 6))
+        (opened as StageToolOpenResult.Granted).session.use { session ->
+            assertTrue(session.write(listOf(
+                StageWrite.Create("specs/BeforeCheck.md", "valid\n")
+            )).permitted)
+            val result = session.runCheck("git_diff_check")
+            assertEquals("STALE_STAGE_AUTHORITY", result.deniedCode)
+            assertFalse(result.passed)
+            val verified = session.verify()
+            assertFalse(verified.successful)
+            assertEquals("STALE_STAGE_AUTHORITY", verified.deniedCode)
+        }
+    }
+
+    @Test fun revokedDuringFinishNeverReturnsSuccessfulValidation() {
+        val fixture = fixture("revoke-finish")
+        val original = snapshot(StageKind.SDD, fixture)
+        val opened = LinuxStageToolSessionOpener(temp.resolve("locks"))
+            .open(revokeOnRead(original, changedOnRead = 8))
+        (opened as StageToolOpenResult.Granted).session.use { session ->
+            assertTrue(session.write(listOf(
+                StageWrite.Create("specs/BeforeFinish.md", "valid\n")
+            )).permitted)
+            assertTrue(session.runCheck("git_diff_check").passed)
+            val verified = session.verify()
+            assertFalse(verified.successful)
+            assertEquals("STALE_STAGE_AUTHORITY", verified.deniedCode)
+            assertEquals("STALE_STAGE_AUTHORITY",
+                verified.requiredChecks.single().deniedCode)
+            // Must latch revocation, not transition to STAGE_TOOL_FINISHED.
+            assertEquals("STALE_STAGE_AUTHORITY", session.verify().deniedCode)
+        }
+    }
+
+    @Test fun unrelatedGraphChangeRevokesLiveStageSession() {
+        val fixture = fixture("revoke-sibling")
+        val baseline = snapshot(StageKind.SDD, fixture)
+        var current = baseline
+        val opened = LinuxStageToolSessionOpener(temp.resolve("locks"))
+            .open(StageToolAuthoritySource { current })
+        (opened as StageToolOpenResult.Granted).session.use { session ->
+            current = baseline.copy(graph = baseline.graph.copy(
+                stages = baseline.graph.stages.map { stage ->
+                    if (stage.kind == StageKind.REVIEW)
+                        stage.copy(state = StageState.CANCELLED) else stage
+                }
+            ))
+            assertEquals("STALE_STAGE_AUTHORITY", session.runCheck("git_diff_check").deniedCode)
+        }
+    }
+
+    @Test fun readyToRunningTransitionRevokesAlreadyOpenedPreflightSession() {
+        val fixture = fixture("revoke-transition")
+        val baseline = snapshot(StageKind.SDD, fixture)
+        var current = baseline
+        val opened = LinuxStageToolSessionOpener(temp.resolve("locks"))
+            .open(StageToolAuthoritySource { current })
+        (opened as StageToolOpenResult.Granted).session.use { session ->
+            current = baseline.copy(graph = baseline.graph.copy(
+                stages = baseline.graph.stages.map { stage ->
+                    if (stage.kind == StageKind.SDD)
+                        stage.copy(state = StageState.RUNNING) else stage
+                }
+            ))
+            assertEquals("STALE_STAGE_AUTHORITY",
+                session.write(listOf(StageWrite.Create("specs/TooLate.md", "no"))).deniedCode)
+            assertFalse(Files.exists(fixture.root.resolve("specs/TooLate.md")))
+        }
+    }
+
+    @Test fun collectionInventoryProtectsFrozenHostSnapshotAgainstNewAliases() {
+        // Every collection nested in the trusted host snapshot must be detached
+        // by StageToolHostSnapshot.frozen(). Fail the test if contract fields evolve.
+        val expected = mapOf(
+            StageToolHostSnapshot::class.java to setOf(
+                "hostAcceptedArtifactIds", "checks", "requiredChecks"),
+            StageGraph::class.java to setOf("stages", "artifacts", "children"),
+            StageNode::class.java to setOf(
+                "dependencies", "inputArtifacts", "outputArtifacts"),
+            ChildGraphReference::class.java to setOf("dependsOnStages"),
+            ReviewedChangeFacts::class.java to setOf("paths", "approvedArtifactPaths"),
+            StageIsolatedCheck::class.java to setOf("arguments")
+        )
+        for ((type, fields) in expected) {
+            val actual = type.declaredFields.filter { field ->
+                Collection::class.java.isAssignableFrom(field.type) ||
+                    Map::class.java.isAssignableFrom(field.type)
+            }.map { it.name }.toSet()
+            assertEquals(fields, actual,
+                "Review StageToolHostSnapshot.frozen() when " + type.simpleName + " changes")
         }
     }
 
