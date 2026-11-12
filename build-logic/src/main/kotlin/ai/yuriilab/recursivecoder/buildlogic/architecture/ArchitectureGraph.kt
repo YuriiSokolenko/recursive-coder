@@ -6,6 +6,7 @@ data class ExternalEdge(val module: String, val configuration: String, val group
 /** Pure, deterministic validation of declared dependencies; never resolves artifacts. */
 object ArchitectureGraph {
     val allowedProjectDependencies: Map<String, Set<String>> = mapOf(
+        ":agent:runtime" to setOf(":core:contracts"),
         ":core:contracts" to emptySet(),
         ":core:session" to setOf(":core:contracts"),
         ":core:tasks" to setOf(":core:contracts"),
@@ -14,7 +15,7 @@ object ArchitectureGraph {
         ":infra:task-store" to setOf(":core:tasks", ":core:contracts"),
         ":infra:journal" to setOf(":core:session", ":core:contracts"),
         ":app:cli" to setOf(
-            ":core:contracts", ":core:session", ":core:tasks",
+            ":agent:runtime", ":core:contracts", ":core:session", ":core:tasks",
             ":infra:model", ":infra:workspace", ":infra:task-store", ":infra:journal",
         ),
     )
