@@ -88,6 +88,12 @@ lease plus the #74 restricted write/check port. Its `developerStageModule`
 factory is absent from normal CLI sessions; it returns a typed implementation
 manifest, checks and changed-file hashes for independent review. See
 [Developer stage](DEVELOPER_STAGE.md).
+The separately opted-in `RunReviewerStageUseCase` has its own `ReviewerStageHost`
+CAS contract and read-only `reviewerStageModule`; it consumes accepted frozen
+artifacts and host-verified Developer checks, records structured verdicts, and
+uses the pure `ReviewerRepairPlanner` to propose new bounded Developer/Reviewer
+attempts. The module never grants write-tool access. See
+[Independent Reviewer and bounded repair](REVIEWER_STAGE.md).
 See [Stage tool authority](STAGE_TOOL_AUTHORITY.md) for admission,
 lifetime, immutable artifacts, sandboxing and E2E guarantees.
 
