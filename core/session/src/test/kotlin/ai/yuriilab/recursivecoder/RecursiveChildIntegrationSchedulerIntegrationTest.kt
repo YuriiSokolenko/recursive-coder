@@ -125,12 +125,12 @@ class RecursiveChildIntegrationSchedulerIntegrationTest {
 
     @Test fun explicitIntegrationIsRequiredAndRecheckedAtCommit() = runBlocking {
         val host = FakeTrustedHost()
-        val scheduler = scheduler(StageKind.SDD, host, mutableListOf())
-        val without = scheduler.execute(scheduler.rootGraphId, RecursiveStageExecutor { root ->
+        val firstScheduler = scheduler(StageKind.SDD, host, mutableListOf())
+        val without = firstScheduler.execute(firstScheduler.rootGraphId, RecursiveStageExecutor { root ->
             val node = assertIs<RecursiveDecision.Allowed>(
                 root.requestChild(proposal(root, "request-child", "child-task",
                     setOf("specs/Parent.md")))).child
-            assertEquals(RecursiveExecutionOutcome.Completed, scheduler.execute(node.graphId,
+            assertEquals(RecursiveExecutionOutcome.Completed, firstScheduler.execute(node.graphId,
                 RecursiveStageExecutor {
                     host.accept(node, "specs/Parent.md")
                     RecursiveExecutionOutcome.Completed
