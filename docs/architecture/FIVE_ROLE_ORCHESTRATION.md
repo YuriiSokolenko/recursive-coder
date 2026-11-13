@@ -79,6 +79,53 @@ on Reviewer rejection or NEEDS_HUMAN. It does not yet drive the separately
 documented bounded `ReviewerRepairPlanner` retry loop; repair requires a
 distinct host-verified operation and is not an implicit continuation.
 
+## Linux Git baseline reconciliation — issue #79 next slice
+
+The host-only `LinuxStageGitBaselineReconciler` in `:infra:workspace`
+implements **physical clean-Git handoff**, not an authenticated workflow host.
+It is opt-in and not selected by the installed CLI or Koin composition.
+
+After a trusted stage CAS has independently accepted a proposal, the future
+production host must revalidate its HMAC-backed write/check receipts, manifest
+identity and approved output digest *before* invoking this reconciler. The
+reconciler itself does not establish receipt authenticity, Reviewer approval,
+or an authoritative accepted-ID set.
+
+`StageGitReconciliationRequest` pins the old 40-hex Git HEAD, named branch,
+role, every changed path and its expected SHA-256, plus unchanged frozen
+artifact paths and digests. The reconciler rejects any other Git status,
+modified index entry, symlinked path, unexpected ignored/untracked file,
+role-forbidden path or changed frozen byte. It uses descriptor-relative,
+no-follow file reads and the same external workspace lock file as
+`TrustedWriteRuntime`.
+
+Under that lock it builds a private temporary index, hashes accepted bytes
+without filters, creates a Git tree/commit using plumbing (no shell, Git
+hooks or model-supplied commands), and performs an old-SHA `update-ref` CAS.
+The real index is aligned with the new commit without replacing worktree
+bytes. It reads back the new HEAD, clean Git status and frozen/accepted
+digests before reporting `Committed`.
+
+Before `update-ref` is attempted, validation failure is `Denied`. Once a
+ref update is attempted, any error becomes `ReconciliationRequired` because
+the branch or index may already have changed. **Never retry blindly**; reload
+the host graph, workspace status and HEAD and reconcile under a new exclusive
+fence. Git object writes may leave unreachable objects on denial, which are
+not accepted graph state.
+
+The lock prevents concurrent *trusted* writes using the same lock directory.
+It does not prevent arbitrary external processes from modifying the workspace;
+a production host must control that access and quarantine uncertain state.
+The stage host must atomically persist the new HEAD and next-stage policy
+before allowing a new trusted write session. This integration, authenticated
+receipt storage, the Reviewer commit gate and the writable CLI are **not yet
+implemented**.
+
+`LinuxStageGitBaselineReconcilerTest` tests the Git operations on Linux in
+the integration tier, including successful successive role baselines and
+adversarial status/digest/locking cases. These tests are not a substitute for
+an installed five-role CLI E2E or Linux receipt-provenance validation.
+
 ## Compatibility
 
 The existing `recursive-coder run` command remains read-only and unchanged.
