@@ -139,6 +139,17 @@ the host graph, workspace status and HEAD and reconcile under a new exclusive
 fence. Git object writes may leave unreachable objects on denial, which are
 not accepted graph state.
 
+The Linux integration test suite now exercises two genuine Git-ref mutation
+boundaries through an **internal test-only observer**, which is not exposed
+to serialized requests, the agent, or the installed CLI. After a real
+successful `update-ref`, a deterministic injected failure proves the result
+is `ReconciliationRequired` with the moved HEAD and still-dirty index.
+A separate test lets an external Git process advance the branch after
+preflight but before this reconciler's `update-ref`; the stale-value CAS
+cannot overwrite the competing HEAD and still returns conservative
+`ReconciliationRequired` because an update was attempted. These tests do
+not establish crash recovery or verified cleanup of an uncertain workspace.
+
 The lock prevents concurrent *trusted* writes using the same lock directory.
 It does not prevent arbitrary external processes from modifying the workspace;
 a production host must control that access and quarantine uncertain state.
