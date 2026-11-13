@@ -342,6 +342,43 @@ class RecursiveChildIntegrationSchedulerIntegrationTest {
         assertEquals(RecursiveExecutionOutcome.Completed, outcome)
     }
 
+    @Test fun changedAcceptedResultsResetDenialDeduplication() = runBlocking {
+        val host = FakeTrustedHost()
+        val events = mutableListOf<RecursiveEvent>()
+        val graphScheduler = scheduler(StageKind.SDD, host, events)
+        val outcome = graphScheduler.execute(graphScheduler.rootGraphId,
+            RecursiveStageExecutor { root ->
+                val child = assertIs<RecursiveDecision.Allowed>(root.requestChild(
+                    proposal(root, "request-child", "child-task",
+                        setOf("specs/Parent.md")))).child
+                assertEquals(RecursiveExecutionOutcome.Completed, graphScheduler.execute(
+                    child.graphId, RecursiveStageExecutor {
+                        host.accept(child, "specs/Parent.md")
+                        RecursiveExecutionOutcome.Completed
+                    }))
+                val approvedId = host.byChild.getValue(child.graphId).single().id
+                host.approved.remove(approvedId)
+                repeat(2) {
+                    assertEquals("CHILD_ARTIFACT_UNACCEPTED",
+                        assertIs<ChildIntegrationDecision.Denied>(root.integrateChildren()).code)
+                }
+                host.approved.add(approvedId)
+                assertIs<ChildIntegrationDecision.Accepted>(root.integrateChildren())
+                // This is a new failure after a successful integration, not a
+                // duplicate of the previous denial generation.
+                host.approved.remove(approvedId)
+                assertEquals("CHILD_ARTIFACT_UNACCEPTED",
+                    assertIs<ChildIntegrationDecision.Denied>(root.integrateChildren()).code)
+                host.approved.add(approvedId)
+                assertIs<ChildIntegrationDecision.Accepted>(root.integrateChildren())
+                RecursiveExecutionOutcome.Completed
+            })
+        assertEquals(RecursiveExecutionOutcome.Completed, outcome)
+        assertEquals(2, events.count {
+            it.kind == RecursiveEventKind.DENIED && it.code == "CHILD_ARTIFACT_UNACCEPTED"
+        })
+    }
+
     @Test fun swallowedEventWriteFailureIsVisibleToHost() = runBlocking {
         val scheduler = scheduler(StageKind.REVIEW, FakeTrustedHost(), mutableListOf(),
             RecursiveEventSink { error("Event sink unavailable") })
