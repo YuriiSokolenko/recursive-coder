@@ -67,7 +67,7 @@ class LinuxStageGitBaselineReconciler(
     private val sha256 = Regex("[0-9a-f]{64}")
     private val gitObjectId = Regex("[0-9a-f]{40}")
     private val gitRef = Regex("[A-Za-z0-9][A-Za-z0-9._/-]{0,127}")
-    private val safeRemoteOrBranchKey = Regex("(remote|branch)\\\\.[A-Za-z0-9_.-]+\\\\.(url|fetch|remote|merge)")
+    private val safeRemoteOrBranchKey = Regex("""(remote|branch)\.[A-Za-z0-9_.-]+\.(url|fetch|remote|merge)""")
 
     private fun digest(bytes: ByteArray): String =
         MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") {
