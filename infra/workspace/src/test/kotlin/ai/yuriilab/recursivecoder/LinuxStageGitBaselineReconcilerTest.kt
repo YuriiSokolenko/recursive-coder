@@ -295,6 +295,52 @@ class LinuxStageGitBaselineReconcilerTest {
         assertEquals(first.newHead, git(repo.root, "rev-parse", "HEAD"))
     }
 
+    @Test fun gitOwnerExecuteSemanticsRejectUnusualTrackedModesBeforeCas() {
+        val repo = createRepo()
+        val executable = "src/main/Executable.kt"
+        write(repo.root, executable, "fun runnable() = 1\n")
+        Files.setPosixFilePermissions(repo.root.resolve(executable),
+            PosixFilePermissions.fromString("rwxr-xr-x"))
+        git(repo.root, "add", executable)
+        git(repo.root, "commit", "-m", "track executable")
+        val executableHead = git(repo.root, "rev-parse", "HEAD")
+        assertEquals("100755",
+            git(repo.root, "ls-tree", "HEAD", "--", executable).substringBefore(' '))
+
+        // chmod 655 removes OWNER_EXECUTE but keeps GROUP/OTHERS_EXECUTE.
+        // Git sees 100644; the old any-execute-bit derivation incorrectly
+        // treated it as 100755 and failed only after advancing the branch.
+        val changedExecutable = write(repo.root, executable, "fun runnable() = 2\n")
+        Files.setPosixFilePermissions(repo.root.resolve(executable),
+            PosixFilePermissions.fromString("rw-r-xr-x"))
+        val changedMode = assertIs<StageGitReconciliationResult.Denied>(
+            reconcile(repo, executableHead, EngineeringRole.DEVELOPER,
+                mapOf(executable to changedExecutable)))
+        assertEquals("UNSAFE_STAGE_FILE_MODE", changedMode.code)
+        assertEquals(executableHead, git(repo.root, "rev-parse", "HEAD"))
+
+        // Restore tracked fixture contents before creating the second baseline.
+        git(repo.root, "restore", "--source=HEAD", "--worktree", "--", executable)
+        val regular = "src/main/Regular.kt"
+        write(repo.root, regular, "fun ordinary() = 1\n")
+        git(repo.root, "add", regular)
+        git(repo.root, "commit", "-m", "track regular")
+        val regularHead = git(repo.root, "rev-parse", "HEAD")
+        assertEquals("100644",
+            git(repo.root, "ls-tree", "HEAD", "--", regular).substringBefore(' '))
+
+        // chmod 654 grants GROUP_EXECUTE but not OWNER_EXECUTE. Git mode
+        // is still 100644; reject the inconsistent candidate permissions.
+        val changedRegular = write(repo.root, regular, "fun ordinary() = 2\n")
+        Files.setPosixFilePermissions(repo.root.resolve(regular),
+            PosixFilePermissions.fromString("rw-r-xr--"))
+        val groupOnlyExec = assertIs<StageGitReconciliationResult.Denied>(
+            reconcile(repo, regularHead, EngineeringRole.DEVELOPER,
+                mapOf(regular to changedRegular)))
+        assertEquals("UNSAFE_STAGE_FILE_MODE", groupOnlyExec.code)
+        assertEquals(regularHead, git(repo.root, "rev-parse", "HEAD"))
+    }
+
     @Test fun trackedEditSucceedsAndLeavesCleanWorktree() {
         val repo = createRepo()
         val path = "src/main/Feature.kt"
