@@ -3,7 +3,10 @@
 **Status: partial implementation.** `RunFiveRoleWorkflowUseCase` provides a
 bounded, in-process coordinator for `SDD → ATDD → TDD → Developer → Reviewer`.
 An in-memory fake-host integration test executes all five existing role use
-cases. This is **not** an installed writable CLI or a completed issue #79.
+cases. Additional pure scripted coordinator tests check fail-closed responses.
+**Neither fake host authenticates actual write/check receipts or fences Git
+mutations.** These tests do not prove the eventual production host's guarantees.
+This is **not** an installed writable CLI or a completed issue #79.
 
 ## Execution and authority
 
@@ -26,7 +29,11 @@ At each stage boundary the coordinator:
 3. Accepts only the concrete use case's committed ACCEPTED result; a denial,
    failure, human-approval requirement or uncertain CAS stops execution.
 4. Re-reads the authoritative snapshot to confirm the committed stage result.
-5. Calls `FiveRoleWorkflowHost.advance` before admitting the next role.
+   On any early stop, a reported graph is also re-read; `Stopped.authoritative`
+   is only populated after matching live host state. Unknown stop state requires
+   `ReconciliationRequired` and must never be used for resume.
+5. Calls `FiveRoleWorkflowHost.advance` before admitting the next role and
+   verifies the returned stage graph against a second live host read.
 
 `advance` is a **trusted host CAS boundary**, not a request to automatically
 commit any dirty workspace. A production implementation must verify the
@@ -45,7 +52,17 @@ the Developer role and is rechecked at `finishSuccess`.
 `finishSuccess` must atomically validate all accepted frozen bytes, the
 independent Reviewer acceptance attestation and legal
 `RUNNING → SUCCEEDED` transition. The coordinator checks the returned graph
-shape but cannot make a host's unverified claims authoritative.
+shape and reads it back from the host but cannot make a host's unverified
+claims authoritative. Every configured Developer target is separately validated
+against Developer write scope before starting any stage; this early check is not
+a replacement for the trusted runtime's physical path/receipt enforcement.
+
+The plan has **one overall deadline and cancellation token for all five
+stages**, not a fresh allowance per stage. A slow early stage reduces the
+remaining time available to later stages. The coordinator currently **stops**
+on Reviewer rejection or NEEDS_HUMAN. It does not yet drive the separately
+documented bounded `ReviewerRepairPlanner` retry loop; repair requires a
+distinct host-verified operation and is not an implicit continuation.
 
 ## Compatibility
 
