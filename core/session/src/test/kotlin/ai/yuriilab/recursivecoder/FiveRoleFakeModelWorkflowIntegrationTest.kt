@@ -325,4 +325,101 @@ class FiveRoleFakeModelWorkflowIntegrationTest {
             host.graph, StageGraphState.SUCCEEDED, host.accepted,
             setOf(ids.getValue(StageKind.REVIEW))))
     }
+
+    @Test fun coordinatorRunsFiveRolesAcrossExplicitHostBarriers() = runBlocking {
+        for (tamperAcceptedSpecification in listOf(false, true)) {
+        val preparationHost = FakePreparationHost()
+        val roles = FakeFiveRoleModel(sourcePath, newSource, proposed)
+        val tools = FakeToolPort(preparationHost)
+        var reviewAdapter: FakeReviewHost? = null
+        val reviewHost = object : ReviewerStageHost {
+            override fun beginStage(graph: StageGraph, stageRunId: StageRunId,
+                accepted: Set<ArtifactId>) =
+                requireNotNull(reviewAdapter).beginStage(graph, stageRunId, accepted)
+            override fun current(lease: ReviewerStageLease) =
+                requireNotNull(reviewAdapter).current(lease)
+            override fun readBytes(path: String) = preparationHost.readBytes(path)
+            override fun verifyDeveloperEvidence(lease: ReviewerStageLease) =
+                requireNotNull(reviewAdapter).verifyDeveloperEvidence(lease)
+            override fun finishStage(lease: ReviewerStageLease, graph: StageGraph,
+                accepted: Set<ArtifactId>, decision: ReviewerDecisionRecord) =
+                requireNotNull(reviewAdapter).finishStage(lease, graph, accepted, decision)
+            override fun abortStage(lease: ReviewerStageLease, terminal: StageState) =
+                requireNotNull(reviewAdapter).abortStage(lease, terminal)
+        }
+        val coordinatorHost = object : FiveRoleWorkflowHost {
+            override fun snapshot() =
+                PreparationStageSnapshot(preparationHost.graph, preparationHost.accepted)
+
+            override fun advance(expected: PreparationStageSnapshot, next: StageKind,
+                developerHandoff: DeveloperReviewEvidence?): PreparationStageSnapshot? {
+                if (snapshot() != expected || next == StageKind.SDD) return null
+                if (tamperAcceptedSpecification && next == StageKind.ATDD) {
+                    // A malicious/accidental write after SDD acceptance must
+                    // stop the workflow before the next stage is admitted.
+                    preparationHost.files[outputPaths.getValue(StageKind.SDD)] =
+                        bytes("tampered after acceptance\n")
+                }
+                if (expected.graph.artifacts.any { manifest ->
+                    manifest.id !in expected.acceptedIds ||
+                    preparationHost.readBytes(manifest.declaredPath)?.let {
+                        sha(String(it)) == manifest.sha256
+                    } != true
+                }) return null
+                if (next == StageKind.REVIEW) {
+                    val handoff = developerHandoff ?: return null
+                    if (handoff.manifest.kind != StageArtifactKind.IMPLEMENTATION ||
+                        handoff.manifest.id !in expected.acceptedIds ||
+                        !handoff.validation.successful) return null
+                    reviewAdapter = FakeReviewHost(preparationHost,
+                        ReviewerDeveloperHandoff(handoff, expected.graph.stages.map {
+                            ReviewerHistoryEntry(it.correlation, it.kind.role, it.state)
+                        }))
+                } else if (developerHandoff != null) return null
+                preparationHost.append(next)
+                return snapshot()
+            }
+
+            override fun finishSuccess(expected: PreparationStageSnapshot,
+                reviewerId: StageRunId): StageGraph? {
+                if (snapshot() != expected || reviewAdapter == null) return null
+                if (StageGraphPolicy.authorizeGraphTransition(expected.graph,
+                    StageGraphState.SUCCEEDED, expected.acceptedIds,
+                    setOf(reviewerId)) != StageGateDecision.Permit) return null
+                val finished = expected.graph.copy(state = StageGraphState.SUCCEEDED)
+                preparationHost.graph = finished
+                return finished
+            }
+        }
+        val plan = FiveRoleWorkflowPlan(
+            StageKind.entries.filter { it != StageKind.REVIEW }.associateWith {
+                FiveRoleArtifactTarget(artifactIds.getValue(it), outputPaths.getValue(it))
+            },
+            StageKind.entries.associateWith { "Run " + it.name },
+            listOf(DeveloperFileTarget(sourcePath, sha(oldSource))),
+            model, Instant.now().plusSeconds(60), Cancellation()
+        )
+        val runner = RunFiveRoleWorkflowUseCase(
+            RunPreparationStageUseCase(roles, tools, preparationHost),
+            RunDeveloperStageUseCase(roles, tools, preparationHost),
+            RunReviewerStageUseCase(roles, reviewHost),
+            coordinatorHost
+        )
+        val result = runner.execute(plan, StageRoleEventSink { },
+            PreparationStageEventSink { }, ReviewerDecisionSink { })
+        if (tamperAcceptedSpecification) {
+            val denied = assertIs<FiveRoleWorkflowOutcome.ReconciliationRequired>(result)
+            assertEquals("STAGE_RECONCILIATION_DENIED", denied.code)
+            assertEquals(StageKind.SDD, denied.stage)
+            assertEquals(listOf(StageKind.SDD), roles.called)
+        } else {
+            val completed = assertIs<FiveRoleWorkflowOutcome.Completed>(result,
+                "workflow=$result; called=${roles.called}")
+            assertEquals(StageGraphState.SUCCEEDED, completed.graph.state)
+            assertEquals(StageKind.entries.toList(), roles.called)
+            assertEquals(4, preparationHost.accepted.size)
+            assertEquals(newSource, String(preparationHost.files.getValue(sourcePath)))
+        }
+        }
+    }
 }

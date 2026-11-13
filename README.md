@@ -2,7 +2,7 @@
 
 **Recursive Coder** is an in-development, standalone open-source software engineering agent built with **Kotlin/JVM**. **JetBrains Koog** is integrated as an opt-in, fake-model-only single-role adapter; recursive production orchestration remains planned.
 
-> **Implementation snapshot (2026-11-12, PR #82 / issue #74):** The CLI has native task scheduling, a read-only session engine, FakeModel, an optional strict OpenAI-compatible Model Gateway and a trusted workspace. A Linux-only trusted write/check runtime has an **opt-in host-controlled stage port (#74)**, but remains disabled for CLI sessions and Koog. A minimal isolated Koog stage runner is implemented in `:agent:runtime` but is **not selected by CLI sessions**. Five-role orchestration, recursive coding, checkpoints and crash-resume are **not implemented**.
+> **Implementation snapshot (2026-11-13, PR #90 / issue #79):** The CLI has native task scheduling, a read-only session engine, FakeModel, an optional strict OpenAI-compatible Model Gateway and a trusted workspace. A Linux-only trusted write/check runtime has an **opt-in host-controlled stage port (#74)**, but remains disabled for CLI sessions and Koog. A minimal isolated Koog stage runner is implemented in `:agent:runtime` but is **not selected by CLI sessions**. An **in-process, five-role workflow coordinator** and bounded recursive child-result integration are implemented separately; they are **not wired into the installed CLI**. Production stage-to-stage Git reconciliation, recursive five-role execution, checkpoints and crash-resume remain unimplemented.
 
 ## What we are building
 
@@ -51,6 +51,7 @@ With Gradle 9.8.1 and JDK 21 installed:
 - [Architecture and engineering roadmap](docs/architecture/ARCHITECTURE.md)
 - [Stage graph contracts and policy gates (#72)](docs/architecture/STAGE_GRAPH.md)
 - [Verified recursive child artifact integration (#79, partial)](docs/architecture/CHILD_INTEGRATION.md)
+- [Host-owned five-role orchestration (#79, in progress)](docs/architecture/FIVE_ROLE_ORCHESTRATION.md)
 - [Koog single-role execution boundary (#73)](docs/architecture/KOOG_STAGE_EXECUTION.md)
 - [Host-controlled stage tool authority and isolated checks (#74)](docs/architecture/STAGE_TOOL_AUTHORITY.md)
 - [Host-approved SDD, ATDD and TDD preparation stages (#75)](docs/architecture/PREPARATION_STAGES.md)
