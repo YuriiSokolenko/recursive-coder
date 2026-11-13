@@ -217,29 +217,37 @@ class LinuxStageGitBaselineReconcilerTest {
         assertEquals("", git(repo.root, "status", "--porcelain"))
     }
 
-    @Test fun acceptedCandidateStillRejectsNoncanonicalReadWritePermissions() {
+    @Test fun acceptedCandidateUsesGitModeAcrossDifferentUmasks() {
         val repo = createRepo()
         val path = "specs/Feature.md"
         val hash = write(repo.root, path, "requirements\n")
+        // CREATE_NEW under umask 002 can produce 0664: Git still records 100644.
         Files.setPosixFilePermissions(repo.root.resolve(path),
             PosixFilePermissions.fromString("rw-rw-r--"))
-        val rejected = assertIs<StageGitReconciliationResult.Denied>(
-            reconcile(repo, repo.head, EngineeringRole.SDD, mapOf(path to hash)))
-        assertEquals("UNSAFE_STAGE_FILE_MODE", rejected.code)
-        assertEquals(repo.head, git(repo.root, "rev-parse", "HEAD"))
-
-        Files.setPosixFilePermissions(repo.root.resolve(path),
-            PosixFilePermissions.fromString("rw-r--r--"))
         val committed = assertIs<StageGitReconciliationResult.Committed>(
             reconcile(repo, repo.head, EngineeringRole.SDD, mapOf(path to hash)))
+        assertEquals("", git(repo.root, "status", "--porcelain"))
+
+        // A later edit under umask 077 may have 0600, also Git mode 100644.
         val updated = write(repo.root, path, "updated requirements\n")
         Files.setPosixFilePermissions(repo.root.resolve(path),
             PosixFilePermissions.fromString("rw-------"))
-        val refusedEdit = assertIs<StageGitReconciliationResult.Denied>(
+        val edited = assertIs<StageGitReconciliationResult.Committed>(
             reconcile(repo, committed.newHead, EngineeringRole.SDD,
                 mapOf(path to updated)))
-        assertEquals("UNSAFE_STAGE_FILE_MODE", refusedEdit.code)
-        assertEquals(committed.newHead, git(repo.root, "rev-parse", "HEAD"))
+        assertEquals("100644",
+            git(repo.root, "ls-tree", "HEAD", "--", path).substringBefore(' '))
+        assertEquals("", git(repo.root, "status", "--porcelain"))
+
+        // World-writable accepted files remain forbidden even without execute bit.
+        val riskyHash = write(repo.root, path, "unsafe permissions\n")
+        Files.setPosixFilePermissions(repo.root.resolve(path),
+            PosixFilePermissions.fromString("rw-rw-rw-"))
+        val denied = assertIs<StageGitReconciliationResult.Denied>(
+            reconcile(repo, edited.newHead, EngineeringRole.SDD,
+                mapOf(path to riskyHash)))
+        assertEquals("UNSAFE_STAGE_FILE_MODE", denied.code)
+        assertEquals(edited.newHead, git(repo.root, "rev-parse", "HEAD"))
     }
 
     @Test fun executableGitHooksAreDisabledEvenWithoutLocalHookConfig() {
