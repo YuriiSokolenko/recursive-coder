@@ -24,9 +24,15 @@ sealed interface FiveRoleWorkflowOutcome {
     /** Only verified host snapshots can be offered as resumable state. */
     data class Stopped(val code: String, val stage: StageKind,
                        val authoritative: PreparationStageSnapshot?) : FiveRoleWorkflowOutcome
-    /** A lease/commit may have succeeded; never treat an uncertain CAS as a retryable denial. */
-    data class ReconciliationRequired(val code: String, val stage: StageKind) :
-        FiveRoleWorkflowOutcome
+    /**
+     * An uncertain CAS is never retryable. workspaceMayBeDirty is a conservative
+     * signal forwarded from the Developer's trusted execution path: false is NOT
+     * proof that physical workspace bytes are unchanged.
+     */
+    data class ReconciliationRequired(
+        val code: String, val stage: StageKind,
+        val workspaceMayBeDirty: Boolean = false
+    ) : FiveRoleWorkflowOutcome
 }
 
 /**
@@ -129,8 +135,8 @@ class RunFiveRoleWorkflowUseCase(
         preparationEvents: PreparationStageEventSink,
         reviewerEvents: ReviewerDecisionSink
     ): FiveRoleWorkflowOutcome {
-        fun uncertain(kind: StageKind, code: String) =
-            FiveRoleWorkflowOutcome.ReconciliationRequired(code, kind)
+        fun uncertain(kind: StageKind, code: String, workspaceMayBeDirty: Boolean = false) =
+            FiveRoleWorkflowOutcome.ReconciliationRequired(code, kind, workspaceMayBeDirty)
         fun stop(kind: StageKind, code: String, state: PreparationStageSnapshot?):
             FiveRoleWorkflowOutcome {
             if (state == null) return FiveRoleWorkflowOutcome.Stopped(code, kind, null)
@@ -255,15 +261,21 @@ class RunFiveRoleWorkflowUseCase(
                             PreparationStageSnapshot(graph, ids)
                         }
                         is DeveloperStageOutcome.ReconciliationRequired ->
-                            return uncertain(kind, outcome.code)
+                            return uncertain(kind, outcome.code, outcome.workspaceMayBeDirty)
                         is DeveloperStageOutcome.Denied ->
                             return stop(kind, outcome.code, current)
-                        is DeveloperStageOutcome.Failed ->
+                        is DeveloperStageOutcome.Failed -> {
+                            // An attempted write can have mutated physical bytes even when
+                            // the host has a valid graph snapshot. Do not expose resumable
+                            // Stopped state until the workspace is reconciled.
+                            if (outcome.workspaceMayBeDirty)
+                                return uncertain(kind, outcome.code, true)
                             return stop(kind, outcome.code, done.graph?.let { graph ->
                                 done.hostAcceptedArtifactIds?.let { ids ->
                                     PreparationStageSnapshot(graph, ids)
                                 }
                             })
+                        }
                     }
                 }
                 StageKind.REVIEW -> {
