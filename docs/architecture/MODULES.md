@@ -9,7 +9,7 @@
 | `:core:session` | `RunSessionUseCase` + `DefaultRunSessionUseCase`, compatibility Session Controller, in-memory `RecursiveGraphScheduler` for stage-owned subtree execution, host-owned `RunFiveRoleWorkflowUseCase` and its stage/host execution ports, deadline/budget enforcement, admission policy and event journal | `:core:contracts` |
 | `:core:tasks` | Task command/query and scheduler-attempt Use Case interfaces and implementations, TaskService façade, policy, repository port and scheduler | `:core:contracts` |
 | `:infra:model` | Offline FakeModel and optional OpenAI-compatible HTTP adapter | `:core:contracts` |
-| `:infra:workspace` | Workspace Manager, restricted Git, trusted write/check runtime and LinuxStageToolSessionOpener | `:core:contracts` |
+| `:infra:workspace` | Workspace Manager, restricted Git, trusted write/check runtime, LinuxStageToolSessionOpener and host-only LinuxStageGitBaselineReconciler (not a production receipt authority) | `:core:contracts` |
 | `:infra:task-store` | Durable tasks.json snapshot, file locks and atomic replacement | `:core:tasks`, `:core:contracts` |
 | `:infra:journal` | JSONL append/flush/close and physical event-log SHA-256 | `:core:session`, `:core:contracts` |
 | `:app:cli` | Clikt command entry point and Koin 4.2.2 interface-to-implementation bindings/composition | all eight libraries |
