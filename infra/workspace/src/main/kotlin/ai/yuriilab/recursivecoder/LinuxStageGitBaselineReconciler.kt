@@ -13,6 +13,9 @@ import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.BasicFileAttributeView
 import java.nio.file.attribute.BasicFileAttributes
 import java.security.MessageDigest
+import java.nio.file.attribute.PosixFileAttributeView
+import java.nio.file.attribute.PosixFilePermission
+import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
@@ -60,10 +63,11 @@ class LinuxStageGitBaselineReconciler(
     private val gitExecutable: Path = findGit()
 ) {
     private class Reject(val code: String) : RuntimeException()
+    private data class OpenedFile(val bytes: ByteArray, val gitMode: String)
     private val sha256 = Regex("[0-9a-f]{64}")
     private val gitObjectId = Regex("[0-9a-f]{40}")
     private val gitRef = Regex("[A-Za-z0-9][A-Za-z0-9._/-]{0,127}")
-    private val forbiddenConfig = Regex("diff\\..*\\.(command|textconv)")
+    private val safeRemoteOrBranchKey = Regex("(remote|branch)\\\\.[A-Za-z0-9_.-]+\\\\.(url|fetch|remote|merge)")
 
     private fun digest(bytes: ByteArray): String =
         MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") {
@@ -89,7 +93,7 @@ class LinuxStageGitBaselineReconciler(
      * isRegularFile/readAllBytes would be vulnerable to a symlink swap between
      * the check and read, even under the trusted-writer coordination lock.
      */
-    private fun read(root: Path, path: String): ByteArray {
+    private fun read(root: Path, path: String): OpenedFile {
         check(ToolAuthorizationPolicy.validDeclaredPath(path), "INVALID_STAGE_PATH")
         val key = Files.readAttributes(root, BasicFileAttributes::class.java,
             LinkOption.NOFOLLOW_LINKS).fileKey()
@@ -125,6 +129,20 @@ class LinuxStageGitBaselineReconciler(
                 }
                 check(attributes.isRegularFile && attributes.size() <= 4 * 1024 * 1024L,
                     "UNSAFE_STAGE_FILE")
+                val perms = try {
+                    cursor.getFileAttributeView(name, PosixFileAttributeView::class.java,
+                        LinkOption.NOFOLLOW_LINKS).readAttributes().permissions()
+                } catch (_: Exception) { throw Reject("UNSAFE_STAGE_FILE_MODE") }
+                val regular = setOf(PosixFilePermission.OWNER_READ,
+                    PosixFilePermission.OWNER_WRITE, PosixFilePermission.GROUP_READ,
+                    PosixFilePermission.OTHERS_READ)
+                val executable = regular + setOf(PosixFilePermission.OWNER_EXECUTE,
+                    PosixFilePermission.GROUP_EXECUTE, PosixFilePermission.OTHERS_EXECUTE)
+                val mode = when (perms) {
+                    regular -> "100644"
+                    executable -> "100755"
+                    else -> throw Reject("UNSAFE_STAGE_FILE_MODE")
+                }
                 return try {
                     cursor.newByteChannel(name, setOf<OpenOption>(StandardOpenOption.READ,
                         LinkOption.NOFOLLOW_LINKS)).use { channel ->
@@ -140,7 +158,7 @@ class LinuxStageGitBaselineReconciler(
                             check(result.size() <= 4 * 1024 * 1024,
                                 "STAGE_FILE_TOO_LARGE")
                         }
-                        result.toByteArray()
+                        OpenedFile(result.toByteArray(), mode)
                     }
                 } catch (e: Reject) {
                     throw e
@@ -158,7 +176,8 @@ class LinuxStageGitBaselineReconciler(
         input: ByteArray? = null, index: Path? = null): String {
         val process = ProcessBuilder(listOf(gitExecutable.toString(),
             "--no-optional-locks", "-C", root.toString(),
-            "-c", "core.fsmonitor=false", "-c", "diff.external=") + args)
+            "-c", "core.fsmonitor=false", "-c", "diff.external=",
+            "-c", "core.hooksPath=/dev/null", "-c", "core.filemode=true") + args)
             .directory(root.toFile()).redirectError(ProcessBuilder.Redirect.DISCARD)
             .apply {
                 environment().clear()
@@ -201,6 +220,10 @@ class LinuxStageGitBaselineReconciler(
                 java.nio.ByteBuffer.wrap(output)).toString().trimEnd('\n')
         } catch (e: Reject) {
             throw e
+        } catch (e: ExecutionException) {
+            val cause = e.cause
+            if (cause is Reject) throw cause
+            throw Reject("GIT_COMMAND_UNAVAILABLE")
         } catch (_: Exception) {
             throw Reject("GIT_COMMAND_UNAVAILABLE")
         } finally {
@@ -228,24 +251,24 @@ class LinuxStageGitBaselineReconciler(
     }
 
     private fun verifyFacts(root: Path, request: StageGitReconciliationRequest,
-        expectedStatuses: Map<String, String>): Map<String, ByteArray> {
+        expectedStatuses: Map<String, String>): Map<String, OpenedFile> {
         check(git(root, listOf("rev-parse", "HEAD")) == request.expectedHead,
             "STAGE_BASELINE_CHANGED")
         check(git(root, listOf("symbolic-ref", "-q", "HEAD")) ==
             "refs/heads/" + request.branch, "STAGE_BRANCH_CHANGED")
         check(status(root) == expectedStatuses, "STAGE_WORKSPACE_CHANGED")
         for ((path, hash) in request.frozenArtifacts) {
-            check(digest(read(root, path)) == hash, "FROZEN_ARTIFACT_CHANGED")
+            check(digest(read(root, path).bytes) == hash, "FROZEN_ARTIFACT_CHANGED")
         }
         return request.acceptedFiles.associate { change ->
             val bytes = read(root, change.path)
-            check(digest(bytes) == change.sha256, "STAGE_ARTIFACT_CHANGED")
+            check(digest(bytes.bytes) == change.sha256, "STAGE_ARTIFACT_CHANGED")
             change.path to bytes
         }
     }
 
     private fun preflight(root: Path, request: StageGitReconciliationRequest):
-        Pair<Map<String, String>, Map<String, ByteArray>> {
+        Pair<Map<String, String>, Map<String, OpenedFile>> {
         check(gitObjectId.matches(request.expectedHead) &&
             gitRef.matches(request.branch) && !request.branch.contains("..") &&
             !request.branch.contains("//") && !request.branch.endsWith("/") &&
@@ -268,13 +291,23 @@ class LinuxStageGitBaselineReconciler(
         check(git(root, listOf("rev-parse", "--show-toplevel")) == root.toString() &&
             Path.of(git(root, listOf("rev-parse", "--absolute-git-dir"))).toRealPath() ==
             root.resolve(".git").toRealPath(), "UNSUPPORTED_WORKSPACE")
+        // Explicit allowlist: repository-local configuration must not alter
+        // filters, hooks, index, worktree, ref or attributes semantics.
         val config = git(root, listOf("config", "--local", "--list"))
-        check(config.lineSequence().map { it.substringBefore('=').lowercase() }.none {
-            it.startsWith("filter.") || it.startsWith("include.") ||
-                it.startsWith("includeif.") || it.startsWith("core.fsmonitor") ||
-                it.startsWith("core.hookspath") || it == "diff.external" ||
-                forbiddenConfig.matches(it)
-        }, "UNSAFE_GIT_CONFIGURATION")
+        val safeConfig = config.lineSequence().filter { it.isNotBlank() }.all { entry ->
+            val key = entry.substringBefore('=').lowercase()
+            val value = entry.substringAfter('=', missingDelimiterValue = "")
+            when (key) {
+                "core.repositoryformatversion" -> value == "0"
+                "core.bare" -> value == "false"
+                "core.filemode", "core.symlinks", "core.logallrefupdates" -> value == "true"
+                "core.ignorecase", "core.precomposeunicode" -> value == "false"
+                "user.name", "user.email" -> value.isNotBlank()
+                else -> safeRemoteOrBranchKey.matches(key)
+            }
+        }
+        check(safeConfig && config.lines().any { it == "core.filemode=true" },
+            "UNSAFE_GIT_CONFIGURATION")
         val flags = git(root, listOf("ls-files", "-v", "-z"))
         check(flags.split('\u0000').filter(String::isNotEmpty).all {
             it.startsWith("H ")
@@ -285,15 +318,27 @@ class LinuxStageGitBaselineReconciler(
         }, "UNSAFE_GIT_INDEX")
         val changed = status(root)
         check(changed.keys == names.toSet(), "UNEXPECTED_GIT_CHANGE")
-        // Recheck role-specific CREATE vs EDIT using the actual index facts.
-        check(request.acceptedFiles.all {
-            val op = if (changed.getValue(it.path) == "??")
-                WriteOperationKind.CREATE else WriteOperationKind.EDIT
-            ToolAuthorizationPolicy.authorizeWrite(WriteAuthorizationFacts(
-                request.actorRole, op, it.path
-            )) == ToolAuthorizationDecision.Permit
-        }, "STAGE_ROLE_DENIED")
         val bytes = verifyFacts(root, request, changed)
+        // Commit-tree records file modes. Mode-only changes are not part of
+        // trusted writes and must be rejected BEFORE the ref CAS.
+        for (item in request.acceptedFiles) {
+            val status = changed.getValue(item.path)
+            val trackedMode = if (status == "??") null else {
+                val line = git(root, listOf("ls-tree", "HEAD", "--", item.path))
+                line.substringBefore(' ').takeIf { it in setOf("100644", "100755") }
+                    ?: throw Reject("UNSAFE_GIT_ENTRY")
+            }
+            val expectedMode = trackedMode ?: "100644"
+            check(bytes.getValue(item.path).gitMode == expectedMode,
+                "UNSAFE_STAGE_FILE_MODE")
+            val decision = ToolAuthorizationPolicy.authorizeWrite(WriteAuthorizationFacts(
+                request.actorRole,
+                if (trackedMode == null) WriteOperationKind.CREATE else WriteOperationKind.EDIT,
+                item.path, trackedGitMode = trackedMode,
+                immutableArtifactPaths = request.frozenArtifacts.keys
+            ))
+            check(decision == ToolAuthorizationDecision.Permit, "STAGE_ROLE_DENIED")
+        }
         return changed to bytes
     }
 
@@ -325,7 +370,7 @@ class LinuxStageGitBaselineReconciler(
                     git(real, listOf("read-tree", request.expectedHead), index = index)
                     for (item in request.acceptedFiles.sortedBy { it.path }) {
                         val oid = git(real, listOf("hash-object", "-w", "--stdin"),
-                            contents.getValue(item.path))
+                            contents.getValue(item.path).bytes)
                         check(gitObjectId.matches(oid), "INVALID_GIT_OBJECT")
                         val mode = if (before.getValue(item.path) == "??") "100644" else {
                             val entry = git(real, listOf("ls-tree", "HEAD", "--", item.path))
@@ -340,7 +385,8 @@ class LinuxStageGitBaselineReconciler(
                     val tree = git(real, listOf("write-tree"), index = index)
                     check(gitObjectId.matches(tree), "INVALID_GIT_TREE")
                     val commit = git(real, listOf("commit-tree", tree,
-                        "-p", request.expectedHead, "-m", "Recursive Coder accepted stage"))
+                        "-p", request.expectedHead, "-m",
+                        "Recursive Coder accepted " + request.actorRole.name.lowercase() + " stage"))
                     check(gitObjectId.matches(commit), "INVALID_GIT_COMMIT")
                     verifyFacts(real, request, before)
                     // From here the ref may have moved, even if Git reports failure.
@@ -353,9 +399,9 @@ class LinuxStageGitBaselineReconciler(
                     check(git(real, listOf("rev-parse", "HEAD")) == commit &&
                         status(real).isEmpty(), "UNCERTAIN_GIT_HANDOFF")
                     for ((path, hash) in request.frozenArtifacts)
-                        check(digest(read(real, path)) == hash, "UNCERTAIN_GIT_HANDOFF")
+                        check(digest(read(real, path).bytes) == hash, "UNCERTAIN_GIT_HANDOFF")
                     for (item in request.acceptedFiles)
-                        check(digest(read(real, item.path)) == item.sha256,
+                        check(digest(read(real, item.path).bytes) == item.sha256,
                             "UNCERTAIN_GIT_HANDOFF")
                     return StageGitReconciliationResult.Committed(
                         request.expectedHead, commit)
