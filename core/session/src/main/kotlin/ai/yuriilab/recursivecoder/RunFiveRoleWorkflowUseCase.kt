@@ -21,6 +21,7 @@ data class FiveRoleArtifactTarget(val id: ArtifactId, val path: String)
 
 sealed interface FiveRoleWorkflowOutcome {
     data class Completed(val graph: StageGraph) : FiveRoleWorkflowOutcome
+    /** Only verified host snapshots can be offered as resumable state. */
     data class Stopped(val code: String, val stage: StageKind,
                        val authoritative: PreparationStageSnapshot?) : FiveRoleWorkflowOutcome
     /** A lease/commit may have succeeded; never treat an uncertain CAS as a retryable denial. */
@@ -56,6 +57,31 @@ interface FiveRoleWorkflowHost {
 }
 
 /**
+ * Narrow execution seam for deterministic fail-closed unit tests. Production
+ * delegates to the existing authenticated stage use cases; no policy or write
+ * authority is ever granted by these wrappers.
+ */
+interface FiveRoleStageActions {
+    suspend fun prepare(
+        command: PreparationStageCommand,
+        roleEvents: StageRoleEventSink,
+        events: PreparationStageEventSink
+    ): PreparationStageResult
+
+    suspend fun develop(
+        command: DeveloperStageCommand,
+        roleEvents: StageRoleEventSink,
+        events: PreparationStageEventSink
+    ): DeveloperStageResult
+
+    suspend fun review(
+        command: ReviewerStageCommand,
+        roleEvents: StageRoleEventSink,
+        events: ReviewerDecisionSink
+    ): ReviewerStageResult
+}
+
+/**
  * A bounded sequential role runner. The current host snapshot is checked after
  * each existing use case and before every authority transition; callers cannot
  * synthesize acceptance from a model's successful text result.
@@ -64,11 +90,34 @@ interface FiveRoleWorkflowHost {
  * separate layers. They must be wired before issue #79 can be marked complete.
  */
 class RunFiveRoleWorkflowUseCase(
-    private val preparations: RunPreparationStageUseCase,
-    private val developer: RunDeveloperStageUseCase,
-    private val reviewer: RunReviewerStageUseCase,
+    private val stages: FiveRoleStageActions,
     private val host: FiveRoleWorkflowHost
 ) {
+    constructor(
+        preparations: RunPreparationStageUseCase,
+        developer: RunDeveloperStageUseCase,
+        reviewer: RunReviewerStageUseCase,
+        host: FiveRoleWorkflowHost
+    ) : this(object : FiveRoleStageActions {
+        override suspend fun prepare(
+            command: PreparationStageCommand,
+            roleEvents: StageRoleEventSink,
+            events: PreparationStageEventSink
+        ) = preparations.execute(command, roleEvents, events)
+
+        override suspend fun develop(
+            command: DeveloperStageCommand,
+            roleEvents: StageRoleEventSink,
+            events: PreparationStageEventSink
+        ) = developer.execute(command, roleEvents, events)
+
+        override suspend fun review(
+            command: ReviewerStageCommand,
+            roleEvents: StageRoleEventSink,
+            events: ReviewerDecisionSink
+        ) = reviewer.execute(command, roleEvents, events)
+    }, host)
+
     private val order = listOf(
         StageKind.SDD, StageKind.ATDD, StageKind.TDD, StageKind.DEVELOP,
         StageKind.REVIEW
@@ -80,10 +129,17 @@ class RunFiveRoleWorkflowUseCase(
         preparationEvents: PreparationStageEventSink,
         reviewerEvents: ReviewerDecisionSink
     ): FiveRoleWorkflowOutcome {
-        fun stop(kind: StageKind, code: String, state: PreparationStageSnapshot?) =
-            FiveRoleWorkflowOutcome.Stopped(code, kind, state)
         fun uncertain(kind: StageKind, code: String) =
             FiveRoleWorkflowOutcome.ReconciliationRequired(code, kind)
+        fun stop(kind: StageKind, code: String, state: PreparationStageSnapshot?):
+            FiveRoleWorkflowOutcome {
+            if (state == null) return FiveRoleWorkflowOutcome.Stopped(code, kind, null)
+            val latest = try { host.snapshot() }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) { return uncertain(kind, "HOST_STOP_SNAPSHOT_UNAVAILABLE") }
+            return if (latest != state) uncertain(kind, "UNCONFIRMED_STOP_STATE")
+            else FiveRoleWorkflowOutcome.Stopped(code, kind, latest)
+        }
 
         val writerKinds = order.dropLast(1).toSet()
         if (plan.artifacts.keys != writerKinds ||
@@ -99,7 +155,15 @@ class RunFiveRoleWorkflowUseCase(
             plan.developerTargets.size > 7 ||
             plan.developerTargets.map { it.path }.toSet().size !=
                 plan.developerTargets.size ||
-            plan.developerTargets.any { it.path in plan.artifacts.values.map { a -> a.path } }) {
+            plan.developerTargets.any { target ->
+                target.path in plan.artifacts.values.map { a -> a.path } ||
+                ToolAuthorizationPolicy.authorizeWrite(WriteAuthorizationFacts(
+                    EngineeringRole.DEVELOPER,
+                    if (target.expectedSha256 == null) WriteOperationKind.CREATE
+                    else WriteOperationKind.EDIT,
+                    target.path
+                )) != ToolAuthorizationDecision.Permit
+            }) {
             return stop(StageKind.SDD, "INVALID_WORKFLOW_PLAN", null)
         }
 
@@ -131,7 +195,7 @@ class RunFiveRoleWorkflowUseCase(
             val result = when (kind) {
                 StageKind.SDD, StageKind.ATDD, StageKind.TDD -> {
                     val output = plan.artifacts.getValue(kind)
-                    val done = preparations.execute(
+                    val done = stages.prepare(
                         PreparationStageCommand(current.graph, current.acceptedIds,
                             id, output.id, output.path,
                             plan.instructions.getValue(kind), plan.model,
@@ -167,7 +231,7 @@ class RunFiveRoleWorkflowUseCase(
                 }
                 StageKind.DEVELOP -> {
                     val output = plan.artifacts.getValue(kind)
-                    val done = developer.execute(
+                    val done = stages.develop(
                         DeveloperStageCommand(current.graph, current.acceptedIds,
                             id, output.id, output.path, plan.developerTargets,
                             plan.instructions.getValue(kind), plan.model,
@@ -203,7 +267,7 @@ class RunFiveRoleWorkflowUseCase(
                     }
                 }
                 StageKind.REVIEW -> {
-                    val done = reviewer.execute(
+                    val done = stages.review(
                         ReviewerStageCommand(current.graph, current.acceptedIds,
                             id, plan.model, plan.instructions.getValue(kind),
                             plan.deadline, plan.cancellation),
@@ -257,6 +321,13 @@ class RunFiveRoleWorkflowUseCase(
                         it.kind == next && it.supersededBy == null
                     } == null)
                     return uncertain(next, "INVALID_NEXT_STAGE_GRAPH")
+                val confirmed = try { host.snapshot() }
+                catch (cancelled: CancellationException) { throw cancelled }
+                catch (_: Exception) {
+                    return uncertain(next, "STAGE_RECONCILIATION_UNCONFIRMED")
+                }
+                if (confirmed != authoritative)
+                    return uncertain(next, "STAGE_RECONCILIATION_UNCONFIRMED")
             }
         }
         val reviewerId = authoritative.graph.stages.single {
@@ -271,6 +342,12 @@ class RunFiveRoleWorkflowUseCase(
             completed.copy(state = authoritative.graph.state) != authoritative.graph ||
             StageGraphPolicy.validate(completed) != StageGateDecision.Permit)
             return uncertain(StageKind.REVIEW, "INVALID_FINISHED_GRAPH")
+        val committed = try { host.snapshot() }
+        catch (cancelled: CancellationException) { throw cancelled }
+        catch (_: Exception) { return uncertain(StageKind.REVIEW, "GRAPH_FINISH_UNCONFIRMED") }
+        if (committed.graph != completed ||
+            committed.acceptedIds != authoritative.acceptedIds)
+            return uncertain(StageKind.REVIEW, "GRAPH_FINISH_UNCONFIRMED")
         return FiveRoleWorkflowOutcome.Completed(completed)
     }
 }
