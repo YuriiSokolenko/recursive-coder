@@ -252,7 +252,9 @@ class LinuxStageGitBaselineReconcilerTest {
                 reconcile(repo, repo.head, EngineeringRole.SDD,
                     mapOf("specs/Feature.md" to hash)))
             assertEquals("UNSAFE_GIT_CONFIGURATION", denied.code, key)
-            git(repo.root, "config", "--local", "--unset", key)
+            if (key == "core.filemode")
+                git(repo.root, "config", "--local", "core.filemode", "true")
+            else git(repo.root, "config", "--local", "--unset", key)
         }
         assertEquals(repo.head, git(repo.root, "rev-parse", "HEAD"))
     }
