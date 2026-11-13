@@ -1,12 +1,17 @@
 package ai.yuriilab.recursivecoder
 
 import java.io.ByteArrayOutputStream
+import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.nio.file.SecureDirectoryStream
+import java.nio.file.OpenOption
 import java.nio.file.StandardOpenOption
+import java.nio.file.attribute.BasicFileAttributeView
+import java.nio.file.attribute.BasicFileAttributes
 import java.security.MessageDigest
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -79,23 +84,73 @@ class LinuxStageGitBaselineReconciler(
         return real
     }
 
-    /** A validated, regular, no-follow path. Reject symlinks in every component. */
+    /**
+     * Descriptor-relative no-follow reads like TrustedWriteRuntime. Path-based
+     * isRegularFile/readAllBytes would be vulnerable to a symlink swap between
+     * the check and read, even under the trusted-writer coordination lock.
+     */
     private fun read(root: Path, path: String): ByteArray {
         check(ToolAuthorizationPolicy.validDeclaredPath(path), "INVALID_STAGE_PATH")
-        var current = root
-        val parts = path.split('/')
-        for (part in parts.dropLast(1)) {
-            current = current.resolve(part)
-            check(!Files.isSymbolicLink(current) && Files.isDirectory(current,
-                LinkOption.NOFOLLOW_LINKS), "UNSAFE_STAGE_PATH")
+        val key = Files.readAttributes(root, BasicFileAttributes::class.java,
+            LinkOption.NOFOLLOW_LINKS).fileKey()
+        check(key != null, "SANDBOX_UNAVAILABLE")
+        Files.newDirectoryStream(root).use { openedRoot ->
+            val first = openedRoot as? SecureDirectoryStream<Path>
+                ?: throw Reject("SANDBOX_UNAVAILABLE")
+            check(first.getFileAttributeView(BasicFileAttributeView::class.java)
+                .readAttributes().fileKey() == key, "WORKSPACE_REPLACED")
+            var cursor = first
+            val opened = mutableListOf<SecureDirectoryStream<Path>>()
+            try {
+                val parts = path.split('/')
+                for (component in parts.dropLast(1)) {
+                    check(cursor.any { it.fileName.toString() == component },
+                        "UNSAFE_STAGE_PATH")
+                    val next = try {
+                        cursor.newDirectoryStream(Path.of(component), LinkOption.NOFOLLOW_LINKS)
+                    } catch (_: Exception) {
+                        throw Reject("UNSAFE_STAGE_PATH")
+                    }
+                    opened += next
+                    cursor = next
+                }
+                val name = Path.of(parts.last())
+                check(cursor.any { it.fileName.toString() == name.toString() },
+                    "UNSAFE_STAGE_FILE")
+                val attributes = try {
+                    cursor.getFileAttributeView(name, BasicFileAttributeView::class.java,
+                        LinkOption.NOFOLLOW_LINKS).readAttributes()
+                } catch (_: Exception) {
+                    throw Reject("UNSAFE_STAGE_FILE")
+                }
+                check(attributes.isRegularFile && attributes.size() <= 4 * 1024 * 1024L,
+                    "UNSAFE_STAGE_FILE")
+                return try {
+                    cursor.newByteChannel(name, setOf<OpenOption>(StandardOpenOption.READ,
+                        LinkOption.NOFOLLOW_LINKS)).use { channel ->
+                        val result = ByteArrayOutputStream()
+                        val buffer = ByteBuffer.allocate(8192)
+                        while (true) {
+                            val n = channel.read(buffer)
+                            if (n < 0) break
+                            if (n == 0) continue
+                            buffer.flip()
+                            result.write(buffer.array(), 0, n)
+                            buffer.clear()
+                            check(result.size() <= 4 * 1024 * 1024,
+                                "STAGE_FILE_TOO_LARGE")
+                        }
+                        result.toByteArray()
+                    }
+                } catch (e: Reject) {
+                    throw e
+                } catch (_: Exception) {
+                    throw Reject("UNSAFE_STAGE_FILE")
+                }
+            } finally {
+                opened.asReversed().forEach { it.close() }
+            }
         }
-        current = current.resolve(parts.last())
-        check(Files.isRegularFile(current, LinkOption.NOFOLLOW_LINKS) &&
-            !Files.isSymbolicLink(current), "UNSAFE_STAGE_FILE")
-        check(Files.size(current) <= 4 * 1024 * 1024L, "STAGE_FILE_TOO_LARGE")
-        val bytes = Files.readAllBytes(current)
-        check(bytes.size <= 4 * 1024 * 1024, "STAGE_FILE_TOO_LARGE")
-        return bytes
     }
 
     /** Fixed-argument Git process; never uses a shell, hooks or external filters. */
