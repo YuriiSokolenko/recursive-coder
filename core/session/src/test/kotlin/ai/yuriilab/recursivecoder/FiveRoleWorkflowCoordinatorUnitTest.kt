@@ -39,7 +39,9 @@ class FiveRoleWorkflowCoordinatorUnitTest {
         var called = mutableListOf<StageKind>()
 
         private fun node(kind: StageKind): StageNode {
-            val producers = outputs.keys.filter { kind.requiredInputs.contains(it.output) }
+            val producers = outputs.keys.filter { producer ->
+                producer.output?.let { it in kind.requiredInputs } == true
+            }
             val correlation = StageCorrelation("session-unit-79", graphId,
                 ids.getValue(kind), "request-" + kind.name.lowercase(),
                 "correlation-" + kind.name.lowercase())
@@ -54,7 +56,7 @@ class FiveRoleWorkflowCoordinatorUnitTest {
             listOf(DeveloperFileTarget("src/main/Feature.kt", "b".repeat(64))),
             ModelConfig("fake", "fake-v1", "http://localhost/unused",
                 "env:FAKE", 4096, 512, setOf("tool_calls"), null, 1000, 1000),
-            Instant.now().plusSeconds(60), Cancellation()
+            Instant.parse("2035-01-01T00:00:00Z"), Cancellation()
         )
 
         override fun snapshot(): PreparationStageSnapshot {
@@ -291,7 +293,8 @@ class FiveRoleWorkflowCoordinatorUnitTest {
         )) {
             val fixture = Fixture()
             fixture.advanceMode = mode
-            expectUncertain(fixture, code)
+            expectUncertain(fixture, code,
+                if (mode == "missing-next") StageKind.ATDD else StageKind.SDD)
         }
         val tamperedHandoff = Fixture()
         tamperedHandoff.advanceMode = "tampered-handoff"
