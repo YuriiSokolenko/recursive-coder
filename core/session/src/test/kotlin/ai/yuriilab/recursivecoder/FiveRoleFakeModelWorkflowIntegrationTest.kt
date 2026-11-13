@@ -356,7 +356,7 @@ class FiveRoleFakeModelWorkflowIntegrationTest {
                 if (expected.graph.artifacts.any { manifest ->
                     manifest.id !in expected.acceptedIds ||
                     preparationHost.readBytes(manifest.declaredPath)?.let {
-                        sha(String(it)) != manifest.sha256
+                        sha(String(it)) == manifest.sha256
                     } != true
                 }) return null
                 if (next == StageKind.REVIEW) {
