@@ -1,12 +1,14 @@
 # Host-owned five-role orchestration (issue #79)
 
-**Status: partial implementation.** `RunFiveRoleWorkflowUseCase` provides a
+**Status: host-only production implementation under validation (Draft PR #92).** `RunFiveRoleWorkflowUseCase` provides a
 bounded, in-process coordinator for `SDD → ATDD → TDD → Developer → Reviewer`.
 An in-memory fake-host integration test executes all five existing role use
 cases. Additional pure scripted coordinator tests check fail-closed responses.
-**Neither fake host authenticates actual write/check receipts or fences Git
-mutations.** These tests do not prove the eventual production host's guarantees.
-This is **not** an installed writable CLI or a completed issue #79.
+The in-memory fake-host tests alone cannot authenticate write/check receipts
+or fence Git mutations. A separate Linux production-host integration suite now
+exercises the real trusted write/check port, authenticated stage handoffs,
+real Git reconciliation and independent Reviewer completion. This remains
+**not** an installed writable CLI or a completed issue #79.
 
 ## Execution and authority
 
@@ -79,17 +81,49 @@ on Reviewer rejection or NEEDS_HUMAN. It does not yet drive the separately
 documented bounded `ReviewerRepairPlanner` retry loop; repair requires a
 distinct host-verified operation and is not an implicit continuation.
 
-## Linux Git baseline reconciliation — issue #79 next slice
+## Linux production host and Git baseline reconciliation — PR #92
 
 The host-only `LinuxStageGitBaselineReconciler` in `:infra:workspace`
 implements **physical clean-Git handoff**, not an authenticated workflow host.
 It is opt-in and not selected by the installed CLI or Koin composition.
 
-After a trusted stage CAS has independently accepted a proposal, the future
-production host must revalidate its HMAC-backed write/check receipts, manifest
-identity and approved output digest *before* invoking this reconciler. The
-reconciler itself does not establish receipt authenticity, Reviewer approval,
-or an authoritative accepted-ID set.
+The opt-in `LinuxFiveRoleWorkflowHost` in `:app:cli` now retains
+generation-fenced, host-HMAC-attested write/check evidence obtained only from
+the genuine `TrustedWriteRuntime.finish()` path. Each accepted stage checks
+the independent host decision, exact output bytes, verified changed-file hashes
+and stage/accepted-ID CAS before invoking the reconciler. The Developer handoff
+must match host-retained usage, write tool ID, check records and changed files;
+the separate Reviewer adapter cannot open a write tool. The reconciler itself
+does not establish receipt authenticity or independent Reviewer approval.
+
+For clean-tree admission, the host calls
+`LinuxStageGitBaselineReconciler.inspectCleanBaseline` rather than a second,
+insecure Git invocation. This returns typed `Clean` or `Denied(code)`; operators
+can retrieve the last denial via `LinuxFiveRoleWorkflowHost.lastBaselineDenialCode()`
+without exposing Git output or secret paths. Admission and reconciliation
+share environment-scrubbed Git subprocesses, strict repository-local config
+and index allowlists, exact HEAD/branch checks, and ignored-file-aware status.
+**One five-second monotonic deadline spans all Git subprocesses of each
+read-only baseline inspection.** Expiry stops and destroys the active child,
+rather than holding the host monitor for a succession of 15-second waits.
+This budget applies to the read-only Git subprocesses, **not** to
+`canonicalRoot()`/`toRealPath()`, host `readBytes()` or `frozenIntact()`.
+A stage transition may run more than one clean-baseline inspection under the
+host monitor, so five seconds is **not** a total transition deadline.
+Interrupts during Git `future.get` or `waitFor` preserve the thread interrupt
+flag and return a stable fail-closed code. Mutable stage reconciliation
+explicitly rejects all `!!` ignored status entries with
+`UNEXPECTED_GIT_CHANGE` even if an authenticated accepted path is ignored.
+
+External approval runs outside the host monitor; late decisions are discarded
+after lease revocation. A failed post-gateway fence or byte check permanently
+sets `REJECT` on the current lease, preventing repeated human approval prompts.
+Interrupted callbacks preserve the thread's interrupt flag. Host HMAC payloads
+are canonical, versioned, length-prefixed bytes rather than ambiguous
+separators/toString.
+Descriptor-relative file access refuses protected paths, links and non-regular
+files including FIFOs. Arbitrary same-UID writers remain outside this in-process
+security boundary and require an isolated checkout.
 
 `StageGitReconciliationRequest` pins the old 40-hex Git HEAD, named branch,
 role, every changed path and its expected SHA-256, plus unchanged frozen
@@ -151,17 +185,25 @@ cannot overwrite the competing HEAD and still returns conservative
 not establish crash recovery or verified cleanup of an uncertain workspace.
 
 The lock prevents concurrent *trusted* writes using the same lock directory.
+A denied write request still marks an attempted write: even if the write policy
+rejected it before changing disk, abort deliberately quarantines the host.
+This is intentionally conservative until a trusted recovery mechanism exists.
 It does not prevent arbitrary external processes from modifying the workspace;
 a production host must control that access and quarantine uncertain state.
-The stage host must atomically persist the new HEAD and next-stage policy
-before allowing a new trusted write session. This integration, authenticated
-receipt storage, the Reviewer commit gate and the writable CLI are **not yet
-implemented**.
+The in-process host now publishes the committed HEAD together with the next
+graph stage before admitting further work. It quarantines uncertain state
+instead of silently retrying. **Writable CLI opt-in, durable recovery and
+two-origin recursive installed E2E are not yet implemented.**
 
-`LinuxStageGitBaselineReconcilerTest` tests the Git operations on Linux in
-the integration tier, including successful successive role baselines and
-adversarial status/digest/locking cases. These tests are not a substitute for
-an installed five-role CLI E2E or Linux receipt-provenance validation.
+`LinuxStageGitBaselineReconcilerTest` tests Git handoffs and now the direct
+typed read-only API on Linux, including malformed head/branch, HEAD/branch
+drift, unsafe config and index flags, ignored files, ref changes during final
+inspection and expiry of the total baseline deadline. The
+`LinuxFiveRoleWorkflowHostTest` exercises authenticated Linux receipts,
+a complete five-role real-Git success through `finishSuccess`, Developer
+handoff tampering, diagnostic codes, role-only/protected reads, blocking
+approval and terminal rejection after byte drift or duplicate gateway calls. Neither suite is an installed writable CLI E2E
+or a crash-recovery guarantee.
 
 ## Compatibility
 
@@ -171,8 +213,8 @@ The native TaskScheduler and Session Protocol v1 schema are unchanged.
 
 ## Outstanding issue #79 acceptance
 
-- Implement a production Linux host with real trusted receipt retention,
-  isolation and fenced per-stage Git reconciliation.
+- Independently validate/review the production Linux host in Draft PR #92;
+  production deployment still requires an isolated workspace and lock scope.
 - Wire an explicit opt-in scoped-write CLI route and stage-specific deterministic
   FakeModel fixtures. An executable CLI E2E must cover all five roles.
 - Wire bounded `RecursiveGraphScheduler` child graphs with **two distinct

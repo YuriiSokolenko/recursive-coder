@@ -75,7 +75,12 @@ repository input or remote endpoint is modified by these tests.
 
 ## Five-role coordinator tests (issue #79)
 
-`FiveRoleWorkflowCoordinatorUnitTest` (`@Tag("unit")`) runs scripted in-memory `FiveRoleStageActions` and `FiveRoleWorkflowHost` ports. It checks invalid plans including forbidden Developer targets, mismatched host snapshots, tentative vs confirmed commits, reconciliation denials, Reviewer stops and final graph attestation failures with exact codes/stages. `FiveRoleFakeModelWorkflowIntegrationTest` (`@Tag("integration")`) invokes the five real stage use cases through an in-memory fake host and fake tool sessions. **These tests do not establish authenticated production receipts, real fenced Git stage transitions, or installed CLI E2E**; those are still issue #79 acceptance work. See [five-role orchestration](FIVE_ROLE_ORCHESTRATION.md).
+`FiveRoleWorkflowCoordinatorUnitTest` (`@Tag("unit")`) runs scripted in-memory `FiveRoleStageActions` and `FiveRoleWorkflowHost` ports. It checks invalid plans including forbidden Developer targets, mismatched host snapshots, tentative vs confirmed commits, reconciliation denials, Reviewer stops and final graph attestation failures with exact codes/stages. `FiveRoleFakeModelWorkflowIntegrationTest` (`@Tag("integration")`) invokes the five real stage use cases through an in-memory fake host and fake tool sessions. **These fake-host tests alone do not establish authenticated receipts or Git transition security.** Direct `:infra:workspace`
+`LinuxStageGitBaselineReconcilerTest` cases separately exercise the new typed
+baseline API: malformed heads/branches, Git ref drift (including during final
+inspection), unsafe local config/index flags, ignored files and total deadline
+expiry. This validates the shared read-only and mutable preflight contract at
+its owning module rather than only through CLI integration. The new `LinuxFiveRoleWorkflowHostTest` (`:app:cli`, `@Tag("integration")`) exercises the real Linux TrustedWriteRuntime session, host HMAC/typed evidence, a complete five-role run through Git CAS and independent Reviewer `finishSuccess`, tampered Developer usage/write ID/changed-file digests, forged acceptance, quarantine, unsafe Git configuration, ignored files, FIFO reads, and an external approval callback without holding the host monitor. The installed writable CLI with two distinct nested stage origins is still outstanding under #79. See [five-role orchestration](FIVE_ROLE_ORCHESTRATION.md).
 
 ## Test taxonomy
 

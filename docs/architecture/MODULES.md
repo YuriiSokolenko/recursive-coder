@@ -12,7 +12,7 @@
 | `:infra:workspace` | Workspace Manager, restricted Git, trusted write/check runtime, LinuxStageToolSessionOpener and host-only LinuxStageGitBaselineReconciler (not a production receipt authority) | `:core:contracts` |
 | `:infra:task-store` | Durable tasks.json snapshot, file locks and atomic replacement | `:core:tasks`, `:core:contracts` |
 | `:infra:journal` | JSONL append/flush/close and physical event-log SHA-256 | `:core:session`, `:core:contracts` |
-| `:app:cli` | Clikt command entry point and Koin 4.2.2 interface-to-implementation bindings/composition | all eight libraries |
+| `:app:cli` | Clikt CLI/Koin composition plus opt-in `LinuxFiveRoleWorkflowHost`: trusted receipt authority, reviewer CAS and Git handoffs (not selected by default read-only CLI) | all eight libraries |
 
 ```text
 :app:cli         -> :agent:runtime, :core:contracts, :core:session, :core:tasks,
@@ -75,7 +75,7 @@ capability and test boundaries.
 
 ## Host-owned five-role orchestration (issue #79, incomplete)
 
-`:core:session` owns `RunFiveRoleWorkflowUseCase`, `FiveRoleWorkflowHost` and `FiveRoleStageActions`. The two latter ports live next to the coordinator rather than in shared `:core:contracts`: they exist solely to compose existing session use cases, do not grant capabilities, and are not consumed by other modules. The secondary constructor wraps the existing `RunPreparationStageUseCase`, `RunDeveloperStageUseCase` and `RunReviewerStageUseCase`; pure unit tests substitute a scripted action port without creating physical writes. A trusted host must verify clean-tree reconciliation and receipt provenance before using the production coordinator. The installed read-only CLI does not select this workflow. See [five-role orchestration](FIVE_ROLE_ORCHESTRATION.md).
+`:core:session` owns `RunFiveRoleWorkflowUseCase`, `FiveRoleWorkflowHost` and `FiveRoleStageActions`. The two latter ports live next to the coordinator rather than in shared `:core:contracts`: they exist solely to compose existing session use cases, do not grant capabilities, and are not consumed by other modules. The secondary constructor wraps the existing `RunPreparationStageUseCase`, `RunDeveloperStageUseCase` and `RunReviewerStageUseCase`; pure unit tests substitute a scripted action port without creating physical writes. `LinuxFiveRoleWorkflowHost` in `:app:cli` now composes those ports with the real Linux tool opener, host-HMAC evidence and the `:infra:workspace` Git reconciler. Its separate Reviewer adapter has no tool-session opener. The shared secure reconciler preflight returns typed denial codes and is constrained by a five-second overall monotonic read-only deadline. It checks clean HEAD, repository configuration, index and ignored files before accepting a new stage. The installed read-only CLI does not select this host, which has no checkpoint/restart recovery; writable CLI and nested-graph acceptance remain open. See [five-role orchestration](FIVE_ROLE_ORCHESTRATION.md).
 
 ## Host-only stage tool authority (issue #74)
 

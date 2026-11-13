@@ -18,6 +18,7 @@ import java.nio.file.attribute.PosixFilePermission
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 
 /**
  * Host-only Git handoff. The caller MUST separately authenticate the stage's
@@ -36,6 +37,12 @@ data class StageGitReconciliationRequest(
     val frozenArtifacts: Map<String, String> = emptyMap()
 )
 
+/** Exact, safe-to-expose operator result for a read-only pinned checkout check. */
+sealed interface StageGitBaselineResult {
+    data object Clean : StageGitBaselineResult
+    data class Denied(val code: String) : StageGitBaselineResult
+}
+
 sealed interface StageGitReconciliationResult {
     data class Committed(val oldHead: String, val newHead: String) :
         StageGitReconciliationResult
@@ -48,7 +55,9 @@ sealed interface StageGitReconciliationResult {
  * Internal deterministic observation points for Linux integration tests.
  * These are never reachable from model inputs, serialized requests, or the CLI.
  */
-internal enum class StageGitTestCheckpoint { BEFORE_REF_UPDATE, AFTER_REF_UPDATE }
+internal enum class StageGitTestCheckpoint {
+    BEFORE_REF_UPDATE, AFTER_REF_UPDATE, BEFORE_BASELINE_FINAL_READ
+}
 internal fun interface StageGitTestObserver {
     fun at(checkpoint: StageGitTestCheckpoint)
 }
@@ -69,14 +78,25 @@ class LinuxStageGitBaselineReconciler internal constructor(
     private val root: Path,
     private val lockDirectory: Path,
     private val gitExecutable: Path,
-    private val testObserver: StageGitTestObserver?
+    private val testObserver: StageGitTestObserver?,
+    private val baselineBudgetMillis: Long
 ) {
+    internal constructor(root: Path, lockDirectory: Path, gitExecutable: Path,
+        testObserver: StageGitTestObserver?) :
+        this(root, lockDirectory, gitExecutable, testObserver, 5_000L)
+
     constructor(
         root: Path,
         lockDirectory: Path =
             Path.of(System.getProperty("user.home"), ".recursive-coder", "locks"),
         gitExecutable: Path = findGit()
-    ) : this(root, lockDirectory, gitExecutable, null)
+    ) : this(root, lockDirectory, gitExecutable, null, 5_000L)
+
+    init {
+        require(baselineBudgetMillis in 1L..5_000L) {
+            "Read-only Git baseline budget must be bounded"
+        }
+    }
     private class Reject(val code: String) : RuntimeException()
     private data class OpenedFile(val bytes: ByteArray, val gitMode: String)
     private val sha256 = Regex("[0-9a-f]{64}")
@@ -91,6 +111,13 @@ class LinuxStageGitBaselineReconciler internal constructor(
 
     private fun check(allowed: Boolean, code: String) {
         if (!allowed) throw Reject(code)
+    }
+
+    private fun remainingNanos(deadlineNanos: Long?): Long {
+        if (deadlineNanos == null) return TimeUnit.SECONDS.toNanos(15)
+        val remaining = deadlineNanos - System.nanoTime()
+        if (remaining <= 0L) throw Reject("GIT_BASELINE_TIMEOUT")
+        return remaining
     }
 
     private fun canonicalRoot(): Path {
@@ -203,7 +230,14 @@ class LinuxStageGitBaselineReconciler internal constructor(
 
     /** Fixed-argument Git process; never uses a shell, hooks or external filters. */
     private fun git(root: Path, args: List<String>,
-        input: ByteArray? = null, index: Path? = null): String {
+        input: ByteArray? = null, index: Path? = null,
+        deadlineNanos: Long? = null): String {
+        remainingNanos(deadlineNanos) // fail before starting another child
+        // Cancellation already signalled before entry must not depend on
+        // whether a very fast Git child finishes before Future.get().
+        if (Thread.currentThread().isInterrupted)
+            throw Reject(if (deadlineNanos == null)
+                "GIT_COMMAND_INTERRUPTED" else "GIT_BASELINE_INTERRUPTED")
         val process = ProcessBuilder(listOf(gitExecutable.toString(),
             "--no-optional-locks", "-C", root.toString(),
             "-c", "core.fsmonitor=false", "-c", "diff.external=",
@@ -243,17 +277,31 @@ class LinuxStageGitBaselineReconciler internal constructor(
         }
         try {
             process.outputStream.use { pipe -> if (input != null) pipe.write(input) }
-            val output = future.get(15, TimeUnit.SECONDS)
-            check(process.waitFor(1, TimeUnit.SECONDS), "GIT_TIMEOUT")
+            val output = future.get(
+                minOf(TimeUnit.SECONDS.toNanos(15), remainingNanos(deadlineNanos)),
+                TimeUnit.NANOSECONDS
+            )
+            check(process.waitFor(
+                minOf(TimeUnit.SECONDS.toNanos(1), remainingNanos(deadlineNanos)),
+                TimeUnit.NANOSECONDS
+            ), if (deadlineNanos == null) "GIT_TIMEOUT" else "GIT_BASELINE_TIMEOUT")
             check(process.exitValue() == 0, "GIT_COMMAND_DENIED")
             return StandardCharsets.UTF_8.newDecoder().decode(
                 java.nio.ByteBuffer.wrap(output)).toString().trimEnd('\n')
         } catch (e: Reject) {
             throw e
+        } catch (_: TimeoutException) {
+            throw Reject(if (deadlineNanos == null) "GIT_TIMEOUT" else "GIT_BASELINE_TIMEOUT")
         } catch (e: ExecutionException) {
             val cause = e.cause
             if (cause is Reject) throw cause
             throw Reject("GIT_COMMAND_UNAVAILABLE")
+        } catch (_: InterruptedException) {
+            // Future.get / waitFor can be interrupted while Git is running.
+            // Preserve the caller's cancellation signal and fail closed.
+            Thread.currentThread().interrupt()
+            throw Reject(if (deadlineNanos == null)
+                "GIT_COMMAND_INTERRUPTED" else "GIT_BASELINE_INTERRUPTED")
         } catch (_: Exception) {
             throw Reject("GIT_COMMAND_UNAVAILABLE")
         } finally {
@@ -263,9 +311,10 @@ class LinuxStageGitBaselineReconciler internal constructor(
         }
     }
 
-    private fun status(root: Path): Map<String, String> {
+    private fun status(root: Path, deadlineNanos: Long? = null): Map<String, String> {
         val raw = git(root, listOf("status", "--porcelain=v1", "-z",
-            "--untracked-files=all", "--ignored=matching", "--ignore-submodules=none"))
+            "--untracked-files=all", "--ignored=matching", "--ignore-submodules=none"),
+            deadlineNanos = deadlineNanos)
         // With -z, a rename has another NUL-separated path. Renames and
         // copies are denied because no allowed status has an index-side change.
         val paths = linkedMapOf<String, String>()
@@ -273,7 +322,8 @@ class LinuxStageGitBaselineReconciler internal constructor(
             check(record.length >= 4 && record[2] == ' ', "GIT_STATUS_INVALID")
             val state = record.substring(0, 2)
             val path = record.substring(3)
-            check(state == "??" || state == " M", "UNEXPECTED_GIT_CHANGE")
+            check(state == "??" || state == " M" || state == "!!",
+                "UNEXPECTED_GIT_CHANGE")
             check(ToolAuthorizationPolicy.validDeclaredPath(path) &&
                 paths.put(path, state) == null, "GIT_STATUS_INVALID")
         }
@@ -296,6 +346,94 @@ class LinuxStageGitBaselineReconciler internal constructor(
             change.path to bytes
         }
     }
+
+    /**
+     * Shared deny-by-default Git repository preflight. Both clean stage
+     * admission and mutable reconciliation MUST use the identical config and
+     * index policy; otherwise a malicious core.fsmonitor/attributes override
+     * could influence the admission verdict before reconciliation.
+     */
+    /**
+     * Shared allowlist for read-only admission and mutation reconciliation.
+     * The optional deadline makes each Git subprocess consume the caller's
+     * remaining baseline budget rather than starting a fresh 15 s timer.
+     */
+    private fun verifyRepositoryConfiguration(root: Path,
+        deadlineNanos: Long? = null) {
+        val config = git(root, listOf("config", "--local", "--list"),
+            deadlineNanos = deadlineNanos)
+        val safeConfig = config.lineSequence().filter { it.isNotBlank() }.all { entry ->
+            val key = entry.substringBefore('=').lowercase()
+            val value = entry.substringAfter('=', missingDelimiterValue = "")
+            when (key) {
+                "core.repositoryformatversion" -> value == "0"
+                "core.bare" -> value == "false"
+                "core.filemode", "core.symlinks", "core.logallrefupdates" -> value == "true"
+                "core.ignorecase", "core.precomposeunicode" -> value == "false"
+                "user.name", "user.email" -> value.isNotBlank()
+                else -> safeRemoteOrBranchKey.matches(key)
+            }
+        }
+        check(safeConfig && config.lines().any { it == "core.filemode=true" },
+            "UNSAFE_GIT_CONFIGURATION")
+        val flags = git(root, listOf("ls-files", "-v", "-z"),
+            deadlineNanos = deadlineNanos)
+        check(flags.split('\u0000').filter(String::isNotEmpty).all {
+            it.startsWith("H ")
+        }, "UNSAFE_GIT_INDEX")
+        val staged = git(root, listOf("ls-files", "--stage", "-z"),
+            deadlineNanos = deadlineNanos)
+        check(staged.split('\u0000').filter(String::isNotEmpty).all {
+            it.startsWith("100644 ") || it.startsWith("100755 ")
+        }, "UNSAFE_GIT_INDEX")
+    }
+
+    /**
+     * Typed, read-only Git baseline inspection. Every Git subprocess shares
+     * a single <=5 s monotonic deadline; failures are fail-closed and expose
+     * only stable denial codes (never Git output or secret paths).
+     */
+    fun inspectCleanBaseline(expectedHead: String, branch: String):
+        StageGitBaselineResult = try {
+        val deadline = System.nanoTime() +
+            TimeUnit.MILLISECONDS.toNanos(baselineBudgetMillis)
+        check(gitObjectId.matches(expectedHead) && gitRef.matches(branch) &&
+            !branch.contains("..") && !branch.contains("//") &&
+            !branch.endsWith("/") && !branch.endsWith(".lock") &&
+            branch.split('/').none { it.startsWith(".") }, "INVALID_GIT_BASELINE")
+        val real = canonicalRoot()
+        check(git(real, listOf("rev-parse", "--show-toplevel"),
+            deadlineNanos = deadline) == real.toString() &&
+            Path.of(git(real, listOf("rev-parse", "--absolute-git-dir"),
+                deadlineNanos = deadline)).toRealPath() ==
+                real.resolve(".git").toRealPath(), "UNSUPPORTED_WORKSPACE")
+        check(git(real, listOf("rev-parse", "HEAD"), deadlineNanos = deadline) ==
+            expectedHead, "STAGE_BASELINE_CHANGED")
+        check(git(real, listOf("symbolic-ref", "-q", "HEAD"),
+            deadlineNanos = deadline) == "refs/heads/" + branch, "STAGE_BRANCH_CHANGED")
+        verifyRepositoryConfiguration(real, deadline)
+        check(status(real, deadline).isEmpty(), "STAGE_WORKSPACE_CHANGED")
+        // Test-only deterministic ref-drift/total-budget seam. Not available to
+        // models, CLI or the public production constructor.
+        testObserver?.at(StageGitTestCheckpoint.BEFORE_BASELINE_FINAL_READ)
+        remainingNanos(deadline)
+        check(git(real, listOf("rev-parse", "HEAD"), deadlineNanos = deadline) ==
+            expectedHead && git(real, listOf("symbolic-ref", "-q", "HEAD"),
+                deadlineNanos = deadline) == "refs/heads/" + branch,
+            "STAGE_BASELINE_CHANGED")
+        StageGitBaselineResult.Clean
+    } catch (failure: Reject) {
+        StageGitBaselineResult.Denied(failure.code)
+    } catch (_: InterruptedException) {
+        Thread.currentThread().interrupt()
+        StageGitBaselineResult.Denied("GIT_BASELINE_INTERRUPTED")
+    } catch (_: Exception) {
+        StageGitBaselineResult.Denied("GIT_BASELINE_UNAVAILABLE")
+    }
+
+    /** Legacy Boolean convenience for callers that do not need denial codes. */
+    fun verifyCleanBaseline(expectedHead: String, branch: String): Boolean =
+        inspectCleanBaseline(expectedHead, branch) == StageGitBaselineResult.Clean
 
     private fun preflight(root: Path, request: StageGitReconciliationRequest):
         Pair<Map<String, String>, Map<String, OpenedFile>> {
@@ -329,32 +467,13 @@ class LinuxStageGitBaselineReconciler internal constructor(
             "STAGE_BASELINE_CHANGED")
         check(git(root, listOf("symbolic-ref", "-q", "HEAD")) ==
             "refs/heads/" + request.branch, "STAGE_BRANCH_CHANGED")
-        // Explicit allowlist: repository-local configuration must not alter
-        // filters, hooks, index, worktree, ref or attributes semantics.
-        val config = git(root, listOf("config", "--local", "--list"))
-        val safeConfig = config.lineSequence().filter { it.isNotBlank() }.all { entry ->
-            val key = entry.substringBefore('=').lowercase()
-            val value = entry.substringAfter('=', missingDelimiterValue = "")
-            when (key) {
-                "core.repositoryformatversion" -> value == "0"
-                "core.bare" -> value == "false"
-                "core.filemode", "core.symlinks", "core.logallrefupdates" -> value == "true"
-                "core.ignorecase", "core.precomposeunicode" -> value == "false"
-                "user.name", "user.email" -> value.isNotBlank()
-                else -> safeRemoteOrBranchKey.matches(key)
-            }
-        }
-        check(safeConfig && config.lines().any { it == "core.filemode=true" },
-            "UNSAFE_GIT_CONFIGURATION")
-        val flags = git(root, listOf("ls-files", "-v", "-z"))
-        check(flags.split('\u0000').filter(String::isNotEmpty).all {
-            it.startsWith("H ")
-        }, "UNSAFE_GIT_INDEX")
-        val staged = git(root, listOf("ls-files", "--stage", "-z"))
-        check(staged.split('\u0000').filter(String::isNotEmpty).all {
-            it.startsWith("100644 ") || it.startsWith("100755 ")
-        }, "UNSAFE_GIT_INDEX")
+        verifyRepositoryConfiguration(root)
         val changed = status(root)
+        // The read-only baseline status parser accepts '!!' to produce a
+        // useful dirty-check denial, but an ignored file is NEVER an
+        // acceptable mutable stage change, even if the path is on the
+        // authenticated accepted-file list.
+        check(changed.values.none { it == "!!" }, "UNEXPECTED_GIT_CHANGE")
         check(changed.keys == names.toSet(), "UNEXPECTED_GIT_CHANGE")
         val bytes = verifyFacts(root, request, changed)
         // Commit-tree records file modes. Mode-only changes are not part of
