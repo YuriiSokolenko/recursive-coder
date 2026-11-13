@@ -73,6 +73,10 @@ repository input or remote endpoint is modified by these tests.
 
 **Scope and existing exceptions:** The rules cover Gradle project dependencies and selected external framework groups, not imports or the implementation of port interfaces. The included `build-logic` build belongs to Gradle tooling, not product modules. `TaskStore` was extracted into `:infra:task-store` in issue #27, with its `TaskRepository` contract in `:core:tasks`; only the CLI composition root selects the filesystem adapter. The physical JSONL event writer is in `:infra:journal` (#29), selected by the CLI EventSinkFactory. Neither case permits core to depend on infrastructure or CLI. The original issue #25 architecture guardrails remain enforced across all modules.
 
+## Five-role coordinator tests (issue #79)
+
+`FiveRoleWorkflowCoordinatorUnitTest` (`@Tag("unit")`) runs scripted in-memory `FiveRoleStageActions` and `FiveRoleWorkflowHost` ports. It checks invalid plans including forbidden Developer targets, mismatched host snapshots, tentative vs confirmed commits, reconciliation denials, Reviewer stops and final graph attestation failures with exact codes/stages. `FiveRoleFakeModelWorkflowIntegrationTest` (`@Tag("integration")`) invokes the five real stage use cases through an in-memory fake host and fake tool sessions. **These tests do not establish authenticated production receipts, real fenced Git stage transitions, or installed CLI E2E**; those are still issue #79 acceptance work. See [five-role orchestration](FIVE_ROLE_ORCHESTRATION.md).
+
 ## Test taxonomy
 
 | Tier | Target | Characteristics and coverage |
