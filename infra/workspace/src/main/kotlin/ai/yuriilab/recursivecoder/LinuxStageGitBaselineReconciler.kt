@@ -56,12 +56,27 @@ sealed interface StageGitReconciliationResult {
  * Git object writes may leave unreachable objects on failure. Once update-ref
  * is attempted, any exception is an UNKNOWN commit, never a retryable Denied.
  */
-class LinuxStageGitBaselineReconciler(
+/**
+ * Internal deterministic observation points for Linux integration tests.
+ * These are never reachable from model inputs, serialized requests, or the CLI.
+ */
+internal enum class StageGitTestCheckpoint { BEFORE_REF_UPDATE, AFTER_REF_UPDATE }
+internal fun interface StageGitTestObserver {
+    fun at(checkpoint: StageGitTestCheckpoint)
+}
+
+class LinuxStageGitBaselineReconciler internal constructor(
     private val root: Path,
-    private val lockDirectory: Path =
-        Path.of(System.getProperty("user.home"), ".recursive-coder", "locks"),
-    private val gitExecutable: Path = findGit()
+    private val lockDirectory: Path,
+    private val gitExecutable: Path,
+    private val testObserver: StageGitTestObserver?
 ) {
+    constructor(
+        root: Path,
+        lockDirectory: Path =
+            Path.of(System.getProperty("user.home"), ".recursive-coder", "locks"),
+        gitExecutable: Path = findGit()
+    ) : this(root, lockDirectory, gitExecutable, null)
     private class Reject(val code: String) : RuntimeException()
     private data class OpenedFile(val bytes: ByteArray, val gitMode: String)
     private val sha256 = Regex("[0-9a-f]{64}")
@@ -404,10 +419,17 @@ class LinuxStageGitBaselineReconciler(
                         "Recursive Coder accepted " + request.actorRole.name.lowercase() + " stage"))
                     check(gitObjectId.matches(commit), "INVALID_GIT_COMMIT")
                     verifyFacts(real, request, before)
+                    // The test-only observer can simulate an external actor
+                    // moving the ref before our compare-and-swap. That observer
+                    // does not grant any capability to the model or CLI.
+                    testObserver?.at(StageGitTestCheckpoint.BEFORE_REF_UPDATE)
                     // From here the ref may have moved, even if Git reports failure.
                     updatedRef = true
                     git(real, listOf("update-ref", "refs/heads/" + request.branch,
                         commit, request.expectedHead))
+                    // Simulate the critical crash window: HEAD moved but the
+                    // real index has not yet been aligned with the new commit.
+                    testObserver?.at(StageGitTestCheckpoint.AFTER_REF_UPDATE)
                     // This only updates the index; working-tree contents are already
                     // the exact accepted bytes and must never be reset by the host.
                     git(real, listOf("read-tree", "--reset", commit))
