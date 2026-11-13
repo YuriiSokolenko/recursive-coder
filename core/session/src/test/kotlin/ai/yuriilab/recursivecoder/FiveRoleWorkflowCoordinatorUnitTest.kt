@@ -97,6 +97,8 @@ class FiveRoleWorkflowCoordinatorUnitTest {
                 state.graph, state.acceptedIds, PreparationStageOutcome.Denied("DENIED_BY_STAGE"))
             if (prepareMode == "failed") return PreparationStageResult(
                 state.graph, state.acceptedIds, PreparationStageOutcome.Failed("STAGE_FAILED"))
+            if (prepareMode == "uncertain") return PreparationStageResult(null, null,
+                PreparationStageOutcome.ReconciliationRequired("PREPARATION_UNCERTAIN"))
             if (prepareMode == "reported-stale") return PreparationStageResult(
                 state.graph.copy(budget = state.graph.budget.copy(maxTokens = 9998)),
                 state.acceptedIds, PreparationStageOutcome.Failed("STAGE_FAILED"))
@@ -107,7 +109,8 @@ class FiveRoleWorkflowCoordinatorUnitTest {
             if (prepareMode != "no-commit") state = accepted
             val response = if (prepareMode == "wrong-output")
                 manifest.copy(id = ArtifactId("incorrect-output")) else manifest
-            return PreparationStageResult(accepted.graph,
+            return PreparationStageResult(
+                if (prepareMode == "missing-graph") null else accepted.graph,
                 if (prepareMode == "missing-acceptance") null else accepted.acceptedIds,
                 PreparationStageOutcome.Accepted(response,
                     StageValidationEvidence(
@@ -123,10 +126,13 @@ class FiveRoleWorkflowCoordinatorUnitTest {
             when (developMode) {
                 "denied" -> return DeveloperStageResult(state.graph, state.acceptedIds,
                     DeveloperStageOutcome.Denied("DEVELOPER_DENIED"))
-                "failed" -> return DeveloperStageResult(state.graph, state.acceptedIds,
-                    DeveloperStageOutcome.Failed("DEVELOPER_FAILED", false))
-                "uncertain" -> return DeveloperStageResult(null, null,
-                    DeveloperStageOutcome.ReconciliationRequired("DEVELOPER_UNCERTAIN", true))
+                "failed", "failed-dirty" -> return DeveloperStageResult(
+                    state.graph, state.acceptedIds,
+                    DeveloperStageOutcome.Failed("DEVELOPER_FAILED",
+                        developMode == "failed-dirty"))
+                "uncertain", "uncertain-clean" -> return DeveloperStageResult(null, null,
+                    DeveloperStageOutcome.ReconciliationRequired("DEVELOPER_UNCERTAIN",
+                        developMode == "uncertain"))
             }
             val (manifest, accepted) = approved(command.graph, StageKind.DEVELOP,
                 command.artifactId, command.manifestPath)
@@ -140,7 +146,7 @@ class FiveRoleWorkflowCoordinatorUnitTest {
             acceptedDeveloperEvidence = DeveloperReviewEvidence(result.manifest,
                 result.changedFiles.map { ReviewerChangedFile(it.path, it.beforeSha256,
                     it.afterSha256) }, result.writeToolId, result.validation, result.usage)
-            state = accepted
+            if (developMode != "no-commit") state = accepted
             return DeveloperStageResult(
                 if (developMode == "missing-graph") null else accepted.graph,
                 if (developMode == "missing-acceptance") null else accepted.acceptedIds,
@@ -195,8 +201,10 @@ class FiveRoleWorkflowCoordinatorUnitTest {
                         requireNotNull(it.agentId), ReviewVerdict.ACCEPT))
                 else it
             })
-            state = state.copy(graph = changed)
-            return ReviewerStageResult(changed, state.acceptedIds,
+            if (reviewMode != "no-commit") state = state.copy(graph = changed)
+            return ReviewerStageResult(
+                if (reviewMode == "missing-graph") null else changed,
+                if (reviewMode == "missing-acceptance") null else state.acceptedIds,
                 ReviewerStageOutcome.Accepted(decision, StageRoleUsage()))
         }
 
@@ -245,10 +253,11 @@ class FiveRoleWorkflowCoordinatorUnitTest {
     }
 
     private suspend fun expectUncertain(f: Fixture, code: String,
-        stage: StageKind = StageKind.SDD) {
+        stage: StageKind = StageKind.SDD, workspaceMayBeDirty: Boolean = false) {
         val outcome = assertIs<FiveRoleWorkflowOutcome.ReconciliationRequired>(f.run())
         assertEquals(code, outcome.code)
         assertEquals(stage, outcome.stage)
+        assertEquals(workspaceMayBeDirty, outcome.workspaceMayBeDirty)
     }
 
     @Test fun invalidPlansCannotReachAnyRoleOrHost() = runBlocking {
@@ -306,6 +315,9 @@ class FiveRoleWorkflowCoordinatorUnitTest {
         val human = Fixture()
         human.prepareMode = "human"
         expectStopped(human, "HUMAN_APPROVAL_REQUIRED")
+        val prepareUncertain = Fixture()
+        prepareUncertain.prepareMode = "uncertain"
+        expectUncertain(prepareUncertain, "PREPARATION_UNCERTAIN")
         val stoppedReadFailure = Fixture()
         stoppedReadFailure.prepareMode = "denied"
         stoppedReadFailure.snapshotMode = "throw-on-stop"
@@ -323,6 +335,9 @@ class FiveRoleWorkflowCoordinatorUnitTest {
         val missing = Fixture()
         missing.prepareMode = "missing-acceptance"
         expectUncertain(missing, "MISSING_HOST_ACCEPTANCE")
+        val missingGraph = Fixture()
+        missingGraph.prepareMode = "missing-graph"
+        expectUncertain(missingGraph, "MISSING_COMMITTED_GRAPH")
         val uncommitted = Fixture()
         uncommitted.prepareMode = "no-commit"
         expectUncertain(uncommitted, "UNCONFIRMED_STAGE_COMMIT")
@@ -348,21 +363,25 @@ class FiveRoleWorkflowCoordinatorUnitTest {
     }
 
     @Test fun developerAndReviewerFailuresNeverBecomeSuccessfulStages() = runBlocking {
-        for ((mode, code, needsReconciliation) in listOf(
-            Triple("denied", "DEVELOPER_DENIED", false),
-            Triple("failed", "DEVELOPER_FAILED", false),
-            Triple("uncertain", "DEVELOPER_UNCERTAIN", true)
+        for ((mode, code, needsReconciliation, mayBeDirty) in listOf(
+            listOf("denied", "DEVELOPER_DENIED", "false", "false"),
+            listOf("failed", "DEVELOPER_FAILED", "false", "false"),
+            listOf("failed-dirty", "DEVELOPER_FAILED", "true", "true"),
+            listOf("uncertain", "DEVELOPER_UNCERTAIN", "true", "true"),
+            listOf("uncertain-clean", "DEVELOPER_UNCERTAIN", "true", "false")
         )) {
             val fixture = Fixture()
             fixture.developMode = mode
-            if (needsReconciliation) expectUncertain(fixture, code, StageKind.DEVELOP)
+            if (needsReconciliation.toBoolean())
+                expectUncertain(fixture, code, StageKind.DEVELOP, mayBeDirty.toBoolean())
             else expectStopped(fixture, code, StageKind.DEVELOP)
             assertEquals(StageKind.DEVELOP, fixture.called.last())
         }
         for ((mode, code) in listOf(
             "wrong-output" to "WORKFLOW_OUTPUT_MISMATCH",
             "missing-acceptance" to "MISSING_HOST_ACCEPTANCE",
-            "missing-graph" to "MISSING_COMMITTED_GRAPH"
+            "missing-graph" to "MISSING_COMMITTED_GRAPH",
+            "no-commit" to "UNCONFIRMED_STAGE_COMMIT"
         )) {
             val fixture = Fixture()
             fixture.developMode = mode
@@ -378,6 +397,15 @@ class FiveRoleWorkflowCoordinatorUnitTest {
             if (needsReconciliation) expectUncertain(fixture, code, StageKind.REVIEW)
             else expectStopped(fixture, code, StageKind.REVIEW)
             assertEquals(StageKind.REVIEW, fixture.called.last())
+        }
+        for ((mode, code) in listOf(
+            "missing-graph" to "MISSING_COMMITTED_GRAPH",
+            "missing-acceptance" to "MISSING_HOST_ACCEPTANCE",
+            "no-commit" to "UNCONFIRMED_STAGE_COMMIT"
+        )) {
+            val fixture = Fixture()
+            fixture.reviewMode = mode
+            expectUncertain(fixture, code, StageKind.REVIEW)
         }
     }
 
