@@ -139,12 +139,17 @@ class LinuxStageGitBaselineReconciler(
                 // read/write bits (0600, 0644, 0664) do not change Git mode.
                 // TrustedWriteRuntime uses CREATE_NEW and respects process umask,
                 // so requiring the exact 0644 POSIX set would reject valid writes.
-                val mode = if (perms.any { it in setOf(
-                        PosixFilePermission.OWNER_EXECUTE,
-                        PosixFilePermission.GROUP_EXECUTE,
-                        PosixFilePermission.OTHERS_EXECUTE
-                    ) }) "100755" else "100644"
+                // Git's core.filemode=true checks the owner execute bit only.
+                // Group/other execute without owner execute is an unusual
+                // candidate mode, so reject it before update-ref rather than
+                // permit ambiguous cross-platform permission semantics.
+                val ownerExecutable = PosixFilePermission.OWNER_EXECUTE in perms
+                val mode = if (ownerExecutable) "100755" else "100644"
                 if (requireCanonicalMode) {
+                    check(ownerExecutable || (
+                        PosixFilePermission.GROUP_EXECUTE !in perms &&
+                        PosixFilePermission.OTHERS_EXECUTE !in perms),
+                        "UNSAFE_STAGE_FILE_MODE")
                     // Accepted writes must be owner-readable/writable and must
                     // not be world-writable. Immutable inputs only need a safe
                     // descriptor read, accepted digest and clean Git status.
