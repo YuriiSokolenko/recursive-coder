@@ -43,6 +43,21 @@ Git baseline suitable for the next `TrustedWriteRuntime.open`. It must fence
 concurrent workspace mutations throughout the read/commit interval. A policy
 `Permit` does not substitute for this evidence.
 
+Developer failures retain the trusted stage's `workspaceMayBeDirty` signal:
+a `DeveloperStageOutcome.Failed` with this flag **never** becomes a resumable
+`Stopped`, even when the host graph snapshot looks valid. It becomes
+`ReconciliationRequired(code, DEVELOP, workspaceMayBeDirty = true)`. The flag
+is also forwarded from Developer `ReconciliationRequired` outcomes; `false`
+only means no positive dirty-workspace signal was supplied, **not** verified
+cleanliness. Only a trusted host can inspect and reconcile physical changes.
+A clean `Denied` that nevertheless changes the host snapshot is likewise
+converted into `UNCONFIRMED_STOP_STATE`.
+
+For stage attribution, an exception thrown *inside* `advance` is reported for
+the finishing stage (the reconciliation operation is unconfirmed). Once
+`advance` has returned, an invalid/unconfirmed next-stage snapshot is
+reported for the **next** stage, which must not be admitted.
+
 A Developer handoff includes its output manifest, changed-file pre/postimages,
 write tool ID, checked evidence and usage. The host must independently verify
 these against retained authenticated receipts before constructing the Reviewer
