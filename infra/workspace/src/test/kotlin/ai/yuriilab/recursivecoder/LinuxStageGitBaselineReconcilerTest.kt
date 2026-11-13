@@ -4,6 +4,7 @@ import java.nio.channels.FileChannel
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
+import java.nio.file.attribute.PosixFilePermissions
 import java.security.MessageDigest
 import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
@@ -11,6 +12,7 @@ import org.junit.jupiter.api.condition.EnabledOnOs
 import org.junit.jupiter.api.condition.OS
 import org.junit.jupiter.api.io.TempDir
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
@@ -99,10 +101,11 @@ class LinuxStageGitBaselineReconcilerTest {
                 mapOf("specs/Feature.md" to original)))
         write(repo.root, "specs/Feature.md", "tampered\n")
         val acceptance = write(repo.root, "tests/acceptance/A.feature", "accepted\n")
-        assertIs<StageGitReconciliationResult.Denied>(
+        val tampered = assertIs<StageGitReconciliationResult.Denied>(
             reconcile(repo, committed.newHead, EngineeringRole.ATDD,
                 mapOf("tests/acceptance/A.feature" to acceptance),
                 mapOf("specs/Feature.md" to original)))
+        assertEquals("UNEXPECTED_GIT_CHANGE", tampered.code)
         assertEquals(committed.newHead, git(repo.root, "rev-parse", "HEAD"))
 
         // Even an unrelated untracked file must block the next commit.
@@ -176,5 +179,104 @@ class LinuxStageGitBaselineReconcilerTest {
             reconcile(repo, repo.head, EngineeringRole.SDD,
                 mapOf("specs/Feature.md" to accepted)))
         assertEquals("UNSAFE_GIT_CONFIGURATION", blocked.code)
+    }
+
+    @Test fun executableGitHooksAreDisabledEvenWithoutLocalHookConfig() {
+        val repo = createRepo()
+        val marker = temporary.resolve("git-hook-executed")
+        val hooks = repo.root.resolve(".git/hooks")
+        Files.createDirectories(hooks)
+        for (name in listOf("reference-transaction", "post-index-change")) {
+            val hook = hooks.resolve(name)
+            Files.writeString(hook, "#!/bin/sh\\nprintf 'hook\\n' >> '${marker}'\\n".replace("\\n", "\n"))
+            Files.setPosixFilePermissions(hook, PosixFilePermissions.fromString("rwxr-xr-x"))
+        }
+        val digest = write(repo.root, "specs/Feature.md", "safe without hooks\n")
+        val result = assertIs<StageGitReconciliationResult.Committed>(
+            reconcile(repo, repo.head, EngineeringRole.SDD,
+                mapOf("specs/Feature.md" to digest)))
+        assertEquals(result.newHead, git(repo.root, "rev-parse", "HEAD"))
+        assertFalse(Files.exists(marker), "Git hooks must never execute in the host")
+    }
+
+    @Test fun executableModeChangesAreRejectedBeforeUpdatingBranch() {
+        val repo = createRepo()
+        val path = "src/main/Feature.kt"
+        val initial = write(repo.root, path, "fun feature() = 1\n")
+        Files.setPosixFilePermissions(repo.root.resolve(path),
+            PosixFilePermissions.fromString("rwxr-xr-x"))
+        val newMode = assertIs<StageGitReconciliationResult.Denied>(
+            reconcile(repo, repo.head, EngineeringRole.DEVELOPER,
+                mapOf(path to initial)))
+        assertEquals("UNSAFE_STAGE_FILE_MODE", newMode.code)
+        assertEquals(repo.head, git(repo.root, "rev-parse", "HEAD"))
+
+        Files.setPosixFilePermissions(repo.root.resolve(path),
+            PosixFilePermissions.fromString("rw-r--r--"))
+        val first = assertIs<StageGitReconciliationResult.Committed>(
+            reconcile(repo, repo.head, EngineeringRole.DEVELOPER,
+                mapOf(path to initial)))
+        val editedHash = write(repo.root, path, "fun feature() = 2\n")
+        Files.setPosixFilePermissions(repo.root.resolve(path),
+            PosixFilePermissions.fromString("rwxr-xr-x"))
+        val drift = assertIs<StageGitReconciliationResult.Denied>(
+            reconcile(repo, first.newHead, EngineeringRole.DEVELOPER,
+                mapOf(path to editedHash)))
+        assertEquals("UNSAFE_STAGE_FILE_MODE", drift.code)
+        assertEquals(first.newHead, git(repo.root, "rev-parse", "HEAD"))
+    }
+
+    @Test fun trackedEditSucceedsAndLeavesCleanWorktree() {
+        val repo = createRepo()
+        val path = "src/main/Feature.kt"
+        val original = write(repo.root, path, "fun feature() = 1\n")
+        val first = assertIs<StageGitReconciliationResult.Committed>(
+            reconcile(repo, repo.head, EngineeringRole.DEVELOPER, mapOf(path to original)))
+        val editedHash = write(repo.root, path, "fun feature() = 2\n")
+        val second = assertIs<StageGitReconciliationResult.Committed>(
+            reconcile(repo, first.newHead, EngineeringRole.DEVELOPER,
+                mapOf(path to editedHash)))
+        assertEquals("", git(repo.root, "status", "--porcelain"))
+        assertEquals("100644", git(repo.root, "ls-tree", "HEAD", "--", path).substringBefore(' '))
+        assertEquals(second.newHead, git(repo.root, "rev-parse", "HEAD"))
+    }
+
+    @Test fun rejectsUnsafeLocalConfigIncludingCoreFileModeFalse() {
+        val repo = createRepo()
+        val hash = write(repo.root, "specs/Feature.md", "requirements\n")
+        for ((key, value) in listOf("core.filemode" to "false",
+            "core.attributesfile" to "/tmp/attributes", "alias.status" to "echo spoofed",
+            "commit.gpgsign" to "true")) {
+            git(repo.root, "config", "--local", key, value)
+            val denied = assertIs<StageGitReconciliationResult.Denied>(
+                reconcile(repo, repo.head, EngineeringRole.SDD,
+                    mapOf("specs/Feature.md" to hash)))
+            assertEquals("UNSAFE_GIT_CONFIGURATION", denied.code, key)
+            git(repo.root, "config", "--local", "--unset", key)
+        }
+        assertEquals(repo.head, git(repo.root, "rev-parse", "HEAD"))
+    }
+
+    @Test fun rejectsStagedIndexIgnoredFileAndWrongBranch() {
+        val repo = createRepo()
+        val hash = write(repo.root, "specs/Feature.md", "requirements\n")
+        val wrongBranch = assertIs<StageGitReconciliationResult.Denied>(
+            LinuxStageGitBaselineReconciler(repo.root, repo.locks).reconcile(
+                StageGitReconciliationRequest(repo.head, "other", EngineeringRole.SDD,
+                    listOf(StageGitAcceptedFile("specs/Feature.md", hash)))))
+        assertEquals("STAGE_BRANCH_CHANGED", wrongBranch.code)
+        git(repo.root, "add", "specs/Feature.md")
+        val staged = assertIs<StageGitReconciliationResult.Denied>(
+            reconcile(repo, repo.head, EngineeringRole.SDD,
+                mapOf("specs/Feature.md" to hash)))
+        assertEquals("UNEXPECTED_GIT_CHANGE", staged.code)
+        git(repo.root, "reset", "--mixed", "HEAD")
+        Files.writeString(repo.root.resolve(".git/info/exclude"), "ignored-fixture\n")
+        write(repo.root, "ignored-fixture", "should be rejected\n")
+        val ignored = assertIs<StageGitReconciliationResult.Denied>(
+            reconcile(repo, repo.head, EngineeringRole.SDD,
+                mapOf("specs/Feature.md" to hash)))
+        assertEquals("UNEXPECTED_GIT_CHANGE", ignored.code)
+        assertEquals(repo.head, git(repo.root, "rev-parse", "HEAD"))
     }
 }
