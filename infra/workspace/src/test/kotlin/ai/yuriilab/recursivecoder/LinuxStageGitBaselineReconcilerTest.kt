@@ -25,8 +25,15 @@ class LinuxStageGitBaselineReconcilerTest {
     private data class Repo(val root: Path, val locks: Path, val head: String)
 
     private fun git(root: Path, vararg args: String): String {
-        val process = ProcessBuilder(listOf("git") + args).directory(root.toFile())
-            .redirectErrorStream(true).start()
+        val process = ProcessBuilder(listOf("/usr/bin/git",
+            "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null") + args)
+            .directory(root.toFile()).redirectErrorStream(true).apply {
+                environment().clear()
+                environment()["GIT_CONFIG_NOSYSTEM"] = "1"
+                environment()["GIT_CONFIG_GLOBAL"] = "/dev/null"
+                environment()["GIT_TERMINAL_PROMPT"] = "0"
+                environment()["LC_ALL"] = "C"
+            }.start()
         val output = process.inputStream.bufferedReader().readText()
         assertEquals(0, process.waitFor(), output)
         return output.trim()
@@ -377,7 +384,7 @@ class LinuxStageGitBaselineReconcilerTest {
     private fun withFaultObserver(repo: Repo, observer: StageGitTestObserver):
         LinuxStageGitBaselineReconciler =
         LinuxStageGitBaselineReconciler(repo.root, repo.locks,
-            LinuxStageGitBaselineReconciler.findGit(), observer)
+            Path.of("/usr/bin/git"), observer)
 
     @Test fun postCasFailureIsUncertainEvenWhenRefAlreadyMoved() {
         val repo = createRepo()
@@ -452,4 +459,127 @@ class LinuxStageGitBaselineReconcilerTest {
         assertEquals("UNEXPECTED_GIT_CHANGE", ignored.code)
         assertEquals(repo.head, git(repo.root, "rev-parse", "HEAD"))
     }
+    private fun baseline(repo: Repo, head: String = repo.head,
+        branch: String = "dev"): StageGitBaselineResult =
+        LinuxStageGitBaselineReconciler(repo.root, repo.locks,
+            Path.of("/usr/bin/git")).inspectCleanBaseline(head, branch)
+
+    @Test fun cleanBaselineAcceptsCorrectHeadAndRejectsInvalidArguments() {
+        val repo = createRepo()
+        assertEquals(StageGitBaselineResult.Clean, baseline(repo))
+        assertEquals(StageGitBaselineResult.Denied("INVALID_GIT_BASELINE"),
+            baseline(repo, head = "invalid-head"))
+        assertEquals(StageGitBaselineResult.Denied("INVALID_GIT_BASELINE"),
+            baseline(repo, branch = "../escaping"))
+        assertEquals(StageGitBaselineResult.Denied("INVALID_GIT_BASELINE"),
+            baseline(repo, branch = "dev.lock"))
+        assertEquals(repo.head, git(repo.root, "rev-parse", "HEAD"))
+    }
+
+    @Test fun cleanBaselineRejectsHeadAndBranchDriftWithCodes() {
+        val repo = createRepo()
+        git(repo.root, "commit", "--allow-empty", "-m", "competing head")
+        assertEquals(StageGitBaselineResult.Denied("STAGE_BASELINE_CHANGED"),
+            baseline(repo))
+        val changedHead = git(repo.root, "rev-parse", "HEAD")
+        git(repo.root, "checkout", "-b", "competing-branch")
+        assertEquals(StageGitBaselineResult.Denied("STAGE_BRANCH_CHANGED"),
+            baseline(repo, head = changedHead))
+    }
+
+    @Test fun cleanBaselineRejectsUnsafeConfigurationAndIndexFlags() {
+        val repo = createRepo()
+        git(repo.root, "config", "--local", "core.hooksPath", "/tmp/unsafe-hooks")
+        assertEquals(StageGitBaselineResult.Denied("UNSAFE_GIT_CONFIGURATION"),
+            baseline(repo))
+        git(repo.root, "config", "--local", "--unset", "core.hooksPath")
+        assertEquals(StageGitBaselineResult.Clean, baseline(repo))
+        git(repo.root, "update-index", "--skip-worktree", "README.md")
+        assertEquals(StageGitBaselineResult.Denied("UNSAFE_GIT_INDEX"),
+            baseline(repo))
+        git(repo.root, "update-index", "--no-skip-worktree", "README.md")
+        assertEquals(StageGitBaselineResult.Clean, baseline(repo))
+    }
+
+    @Test fun cleanBaselineDoesNotIgnoreIgnoredFiles() {
+        val repo = createRepo()
+        Files.writeString(repo.root.resolve(".git/info/exclude"), "untracked-secret-fixture\\n")
+        write(repo.root, "untracked-secret-fixture", "must reject even if ignored\\n")
+        assertEquals(StageGitBaselineResult.Denied("STAGE_WORKSPACE_CHANGED"),
+            baseline(repo))
+        Files.delete(repo.root.resolve("untracked-secret-fixture"))
+        assertEquals(StageGitBaselineResult.Clean, baseline(repo))
+    }
+
+    @Test fun cleanBaselineRejectsRefChangeDuringFinalInspection() {
+        val repo = createRepo()
+        var checkpointSeen = false
+        val reconciler = LinuxStageGitBaselineReconciler(repo.root, repo.locks,
+            Path.of("/usr/bin/git"), StageGitTestObserver { checkpoint ->
+                if (checkpoint == StageGitTestCheckpoint.BEFORE_BASELINE_FINAL_READ) {
+                    checkpointSeen = true
+                    git(repo.root, "commit", "--allow-empty", "-m", "external ref drift")
+                }
+            })
+        assertEquals(StageGitBaselineResult.Denied("STAGE_BASELINE_CHANGED"),
+            reconciler.inspectCleanBaseline(repo.head, "dev"))
+        assertTrue(checkpointSeen)
+        assertTrue(repo.head != git(repo.root, "rev-parse", "HEAD"))
+    }
+
+    @Test fun baselineDeadlineCapsTheWholeReadOnlyInspection() {
+        val repo = createRepo()
+        var checkpointSeen = false
+        val reconciler = LinuxStageGitBaselineReconciler(repo.root, repo.locks,
+            Path.of("/usr/bin/git"), StageGitTestObserver { checkpoint ->
+                if (checkpoint == StageGitTestCheckpoint.BEFORE_BASELINE_FINAL_READ) {
+                    checkpointSeen = true
+                    Thread.sleep(60)
+                }
+            }, 5L)
+        assertEquals(StageGitBaselineResult.Denied("GIT_BASELINE_TIMEOUT"),
+            reconciler.inspectCleanBaseline(repo.head, "dev"))
+        // If the very tight injected deadline expired earlier, the same
+        // denial code still proves one overall budget rather than per-call
+        // 15-second accumulation.
+        assertEquals(repo.head, git(repo.root, "rev-parse", "HEAD"))
+    }
+
+    @Test fun ignoredAcceptedStagePathCannotPassMutatingPreflight() {
+        val repo = createRepo()
+        val path = "specs/IgnoredStage.md"
+        Files.writeString(repo.root.resolve(".git/info/exclude"), "$path\n")
+        val accepted = write(repo.root, path, "Ignored by Git, not accepted by policy\n")
+        val denied = assertIs<StageGitReconciliationResult.Denied>(
+            reconcile(repo, repo.head, EngineeringRole.SDD, mapOf(path to accepted)))
+        assertEquals("UNEXPECTED_GIT_CHANGE", denied.code)
+        assertEquals(repo.head, git(repo.root, "rev-parse", "HEAD"))
+        assertTrue(Files.exists(repo.root.resolve(path)),
+            "Denied reconciler may not erase physical working files")
+    }
+
+    @Test fun interruptedGitBaselinePreservesInterruptFlagAndDenialCode() {
+        val repo = createRepo()
+        val reconciler = LinuxStageGitBaselineReconciler(
+            repo.root, repo.locks, Path.of("/usr/bin/git"))
+        val captured = java.util.concurrent.atomic.AtomicReference<StageGitBaselineResult>()
+        val preserved = java.util.concurrent.atomic.AtomicBoolean(false)
+        val worker = Thread {
+            try {
+                Thread.currentThread().interrupt()
+                captured.set(reconciler.inspectCleanBaseline(repo.head, "dev"))
+                preserved.set(Thread.currentThread().isInterrupted)
+            } finally {
+                // Do not leak an interrupted status to the test executor.
+                Thread.interrupted()
+            }
+        }
+        worker.start()
+        worker.join(10_000)
+        assertFalse(worker.isAlive, "An interrupted Git baseline must terminate")
+        assertEquals(StageGitBaselineResult.Denied("GIT_BASELINE_INTERRUPTED"), captured.get())
+        assertTrue(preserved.get(), "Git subprocess denial must preserve the interrupt bit")
+        assertEquals(repo.head, git(repo.root, "rev-parse", "HEAD"))
+    }
+
 }
