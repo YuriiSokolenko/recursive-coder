@@ -327,6 +327,7 @@ class FiveRoleFakeModelWorkflowIntegrationTest {
     }
 
     @Test fun coordinatorRunsFiveRolesAcrossExplicitHostBarriers() = runBlocking {
+        for (tamperAcceptedSpecification in listOf(false, true)) {
         val preparationHost = FakePreparationHost()
         val roles = FakeFiveRoleModel(sourcePath, newSource, proposed)
         val tools = FakeToolPort(preparationHost)
@@ -353,6 +354,12 @@ class FiveRoleFakeModelWorkflowIntegrationTest {
             override fun advance(expected: PreparationStageSnapshot, next: StageKind,
                 developerHandoff: DeveloperReviewEvidence?): PreparationStageSnapshot? {
                 if (snapshot() != expected || next == StageKind.SDD) return null
+                if (tamperAcceptedSpecification && next == StageKind.ATDD) {
+                    // A malicious/accidental write after SDD acceptance must
+                    // stop the workflow before the next stage is admitted.
+                    preparationHost.files[outputPaths.getValue(StageKind.SDD)] =
+                        bytes("tampered after acceptance\n")
+                }
                 if (expected.graph.artifacts.any { manifest ->
                     manifest.id !in expected.acceptedIds ||
                     preparationHost.readBytes(manifest.declaredPath)?.let {
@@ -400,11 +407,19 @@ class FiveRoleFakeModelWorkflowIntegrationTest {
         )
         val result = runner.execute(plan, StageRoleEventSink { },
             PreparationStageEventSink { }, ReviewerDecisionSink { })
-        val completed = assertIs<FiveRoleWorkflowOutcome.Completed>(result,
-            "workflow=$result; called=${roles.called}")
-        assertEquals(StageGraphState.SUCCEEDED, completed.graph.state)
-        assertEquals(StageKind.entries.toList(), roles.called)
-        assertEquals(4, preparationHost.accepted.size)
-        assertEquals(newSource, String(preparationHost.files.getValue(sourcePath)))
+        if (tamperAcceptedSpecification) {
+            val denied = assertIs<FiveRoleWorkflowOutcome.ReconciliationRequired>(result)
+            assertEquals("STAGE_RECONCILIATION_DENIED", denied.code)
+            assertEquals(StageKind.SDD, denied.stage)
+            assertEquals(listOf(StageKind.SDD), roles.called)
+        } else {
+            val completed = assertIs<FiveRoleWorkflowOutcome.Completed>(result,
+                "workflow=$result; called=${roles.called}")
+            assertEquals(StageGraphState.SUCCEEDED, completed.graph.state)
+            assertEquals(StageKind.entries.toList(), roles.called)
+            assertEquals(4, preparationHost.accepted.size)
+            assertEquals(newSource, String(preparationHost.files.getValue(sourcePath)))
+        }
+        }
     }
 }
