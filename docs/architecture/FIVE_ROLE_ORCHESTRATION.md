@@ -105,16 +105,21 @@ no-follow file reads and the same external workspace lock file as
 plumbing can run even without invoking `git commit`. Only a conservative
 allowlist of repository-local Git configuration keys is accepted;
 `core.filemode=false`, filters, attribute overrides, aliases and hooks
-configuration are rejected. For the *currently accepted stage writes*,
-the Linux reconciler checks exact POSIX permissions corresponding to `100644`
-or `100755` and requires new files to be `100644` and tracked writes to
-preserve their HEAD mode **before** updating the branch reference. Existing
-frozen inputs are different: Git only tracks the executable bit, so frozen
-regular files at `0600` (umask 077) or `0664` (umask 002) are permitted
-as long as their SHA-256 and no-follow file access are valid and Git status
-remains clean. The same distinction applies to preflight and post-commit
-verification. Mode-only changes, deletions, renames, pre-staged index changes
-and unexpected ignored or untracked files are not supported and are denied.
+configuration are rejected. For *currently accepted stage writes*,
+the reconciler uses the POSIX executable bit to determine Git mode
+(`100644`/`100755`), requires new files to be non-executable and tracked
+writes to preserve their HEAD Git mode **before** updating the branch ref,
+and rejects world-writable or owner-unreadable/unwritable files. Non-executable
+files created under `umask 077` (`0600`) or `umask 002` (`0664`)
+are valid: `TrustedWriteRuntime` honors the process umask when creating a
+file, and Git does not record those read/write permission differences.
+
+Already frozen regular inputs only require SHA-256, no-follow descriptor
+safety and a clean Git status; they do not need the accepted-write permission
+policy. The same distinction applies to preflight and post-commit
+verification. Executable-bit changes, deletions, renames, pre-staged index
+changes and unexpected ignored or untracked files are not supported and are
+denied.
 Linux repositories copied from another OS may also be rejected if their Git
 local configuration does not satisfy the strict Linux-only allowlist.
 
