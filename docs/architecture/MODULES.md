@@ -6,7 +6,7 @@
 | --- | --- | --- |
 | `:agent:runtime` | One role-scoped Koog execution adapter, offline fake prompt bridge, metering and sanitized proposal events | `:core:contracts` |
 | `:core:contracts` | Session Protocol support, request validation, model/workspace contracts, stage graph and bounded recursion policies, host-only stage tool ports and typed evidence, shared value types and pure tool authorization | none |
-| `:core:session` | `RunSessionUseCase` + `DefaultRunSessionUseCase`, compatibility Session Controller, in-memory `RecursiveGraphScheduler` for stage-owned subtree execution, deadline/budget enforcement, admission policy and event journal | `:core:contracts` |
+| `:core:session` | `RunSessionUseCase` + `DefaultRunSessionUseCase`, compatibility Session Controller, in-memory `RecursiveGraphScheduler` for stage-owned subtree execution, host-owned `RunFiveRoleWorkflowUseCase` and its stage/host execution ports, deadline/budget enforcement, admission policy and event journal | `:core:contracts` |
 | `:core:tasks` | Task command/query and scheduler-attempt Use Case interfaces and implementations, TaskService façade, policy, repository port and scheduler | `:core:contracts` |
 | `:infra:model` | Offline FakeModel and optional OpenAI-compatible HTTP adapter | `:core:contracts` |
 | `:infra:workspace` | Workspace Manager, restricted Git, trusted write/check runtime and LinuxStageToolSessionOpener | `:core:contracts` |
@@ -72,6 +72,10 @@ The adapter uses only a deterministic fake-model compatibility bridge
 until a production free-form role gateway is implemented and reviewed.
 See [Koog role execution](KOOG_STAGE_EXECUTION.md) for trust, metering,
 capability and test boundaries.
+
+## Host-owned five-role orchestration (issue #79, incomplete)
+
+`:core:session` owns `RunFiveRoleWorkflowUseCase`, `FiveRoleWorkflowHost` and `FiveRoleStageActions`. The two latter ports live next to the coordinator rather than in shared `:core:contracts`: they exist solely to compose existing session use cases, do not grant capabilities, and are not consumed by other modules. The secondary constructor wraps the existing `RunPreparationStageUseCase`, `RunDeveloperStageUseCase` and `RunReviewerStageUseCase`; pure unit tests substitute a scripted action port without creating physical writes. A trusted host must verify clean-tree reconciliation and receipt provenance before using the production coordinator. The installed read-only CLI does not select this workflow. See [five-role orchestration](FIVE_ROLE_ORCHESTRATION.md).
 
 ## Host-only stage tool authority (issue #74)
 
