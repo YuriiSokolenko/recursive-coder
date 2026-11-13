@@ -374,6 +374,67 @@ class LinuxStageGitBaselineReconcilerTest {
         assertEquals(repo.head, git(repo.root, "rev-parse", "HEAD"))
     }
 
+    private fun withFaultObserver(repo: Repo, observer: StageGitTestObserver):
+        LinuxStageGitBaselineReconciler {
+        val executable = System.getenv("PATH").orEmpty()
+            .split(java.io.File.pathSeparatorChar)
+            .asSequence().filter(String::isNotBlank)
+            .map { Path.of(it).resolve("git") }
+            .first { Files.isExecutable(it) && it.isAbsolute }
+        return LinuxStageGitBaselineReconciler(repo.root, repo.locks, executable, observer)
+    }
+
+    @Test fun postCasFailureIsUncertainEvenWhenRefAlreadyMoved() {
+        val repo = createRepo()
+        val path = "specs/Feature.md"
+        val hash = write(repo.root, path, "accepted requirements\n")
+        var headInsideFailure: String? = null
+        val reconciler = withFaultObserver(repo, StageGitTestObserver { checkpoint ->
+            if (checkpoint == StageGitTestCheckpoint.AFTER_REF_UPDATE) {
+                headInsideFailure = git(repo.root, "rev-parse", "HEAD")
+                error("injected process failure after update-ref succeeded")
+            }
+        })
+        val outcome = assertIs<StageGitReconciliationResult.ReconciliationRequired>(
+            reconciler.reconcile(StageGitReconciliationRequest(repo.head, "dev",
+                EngineeringRole.SDD, listOf(StageGitAcceptedFile(path, hash)))))
+        assertEquals("GIT_HANDOFF_UNCONFIRMED", outcome.code)
+        assertTrue(headInsideFailure != null && headInsideFailure != repo.head,
+            "the fault must occur after the real branch ref moved")
+        assertEquals(headInsideFailure, git(repo.root, "rev-parse", "HEAD"))
+        assertTrue(git(repo.root, "status", "--porcelain").isNotBlank(),
+            "the real index is not yet aligned; do not admit another stage")
+
+        val retry = assertIs<StageGitReconciliationResult.Denied>(
+            reconcile(repo, repo.head, EngineeringRole.SDD, mapOf(path to hash)))
+        assertEquals("STAGE_BASELINE_CHANGED", retry.code)
+    }
+
+    @Test fun externalRefAdvanceDuringCasCannotOverwriteTheCompetingHead() {
+        val repo = createRepo()
+        val path = "specs/Feature.md"
+        val hash = write(repo.root, path, "accepted requirements\n")
+        var competingHead: String? = null
+        val reconciler = withFaultObserver(repo, StageGitTestObserver { checkpoint ->
+            if (checkpoint == StageGitTestCheckpoint.BEFORE_REF_UPDATE) {
+                val baselineTree = git(repo.root, "rev-parse", "HEAD^{tree}")
+                competingHead = git(repo.root, "commit-tree", baselineTree,
+                    "-p", repo.head, "-m", "independent competing host")
+                git(repo.root, "update-ref", "refs/heads/dev",
+                    requireNotNull(competingHead), repo.head)
+            }
+        })
+        val outcome = assertIs<StageGitReconciliationResult.ReconciliationRequired>(
+            reconciler.reconcile(StageGitReconciliationRequest(repo.head, "dev",
+                EngineeringRole.SDD, listOf(StageGitAcceptedFile(path, hash)))))
+        assertEquals("GIT_COMMAND_DENIED", outcome.code)
+        assertTrue(competingHead != null && competingHead != repo.head)
+        assertEquals(competingHead, git(repo.root, "rev-parse", "HEAD"),
+            "the stale-old-value CAS must never overwrite an external writer")
+        assertTrue(git(repo.root, "status", "--porcelain").isNotBlank(),
+            "uncertain handoff cannot be treated as a clean, admitted stage")
+    }
+
     @Test fun rejectsStagedIndexIgnoredFileAndWrongBranch() {
         val repo = createRepo()
         val hash = write(repo.root, "specs/Feature.md", "requirements\n")
