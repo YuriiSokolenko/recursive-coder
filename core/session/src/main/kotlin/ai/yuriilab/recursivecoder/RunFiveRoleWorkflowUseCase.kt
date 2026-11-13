@@ -45,7 +45,8 @@ interface FiveRoleWorkflowHost {
 
     fun advance(
         expected: PreparationStageSnapshot,
-        next: StageKind
+        next: StageKind,
+        developerHandoff: DeveloperReviewEvidence? = null
     ): PreparationStageSnapshot?
 
     fun finishSuccess(
@@ -113,6 +114,7 @@ class RunFiveRoleWorkflowUseCase(
             return stop(StageKind.SDD, "INVALID_INITIAL_STAGE_GRAPH", initial)
 
         var authoritative = initial
+        var developerHandoff: DeveloperReviewEvidence? = null
         for ((index, kind) in order.withIndex()) {
             val before = authoritative
             val current = try { host.snapshot() }
@@ -176,6 +178,13 @@ class RunFiveRoleWorkflowUseCase(
                             if (outcome.manifest.id != output.id ||
                                 outcome.manifest.declaredPath != output.path)
                                 return uncertain(kind, "WORKFLOW_OUTPUT_MISMATCH")
+                            developerHandoff = DeveloperReviewEvidence(
+                                outcome.manifest,
+                                outcome.changedFiles.map { file ->
+                                    ReviewerChangedFile(file.path, file.beforeSha256, file.afterSha256)
+                                },
+                                outcome.writeToolId, outcome.validation, outcome.usage
+                            )
                             val graph = done.graph ?: return uncertain(kind, "MISSING_COMMITTED_GRAPH")
                             val ids = done.hostAcceptedArtifactIds
                                 ?: return uncertain(kind, "MISSING_HOST_ACCEPTANCE")
@@ -238,7 +247,8 @@ class RunFiveRoleWorkflowUseCase(
             authoritative = result
             if (index < order.lastIndex) {
                 val next = order[index + 1]
-                authoritative = try { host.advance(result, next) }
+                authoritative = try { host.advance(result, next,
+                    if (next == StageKind.REVIEW) developerHandoff else null) }
                 catch (cancelled: CancellationException) { throw cancelled }
                 catch (_: Exception) { return uncertain(kind, "STAGE_RECONCILIATION_UNCONFIRMED") }
                     ?: return uncertain(kind, "STAGE_RECONCILIATION_DENIED")
