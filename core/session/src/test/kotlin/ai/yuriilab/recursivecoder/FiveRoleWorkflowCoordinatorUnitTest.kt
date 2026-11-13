@@ -335,7 +335,8 @@ class FiveRoleWorkflowCoordinatorUnitTest {
             val fixture = Fixture()
             fixture.advanceMode = mode
             expectUncertain(fixture, code,
-                if (mode == "missing-next") StageKind.ATDD else StageKind.SDD)
+                if (mode == "missing-next" || mode == "uncommitted-next")
+                    StageKind.ATDD else StageKind.SDD)
         }
         val tamperedHandoff = Fixture()
         tamperedHandoff.developMode = "tampered-handoff"
