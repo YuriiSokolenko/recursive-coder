@@ -400,7 +400,8 @@ class FiveRoleFakeModelWorkflowIntegrationTest {
         )
         val result = runner.execute(plan, StageRoleEventSink { },
             PreparationStageEventSink { }, ReviewerDecisionSink { })
-        val completed = assertIs<FiveRoleWorkflowOutcome.Completed>(result)
+        val completed = assertIs<FiveRoleWorkflowOutcome.Completed>(result,
+            "workflow=$result; called=${roles.called}")
         assertEquals(StageGraphState.SUCCEEDED, completed.graph.state)
         assertEquals(StageKind.entries.toList(), roles.called)
         assertEquals(4, preparationHost.accepted.size)
