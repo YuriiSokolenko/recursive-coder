@@ -105,11 +105,18 @@ no-follow file reads and the same external workspace lock file as
 plumbing can run even without invoking `git commit`. Only a conservative
 allowlist of repository-local Git configuration keys is accepted;
 `core.filemode=false`, filters, attribute overrides, aliases and hooks
-configuration are rejected. The Linux reconciler checks exact POSIX modes
-(`100644` or `100755`) and requires new files to be `100644` and tracked
-files to preserve their HEAD mode **before** updating the branch reference.
-Mode-only changes, deletions, renames, pre-staged index changes and unexpected
-ignored or untracked files are not supported and are denied.
+configuration are rejected. For the *currently accepted stage writes*,
+the Linux reconciler checks exact POSIX permissions corresponding to `100644`
+or `100755` and requires new files to be `100644` and tracked writes to
+preserve their HEAD mode **before** updating the branch reference. Existing
+frozen inputs are different: Git only tracks the executable bit, so frozen
+regular files at `0600` (umask 077) or `0664` (umask 002) are permitted
+as long as their SHA-256 and no-follow file access are valid and Git status
+remains clean. The same distinction applies to preflight and post-commit
+verification. Mode-only changes, deletions, renames, pre-staged index changes
+and unexpected ignored or untracked files are not supported and are denied.
+Linux repositories copied from another OS may also be rejected if their Git
+local configuration does not satisfy the strict Linux-only allowlist.
 
 Under that lock it builds a private temporary index, hashes accepted bytes
 without filters, creates a Git tree/commit using plumbing (no shell, Git
