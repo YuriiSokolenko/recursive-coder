@@ -51,6 +51,7 @@ With Gradle 9.8.1 and JDK 21 installed:
 - [Architecture and engineering roadmap](docs/architecture/ARCHITECTURE.md)
 - [Stage graph contracts and policy gates (#72)](docs/architecture/STAGE_GRAPH.md)
 - [Verified recursive child artifact integration (#79, partial)](docs/architecture/CHILD_INTEGRATION.md)
+- [Host-owned five-role orchestration (#79, in progress)](docs/architecture/FIVE_ROLE_ORCHESTRATION.md)
 - [Koog single-role execution boundary (#73)](docs/architecture/KOOG_STAGE_EXECUTION.md)
 - [Host-controlled stage tool authority and isolated checks (#74)](docs/architecture/STAGE_TOOL_AUTHORITY.md)
 - [Host-approved SDD, ATDD and TDD preparation stages (#75)](docs/architecture/PREPARATION_STAGES.md)
