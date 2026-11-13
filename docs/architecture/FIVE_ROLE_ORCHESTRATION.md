@@ -99,6 +99,18 @@ role-forbidden path or changed frozen byte. It uses descriptor-relative,
 no-follow file reads and the same external workspace lock file as
 `TrustedWriteRuntime`.
 
+**Git hooks are disabled for every invocation** through an overriding
+`core.hooksPath=/dev/null` configuration. This includes
+`reference-transaction` and `post-index-change`, which ordinary Git
+plumbing can run even without invoking `git commit`. Only a conservative
+allowlist of repository-local Git configuration keys is accepted;
+`core.filemode=false`, filters, attribute overrides, aliases and hooks
+configuration are rejected. The Linux reconciler checks exact POSIX modes
+(`100644` or `100755`) and requires new files to be `100644` and tracked
+files to preserve their HEAD mode **before** updating the branch reference.
+Mode-only changes, deletions, renames, pre-staged index changes and unexpected
+ignored or untracked files are not supported and are denied.
+
 Under that lock it builds a private temporary index, hashes accepted bytes
 without filters, creates a Git tree/commit using plumbing (no shell, Git
 hooks or model-supplied commands), and performs an old-SHA `update-ref` CAS.
