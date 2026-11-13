@@ -106,8 +106,10 @@ plumbing can run even without invoking `git commit`. Only a conservative
 allowlist of repository-local Git configuration keys is accepted;
 `core.filemode=false`, filters, attribute overrides, aliases and hooks
 configuration are rejected. For *currently accepted stage writes*,
-the reconciler uses the POSIX executable bit to determine Git mode
-(`100644`/`100755`), requires new files to be non-executable and tracked
+the reconciler uses the POSIX **owner execute bit** (not the
+group/other execute bits) to determine Git mode (`100644`/`100755`). Accepted
+files with group/other execute but no owner execute are rejected before Git
+ref CAS; new files must be non-executable and tracked
 writes to preserve their HEAD Git mode **before** updating the branch ref,
 and rejects world-writable or owner-unreadable/unwritable files. Non-executable
 files created under `umask 077` (`0600`) or `umask 002` (`0664`)
