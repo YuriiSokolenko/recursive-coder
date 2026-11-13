@@ -181,6 +181,67 @@ class LinuxStageGitBaselineReconcilerTest {
         assertEquals("UNSAFE_GIT_CONFIGURATION", blocked.code)
     }
 
+    @Test fun frozenInputsMayUse0600Or0664WithoutChangingGitBaseline() {
+        val repo = createRepo()
+        val specPath = "specs/Feature.md"
+        val specHash = write(repo.root, specPath, "requirements\n")
+        val sdd = assertIs<StageGitReconciliationResult.Committed>(
+            reconcile(repo, repo.head, EngineeringRole.SDD,
+                mapOf(specPath to specHash)))
+
+        // Changing read/write permission bits does not alter Git's executable
+        // mode: a pinned SDD input remains byte-identical at umask 077.
+        Files.setPosixFilePermissions(repo.root.resolve(specPath),
+            PosixFilePermissions.fromString("rw-------"))
+        assertEquals("", git(repo.root, "status", "--porcelain"))
+        val acceptancePath = "tests/acceptance/Feature.feature"
+        val acceptanceHash = write(repo.root, acceptancePath, "Given accepted\n")
+        val atdd = assertIs<StageGitReconciliationResult.Committed>(
+            reconcile(repo, sdd.newHead, EngineeringRole.ATDD,
+                mapOf(acceptancePath to acceptanceHash),
+                mapOf(specPath to specHash)))
+
+        // Common umask 002 and 077 files coexist as immutable inputs.
+        Files.setPosixFilePermissions(repo.root.resolve(specPath),
+            PosixFilePermissions.fromString("rw-rw-r--"))
+        Files.setPosixFilePermissions(repo.root.resolve(acceptancePath),
+            PosixFilePermissions.fromString("rw-------"))
+        assertEquals("", git(repo.root, "status", "--porcelain"))
+        val unitPath = "tests/unit/FeatureTest.kt"
+        val unitHash = write(repo.root, unitPath, "fun testFeature() = Unit\n")
+        val tdd = assertIs<StageGitReconciliationResult.Committed>(
+            reconcile(repo, atdd.newHead, EngineeringRole.TDD,
+                mapOf(unitPath to unitHash),
+                mapOf(specPath to specHash, acceptancePath to acceptanceHash)))
+        assertEquals(tdd.newHead, git(repo.root, "rev-parse", "HEAD"))
+        assertEquals("", git(repo.root, "status", "--porcelain"))
+    }
+
+    @Test fun acceptedCandidateStillRejectsNoncanonicalReadWritePermissions() {
+        val repo = createRepo()
+        val path = "specs/Feature.md"
+        val hash = write(repo.root, path, "requirements\n")
+        Files.setPosixFilePermissions(repo.root.resolve(path),
+            PosixFilePermissions.fromString("rw-rw-r--"))
+        val rejected = assertIs<StageGitReconciliationResult.Denied>(
+            reconcile(repo, repo.head, EngineeringRole.SDD, mapOf(path to hash)))
+        assertEquals("UNSAFE_STAGE_FILE_MODE", rejected.code)
+        assertEquals(repo.head, git(repo.root, "rev-parse", "HEAD"))
+
+        Files.setPosixFilePermissions(repo.root.resolve(path),
+            PosixFilePermissions.fromString("rw-r--r--"))
+        val committed = assertIs<StageGitReconciliationResult.Committed>(
+            reconcile(repo, repo.head, EngineeringRole.SDD, mapOf(path to hash)))
+        val updated = write(repo.root, path, "updated requirements\n")
+        Files.setPosixFilePermissions(repo.root.resolve(path),
+            PosixFilePermissions.fromString("rw-------"))
+        val refusedEdit = assertIs<StageGitReconciliationResult.Denied>(
+            reconcile(repo, committed.newHead, EngineeringRole.SDD,
+                mapOf(path to updated)))
+        assertEquals("UNSAFE_STAGE_FILE_MODE", refusedEdit.code)
+        assertEquals(committed.newHead, git(repo.root, "rev-parse", "HEAD"))
+    }
+
     @Test fun executableGitHooksAreDisabledEvenWithoutLocalHookConfig() {
         val repo = createRepo()
         val marker = temporary.resolve("git-hook-executed")
