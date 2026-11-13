@@ -93,7 +93,9 @@ class LinuxStageGitBaselineReconciler(
      * isRegularFile/readAllBytes would be vulnerable to a symlink swap between
      * the check and read, even under the trusted-writer coordination lock.
      */
-    private fun read(root: Path, path: String): OpenedFile {
+    private fun read(
+        root: Path, path: String, requireCanonicalMode: Boolean = false
+    ): OpenedFile {
         check(ToolAuthorizationPolicy.validDeclaredPath(path), "INVALID_STAGE_PATH")
         val key = Files.readAttributes(root, BasicFileAttributes::class.java,
             LinkOption.NOFOLLOW_LINKS).fileKey()
@@ -138,10 +140,18 @@ class LinuxStageGitBaselineReconciler(
                     PosixFilePermission.OTHERS_READ)
                 val executable = regular + setOf(PosixFilePermission.OWNER_EXECUTE,
                     PosixFilePermission.GROUP_EXECUTE, PosixFilePermission.OTHERS_EXECUTE)
+                // Git records only the executable bit. Frozen, already tracked
+                // inputs may legitimately be 0600 or 0664; their safety is
+                // established by no-follow descriptor reads, a frozen SHA-256
+                // and the clean Git status check. Candidate stage writes must
+                // retain the strict, canonical file-mode boundary.
                 val mode = when (perms) {
                     regular -> "100644"
                     executable -> "100755"
-                    else -> throw Reject("UNSAFE_STAGE_FILE_MODE")
+                    else -> {
+                        check(!requireCanonicalMode, "UNSAFE_STAGE_FILE_MODE")
+                        null
+                    }
                 }
                 return try {
                     cursor.newByteChannel(name, setOf<OpenOption>(StandardOpenOption.READ,
@@ -261,7 +271,7 @@ class LinuxStageGitBaselineReconciler(
             check(digest(read(root, path).bytes) == hash, "FROZEN_ARTIFACT_CHANGED")
         }
         return request.acceptedFiles.associate { change ->
-            val bytes = read(root, change.path)
+            val bytes = read(root, change.path, requireCanonicalMode = true)
             check(digest(bytes.bytes) == change.sha256, "STAGE_ARTIFACT_CHANGED")
             change.path to bytes
         }
@@ -401,7 +411,8 @@ class LinuxStageGitBaselineReconciler(
                     for ((path, hash) in request.frozenArtifacts)
                         check(digest(read(real, path).bytes) == hash, "UNCERTAIN_GIT_HANDOFF")
                     for (item in request.acceptedFiles)
-                        check(digest(read(real, item.path).bytes) == item.sha256,
+                        check(digest(read(real, item.path,
+                            requireCanonicalMode = true).bytes) == item.sha256,
                             "UNCERTAIN_GIT_HANDOFF")
                     return StageGitReconciliationResult.Committed(
                         request.expectedHead, commit)
