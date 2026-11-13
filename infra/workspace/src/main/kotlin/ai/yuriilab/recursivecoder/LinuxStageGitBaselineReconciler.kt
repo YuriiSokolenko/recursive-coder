@@ -135,23 +135,23 @@ class LinuxStageGitBaselineReconciler(
                     cursor.getFileAttributeView(name, PosixFileAttributeView::class.java,
                         LinkOption.NOFOLLOW_LINKS).readAttributes().permissions()
                 } catch (_: Exception) { throw Reject("UNSAFE_STAGE_FILE_MODE") }
-                val regular = setOf(PosixFilePermission.OWNER_READ,
-                    PosixFilePermission.OWNER_WRITE, PosixFilePermission.GROUP_READ,
-                    PosixFilePermission.OTHERS_READ)
-                val executable = regular + setOf(PosixFilePermission.OWNER_EXECUTE,
-                    PosixFilePermission.GROUP_EXECUTE, PosixFilePermission.OTHERS_EXECUTE)
-                // Git records only the executable bit. Frozen, already tracked
-                // inputs may legitimately be 0600 or 0664; their safety is
-                // established by no-follow descriptor reads, a frozen SHA-256
-                // and the clean Git status check. Candidate stage writes must
-                // retain the strict, canonical file-mode boundary.
-                val mode = when (perms) {
-                    regular -> "100644"
-                    executable -> "100755"
-                    else -> {
-                        check(!requireCanonicalMode, "UNSAFE_STAGE_FILE_MODE")
-                        null
-                    }
+                // Git stores regular files as 100644 or 100755: umask-adjusted
+                // read/write bits (0600, 0644, 0664) do not change Git mode.
+                // TrustedWriteRuntime uses CREATE_NEW and respects process umask,
+                // so requiring the exact 0644 POSIX set would reject valid writes.
+                val mode = if (perms.any { it in setOf(
+                        PosixFilePermission.OWNER_EXECUTE,
+                        PosixFilePermission.GROUP_EXECUTE,
+                        PosixFilePermission.OTHERS_EXECUTE
+                    ) }) "100755" else "100644"
+                if (requireCanonicalMode) {
+                    // Accepted writes must be owner-readable/writable and must
+                    // not be world-writable. Immutable inputs only need a safe
+                    // descriptor read, accepted digest and clean Git status.
+                    check(PosixFilePermission.OWNER_READ in perms &&
+                        PosixFilePermission.OWNER_WRITE in perms &&
+                        PosixFilePermission.OTHERS_WRITE !in perms,
+                        "UNSAFE_STAGE_FILE_MODE")
                 }
                 return try {
                     cursor.newByteChannel(name, setOf<OpenOption>(StandardOpenOption.READ,
