@@ -33,8 +33,11 @@ class FiveRoleWorkflowCoordinatorUnitTest {
         var snapshotCount = 0
         var snapshotMode = ""
         var prepareMode = ""
+        var developMode = ""
         var advanceMode = ""
         var reviewMode = ""
+        var acceptedDeveloperEvidence: DeveloperReviewEvidence? = null
+        val receivedHandoffs = mutableListOf<Pair<StageKind, DeveloperReviewEvidence?>>()
         var finishMode = ""
         var called = mutableListOf<StageKind>()
 
@@ -56,12 +59,14 @@ class FiveRoleWorkflowCoordinatorUnitTest {
             listOf(DeveloperFileTarget("src/main/Feature.kt", "b".repeat(64))),
             ModelConfig("fake", "fake-v1", "http://localhost/unused",
                 "env:FAKE", 4096, 512, setOf("tool_calls"), null, 1000, 1000),
-            Instant.parse("2035-01-01T00:00:00Z"), Cancellation()
+            Instant.MAX, Cancellation()
         )
 
         override fun snapshot(): PreparationStageSnapshot {
             snapshotCount++
-            if (snapshotMode == "throw") error("Host unavailable")
+            if (snapshotMode == "throw" ||
+                (snapshotMode == "throw-on-stop" && snapshotCount == 3))
+                error("Host unavailable")
             if (snapshotMode == "changed" && snapshotCount == 2)
                 return state.copy(graph = state.graph.copy(
                     budget = state.graph.budget.copy(maxTokens = 9999)))
@@ -115,23 +120,50 @@ class FiveRoleWorkflowCoordinatorUnitTest {
             roleEvents: StageRoleEventSink, events: PreparationStageEventSink
         ): DeveloperStageResult {
             called += StageKind.DEVELOP
+            when (developMode) {
+                "denied" -> return DeveloperStageResult(state.graph, state.acceptedIds,
+                    DeveloperStageOutcome.Denied("DEVELOPER_DENIED"))
+                "failed" -> return DeveloperStageResult(state.graph, state.acceptedIds,
+                    DeveloperStageOutcome.Failed("DEVELOPER_FAILED", false))
+                "uncertain" -> return DeveloperStageResult(null, null,
+                    DeveloperStageOutcome.ReconciliationRequired("DEVELOPER_UNCERTAIN", true))
+            }
             val (manifest, accepted) = approved(command.graph, StageKind.DEVELOP,
                 command.artifactId, command.manifestPath)
             val stage = command.graph.stages.single { it.kind == StageKind.DEVELOP }
+            val result = DeveloperStageOutcome.Accepted(manifest,
+                listOf(DeveloperChangedFile("src/main/Feature.kt", "b".repeat(64),
+                    "c".repeat(64))),
+                "write-unit", StageValidationEvidence(stage.correlation,
+                    requireNotNull(stage.agentId), emptyList(), true),
+                StageRoleUsage(1, 100, 30))
+            acceptedDeveloperEvidence = DeveloperReviewEvidence(result.manifest,
+                result.changedFiles.map { ReviewerChangedFile(it.path, it.beforeSha256,
+                    it.afterSha256) }, result.writeToolId, result.validation, result.usage)
             state = accepted
-            return DeveloperStageResult(accepted.graph, accepted.acceptedIds,
-                DeveloperStageOutcome.Accepted(manifest,
-                    listOf(DeveloperChangedFile("src/main/Feature.kt", "b".repeat(64),
-                        "c".repeat(64))),
-                    "write-unit", StageValidationEvidence(stage.correlation,
-                        requireNotNull(stage.agentId), emptyList(), true),
-                    StageRoleUsage(1, 100, 30)))
+            return DeveloperStageResult(
+                if (developMode == "missing-graph") null else accepted.graph,
+                if (developMode == "missing-acceptance") null else accepted.acceptedIds,
+                when (developMode) {
+                    "wrong-output" -> result.copy(manifest = manifest.copy(
+                        id = ArtifactId("incorrect-developer-output")))
+                    "tampered-handoff" -> result.copy(writeToolId = "forged-write")
+                    else -> result
+                })
         }
 
         override suspend fun review(command: ReviewerStageCommand,
             roleEvents: StageRoleEventSink, events: ReviewerDecisionSink
         ): ReviewerStageResult {
             called += StageKind.REVIEW
+            when (reviewMode) {
+                "denied" -> return ReviewerStageResult(state.graph, state.acceptedIds,
+                    ReviewerStageOutcome.Denied("REVIEWER_DENIED"))
+                "failed" -> return ReviewerStageResult(state.graph, state.acceptedIds,
+                    ReviewerStageOutcome.Failed("REVIEWER_FAILED"))
+                "uncertain" -> return ReviewerStageResult(null, null,
+                    ReviewerStageOutcome.ReconciliationRequired("REVIEWER_UNCERTAIN"))
+            }
             val stage = state.graph.stages.single { it.kind == StageKind.REVIEW }
             val implementation = state.graph.artifacts.single {
                 it.kind == StageArtifactKind.IMPLEMENTATION
@@ -171,15 +203,15 @@ class FiveRoleWorkflowCoordinatorUnitTest {
         override fun advance(expected: PreparationStageSnapshot, next: StageKind,
             developerHandoff: DeveloperReviewEvidence?): PreparationStageSnapshot? {
             if (state != expected) return null
-            if (advanceMode == "denied" ||
-                (next == StageKind.REVIEW && advanceMode == "tampered-handoff"))
-                return null
+            receivedHandoffs += next to developerHandoff
+            if (advanceMode == "denied") return null
             if (advanceMode == "throw") error("Commit uncertain")
             if (advanceMode == "missing-next") return state
-            if (next == StageKind.REVIEW && developerHandoff == null) return null
+            if (developerHandoff != if (next == StageKind.REVIEW)
+                    acceptedDeveloperEvidence else null) return null
             val candidate = state.copy(graph = state.graph.copy(
                 stages = state.graph.stages + node(next)))
-            state = candidate
+            if (advanceMode != "uncommitted-next") state = candidate
             return candidate
         }
 
@@ -274,6 +306,14 @@ class FiveRoleWorkflowCoordinatorUnitTest {
         val human = Fixture()
         human.prepareMode = "human"
         expectStopped(human, "HUMAN_APPROVAL_REQUIRED")
+        val stoppedReadFailure = Fixture()
+        stoppedReadFailure.prepareMode = "denied"
+        stoppedReadFailure.snapshotMode = "throw-on-stop"
+        expectUncertain(stoppedReadFailure, "HOST_STOP_SNAPSHOT_UNAVAILABLE")
+        val running = Fixture()
+        running.state = running.state.copy(graph = running.state.graph.copy(
+            stages = running.state.graph.stages.map { it.copy(state = StageState.RUNNING) }))
+        expectStopped(running, "WORKFLOW_STAGE_NOT_READY")
     }
 
     @Test fun outputAndCommitGatesRejectUnconfirmedAcceptance() = runBlocking {
@@ -289,6 +329,7 @@ class FiveRoleWorkflowCoordinatorUnitTest {
         for ((mode, code) in listOf(
             "denied" to "STAGE_RECONCILIATION_DENIED",
             "throw" to "STAGE_RECONCILIATION_UNCONFIRMED",
+            "uncommitted-next" to "STAGE_RECONCILIATION_UNCONFIRMED",
             "missing-next" to "INVALID_NEXT_STAGE_GRAPH"
         )) {
             val fixture = Fixture()
@@ -297,8 +338,62 @@ class FiveRoleWorkflowCoordinatorUnitTest {
                 if (mode == "missing-next") StageKind.ATDD else StageKind.SDD)
         }
         val tamperedHandoff = Fixture()
-        tamperedHandoff.advanceMode = "tampered-handoff"
+        tamperedHandoff.developMode = "tampered-handoff"
         expectUncertain(tamperedHandoff, "STAGE_RECONCILIATION_DENIED", StageKind.DEVELOP)
+        val passed = requireNotNull(tamperedHandoff.receivedHandoffs.last().second)
+        assertEquals("forged-write", passed.writeToolId)
+        assertEquals("write-unit",
+            requireNotNull(tamperedHandoff.acceptedDeveloperEvidence).writeToolId)
+    }
+
+    @Test fun developerAndReviewerFailuresNeverBecomeSuccessfulStages() = runBlocking {
+        for ((mode, code, needsReconciliation) in listOf(
+            Triple("denied", "DEVELOPER_DENIED", false),
+            Triple("failed", "DEVELOPER_FAILED", false),
+            Triple("uncertain", "DEVELOPER_UNCERTAIN", true)
+        )) {
+            val fixture = Fixture()
+            fixture.developMode = mode
+            if (needsReconciliation) expectUncertain(fixture, code, StageKind.DEVELOP)
+            else expectStopped(fixture, code, StageKind.DEVELOP)
+            assertEquals(StageKind.DEVELOP, fixture.called.last())
+        }
+        for ((mode, code) in listOf(
+            "wrong-output" to "WORKFLOW_OUTPUT_MISMATCH",
+            "missing-acceptance" to "MISSING_HOST_ACCEPTANCE",
+            "missing-graph" to "MISSING_COMMITTED_GRAPH"
+        )) {
+            val fixture = Fixture()
+            fixture.developMode = mode
+            expectUncertain(fixture, code, StageKind.DEVELOP)
+        }
+        for ((mode, code, needsReconciliation) in listOf(
+            Triple("denied", "REVIEWER_DENIED", false),
+            Triple("failed", "REVIEWER_FAILED", false),
+            Triple("uncertain", "REVIEWER_UNCERTAIN", true)
+        )) {
+            val fixture = Fixture()
+            fixture.reviewMode = mode
+            if (needsReconciliation) expectUncertain(fixture, code, StageKind.REVIEW)
+            else expectStopped(fixture, code, StageKind.REVIEW)
+            assertEquals(StageKind.REVIEW, fixture.called.last())
+        }
+    }
+
+    @Test fun developerEvidenceIsForwardedOnlyToReviewerAndWithoutMutation() = runBlocking {
+        val fixture = Fixture()
+        assertIs<FiveRoleWorkflowOutcome.Completed>(fixture.run())
+        assertEquals(listOf(StageKind.ATDD, StageKind.TDD, StageKind.DEVELOP,
+            StageKind.REVIEW), fixture.receivedHandoffs.map { it.first })
+        assertEquals(listOf(null, null, null),
+            fixture.receivedHandoffs.take(3).map { it.second })
+        val actual = requireNotNull(fixture.receivedHandoffs.last().second)
+        assertEquals(fixture.acceptedDeveloperEvidence, actual)
+        assertEquals("src/main/Implementation.json", actual.manifest.declaredPath)
+        assertEquals("write-unit", actual.writeToolId)
+        assertEquals(listOf(ReviewerChangedFile("src/main/Feature.kt",
+            "b".repeat(64), "c".repeat(64))), actual.changedFiles)
+        assertEquals(StageKind.DEVELOP.role, actual.manifest.ownerRole)
     }
 
     @Test fun reviewerAndFinalGraphFailuresRemainFailClosed() = runBlocking {
