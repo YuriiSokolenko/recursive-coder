@@ -45,6 +45,15 @@ sealed interface StageGitReconciliationResult {
 }
 
 /**
+ * Internal deterministic observation points for Linux integration tests.
+ * These are never reachable from model inputs, serialized requests, or the CLI.
+ */
+internal enum class StageGitTestCheckpoint { BEFORE_REF_UPDATE, AFTER_REF_UPDATE }
+internal fun interface StageGitTestObserver {
+    fun at(checkpoint: StageGitTestCheckpoint)
+}
+
+/**
  * Reconciles exactly one independently accepted stage change set into a new,
  * clean Git HEAD without running a shell, filters, Git hooks, or model commands.
  *
@@ -56,15 +65,6 @@ sealed interface StageGitReconciliationResult {
  * Git object writes may leave unreachable objects on failure. Once update-ref
  * is attempted, any exception is an UNKNOWN commit, never a retryable Denied.
  */
-/**
- * Internal deterministic observation points for Linux integration tests.
- * These are never reachable from model inputs, serialized requests, or the CLI.
- */
-internal enum class StageGitTestCheckpoint { BEFORE_REF_UPDATE, AFTER_REF_UPDATE }
-internal fun interface StageGitTestObserver {
-    fun at(checkpoint: StageGitTestCheckpoint)
-}
-
 class LinuxStageGitBaselineReconciler internal constructor(
     private val root: Path,
     private val lockDirectory: Path,
@@ -321,6 +321,14 @@ class LinuxStageGitBaselineReconciler internal constructor(
         check(git(root, listOf("rev-parse", "--show-toplevel")) == root.toString() &&
             Path.of(git(root, listOf("rev-parse", "--absolute-git-dir"))).toRealPath() ==
             root.resolve(".git").toRealPath(), "UNSUPPORTED_WORKSPACE")
+        // Check authoritative ref identity before inspecting index/worktree state.
+        // After an interrupted post-CAS handoff the index may be stale, but
+        // a caller retrying with an old baseline must receive the precise
+        // STAGE_BASELINE_CHANGED denial instead of an unrelated status code.
+        check(git(root, listOf("rev-parse", "HEAD")) == request.expectedHead,
+            "STAGE_BASELINE_CHANGED")
+        check(git(root, listOf("symbolic-ref", "-q", "HEAD")) ==
+            "refs/heads/" + request.branch, "STAGE_BRANCH_CHANGED")
         // Explicit allowlist: repository-local configuration must not alter
         // filters, hooks, index, worktree, ref or attributes semantics.
         val config = git(root, listOf("config", "--local", "--list"))
@@ -460,7 +468,7 @@ class LinuxStageGitBaselineReconciler internal constructor(
     }
 
     companion object {
-        private fun findGit(): Path {
+        internal fun findGit(): Path {
             val selected = System.getProperty("recursiveCoder.gitExecutable")
             if (selected != null) return Path.of(selected)
             return System.getenv("PATH").orEmpty().split(java.io.File.pathSeparatorChar)
