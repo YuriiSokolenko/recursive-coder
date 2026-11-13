@@ -375,14 +375,9 @@ class LinuxStageGitBaselineReconcilerTest {
     }
 
     private fun withFaultObserver(repo: Repo, observer: StageGitTestObserver):
-        LinuxStageGitBaselineReconciler {
-        val executable = System.getenv("PATH").orEmpty()
-            .split(java.io.File.pathSeparatorChar)
-            .asSequence().filter(String::isNotBlank)
-            .map { Path.of(it).resolve("git") }
-            .first { Files.isExecutable(it) && it.isAbsolute }
-        return LinuxStageGitBaselineReconciler(repo.root, repo.locks, executable, observer)
-    }
+        LinuxStageGitBaselineReconciler =
+        LinuxStageGitBaselineReconciler(repo.root, repo.locks,
+            LinuxStageGitBaselineReconciler.findGit(), observer)
 
     @Test fun postCasFailureIsUncertainEvenWhenRefAlreadyMoved() {
         val repo = createRepo()
