@@ -323,5 +323,45 @@ class InstalledWritableWorkflowTest(unittest.TestCase):
         self.assertEqual(NEW, (self.repo / "src/main/FeatureFull.kt").read_text())
 
 
+    def test_opt_in_session_events_are_correlated_and_redacted(self):
+        plan, approvals = self.fixture()
+        journal_path = self.base / "workflow-events.jsonl"
+        plan["eventsPath"] = str(journal_path)
+        self.plan_path.write_text(json.dumps(plan))
+        approvals["planSha256"] = sha(self.plan_path.read_bytes())
+        self.approval_path.write_text(json.dumps(approvals))
+        result = self.authorized()
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        records = [json.loads(line) for line in journal_path.read_text().splitlines()]
+        self.assertGreaterEqual(len(records), 10)
+        self.assertEqual(list(range(1, len(records) + 1)),
+                         [record["sequence"] for record in records])
+        for index, record in enumerate(records):
+            self.assertEqual(record["sessionId"], "installed-fixture")
+            self.assertEqual(record["version"], "1.0")
+            self.assertEqual(record["redaction"]["mode"], "metadata-only")
+            self.assertEqual(record["causationId"],
+                             None if index == 0 else records[index - 1]["eventId"])
+            self.assertNotIn("Perform SDD", json.dumps(record))
+            self.assertNotIn("rawToolOutput", record.get("metadata", {}))
+        roles = {r["metadata"]["role"] for r in records
+                 if "roleEvent" in r.get("metadata", {})}
+        self.assertEqual(roles, {"SDD", "ATDD", "TDD", "DEVELOPER", "REVIEWER"})
+        self.assertTrue(any(r["metadata"].get("verdict") == "ACCEPT"
+                            for r in records))
+
+    def test_existing_event_journal_is_rejected_before_writing(self):
+        plan, approvals = self.fixture()
+        journal_path = self.base / "workflow-events.jsonl"
+        journal_path.write_text("untouched\n")
+        plan["eventsPath"] = str(journal_path)
+        self.plan_path.write_text(json.dumps(plan))
+        approvals["planSha256"] = sha(self.plan_path.read_bytes())
+        self.approval_path.write_text(json.dumps(approvals))
+        result = self.authorized()
+        self.assert_denial(result, "INVALID_EVENT_JOURNAL_PATH")
+        self.assertEqual(journal_path.read_text(), "untouched\n")
+
+
 if __name__ == "__main__":
     unittest.main()
