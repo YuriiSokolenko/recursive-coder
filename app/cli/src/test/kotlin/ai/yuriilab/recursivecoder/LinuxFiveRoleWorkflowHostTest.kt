@@ -167,6 +167,9 @@ class LinuxFiveRoleWorkflowHostTest {
         assertEquals(setOf("git_diff_check", "smoke"), receipt.checkedIds)
         assertTrue(receipt.writeToolId.isNotBlank())
         assertEquals(setOf(output.path), receipt.writtenPostimages.keys)
+        assertEquals(StageRoleUsage(1, 100, 30), receipt.usage)
+        assertEquals(ChildReceiptVerification.Accepted(receipt.manifest),
+            bridge.verifyChild(child))
         assertEquals(listOf(receipt.manifest), bridge.manifestsFor(child))
         assertEquals(setOf(output.id), bridge.acceptedArtifactIds())
         assertEquals(receipt.manifest.sha256,
@@ -176,8 +179,14 @@ class LinuxFiveRoleWorkflowHostTest {
             parentStageRunId = StageRunId("forged-parent"))))
         assertNull(bridge.manifestsFor(child.copy(
             requestId = "forged-request")))
+        assertEquals(ChildReceiptVerification.Denied(
+            ChildReceiptDenialCode.ORIGIN_MISMATCH),
+            bridge.verifyChild(child.copy(origin = StageKind.DEVELOP)))
         assertNull(bridge.manifestsFor(child.copy(
             origin = StageKind.DEVELOP)))
+        assertEquals(ChildReceiptVerification.Denied(
+            ChildReceiptDenialCode.OUTSIDE_WRITABLE_SCOPE),
+            bridge.verifyChild(child.copy(writablePaths = setOf("specs/Other.md"))))
         assertNull(bridge.manifestsFor(child.copy(
             writablePaths = setOf("specs/Other.md"))))
         val noAuthority = LinuxAuthenticatedRecursiveChildIntegrationHost(host,
@@ -250,6 +259,7 @@ class LinuxFiveRoleWorkflowHostTest {
         assertNotNull(developerHost.authenticatedAcceptedStage(
             childStageId(StageKind.DEVELOP)))
 
+        val childTokenGrant = 500L
         fun source(kind: StageKind, host: LinuxFiveRoleWorkflowHost): RecursiveOriginSource {
             val rootGraph = rootId(kind)
             val rootStage = parentId(kind)
@@ -268,7 +278,7 @@ class LinuxFiveRoleWorkflowHostTest {
                 val child = context.requestChild(RecursiveChildProposal(
                     requests.getValue(kind), context.graphId, context.stageRunId,
                     kind, "child-task-" + kind.name.lowercase(),
-                    writablePaths = setOf(target.path), maxTokens = 500,
+                    writablePaths = setOf(target.path), maxTokens = childTokenGrant,
                     maxToolCalls = 5, maxDurationMillis = 5000))
                 val admitted = child as? RecursiveDecision.Allowed
                     ?: return@RecursiveStageExecutor RecursiveExecutionOutcome.Failed(
@@ -283,7 +293,7 @@ class LinuxFiveRoleWorkflowHostTest {
                         // never assume an unverified report means zero.
                         // Write + mandatory checks have genuine host receipts.
                         when (val billed = childContext.charge(RecursiveUsage(
-                                500, attested.checkedIds.size.toLong() + 1))) {
+                                childTokenGrant, attested.checkedIds.size.toLong() + 1))) {
                             is RecursiveDecision.Allowed -> RecursiveExecutionOutcome.Completed
                             is RecursiveDecision.Denied ->
                                 RecursiveExecutionOutcome.Failed(billed.code)
@@ -322,7 +332,7 @@ class LinuxFiveRoleWorkflowHostTest {
             val charged = completed.snapshots.getValue(kind).nodes.single {
                 it.stageRunId == childStageId(kind)
             }
-            assertEquals(RecursiveUsage(500, 3), charged.spent,
+            assertEquals(RecursiveUsage(childTokenGrant, 3), charged.spent,
                 "Fixture tokens charge the full cap; real write/check calls are counted")
             assertTrue(completed.snapshots.getValue(kind).nodes.all {
                 it.state == RecursiveNodeState.SUCCEEDED
