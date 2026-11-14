@@ -30,7 +30,9 @@ data class AuthenticatedAcceptedStageReceipt(
     val manifest: StageArtifactManifest,
     val writeToolId: String,
     val checkedIds: Set<String>,
-    val writtenPostimages: Map<String, String>
+    val writtenPostimages: Map<String, String>,
+    /** Host-retained stage usage; nullable token counts are never coerced to zero. */
+    val usage: StageRoleUsage
 )
 
 /**
@@ -524,7 +526,8 @@ class LinuxFiveRoleWorkflowHost(
                 it.state == StageState.ACCEPTED && it.kind != StageKind.REVIEW &&
                 it.supersededBy == null
         } ?: return null
-        val proof = completed[stageRunId]?.write ?: return null
+        val evidence = completed[stageRunId] ?: return null
+        val proof = evidence.write
         val manifest = graph.artifacts.singleOrNull {
             it.id in stage.outputArtifacts
         } ?: return null
@@ -553,7 +556,7 @@ class LinuxFiveRoleWorkflowHost(
         return AuthenticatedAcceptedStageReceipt(graph.correlation, stage.correlation,
             stage.kind, manifest, proof.writeId,
             proof.validation.requiredChecks.map { it.checkId }.toSet(),
-            proof.files.associate { it.path to it.after })
+            proof.files.associate { it.path to it.after }, evidence.usage.copy())
     }
 
     private fun verifiedDeveloper(evidence: DeveloperReviewEvidence): Boolean {
