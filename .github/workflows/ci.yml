@@ -244,7 +244,9 @@ jobs:
         # JAVA_TOOL_OPTIONS emits a JVM startup banner even when set to "".
         # Unset it only for these local/fake-model CLI contract tests so the
         # runner and Gradle retain their proxy configuration.
-        run: env -u JAVA_TOOL_OPTIONS python -m unittest discover -s tests -p 'test_cli_runtime_v1.py' -v
+        run: |
+          env -u JAVA_TOOL_OPTIONS python -m unittest discover -s tests -p 'test_cli_runtime_v1.py' -v
+          env -u JAVA_TOOL_OPTIONS python -m unittest discover -s tests -p 'test_cli_writable_workflow.py' -v
 
   contracts:
     name: Versioned session contracts

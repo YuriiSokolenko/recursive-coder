@@ -36,7 +36,7 @@ The Gradle build has **nine product modules**: `:agent:runtime`, `:core:contract
 
 The installed distribution remains at `build/install/recursive-coder/bin/recursive-coder`, preserving the existing CLI smoke-test path.
 
-The project includes an offline deterministic fake-model CLI, durable task queue/scheduler, trusted read-only workspace, optional configured HTTP model adapter, and physical JSONL event sink. The standalone Linux trusted write/check runtime now also has an **opt-in, host-only stage tool port**, but neither CLI sessions nor the Koog tool registry can grant it automatically. See [First executable session](docs/architecture/FIRST_SESSION.md) and [Trusted writes](docs/architecture/TRUSTED_WRITES.md).
+The project includes an offline deterministic fake-model CLI, durable task queue/scheduler, trusted read-only workspace, optional configured HTTP model adapter, and physical JSONL event sink. The Linux trusted write/check runtime also has a host-only stage tool port. A **separate, explicitly gated fake-only `workflow` CLI** can now orchestrate five trusted roles in a dedicated checkout; default SessionRequest v1 and native task commands remain read-only. See [First executable session](docs/architecture/FIRST_SESSION.md), [Trusted writes](docs/architecture/TRUSTED_WRITES.md) and [Writable CLI](docs/architecture/WRITABLE_CLI.md).
 
 With Gradle 9.8.1 and JDK 21 installed:
 
@@ -52,6 +52,7 @@ With Gradle 9.8.1 and JDK 21 installed:
 - [Stage graph contracts and policy gates (#72)](docs/architecture/STAGE_GRAPH.md)
 - [Verified recursive child artifact integration (#79, partial)](docs/architecture/CHILD_INTEGRATION.md)
 - [Host-owned five-role orchestration (#79, in progress)](docs/architecture/FIVE_ROLE_ORCHESTRATION.md)
+- [Explicitly opted-in offline writable CLI (#79, partial)](docs/architecture/WRITABLE_CLI.md)
 - [Koog single-role execution boundary (#73)](docs/architecture/KOOG_STAGE_EXECUTION.md)
 - [Host-controlled stage tool authority and isolated checks (#74)](docs/architecture/STAGE_TOOL_AUTHORITY.md)
 - [Host-approved SDD, ATDD and TDD preparation stages (#75)](docs/architecture/PREPARATION_STAGES.md)
