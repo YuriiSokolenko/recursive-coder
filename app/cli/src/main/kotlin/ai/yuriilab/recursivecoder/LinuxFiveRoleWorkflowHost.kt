@@ -727,8 +727,10 @@ class LinuxFiveRoleWorkflowHost(
  */
 class LinuxAuthenticatedRecursiveChildIntegrationHost(
     private val host: LinuxFiveRoleWorkflowHost,
+    private val expectedSessionId: String,
     private val authorizedChildStages: Set<StageRunId>
 ) : RecursiveChildIntegrationHost {
+    init { require(ToolAuthorizationPolicy.validHostIdentifier(expectedSessionId)) }
     override fun acceptedArtifactIds(): Set<ArtifactId> =
         authorizedChildStages.mapNotNull { host.authenticatedAcceptedStage(it)?.manifest?.id }
             .toSet()
@@ -743,6 +745,8 @@ class LinuxAuthenticatedRecursiveChildIntegrationHost(
             return null
         val receipt = host.authenticatedAcceptedStage(child.stageRunId) ?: return null
         if (receipt.origin != child.origin ||
+            receipt.graphCorrelation.sessionId != expectedSessionId ||
+            receipt.stageCorrelation.sessionId != expectedSessionId ||
             receipt.graphCorrelation.graphId != child.graphId ||
             receipt.graphCorrelation.parentGraphId != child.parentGraphId ||
             receipt.graphCorrelation.parentStageRunId != child.parentStageRunId ||
