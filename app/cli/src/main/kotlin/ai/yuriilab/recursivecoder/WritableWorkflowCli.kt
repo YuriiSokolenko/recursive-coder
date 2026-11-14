@@ -41,7 +41,7 @@ internal object WritableWorkflowCli {
 
     private fun input(path: Path): ByteArray {
         require(path.isAbsolute && Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) &&
-            Files.size(path) in 1..65536) { "Invalid operator configuration file" }
+            Files.size(path) in 1L..65536L) { "Invalid operator configuration file" }
         return Files.readAllBytes(path)
     }
 
