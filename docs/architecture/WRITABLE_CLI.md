@@ -53,7 +53,15 @@ The workflow plan is UTF-8 JSON (version 1, maximum 64 KiB), with exactly:
   enabled, optional `maxDepth` (default 1), `maxChildren` (default 1),
   `maxToolCalls` (default 16) and `childTokens` (default 1000) apply to each
   independently bounded origin; a depth of 0 or insufficient budget denies
-  child admission rather than silently omitting the work.
+  child admission rather than silently omitting the work. The previous
+  defaults (6 tool calls, 500 child tokens) could not run the complete
+  five-role FakeModel fixture: five × (100 input + 30 output) = 650 tokens,
+  and the Developer's four write/check cycles require up to 12 calls.
+  Defaults are intentionally 16 / 1000 with strict admission and metering.
+  **Required** numeric fields (including `maxTokens`, `maxDurationMillis`
+  and `deadlineSeconds`) and optional numeric fields must all be unquoted,
+  non-negative integral JSON numbers; null, booleans, fractions and strings
+  are not accepted.
 - Optional `recursiveChildren`: **both** `SDD` and `DEVELOP` checkout records
   are mandatory when recursion is enabled. Each record provides absolute
   `rootPath`, `headSha`, `branch`, `lockDirectory`, and a host-selected
@@ -194,9 +202,27 @@ and check invocations before dispatch (SDD: 1 write + 2 checks; Developer:
 4 write/check cycles; Reviewer does not write). The meter denies missing,
 negative and over-limit token usage, checks the deadline at model and tool
 boundaries, and prevents any later unauthorized trusted call. The recursive
-scheduler's `charge` receives those measured totals rather than a fabricated
-charge equal to the grant. A completed physical child must still present its
-authenticated receipt and checks; metadata alone never permits integration.
+scheduler's `charge` receives those measured totals on a **successful**
+physical child rather than a fabricated charge equal to the grant. If a
+provider response reports a valid token count above the grant, the host
+retains its full **observed** count, which can exceed the grant; it never
+authorizes the late result or additional writes. Missing, negative, or
+unrepresentable usage is marked **unconfirmed**, not silently zeroed.
+A completed physical child must still present its authenticated receipt
+and checks; metadata alone never permits integration.
+
+The physical child is currently executed **before** the two-origin recursive
+scheduler is instantiated. Consequently a failed physical child has no
+scheduler node to charge; do **not** misread this as an actual scheduler
+spent record. Instead, the operator-provisioned grant is conservatively
+accounted as fully consumed for that failed attempt, with **no refund, no
+automatic retry, and no parent success**. When a SessionEventJournal is
+configured, `childResourceAudit=FAILED_RESERVED` records
+`observedTokens/observedToolCalls` separately from
+`accountedTokens/accountedToolCalls`, the original grant and
+`usageUncertain`. This is a local host audit, **not** a proof of complete
+provider-side billing. Live support remains blocked until provider usage
+is trustworthy and failure-path accounting is proven end-to-end.
 
 **Provenance:** the admission comes from host projection of a live parent
 stage, `RecursiveGraphPolicy.admit`, and the validated operator plan.
@@ -213,7 +239,10 @@ recheck all fail-closed gates in CI/security review; none is authorized today.
 **Known-dirty multi-origin stop:** after both child checkouts have accepted
 writes, a later `RunTwoOriginRecursiveChildrenUseCase.Stopped` (for example,
 a cross-origin conflict) is always surfaced as
-`reconciliation_required / CHILD_EXECUTION_UNCONFIRMED`. Both checkouts and
+`reconciliation_required / CHILD_EXECUTION_UNCONFIRMED`. The stable
+`recursiveStopCode` and origin are preserved in the optional metadata-only
+journal's `session.error` entry for operator diagnosis (not echoed to
+untrusted model text or stdout). Both checkouts and
 the parent must be inspected and reconciled/reset by an operator; **neither
 checkout is automatically reverted, deleted, or safe to reuse**. The in-memory
 `origins` map and `integrated` result are owned by the single sequential
@@ -243,4 +272,6 @@ only, **not** live-model integration or a full isolation guarantee against
 same-UID adversarial processes. No checkpoint/restart after uncertain
 writes (#10), external issue tracker, CI coordinator or production API is
 introduced. Issue #79 is already completed in the offline-only scope;
-issue #97 continues to gate any future live-provider release.
+issue #97 remains open as the hard gate for any future live-provider release.
+This PR should be **squash-merged**, after security review, so intermediate
+wiring fixups do not become independently bisectable history.
