@@ -48,21 +48,26 @@ The workflow plan is UTF-8 JSON (version 1, maximum 64 KiB), with exactly:
   `arguments` (at most 16), run in the existing bubblewrap sandbox as
   `offline-check` after each write; `/usr/bin/true` cannot be used.
   `git_diff_check` is also always required.
-- \`limits\`: positive \`maxTokens\`, \`maxDurationMillis\` and
-  \`deadlineSeconds\` within the CLI's bounded ranges. If recursive work is
-  enabled, optional \`maxDepth\` (default 1), \`maxChildren\` (default 1),
-  \`maxToolCalls\` (default 6) and \`childTokens\` (default 500) apply to each
+- `limits`: positive `maxTokens`, `maxDurationMillis` and
+  `deadlineSeconds` within the CLI's bounded ranges. If recursive work is
+  enabled, optional `maxDepth` (default 1), `maxChildren` (default 1),
+  `maxToolCalls` (default 6) and `childTokens` (default 500) apply to each
   independently bounded origin; a depth of 0 or insufficient budget denies
   child admission rather than silently omitting the work.
-- Optional \`recursiveChildren\`: **both** \`SDD\` and \`DEVELOP\` checkout records
+- Optional `recursiveChildren`: **both** `SDD` and `DEVELOP` checkout records
   are mandatory when recursion is enabled. Each record provides absolute
-  \`rootPath\`, \`headSha\`, \`branch\`, \`lockDirectory\`, and a host-selected
-  \`requestId\`. Each checkout must be a separately provisioned clean Linux
+  `rootPath`, `headSha`, `branch`, `lockDirectory`, and a host-selected
+  `requestId`, optionally `maxTokens` for a stricter per-origin child
+  token grant (otherwise the shared `limits.childTokens` is used). Both
+  SDD and future Developer admissions are preflighted at the SDD hook
+  before either child writes; Developer is re-authorized against its
+  real running parent lease before executing. Each checkout must be a
+  separately provisioned clean Linux
   Git checkout at the **same initial HEAD and branch** as the parent, with its
   own isolation marker and disjoint external lock scope. The child workspaces
   may not overlap each other, the parent checkout, plan/approvals or journal.
-  Offline negative-fixture fields are \`dependsOnSelf\` (boolean) and, for
-  the Developer child only, \`outputArtifactId\` (tests an authenticated
+  Offline negative-fixture fields are `dependsOnSelf` (boolean) and, for
+  the Developer child only, `outputArtifactId` (tests an authenticated
   cross-origin ID collision). Both are bound by the approval plan SHA-256.
 
 The separate approvals file also has version 1 and **exactly** `planSha256`
@@ -145,7 +150,7 @@ The role usage is fixture data, not measured token consumption.
 
 ## Authenticated recursive opt-in
 
-When \`recursiveChildren\` is present, the same installed \`workflow\` command
+When `recursiveChildren` is present, the same installed `workflow` command
 runs child SDD while the real parent SDD writer lease is active, and runs an
 independent full five-stage child workflow while the real parent Developer
 lease is active. The latter preauthorizes only the policy-derived Developer
@@ -155,10 +160,13 @@ child is given the parent checkout as its writable workspace.
 The production Linux child hosts perform their own TrustedWriteRuntime
 writes and mandatory Git/sandbox checks, retain HMAC-backed receipts, and
 bind each result to its derived child graph/stage/request identity. The
-\`RunTwoOriginRecursiveChildrenUseCase\` then independently admits, charges
+`RunTwoOriginRecursiveChildrenUseCase` then independently admits, charges
 and integrates both sources through authenticated child receipt adapters.
 Missing approvals, cycles, depth/child/token/tool limits, conflicts and stale
-evidence fail closed. FakeModel usage is *not* provider-measured: the
+evidence fail closed. A denial of Developer's preflight occurs before SDD
+writes. An unconfirmed child execution requires out-of-band reconciliation:
+its physical checkout may already have changed; cancellation is propagated
+rather than treated as a normal model denial. FakeModel usage is *not* provider-measured: the
 recursive scheduler charges the entire allocated child token cap and
 counts the genuine write plus required checks.
 
