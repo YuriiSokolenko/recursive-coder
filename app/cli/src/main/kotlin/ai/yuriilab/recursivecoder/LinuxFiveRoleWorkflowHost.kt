@@ -743,8 +743,26 @@ class LinuxAuthenticatedRecursiveChildIntegrationHost(
     private val authorizedChildStages: Set<StageRunId>
 ) : RecursiveChildIntegrationHost {
     init { require(ToolAuthorizationPolicy.validHostIdentifier(expectedSessionId)) }
+
+    /** Apply the full live child identity gate to accepted IDs as well as manifests. */
+    private fun verifiedChildReceipt(id: StageRunId): AuthenticatedAcceptedStageReceipt? {
+        if (id !in authorizedChildStages) return null
+        val receipt = host.authenticatedAcceptedStage(id) ?: return null
+        val parentGraph = receipt.graphCorrelation.parentGraphId ?: return null
+        val parentStage = receipt.graphCorrelation.parentStageRunId ?: return null
+        val childGraph = RecursiveGraphPolicy.childId(
+            parentGraph, parentStage, receipt.stageCorrelation.requestId)
+        if (receipt.graphCorrelation.sessionId != expectedSessionId ||
+            receipt.stageCorrelation.sessionId != expectedSessionId ||
+            receipt.graphCorrelation.graphId != childGraph ||
+            receipt.stageCorrelation.graphId != childGraph ||
+            receipt.stageCorrelation.stageRunId != RecursiveGraphPolicy.childStageId(childGraph))
+            return null
+        return receipt
+    }
+
     override fun acceptedArtifactIds(): Set<ArtifactId> =
-        authorizedChildStages.mapNotNull { host.authenticatedAcceptedStage(it)?.manifest?.id }
+        authorizedChildStages.mapNotNull { verifiedChildReceipt(it)?.manifest?.id }
             .toSet()
 
     override fun manifestsFor(child: RecursiveNode): List<StageArtifactManifest>? {
@@ -755,7 +773,7 @@ class LinuxAuthenticatedRecursiveChildIntegrationHost(
             child.graphId != RecursiveGraphPolicy.childId(parentId, parentStageId, requestId) ||
             child.stageRunId != RecursiveGraphPolicy.childStageId(child.graphId))
             return null
-        val receipt = host.authenticatedAcceptedStage(child.stageRunId) ?: return null
+        val receipt = verifiedChildReceipt(child.stageRunId) ?: return null
         if (receipt.origin != child.origin ||
             receipt.graphCorrelation.sessionId != expectedSessionId ||
             receipt.stageCorrelation.sessionId != expectedSessionId ||
