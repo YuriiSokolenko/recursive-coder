@@ -74,6 +74,51 @@ class InstalledChildRuntimeGrantsTest {
             metered.recordRole(StageRoleUsage(), false))
         assertTrue(metered.hasUncertainUsage())
         assertEquals(RecursiveUsage(250, 12), metered.accounted(failed = true))
+        assertEquals("CHILD_USAGE_UNCONFIRMED", metered.beforeModel())
+        assertEquals("CHILD_USAGE_UNCONFIRMED", metered.authorizeToolCall())
+        assertEquals(RecursiveUsage(0, 0), metered.measured())
+    }
+
+    @Test fun poisonedMeterCannotOpenOrUseAlreadyOpenedTrustedSession() {
+        val metered = meter(tokens = 250, tools = 4)
+        var opens = 0
+        var writes = 0
+        var checks = 0
+        val delegate = StageToolSessionOpener {
+            opens++
+            StageToolOpenResult.Granted(object : StageToolSession {
+                override fun write(operations: List<StageWrite>): StageWriteEvidence {
+                    writes++
+                    return StageWriteEvidence("unexpected-write")
+                }
+                override fun runCheck(checkId: String): StageCheckEvidence {
+                    checks++
+                    return StageCheckEvidence(checkId, "unexpected-check")
+                }
+                override fun verify(): StageValidationEvidence =
+                    error("verify must not run after uncertain usage")
+                override fun close() {}
+            })
+        }
+        val tools = MeteredChildTools(delegate, metered)
+        val authority = StageToolAuthoritySource { null }
+        val opened = tools.open(authority)
+        assertTrue(opened is StageToolOpenResult.Granted)
+        assertEquals("CHILD_USAGE_UNAVAILABLE",
+            metered.recordRole(StageRoleUsage(1, null, null), false))
+        assertEquals(StageToolOpenResult.Denied("CHILD_USAGE_UNCONFIRMED"),
+            tools.open(authority))
+        opened.session.use { session ->
+            assertEquals("CHILD_USAGE_UNCONFIRMED",
+                session.write(listOf(StageWrite.Create("src/main/Feature.kt", "x")))
+                    .deniedCode)
+            assertEquals("CHILD_USAGE_UNCONFIRMED",
+                session.runCheck("offline-check").deniedCode)
+        }
+        assertEquals(1, opens)
+        assertEquals(0, writes)
+        assertEquals(0, checks)
+        assertEquals(RecursiveUsage(0, 0), metered.measured())
     }
 
     @Test fun trustedToolCallsAreCountedBeforeEveryInvocation() {
