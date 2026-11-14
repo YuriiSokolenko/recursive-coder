@@ -92,11 +92,14 @@ class LinuxFiveRoleWorkflowHostTest {
         startingRequestId: String = "host-request",
         parentGraphId: GraphId? = null,
         parentStageRunId: StageRunId? = null,
+        sessionId: String = "host-session",
+        checkoutName: String = "checkout",
+        preauthorizedStages: Map<StageKind, Pair<StageRunId, String>> = emptyMap(),
         gateway: (StageArtifactManifest, StageValidationEvidence, StageRoleUsage) ->
             PreparationApproval = { _, _, _ -> PreparationApproval.ACCEPT }
     ): Pair<LinuxFiveRoleWorkflowHost, Path> {
         assumeTrue(System.getProperty("os.name").lowercase().contains("linux"))
-        val repo = temp.resolve("checkout")
+        val repo = temp.resolve(checkoutName)
         Files.createDirectories(repo)
         git(repo, "init", "-b", "dev")
         git(repo, "config", "user.email", "host@example.invalid")
@@ -110,11 +113,11 @@ class LinuxFiveRoleWorkflowHostTest {
         git(repo, "commit", "-m", "Initial")
         val id = startingGraphId
         val stage = StageNode(
-            StageCorrelation("host-session", id, startingStageId,
+            StageCorrelation(sessionId, id, startingStageId,
                 startingRequestId, "host-stage-correlation"),
             StageKind.SDD, StageState.CREATED, AgentId("host-sdd-actor")
         )
-        val graph = StageGraph(GraphCorrelation("host-session", id,
+        val graph = StageGraph(GraphCorrelation(sessionId, id,
             "host-graph-correlation", parentGraphId = parentGraphId,
             parentStageRunId = parentStageRunId),
             StageGraphState.RUNNING, listOf(stage),
@@ -123,7 +126,7 @@ class LinuxFiveRoleWorkflowHostTest {
         val host = LinuxFiveRoleWorkflowHost(repo, graph, git(repo, "rev-parse", "HEAD"),
             "dev", mapOf("smoke" to StageIsolatedCheck(Path.of("/usr/bin/true"))),
             setOf("git_diff_check", "smoke"),
-            gateway, temp.resolve("locks"))
+            gateway, temp.resolve("locks-" + checkoutName), preauthorizedStages)
         return host to repo
     }
 
@@ -143,7 +146,7 @@ class LinuxFiveRoleWorkflowHostTest {
             emptySet(), 1, setOf("specs/FeatureFull.md"), emptySet(),
             emptySet(), RecursiveUsage(100, 2), deadline = Instant.now().plusSeconds(90))
         val bridge = LinuxAuthenticatedRecursiveChildIntegrationHost(host,
-            setOf(childStageId))
+            "host-session", setOf(childStageId))
 
         // The existence of a graph or path does not convey accepted evidence.
         assertNull(bridge.manifestsFor(child))
@@ -178,9 +181,11 @@ class LinuxFiveRoleWorkflowHostTest {
         assertNull(bridge.manifestsFor(child.copy(
             writablePaths = setOf("specs/Other.md"))))
         val noAuthority = LinuxAuthenticatedRecursiveChildIntegrationHost(host,
-            emptySet())
+            "host-session", emptySet())
         assertNull(noAuthority.manifestsFor(child))
         assertTrue(noAuthority.acceptedArtifactIds().isEmpty())
+        assertNull(LinuxAuthenticatedRecursiveChildIntegrationHost(host,
+            "other-session", setOf(childStageId)).manifestsFor(child))
         // A live byte change revokes even a previously accepted host receipt.
         Files.writeString(repo.resolve(output.path), "post-acceptance tampering\\n")
         assertNull(host.authenticatedAcceptedStage(childStageId))
