@@ -756,20 +756,22 @@ class LinuxFiveRoleWorkflowHost(
         return graph
     }
 }
+
 /**
  * Strict adapter for an already independently executed *child* stage. A
  * trusted caller binds the exact child stage IDs; the adapter will not turn
  * a parent's accepted write into an invented child receipt.
  *
- * A future child-stage writer must use its actual RecursiveGraphPolicy-
+ * A child-stage writer uses its actual RecursiveGraphPolicy-
  * derived stageRunId as the authenticated Linux stage identity. An existing
  * parent-stage output deliberately fails this check.
  */
 class LinuxAuthenticatedRecursiveChildIntegrationHost(
     private val host: LinuxFiveRoleWorkflowHost,
     private val expectedSessionId: String,
-    private val authorizedChildStages: Set<StageRunId>
+    authorizedChildStages: Set<StageRunId>
 ) : RecursiveChildIntegrationHost {
+    private val authorizedChildStages = authorizedChildStages.toSet()
     init { require(ToolAuthorizationPolicy.validHostIdentifier(expectedSessionId)) }
 
     /** Apply the full live child identity gate to accepted IDs as well as manifests. */
