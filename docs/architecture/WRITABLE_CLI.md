@@ -18,6 +18,12 @@ opening any stage. There is no interactive or implicit authorization fallback.
 The workflow plan is UTF-8 JSON (version 1, maximum 64 KiB), with exactly:
 
 - `sessionId`: a valid host identifier (short enough to fit suffixed stage IDs).
+- Optional `eventsPath`: absolute path of a **new** JSONL Session Protocol v1
+  journal outside the isolated checkout and lock scope. Existing files are
+  never overwritten. The output is a correlated, metadata-only audit stream
+  for five role invocations, preparation acceptance and Reviewer decisions.
+  A failed journal write/close/checksum fails the workflow closed instead of
+  publishing a successful outcome; crash recovery remains #10.
 - `workspace`: `rootPath`, `headSha` (exact 40-digit lowercase Git HEAD),
   `branch`, `lockDirectory` (absolute external lock scope).
 - `artifacts`: keys `SDD`, `ATDD`, `TDD`, `DEVELOP`; values each contain
@@ -105,8 +111,20 @@ or user namespace support in CI is a **failure**, not a silent skip.
 
 The offline provider uses the existing `FakeModel` capability handshake plus
 fixed per-role proposals; it is **not** a production LLM completion provider.
-The role usage is fixture data, not measured token consumption. The result
-does not prove two-origin child-graph integration, SessionEvent correlation,
-production provider compatibility, durable checkpoint/crash-resume (#10) or
+The role usage is fixture data, not measured token consumption.
+
+The `core:session` two-origin coordinator independently schedules and
+integrates nested child graphs under **distinct host-supplied trusted
+integration sources**, rejects repeated origins and cross-origin artifact
+conflicts, and sends both streams to one correlated SessionEvent sink.
+Its current tests use two nested origins (SDD and Developer) and trusted fake
+receipt stores. This coordinator is deliberately **not yet connected** to
+the production Linux write/check host or installed CLI: an executor may
+request a child, but cannot mint the authenticated receipts required for
+parent integration. Never treat in-memory fixture receipts as production
+attestation. The installed workflow now verifies five-role SessionEvent correlation when
+an events path is supplied, but does not yet prove installed, production-host
+two-origin child-graph integration, production provider compatibility,
+durable checkpoint/crash-resume (#10) or
 an externally authenticated human approval system. Issue #79 remains open
 until the nested and journal acceptance suites are delivered.
