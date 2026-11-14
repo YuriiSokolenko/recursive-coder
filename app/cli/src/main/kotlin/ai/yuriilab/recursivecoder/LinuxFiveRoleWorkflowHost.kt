@@ -108,6 +108,10 @@ class LinuxFiveRoleWorkflowHost(
         // A preauthorized identity is accepted only for a child graph whose
         // exact parent and request derive this graph/stage ID. This cannot be
         // repurposed to inject an arbitrary future stage identity.
+        require(preauthorizedStageIdentities.values.map { it.first }.toSet().size ==
+            preauthorizedStageIdentities.size) {
+            "Recursive child stage identities must be unique"
+        }
         require(preauthorizedStageIdentities.all { (kind, identity) ->
             val parentGraph = graph.correlation.parentGraphId
             val parentStage = graph.correlation.parentStageRunId
@@ -555,8 +559,11 @@ class LinuxFiveRoleWorkflowHost(
             }) return null
         return AuthenticatedAcceptedStageReceipt(graph.correlation, stage.correlation,
             stage.kind, manifest, proof.writeId,
-            proof.validation.requiredChecks.map { it.checkId }.toSet(),
-            proof.files.associate { it.path to it.after }, evidence.usage.copy())
+            java.util.Collections.unmodifiableSet(
+                proof.validation.requiredChecks.map { it.checkId }.toMutableSet()),
+            java.util.Collections.unmodifiableMap(
+                proof.files.associate { it.path to it.after }.toMutableMap()),
+            evidence.usage.copy())
     }
 
     private fun verifiedDeveloper(evidence: DeveloperReviewEvidence): Boolean {
