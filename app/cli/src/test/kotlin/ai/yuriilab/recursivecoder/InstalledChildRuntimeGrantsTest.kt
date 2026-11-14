@@ -49,7 +49,7 @@ class InstalledChildRuntimeGrantsTest {
         assertEquals("TOKEN_BUDGET_EXHAUSTED",
             metered.recordRole(StageRoleUsage(1, 100, 30), true))
         assertEquals(RecursiveUsage(650, 0), metered.measured())
-        assertEquals(RecursiveUsage(600, 0), metered.accounted())
+        assertEquals(RecursiveUsage(600, 12), metered.accounted())
         assertEquals(0L, metered.remainingTokens())
     }
 
