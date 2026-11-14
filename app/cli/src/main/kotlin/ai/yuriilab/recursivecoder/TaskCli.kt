@@ -93,7 +93,7 @@ private class RecursiveCoderCommand(
 
     private val tasks = TasksCommand(repositoryFactory)
 
-    init { subcommands(RunSessionCommand(), tasks) }
+    init { subcommands(RunSessionCommand(), WritableWorkflowCommand(), tasks) }
 
     override fun close() = tasks.close()
 
@@ -116,6 +116,31 @@ private class RunSessionCommand : CliktCommand(name = "run") {
         val delay = once(delayOptions, "--fake-delay-ms", 0L)
         if (delay !in 0..60000) throw UsageError("--fake-delay-ms must be from 0 to 60000")
         val status = executeSession(requestPath, delay)
+        if (status != 0) throw ProgramResult(status)
+    }
+}
+
+/**
+ * Writable role orchestration is never inferred from a SessionRequest or
+ * the presence of a workflow file. The operator must explicitly opt in.
+ */
+private class WritableWorkflowCommand : CliktCommand(name = "workflow") {
+    override fun help(context: Context) =
+        "Run a fake-only five-role workflow in a dedicated Linux Git checkout."
+
+    private val planPath by argument("PLAN").convert { Path.of(it) }
+    private val approvalPaths by option("--approvals", help = "Absolute independent approval file.")
+        .convert { Path.of(it) }.multiple()
+    private val enabled by option("--enable-stage-writes",
+        help = "Explicitly authorize scoped stage writes in an isolated checkout.")
+        .flag(default = false)
+
+    override fun run() {
+        if (!enabled) throw UsageError("Writable workflow requires --enable-stage-writes")
+        val approvals = once(approvalPaths, "--approvals", Path.of(""))
+        if (!approvals.isAbsolute || !planPath.isAbsolute)
+            throw UsageError("Absolute plan and approval paths are required")
+        val status = WritableWorkflowCli.execute(planPath, approvals)
         if (status != 0) throw ProgramResult(status)
     }
 }
