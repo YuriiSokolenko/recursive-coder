@@ -261,20 +261,38 @@ class LinuxFiveRoleWorkflowHostTest {
                         kind.name.lowercase()),
                     kind, StageState.RUNNING,
                     AgentId("root-actor-" + kind.name.lowercase()))),
-                emptyList(), StageBudget(500, 30_000, 2, 2))
+                emptyList(), StageBudget(1_000, 30_000, 2, 2))
             val grant = RecursiveRootGrant(graph, rootStage,
                 "root-task-" + kind.name.lowercase(), setOf(target.path), emptySet())
             val executor = RecursiveStageExecutor { context ->
                 val child = context.requestChild(RecursiveChildProposal(
                     requests.getValue(kind), context.graphId, context.stageRunId,
                     kind, "child-task-" + kind.name.lowercase(),
-                    writablePaths = setOf(target.path), maxTokens = 100,
-                    maxToolCalls = 2, maxDurationMillis = 5000))
+                    writablePaths = setOf(target.path), maxTokens = 500,
+                    maxToolCalls = 5, maxDurationMillis = 5000))
                 val admitted = child as? RecursiveDecision.Allowed
                     ?: return@RecursiveStageExecutor RecursiveExecutionOutcome.Failed(
                         (child as RecursiveDecision.Denied).code)
                 val childResult = context.executeChild(admitted.child.graphId,
-                    RecursiveStageExecutor { RecursiveExecutionOutcome.Completed })
+                    RecursiveStageExecutor { childContext ->
+                        val attested = host.authenticatedAcceptedStage(childStageId(kind))
+                            ?: return@RecursiveStageExecutor RecursiveExecutionOutcome.Failed(
+                                "AUTHENTICATED_CHILD_RECEIPT_MISSING")
+                        val input = attested.usage.inputTokens
+                        val output = attested.usage.outputTokens
+                        // Unknown model usage consumes the child's full grant,
+                        // never a synthetic zero. The fixture provides real
+                        // host-retained 100+30 token counts per stage.
+                        val tokens = if (input == null || output == null) 500L
+                            else try { Math.addExact(input, output) }
+                                catch (_: ArithmeticException) { 500L }
+                        when (val billed = childContext.charge(RecursiveUsage(
+                                tokens, attested.checkedIds.size.toLong() + 1))) {
+                            is RecursiveDecision.Allowed -> RecursiveExecutionOutcome.Completed
+                            is RecursiveDecision.Denied ->
+                                RecursiveExecutionOutcome.Failed(billed.code)
+                        }
+                    })
                 if (childResult != RecursiveExecutionOutcome.Completed)
                     return@RecursiveStageExecutor childResult
                 when (val integrated = context.integrateChildren()) {
@@ -283,7 +301,7 @@ class LinuxFiveRoleWorkflowHostTest {
                         RecursiveExecutionOutcome.Failed(integrated.code)
                 }
             }
-            return RecursiveOriginSource(grant, RecursiveLimits(5, 2, 20_000,
+            return RecursiveOriginSource(grant, RecursiveLimits(10, 2, 20_000,
                 Instant.now().plusSeconds(60)),
                 LinuxAuthenticatedRecursiveChildIntegrationHost(host, sessionId,
                     setOf(childStageId(kind))), executor)
@@ -305,6 +323,11 @@ class LinuxFiveRoleWorkflowHostTest {
             val artifact = completed.integrated.getValue(kind).artifacts.single()
             assertEquals(childStageId(kind), artifact.manifest.producerStageRunId)
             assertEquals(targets.getValue(kind).path, artifact.manifest.declaredPath)
+            val charged = completed.snapshots.getValue(kind).nodes.single {
+                it.stageRunId == childStageId(kind)
+            }
+            assertEquals(RecursiveUsage(130, 3), charged.spent,
+                "Actual host stage usage and write/check calls must be charged")
             assertTrue(completed.snapshots.getValue(kind).nodes.all {
                 it.state == RecursiveNodeState.SUCCEEDED
             })
