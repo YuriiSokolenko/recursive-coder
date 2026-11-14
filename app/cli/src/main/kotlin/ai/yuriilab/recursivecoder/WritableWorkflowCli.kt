@@ -326,7 +326,10 @@ internal object WritableWorkflowCli {
                     permittedDigests[kind] == candidate.sha256)
                     PreparationApproval.ACCEPT else PreparationApproval.REJECT
             }, locks)
-        val childExecutor = ConfiguredFakeRoleExecutor(fixtureProposals, verdict)
+        // Child review is independently accepted in the offline fixture. The
+        // configured verdict remains authoritative for the parent Reviewer,
+        // including a rejection *after* successful child integration.
+        val childExecutor = ConfiguredFakeRoleExecutor(fixtureProposals, "ACCEPT")
         val recursive = recursiveConfig?.let { configs ->
             InstalledRecursiveWorkflow(sessionId, host,
                 StageIsolatedCheck(executable, arguments),
