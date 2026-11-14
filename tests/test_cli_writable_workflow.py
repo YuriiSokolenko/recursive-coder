@@ -187,6 +187,12 @@ class InstalledWritableWorkflowTest(unittest.TestCase):
         return self.invoke("--approvals", str(self.approval_path),
                            "--enable-stage-writes")
 
+    def recursive_metadata(self):
+        path = self.base / "recursive-events.jsonl"
+        self.assertTrue(path.is_file(), "Expected a correlated child audit journal")
+        return [item.get("metadata", {}) for item in
+                (json.loads(line) for line in path.read_text().splitlines())]
+
     def test_installed_two_origin_recursive_cli_gates_parent_and_records_events(self):
         self.recursive_fixture()
         result = self.authorized()
@@ -246,6 +252,16 @@ class InstalledWritableWorkflowTest(unittest.TestCase):
         self.assertNotEqual(self.original_head, self.git("rev-parse", "HEAD"))
         self.assertEqual((self.repo / "src/main/FeatureFull.kt").read_text(), OLD)
         self.assertFalse((self.repo / "src/main/FeatureFullManifest.xml").exists())
+        metadata = self.recursive_metadata()
+        self.assertIn("TOKEN_BUDGET_EXHAUSTED",
+                      [m.get("code") for m in metadata])
+        audits = [m for m in metadata
+                  if m.get("childResourceAudit") == "FAILED_RESERVED" and
+                  m.get("origin") == "DEVELOP"]
+        self.assertEqual(len(audits), 1, audits)
+        self.assertEqual(audits[0]["observedTokens"], 520)
+        self.assertEqual(audits[0]["accountedTokens"], 400)
+        self.assertEqual(audits[0]["grantTokens"], 400)
 
     def test_trusted_write_check_tool_grant_overrun_never_succeeds(self):
         plan = self.recursive_fixture()
@@ -261,6 +277,15 @@ class InstalledWritableWorkflowTest(unittest.TestCase):
         self.assertNotEqual(self.original_head, self.git("rev-parse", "HEAD"))
         self.assertEqual((self.repo / "src/main/FeatureFull.kt").read_text(), OLD)
         self.assertFalse((self.repo / "src/main/FeatureFullManifest.xml").exists())
+        metadata = self.recursive_metadata()
+        self.assertIn("TOOL_BUDGET_EXHAUSTED",
+                      [m.get("code") for m in metadata])
+        audits = [m for m in metadata
+                  if m.get("childResourceAudit") == "FAILED_RESERVED" and
+                  m.get("origin") == "DEVELOP"]
+        self.assertEqual(len(audits), 1, audits)
+        self.assertEqual(audits[0]["accountedToolCalls"], 2)
+        self.assertEqual(audits[0]["observedToolCalls"], 2)
 
     def test_optional_recursive_numbers_fail_closed(self):
         original = self.recursive_fixture()
@@ -419,6 +444,10 @@ class InstalledWritableWorkflowTest(unittest.TestCase):
             "code": "CHILD_EXECUTION_UNCONFIRMED",
         })
         self.assertEqual((self.repo / "src/main/FeatureFull.kt").read_text(), OLD)
+        self.assertIn("CROSS_ORIGIN_ARTIFACT_CONFLICT",
+                      [m.get("recursiveStopCode")
+                       for m in self.recursive_metadata()])
+
 
     def test_installed_five_role_workflow_has_clean_baseline(self):
         self.fixture()
