@@ -24,7 +24,8 @@ import javax.crypto.spec.SecretKeySpec
  * producer recorded by the trusted host (no parent-to-child ID remapping).
  */
 data class AuthenticatedAcceptedStageReceipt(
-    val stageRunId: StageRunId,
+    val graphCorrelation: GraphCorrelation,
+    val stageCorrelation: StageCorrelation,
     val origin: StageKind,
     val manifest: StageArtifactManifest,
     val writeToolId: String,
@@ -526,8 +527,8 @@ class LinuxFiveRoleWorkflowHost(
         if (proof.files.any { item ->
                 readBytes(item.path)?.let { digest(it) == item.after } != true
             }) return null
-        return AuthenticatedAcceptedStageReceipt(stageRunId, stage.kind,
-            manifest, proof.writeId,
+        return AuthenticatedAcceptedStageReceipt(graph.correlation, stage.correlation,
+            stage.kind, manifest, proof.writeId,
             proof.validation.requiredChecks.map { it.checkId }.toSet(),
             proof.files.associate { it.path to it.after })
     }
@@ -727,6 +728,12 @@ class LinuxAuthenticatedRecursiveChildIntegrationHost(
             return null
         val receipt = host.authenticatedAcceptedStage(child.stageRunId) ?: return null
         if (receipt.origin != child.origin ||
+            receipt.graphCorrelation.graphId != child.graphId ||
+            receipt.graphCorrelation.parentGraphId != child.parentGraphId ||
+            receipt.graphCorrelation.parentStageRunId != child.parentStageRunId ||
+            receipt.stageCorrelation.stageRunId != child.stageRunId ||
+            receipt.stageCorrelation.requestId != requestId ||
+            receipt.stageCorrelation.graphId != child.graphId ||
             receipt.manifest.declaredPath !in child.writablePaths ||
             receipt.manifest.declaredPath in child.frozenPaths)
             return null
