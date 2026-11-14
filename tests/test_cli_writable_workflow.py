@@ -187,6 +187,12 @@ class InstalledWritableWorkflowTest(unittest.TestCase):
         return self.invoke("--approvals", str(self.approval_path),
                            "--enable-stage-writes")
 
+    def recursive_metadata(self):
+        path = self.base / "recursive-events.jsonl"
+        self.assertTrue(path.is_file(), "Expected a correlated child audit journal")
+        return [item.get("metadata", {}) for item in
+                (json.loads(line) for line in path.read_text().splitlines())]
+
     def test_installed_two_origin_recursive_cli_gates_parent_and_records_events(self):
         self.recursive_fixture()
         result = self.authorized()
@@ -219,6 +225,109 @@ class InstalledWritableWorkflowTest(unittest.TestCase):
         for kind in ("SDD", "ATDD", "TDD", "DEVELOPER", "REVIEWER"):
             self.assertIn(kind, text)
         self.assertNotIn(NEW, text)
+
+    def test_child_token_grant_stops_before_first_write(self):
+        self.recursive_fixture(child_tokens=100)
+        result = self.authorized()
+        self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
+        self.assertEqual(json.loads(result.stdout)["code"], "CHILD_SDD_NOT_ACCEPTED")
+        self.assertFalse((self.base / "child-sdd/specs/FeatureFull.md").exists())
+        self.assertEqual(self.original_head, self.git("rev-parse", "HEAD"))
+
+    def test_cumulative_developer_role_token_overrun_never_succeeds(self):
+        self.recursive_fixture(child_tokens=400)
+        result = self.authorized()
+        self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+        self.assertEqual(json.loads(result.stdout), {
+            "outcome": "reconciliation_required",
+            "code": "CHILD_EXECUTION_UNCONFIRMED",
+        })
+        # Three successful bootstrap roles consume 390 tokens and mutate Git;
+        # the fourth must be denied before it can write a manifest.
+        child = self.base / "child-develop"
+        self.assertTrue((child / "tests/unit/FeatureFullTest.kt").exists())
+        self.assertFalse((child / "src/main/FeatureFullManifest.xml").exists())
+        # Parent SDD/ATDD/TDD may have legitimately committed, but the
+        # Developer proposal must not be accepted after child exhaustion.
+        self.assertNotEqual(self.original_head, self.git("rev-parse", "HEAD"))
+        self.assertEqual((self.repo / "src/main/FeatureFull.kt").read_text(), OLD)
+        self.assertFalse((self.repo / "src/main/FeatureFullManifest.xml").exists())
+        metadata = self.recursive_metadata()
+        self.assertIn("TOKEN_BUDGET_EXHAUSTED",
+                      [m.get("code") for m in metadata])
+        audits = [m for m in metadata
+                  if m.get("childResourceAudit") == "FAILED_RESERVED" and
+                  m.get("origin") == "DEVELOP"]
+        self.assertEqual(len(audits), 1, audits)
+        self.assertEqual(audits[0]["observedTokens"], 520)
+        self.assertEqual(audits[0]["accountedTokens"], 400)
+        self.assertEqual(audits[0]["grantTokens"], 400)
+
+    def test_trusted_write_check_tool_grant_overrun_never_succeeds(self):
+        plan = self.recursive_fixture()
+        plan["recursiveChildren"]["DEVELOP"]["maxToolCalls"] = 2
+        self.plan_path.write_text(json.dumps(plan, separators=(",", ":")))
+        approval = json.loads(self.approval_path.read_text())
+        approval["planSha256"] = sha(self.plan_path.read_bytes())
+        self.approval_path.write_text(json.dumps(approval))
+        result = self.authorized()
+        self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+        self.assertEqual(json.loads(result.stdout)["outcome"],
+                         "reconciliation_required")
+        self.assertNotEqual(self.original_head, self.git("rev-parse", "HEAD"))
+        self.assertEqual((self.repo / "src/main/FeatureFull.kt").read_text(), OLD)
+        self.assertFalse((self.repo / "src/main/FeatureFullManifest.xml").exists())
+        metadata = self.recursive_metadata()
+        self.assertIn("TOOL_BUDGET_EXHAUSTED",
+                      [m.get("code") for m in metadata])
+        audits = [m for m in metadata
+                  if m.get("childResourceAudit") == "FAILED_RESERVED" and
+                  m.get("origin") == "DEVELOP"]
+        self.assertEqual(len(audits), 1, audits)
+        self.assertEqual(audits[0]["accountedToolCalls"], 2)
+        self.assertEqual(audits[0]["observedToolCalls"], 2)
+
+    def test_optional_recursive_numbers_fail_closed(self):
+        original = self.recursive_fixture()
+        bad = [
+            ("maxDepth", "1"),
+            ("maxChildren", 1.5),
+            ("maxToolCalls", "16"),
+            ("childTokens", None),
+            ("childTokens", 1.25),
+            ("maxDepth", True),
+        ]
+        for field, value in bad:
+            with self.subTest(field=field, value=value):
+                plan = json.loads(json.dumps(original))
+                plan["limits"][field] = value
+                self.plan_path.write_text(json.dumps(plan, separators=(",", ":")))
+                approval = json.loads(self.approval_path.read_text())
+                approval["planSha256"] = sha(self.plan_path.read_bytes())
+                self.approval_path.write_text(json.dumps(approval))
+                result = self.authorized()
+                self.assertEqual(result.returncode, 2,
+                                 result.stderr + result.stdout)
+                self.assertEqual(json.loads(result.stdout)["code"],
+                                 "INVALID_WORKFLOW_CONFIGURATION")
+        self.assertEqual(self.original_head, self.git("rev-parse", "HEAD"))
+
+    def test_live_provider_configuration_is_not_a_workflow_feature(self):
+        plan = self.recursive_fixture()
+        plan["model"] = {
+            "provider": "openai",
+            "baseUrl": "https://example.invalid/v1",
+        }
+        self.plan_path.write_text(json.dumps(plan, separators=(",", ":")))
+        approval = json.loads(self.approval_path.read_text())
+        approval["planSha256"] = sha(self.plan_path.read_bytes())
+        self.approval_path.write_text(json.dumps(approval))
+        result = self.authorized()
+        self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
+        self.assertEqual(json.loads(result.stdout)["code"],
+                         "INVALID_WORKFLOW_CONFIGURATION")
+        self.assertFalse((self.base / "child-sdd/specs/FeatureFull.md").exists())
+        self.assertEqual(self.original_head, self.git("rev-parse", "HEAD"))
 
     def test_installed_recursive_cycle_is_denied(self):
         self.recursive_fixture(cycle=True)
@@ -327,10 +436,42 @@ class InstalledWritableWorkflowTest(unittest.TestCase):
     def test_installed_recursive_cross_origin_artifact_id_conflict(self):
         self.recursive_fixture(integration_conflict=True)
         result = self.authorized()
-        self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
-        self.assertEqual(json.loads(result.stdout)["code"],
-                         "CROSS_ORIGIN_ARTIFACT_CONFLICT")
+        # Both child checkouts are already modified; integration failure is
+        # known-dirty, even though the parent Developer has not written.
+        self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+        self.assertEqual(json.loads(result.stdout), {
+            "outcome": "reconciliation_required",
+            "code": "CHILD_EXECUTION_UNCONFIRMED",
+        })
         self.assertEqual((self.repo / "src/main/FeatureFull.kt").read_text(), OLD)
+        self.assertIn("CROSS_ORIGIN_ARTIFACT_CONFLICT",
+                      [m.get("recursiveStopCode")
+                       for m in self.recursive_metadata()])
+        # The physical child runs finished before cross-origin integration
+        # detected the conflict. Both attempts must still have a terminal audit.
+        records = [json.loads(line) for line in
+                   (self.base / "recursive-events.jsonl").read_text().splitlines()]
+        audits = [record for record in records if
+                  record.get("metadata", {}).get("childResourceAudit") ==
+                  "FAILED_RESERVED"]
+        self.assertEqual({r["metadata"]["origin"] for r in audits},
+                         {"SDD", "DEVELOP"})
+        self.assertEqual(len(audits), 2)
+        self.assertTrue(all(r["metadata"]["schedulerChargeRecorded"]
+                            for r in audits))
+        for audit in audits:
+            metadata = audit["metadata"]
+            self.assertEqual(metadata["accountedTokens"],
+                             metadata["grantTokens"])
+            self.assertEqual(metadata["accountedToolCalls"],
+                             metadata["grantToolCalls"])
+        stops = [record for record in records if
+                 record.get("metadata", {}).get("recursiveStopCode") ==
+                 "CROSS_ORIGIN_ARTIFACT_CONFLICT"]
+        self.assertEqual(len(stops), 1)
+        self.assertIn(stops[0]["correlationId"],
+                      {record["correlationId"] for record in audits})
+
 
     def test_installed_five_role_workflow_has_clean_baseline(self):
         self.fixture()
