@@ -154,6 +154,43 @@ internal class InstalledRecursiveWorkflow(
         return host to childStageId
     }
 
+    /**
+     * Pure host-selected admission before creating or writing a child checkout.
+     * Post-execution scheduling repeats every policy, ownership, dependency and
+     * receipt check. Never perform unapproved physical effects first and
+     * discover a depth/tool/token/cycle denial only after the fact.
+     */
+    private fun preflight(kind: StageKind, grant: RecursiveRootGrant): String? {
+        val config = children.getValue(kind)
+        val now = Instant.now()
+        if (!now.isBefore(deadline)) return "GLOBAL_DEADLINE"
+        val budget = grant.graph.budget
+        val window = minOf(budget.maxDurationMillis, maxDurationMillis)
+        val root = RecursiveNode(
+            grant.graph.correlation.graphId, grant.stageRunId,
+            null, null, null, kind, grant.taskId,
+            emptySet(), 0, grant.writablePaths, grant.frozenPaths,
+            grant.allowedReadTools,
+            RecursiveUsage(budget.maxTokens, maxToolCalls),
+            deadline = minOf(deadline, now.plusMillis(window)),
+            state = RecursiveNodeState.RUNNING
+        )
+        val childId = RecursiveGraphPolicy.childId(root.graphId,
+            root.stageRunId, config.requestId)
+        val proposed = RecursiveChildProposal(
+            config.requestId, root.graphId, root.stageRunId, kind,
+            "child-task-" + kind.name.lowercase(),
+            dependsOn = if (config.dependsOnSelf) setOf(childId) else emptySet(),
+            writablePaths = root.writablePaths, maxTokens = childTokens,
+            maxToolCalls = 3, maxDurationMillis = minOf(60_000L, maxDurationMillis)
+        )
+        val decision = RecursiveGraphPolicy.admit(RecursiveSnapshot(listOf(root)),
+            root.graphId, proposed,
+            RecursiveLimits(maxToolCalls, maxChildren, maxDurationMillis, deadline),
+            budget, now)
+        return (decision as? RecursiveDecision.Denied)?.code
+    }
+
     private suspend fun produce(kind: StageKind, grant: RecursiveRootGrant): String? {
         val (host, childStageId) = childHost(kind, grant)
         val config = children.getValue(kind)
@@ -252,6 +289,7 @@ internal class InstalledRecursiveWorkflow(
         if (kind !in children) return null
         if (kind in origins) return "REPEATED_RECURSIVE_ORIGIN"
         val grant = rootFor(request, kind) ?: return "RECURSIVE_PARENT_LEASE_INVALID"
+        preflight(kind, grant)?.let { return it }
         val produced = try { produce(kind, grant) } catch (_: Exception) {
             return "CHILD_EXECUTION_UNCONFIRMED"
         }
