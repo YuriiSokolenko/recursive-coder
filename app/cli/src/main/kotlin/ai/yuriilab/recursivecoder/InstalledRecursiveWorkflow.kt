@@ -220,8 +220,9 @@ internal class InstalledRecursiveWorkflow(
     }
 
     private data class Attempt(val admitted: RecursiveNode,
-        val meter: InstalledChildRuntimeMeter)
+        val meter: InstalledChildRuntimeMeter, var schedulerCharged: Boolean = false)
     private val attempts = linkedMapOf<StageKind, Attempt>()
+    private val auditedAttempts = mutableSetOf<StageKind>()
     private val origins = linkedMapOf<StageKind, Origin>()
 
     /**
@@ -232,24 +233,44 @@ internal class InstalledRecursiveWorkflow(
      */
     private fun auditFailedAttempt(kind: StageKind, code: String) {
         val attempt = attempts[kind] ?: return
+        // At most one terminal audit for each physical checkout. These are
+        // local reservation observations, not additional scheduler charges.
+        if (!auditedAttempts.add(kind)) return
         val observed = attempt.meter.observed()
         val reserved = attempt.admitted.granted
         val accounted = attempt.meter.accounted(failed = true)
-        journal?.append("session.error", "failed",
-            correlationId = attempt.admitted.requestId,
-            extra = buildJsonObject {
-                put("childResourceAudit", "FAILED_RESERVED")
-                put("origin", kind.name)
-                put("code", code)
-                put("observedTokens", observed.tokens)
-                put("observedToolCalls", observed.toolCalls)
-                put("grantTokens", reserved.tokens)
-                put("grantToolCalls", reserved.toolCalls)
-                put("accountedTokens", accounted.tokens)
-                put("accountedToolCalls", accounted.toolCalls)
-                put("usageUncertain", attempt.meter.hasUncertainUsage())
-            })
+        try {
+            journal?.append("session.error", "failed",
+                correlationId = attempt.admitted.requestId,
+                extra = buildJsonObject {
+                    put("childResourceAudit", "FAILED_RESERVED")
+                    put("origin", kind.name)
+                    put("code", code)
+                    put("observedTokens", observed.tokens)
+                    put("observedToolCalls", observed.toolCalls)
+                    put("grantTokens", reserved.tokens)
+                    put("grantToolCalls", reserved.toolCalls)
+                    put("accountedTokens", accounted.tokens)
+                    put("accountedToolCalls", accounted.toolCalls)
+                    put("usageUncertain", attempt.meter.hasUncertainUsage())
+                    // True means a successful measured scheduler charge was
+                    // already recorded before a later integration failure.
+                    // Never sum this audit as another charge.
+                    put("schedulerChargeRecorded", attempt.schedulerCharged)
+                })
+        } catch (_: Exception) {
+            // Preserve the original failure code. A failed journal append
+            // remains unconfirmed at journal.finish(), so it cannot turn
+            // into a successful completed workflow.
+            uncertainChildExecution = true
+        }
     }
+
+    /** Physical work was already performed before recursive scheduling. */
+    private fun auditUnintegratedAttempts(code: String) {
+        attempts.keys.toList().forEach { kind -> auditFailedAttempt(kind, code) }
+    }
+
     private var integrated: TwoOriginRecursiveOutcome.Completed? = null
     @Volatile private var uncertainChildExecution = false
     val reconciliationRequired: Boolean get() = uncertainChildExecution
@@ -508,7 +529,10 @@ internal class InstalledRecursiveWorkflow(
                         return@RecursiveStageExecutor RecursiveExecutionOutcome.Failed(
                             "CHILD_TOOL_USAGE_UNCONFIRMED")
                     when (val charged = owned.charge(measured)) {
-                        is RecursiveDecision.Allowed -> RecursiveExecutionOutcome.Completed
+                        is RecursiveDecision.Allowed -> {
+                            attempts[origin.kind]?.schedulerCharged = true
+                            RecursiveExecutionOutcome.Completed
+                        }
                         is RecursiveDecision.Denied ->
                             RecursiveExecutionOutcome.Failed(charged.code)
                     }
@@ -565,8 +589,19 @@ internal class InstalledRecursiveWorkflow(
         if (kind == StageKind.DEVELOP) {
             val first = origins[StageKind.SDD] ?: return "MISSING_SDD_CHILD_ORIGIN"
             val second = origins.getValue(StageKind.DEVELOP)
-            val result = RunTwoOriginRecursiveChildrenUseCase(events = recursiveEvents)
-                .execute(source(first), source(second))
+            val result = try {
+                RunTwoOriginRecursiveChildrenUseCase(events = recursiveEvents)
+                    .execute(source(first), source(second))
+            } catch (cancelled: CancellationException) {
+                auditUnintegratedAttempts("ORIGIN_CANCELLED")
+                throw cancelled
+            } catch (_: Exception) {
+                // Both checkouts may have committed. Preserve the original
+                // classification even if the best-effort audit fails.
+                uncertainChildExecution = true
+                auditUnintegratedAttempts("ORIGIN_EXECUTION_UNCONFIRMED")
+                return "CHILD_EXECUTION_UNCONFIRMED"
+            }
             integrated = result as? TwoOriginRecursiveOutcome.Completed
             if (integrated == null) {
                 // Both physical child checkouts have already committed writes.
@@ -574,14 +609,23 @@ internal class InstalledRecursiveWorkflow(
                 // preserve both checkouts and require operator reconciliation.
                 uncertainChildExecution = true
                 val stopped = result as TwoOriginRecursiveOutcome.Stopped
-                // Preserve the exact cause for operator reconciliation even
-                // though the public exit contract stays generic.
-                journal?.append("session.error", "failed",
-                    extra = buildJsonObject {
-                        put("recursiveStopCode", stopped.code)
-                        put("origin", stopped.origin?.name ?: "BOTH")
-                        put("requiresReconciliation", true)
-                    })
+                auditUnintegratedAttempts(stopped.code)
+                // Preserve the exact cause and join it to the child's resource
+                // audit via the admitted host-generated request correlation.
+                try {
+                    journal?.append("session.error", "failed",
+                        correlationId = attempts[stopped.origin]?.admitted?.requestId
+                            ?: second.admitted.requestId,
+                        extra = buildJsonObject {
+                            put("recursiveStopCode", stopped.code)
+                            put("origin", stopped.origin?.name ?: "BOTH")
+                            put("requiresReconciliation", true)
+                        })
+                } catch (_: Exception) {
+                    // EventSinkFailure is finalized as unconfirmed by the CLI;
+                    // never mask the scheduler's original stop reason.
+                    uncertainChildExecution = true
+                }
                 return stopped.code
             }
             // The parent Developer writer lease is intentionally live here.
