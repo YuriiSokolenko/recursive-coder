@@ -318,6 +318,22 @@ internal class InstalledRecursiveWorkflow(
             Instant.now())
     }
 
+    /**
+     * On a failed isolated SDD child, distinguish an unchanged initial Git
+     * baseline from an uncommitted/uncertain physical write. Never convert an
+     * inaccessible checkout into a safe ordinary denial.
+     */
+    private fun initialChildBaselineIntact(config: InstalledChildCheckout): Boolean =
+        try {
+            LinuxStageGitBaselineReconciler(config.root, config.locks)
+                .inspectCleanBaseline(config.head, config.branch) ==
+                StageGitBaselineResult.Clean
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            false
+        }
+
     private suspend fun produce(kind: StageKind, grant: RecursiveRootGrant): String? {
         val (host, childStageId) = childHost(kind, grant)
         val config = children.getValue(kind)
@@ -331,10 +347,12 @@ internal class InstalledRecursiveWorkflow(
                     journal?.let(::CorrelatedRoleSessionEvents) ?: StageRoleEventSink { },
                     journal?.let(::CorrelatedPreparationSessionEvents)
                         ?: PreparationStageEventSink { })
-            if (result.outcome is PreparationStageOutcome.ReconciliationRequired)
-                uncertainChildExecution = true
-            if (result.outcome !is PreparationStageOutcome.Accepted)
+            if (result.outcome !is PreparationStageOutcome.Accepted) {
+                if (result.outcome is PreparationStageOutcome.ReconciliationRequired ||
+                    !initialChildBaselineIntact(config))
+                    uncertainChildExecution = true
                 return "CHILD_SDD_NOT_ACCEPTED"
+            }
         } else {
             val childId = host.snapshot().graph.correlation.graphId
             val childTargets = childTargets(kind, childId)
