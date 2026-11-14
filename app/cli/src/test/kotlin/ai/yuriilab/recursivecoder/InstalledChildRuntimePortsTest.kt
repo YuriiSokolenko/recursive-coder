@@ -51,12 +51,15 @@ class InstalledChildRuntimePortsTest {
         val ledger = meter()
         var invocations = 0
         val outputCaps = mutableListOf<Long>()
-        val executor = MeteredChildRoleExecutor(StageRoleExecutor { bounded, _ ->
-            invocations++
-            outputCaps.add(bounded.model.maxOutputTokens)
-            assertEquals(start.plusSeconds(60), bounded.deadline)
-            StageRoleResult(correlation, StageKind.SDD.role, actor,
-                StageRoleOutcome.Proposed("proposal"), StageRoleUsage(1, 100, 30))
+        val executor = MeteredChildRoleExecutor(object : StageRoleExecutor {
+            override suspend fun execute(bounded: StageRoleRequest,
+                events: StageRoleEventSink): StageRoleResult {
+                invocations++
+                outputCaps.add(bounded.model.maxOutputTokens)
+                assertEquals(start.plusSeconds(60), bounded.deadline)
+                return StageRoleResult(correlation, StageKind.SDD.role, actor,
+                    StageRoleOutcome.Proposed("proposal"), StageRoleUsage(1, 100, 30))
+            }
         }, ledger)
         val first = executor.execute(request, StageRoleEventSink { })
         assertIs<StageRoleOutcome.Proposed>(first.outcome)
