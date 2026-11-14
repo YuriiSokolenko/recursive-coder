@@ -220,7 +220,11 @@ class RunFiveRoleWorkflowUseCase(
                         is PreparationStageOutcome.ReconciliationRequired ->
                             return uncertain(kind, outcome.code)
                         is PreparationStageOutcome.Denied ->
-                            return stop(kind, outcome.code, current)
+                            return stop(kind, outcome.code, done.graph?.let { graph ->
+                                done.hostAcceptedArtifactIds?.let { ids ->
+                                    PreparationStageSnapshot(graph, ids)
+                                }
+                            })
                         is PreparationStageOutcome.Failed ->
                             return stop(kind, outcome.code, done.graph?.let { graph ->
                                 done.hostAcceptedArtifactIds?.let { ids ->
@@ -263,7 +267,11 @@ class RunFiveRoleWorkflowUseCase(
                         is DeveloperStageOutcome.ReconciliationRequired ->
                             return uncertain(kind, outcome.code, outcome.workspaceMayBeDirty)
                         is DeveloperStageOutcome.Denied ->
-                            return stop(kind, outcome.code, current)
+                            return stop(kind, outcome.code, done.graph?.let { graph ->
+                                done.hostAcceptedArtifactIds?.let { ids ->
+                                    PreparationStageSnapshot(graph, ids)
+                                }
+                            })
                         is DeveloperStageOutcome.Failed -> {
                             // An attempted write can have mutated physical bytes even when
                             // the host has a valid graph snapshot. Do not expose resumable
@@ -294,7 +302,11 @@ class RunFiveRoleWorkflowUseCase(
                         is ReviewerStageOutcome.ReconciliationRequired ->
                             return uncertain(kind, outcome.code)
                         is ReviewerStageOutcome.Denied ->
-                            return stop(kind, outcome.code, current)
+                            return stop(kind, outcome.code, done.graph?.let { graph ->
+                                done.hostAcceptedArtifactIds?.let { ids ->
+                                    PreparationStageSnapshot(graph, ids)
+                                }
+                            })
                         is ReviewerStageOutcome.Failed ->
                             return stop(kind, outcome.code, done.graph?.let { graph ->
                                 done.hostAcceptedArtifactIds?.let { ids ->
