@@ -103,10 +103,23 @@ class LinuxFiveRoleWorkflowHost(
             graph.stages.single().state in setOf(StageState.CREATED, StageState.READY) &&
             graph.artifacts.isEmpty())
         require(Regex("[0-9a-f]{40}").matches(head))
-        require(preauthorizedStageIdentities.keys.all { it != StageKind.SDD } &&
-            preauthorizedStageIdentities.values.all { (_, requestId) ->
-                ToolAuthorizationPolicy.validHostIdentifier(requestId)
-            })
+        // A preauthorized identity is accepted only for a child graph whose
+        // exact parent and request derive this graph/stage ID. This cannot be
+        // repurposed to inject an arbitrary future stage identity.
+        require(preauthorizedStageIdentities.all { (kind, identity) ->
+            val parentGraph = graph.correlation.parentGraphId
+            val parentStage = graph.correlation.parentStageRunId
+            if (kind in setOf(StageKind.SDD, StageKind.REVIEW) ||
+                parentGraph == null || parentStage == null ||
+                !ToolAuthorizationPolicy.validHostIdentifier(identity.second))
+                false
+            else {
+                val expectedChild = RecursiveGraphPolicy.childId(
+                    parentGraph, parentStage, identity.second)
+                graph.correlation.graphId == expectedChild &&
+                    identity.first == RecursiveGraphPolicy.childStageId(expectedChild)
+            }
+        })
         require("git_diff_check" in requiredChecks &&
             (requiredChecks - "git_diff_check").isNotEmpty() &&
             (requiredChecks - "git_diff_check").all { it in checks })
