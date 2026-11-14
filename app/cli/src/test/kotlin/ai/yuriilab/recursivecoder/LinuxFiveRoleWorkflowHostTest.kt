@@ -413,6 +413,8 @@ class LinuxFiveRoleWorkflowHostTest {
             emptySet(), RecursiveUsage(100, 2), deadline = Instant.now().plusSeconds(90))
         val bridge = LinuxAuthenticatedRecursiveChildIntegrationHost(host,
             "host-session", setOf(childStage))
+        // Provisional host acceptance is not equivalent to child-scope authorization.
+        assertEquals(setOf(output.id), bridge.acceptedArtifactIds())
         // A valid host receipt can still be forbidden by a narrower child grant.
         assertEquals(ChildReceiptVerification.Denied(
             ChildReceiptDenialCode.OUTSIDE_WRITABLE_SCOPE), bridge.verifyChild(child))
