@@ -196,6 +196,18 @@ class TwoOriginRecursiveChildrenIntegrationTest {
         assertEquals("CHILD_EVIDENCE_STALE", denied.code)
     }
 
+    @Test fun acceptedChildPathsUsePortableCanonicalConflictKeys() {
+        assertEquals("src/main/example.kt", childArtifactConflictKey(
+            "src/main/Example.kt"))
+        assertEquals(childArtifactConflictKey("specs/Café.md"),
+            childArtifactConflictKey("specs/Cafe\\u0301.md"))
+        assertEquals(childArtifactConflictKey("src/main/FILE.kt"),
+            childArtifactConflictKey("src/main/file.kt"))
+        assertEquals(null, childArtifactConflictKey("src/main/../Escape.kt"))
+        assertEquals(null, childArtifactConflictKey("/src/main/Absolute.kt"))
+        assertEquals(null, childArtifactConflictKey("src/main\\\\Escape.kt"))
+    }
+
     @Test fun lostSessionEventsMakeTwoOriginSuccessImpossible() = runBlocking {
         val failure = RecursiveEventSink { _: RecursiveEvent -> error("journal write failure") }
         val result = RunTwoOriginRecursiveChildrenUseCase(clock, failure).execute(
