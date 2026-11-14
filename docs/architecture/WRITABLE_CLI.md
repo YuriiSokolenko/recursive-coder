@@ -208,6 +208,10 @@ provider response reports a valid token count above the grant, the host
 retains its full **observed** count, which can exceed the grant; it never
 authorizes the late result or additional writes. Missing, negative, or
 unrepresentable usage is marked **unconfirmed**, not silently zeroed.
+Once usage becomes unconfirmed, the host refuses **every** subsequent
+model call and trusted tool open/write/check/verify, including operations
+through a session opened before the uncertainty was detected. This
+protection is independent of the remaining token or tool-call allowance.
 A completed physical child must still present its authenticated receipt
 and checks; metadata alone never permits integration.
 
@@ -220,9 +224,18 @@ automatic retry, and no parent success**. When a SessionEventJournal is
 configured, `childResourceAudit=FAILED_RESERVED` records
 `observedTokens/observedToolCalls` separately from
 `accountedTokens/accountedToolCalls`, the original grant and
-`usageUncertain`. This is a local host audit, **not** a proof of complete
-provider-side billing. Live support remains blocked until provider usage
-is trustworthy and failure-path accounting is proven end-to-end.
+`usageUncertain`. A failure **after** physical child production
+(including scheduler deadline, missing receipt, usage-denial, cancellation
+or cross-origin integration conflict) also records a terminal audit for
+each checkout that executed. Audits are emitted once per origin, regardless
+of whether the scheduler is present or later stops. The audit carries a
+`schedulerChargeRecorded` boolean: if true, a successful measured
+scheduler charge already occurred before the later failure; **do not
+add the reservation audit to that scheduler charge**. An audit is
+conservative evidence for operator reconciliation, not an additional
+ledger debit or proof of provider-side billing. Live support remains
+blocked until provider usage is trustworthy and failure-path accounting
+is proven end-to-end.
 
 **Provenance:** the admission comes from host projection of a live parent
 stage, `RecursiveGraphPolicy.admit`, and the validated operator plan.
@@ -241,7 +254,8 @@ writes, a later `RunTwoOriginRecursiveChildrenUseCase.Stopped` (for example,
 a cross-origin conflict) is always surfaced as
 `reconciliation_required / CHILD_EXECUTION_UNCONFIRMED`. The stable
 `recursiveStopCode` and origin are preserved in the optional metadata-only
-journal's `session.error` entry for operator diagnosis (not echoed to
+journal's `session.error` entry, with a host-issued child request
+`correlationId` matching that origin's resource audit, for operator diagnosis (not echoed to
 untrusted model text or stdout). Both checkouts and
 the parent must be inspected and reconciled/reset by an operator; **neither
 checkout is automatically reverted, deleted, or safe to reuse**. The in-memory
