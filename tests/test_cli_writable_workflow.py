@@ -241,7 +241,11 @@ class InstalledWritableWorkflowTest(unittest.TestCase):
         child = self.base / "child-develop"
         self.assertTrue((child / "tests/unit/FeatureFullTest.kt").exists())
         self.assertFalse((child / "src/main/FeatureFullManifest.xml").exists())
-        self.assertEqual(self.original_head, self.git("rev-parse", "HEAD"))
+        # Parent SDD/ATDD/TDD may have legitimately committed, but the
+        # Developer proposal must not be accepted after child exhaustion.
+        self.assertNotEqual(self.original_head, self.git("rev-parse", "HEAD"))
+        self.assertEqual((self.repo / "src/main/FeatureFull.kt").read_text(), OLD)
+        self.assertFalse((self.repo / "src/main/FeatureFullManifest.xml").exists())
 
     def test_trusted_write_check_tool_grant_overrun_never_succeeds(self):
         plan = self.recursive_fixture()
@@ -254,7 +258,9 @@ class InstalledWritableWorkflowTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
         self.assertEqual(json.loads(result.stdout)["outcome"],
                          "reconciliation_required")
-        self.assertEqual(self.original_head, self.git("rev-parse", "HEAD"))
+        self.assertNotEqual(self.original_head, self.git("rev-parse", "HEAD"))
+        self.assertEqual((self.repo / "src/main/FeatureFull.kt").read_text(), OLD)
+        self.assertFalse((self.repo / "src/main/FeatureFullManifest.xml").exists())
 
     def test_optional_recursive_numbers_fail_closed(self):
         original = self.recursive_fixture()
