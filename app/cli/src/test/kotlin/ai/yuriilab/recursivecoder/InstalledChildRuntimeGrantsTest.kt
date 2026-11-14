@@ -6,6 +6,7 @@ import java.time.ZoneOffset
 import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -47,7 +48,9 @@ class InstalledChildRuntimeGrantsTest {
         // 4 * 130 fits, but the fifth role must not authorize a proposal.
         assertEquals("TOKEN_BUDGET_EXHAUSTED",
             metered.recordRole(StageRoleUsage(1, 100, 30), true))
-        assertEquals(RecursiveUsage(520, 0), metered.measured())
+        assertEquals(RecursiveUsage(650, 0), metered.measured())
+        assertEquals(RecursiveUsage(600, 0), metered.accounted())
+        assertEquals(0L, metered.remainingTokens())
     }
 
     @Test fun nullUnknownNegativeAndOverflowUsageFailClosed() {
@@ -60,7 +63,9 @@ class InstalledChildRuntimeGrantsTest {
             metered.recordRole(StageRoleUsage(1, -1, 2), true))
         assertEquals("TOKEN_BUDGET_EXHAUSTED",
             metered.recordRole(StageRoleUsage(1, Long.MAX_VALUE, 2), true))
-        assertEquals(RecursiveUsage(0, 0), metered.measured())
+        assertEquals(RecursiveUsage(Long.MAX_VALUE, 0), metered.measured())
+        assertEquals(RecursiveUsage(200, 12), metered.accounted())
+        assertTrue(metered.hasUncertainUsage())
     }
 
     @Test fun trustedToolCallsAreCountedBeforeEveryInvocation() {
@@ -76,7 +81,27 @@ class InstalledChildRuntimeGrantsTest {
         assertEquals("STAGE_DEADLINE", expired.authorizeToolCall())
         assertEquals("STAGE_DEADLINE",
             expired.recordRole(StageRoleUsage(1, 1, 1), true))
-        assertEquals(RecursiveUsage(), expired.measured())
+        assertEquals(RecursiveUsage(2, 0), expired.measured())
+    }
+
+    @Test fun confirmedUsageAfterDeadlineStillCountsAgainstItsGrant() {
+        val expired = meter(tokens = 20, deadline = now)
+        assertEquals("STAGE_DEADLINE",
+            expired.recordRole(StageRoleUsage(1, 10, 7), true))
+        assertEquals(RecursiveUsage(17, 0), expired.observed())
+        assertEquals(RecursiveUsage(20, 12), expired.accounted(failed = true))
+    }
+
+    @Test fun fakeOnlyModelGateRejectsDifferentProviderAndModelId() {
+        val fake = ModelConfig("fake", "fake-v1", "http://localhost/unused",
+            "env:UNUSED", 2048, 256, emptySet(), null, 1000, 1000)
+        requireInstalledRecursiveFakeModel(fake)
+        assertFailsWith<IllegalArgumentException> {
+            requireInstalledRecursiveFakeModel(fake.copy(provider = "live"))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            requireInstalledRecursiveFakeModel(fake.copy(modelId = "other"))
+        }
     }
 
     @Test fun wrappedTrustedToolSessionNeverDispatchesOverLimit() {
