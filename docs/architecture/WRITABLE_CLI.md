@@ -1,0 +1,93 @@
+# Opt-in writable five-role CLI (Issue #79, CLI slice)
+
+The installed CLI now has a separate **offline-only** `workflow` command.
+`recursive-coder run REQUEST` remains SessionRequest v1, **read-only**, and
+`recursive-coder tasks` retains its original scheduler semantics. No default
+dependency-injection module grants write access.
+
+## Invocation
+
+```text
+recursive-coder workflow /absolute/plan.json \
+  --approvals /absolute/approvals.json --enable-stage-writes
+```
+
+All three inputs are mandatory; omitting the flag or approvals fails before
+opening any stage. There is no interactive or implicit authorization fallback.
+
+The workflow plan is UTF-8 JSON (version 1, maximum 64 KiB), with exactly:
+
+- `sessionId`: a valid host identifier (short enough to fit suffixed stage IDs).
+- `workspace`: `rootPath`, `headSha` (exact 40-digit lowercase Git HEAD),
+  `branch`, `lockDirectory` (absolute external lock scope).
+- `artifacts`: keys `SDD`, `ATDD`, `TDD`, `DEVELOP`; values each contain
+  `id` and permitted, distinct repo-relative `path`.
+- `instructions`: nonempty text for each of the five role names, including
+  `REVIEW`.
+- `developerTargets`: one to seven entries, each with `path` and optional
+  exact preimage `expectedSha256` (null/omitted means create).
+- `fakeProposals`: deterministic offline fixture response text for
+  `SDD`, `ATDD`, `TDD`, `DEVELOP`. The Developer response must follow
+  the existing strict `{"files":[{"path":"...", "content":"..."}]}` proposal
+  grammar. The Reviewer response is constructed dynamically from the trusted
+  check/write IDs in the read-only Reviewer prompt.
+- `fakeReviewerVerdict`: `ACCEPT`, `REJECT` or `NEEDS_HUMAN`.
+- `check`: a host/operator-chosen absolute `executable` and string
+  `arguments` (at most 16), run in the existing bubblewrap sandbox as
+  `offline-check` after each write; `/usr/bin/true` cannot be used.
+  `git_diff_check` is also always required.
+- `limits`: positive `maxTokens`, `maxDurationMillis` and
+  `deadlineSeconds` within the CLI's bounded ranges.
+
+The separate approvals file also has version 1 and **exactly** `planSha256`
+(the SHA-256 of the plan file's raw bytes) and `approvedSha256` (a map of
+all four write-role names to the **exact** expected output SHA-256 values).
+For the Developer, the approved output is the generated implementation
+manifest, not just an unverified model source. The candidate role, artifact ID,
+path and digest must all match the independently provisioned approval file;
+otherwise the trusted host rejects it. The approval callback is local and
+noninteractive: it is **not** a signature, user identity assertion or human
+approval workflow.
+
+## Checkout and trust boundary
+
+Run only on Linux with `/usr/bin/git` and `/usr/bin/bwrap` configured,
+in a **dedicated, clean, isolated repository checkout** with a real `.git`
+directory. The operator must place the literal UTF-8 marker
+`isolated-workflow-v1\n` at
+`<checkout>/.git/recursive-coder-isolated-workflow`.
+This is a deliberate operator assertion, **not** a sandbox of the workspace;
+isolate checkout access from untrusted same-UID processes separately.
+
+The plan, approval file, and shared lock directory must live **outside** the
+checkout. The checkout cannot be the CLI process's current working directory.
+The Linux production host checks the exact HEAD, branch, local Git
+configuration and pristine index/worktree before beginning. The host owns
+StageGraph transitions, HMAC-backed receipts, accepted artifacts, frozen
+digests, Git handoffs, and final independent Reviewer acceptance. Neither the
+fixture engine nor the operator JSON can create a trusted receipt or bypass
+the protected-spec/test write policy.
+
+On successful execution, the command reports `{"outcome":"completed",
+"code":"SUCCEEDED"}` and exits 0. Stopped/rejected workflows exit 2.
+A host-uncertain state requiring out-of-band reconciliation exits 1, never
+automatically retries, and **may leave uncommitted workspace changes**.
+Do not reuse this checkout after an uncertain outcome without independent
+reconciliation.
+
+## Test and scope
+
+`tests/test_cli_writable_workflow.py` invokes the **installed distribution**,
+not an in-process shortcut. It covers all five roles with a real Git worktree
+and sandbox checks, a clean final baseline, missing opt-in, stale approvals,
+dirty checkout, independent Reviewer rejection and protected test paths.
+The GitHub `kotlin` job runs these cases after `installDist`. Missing bwrap
+or user namespace support in CI is a **failure**, not a silent skip.
+
+The offline provider uses the existing `FakeModel` capability handshake plus
+fixed per-role proposals; it is **not** a production LLM completion provider.
+The role usage is fixture data, not measured token consumption. The result
+does not prove two-origin child-graph integration, SessionEvent correlation,
+production provider compatibility, durable checkpoint/crash-resume (#10) or
+an externally authenticated human approval system. Issue #79 remains open
+until the nested and journal acceptance suites are delivered.
