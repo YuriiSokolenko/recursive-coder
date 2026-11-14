@@ -1,5 +1,6 @@
 package ai.yuriilab.recursivecoder
 
+import java.security.MessageDigest
 import java.time.Clock
 import kotlinx.coroutines.CancellationException
 
@@ -114,6 +115,29 @@ class RunTwoOriginRecursiveChildrenUseCase(
             }
             integrated[kind] = results
             snapshots[kind] = scheduler.current()
+        }
+        // Re-read both hosts only after the second tree completes. Otherwise
+        // the second executor could invalidate the first tree's accepted bytes
+        // while an earlier receipt snapshot still appears successful.
+        for ((source, kind) in ordered) {
+            val results = integrated.getValue(kind)
+            val snapshot = snapshots.getValue(kind)
+            val intact = try {
+                val approved = source.integrationHost.acceptedArtifactIds()
+                results.artifacts.all { receipt ->
+                    val producer = snapshot.node(receipt.childGraphId)
+                    val bytes = source.integrationHost.readBytes(receipt.manifest.declaredPath)
+                    producer != null && bytes != null &&
+                        receipt.manifest.id in approved &&
+                        source.integrationHost.manifestsFor(producer)
+                            ?.contains(receipt.manifest) == true &&
+                        MessageDigest.getInstance("SHA-256").digest(bytes)
+                            .joinToString("") { "%02x".format(it) } == receipt.observedSha256
+                }
+            } catch (_: Exception) { false }
+            if (!intact) {
+                return TwoOriginRecursiveOutcome.Stopped(kind, "CHILD_EVIDENCE_STALE")
+            }
         }
         return TwoOriginRecursiveOutcome.Completed(integrated.toMap(), snapshots.toMap())
     }
