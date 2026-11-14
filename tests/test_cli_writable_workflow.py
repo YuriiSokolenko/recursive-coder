@@ -125,7 +125,7 @@ class InstalledWritableWorkflowTest(unittest.TestCase):
     def recursive_fixture(self, *, verdict="ACCEPT", protected=False,
                           cycle=False, developer_cycle=False,
                           depth=None, child_tokens=None, developer_tokens=None,
-                          integration_conflict=False):
+                          integration_conflict=False, child_check_fails=False):
         plan, approvals = self.fixture(verdict=verdict, protected=protected)
         configs = {}
         for kind in ("SDD", "DEVELOP"):
@@ -161,6 +161,10 @@ class InstalledWritableWorkflowTest(unittest.TestCase):
         if integration_conflict:
             configs["DEVELOP"]["outputArtifactId"] = plan["artifacts"]["SDD"]["id"]
         plan["recursiveChildren"] = configs
+        if child_check_fails:
+            plan["check"]["arguments"] = [
+                "-q", "no-such-fixture-text", "src/main/FeatureFull.kt"
+            ]
         plan["eventsPath"] = str(self.base / "recursive-events.jsonl")
         if depth is not None:
             plan["limits"]["maxDepth"] = depth
@@ -258,6 +262,18 @@ class InstalledWritableWorkflowTest(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout)["code"], "TOKEN_BUDGET_EXHAUSTED")
         self.assertFalse((self.base / "child-sdd/specs/FeatureFull.md").exists(),
                          "Recursive policy must deny before writing child files")
+
+    def test_failed_child_post_write_check_requires_reconciliation(self):
+        self.recursive_fixture(child_check_fails=True)
+        result = self.authorized()
+        self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+        self.assertEqual(json.loads(result.stdout), {
+            "outcome": "reconciliation_required",
+            "code": "CHILD_EXECUTION_UNCONFIRMED",
+        })
+        self.assertTrue((self.base / "child-sdd/specs/FeatureFull.md").exists())
+        self.assertEqual(self.original_head, self.git("rev-parse", "HEAD"))
+        self.assertEqual((self.repo / "src/main/FeatureFull.kt").read_text(), OLD)
 
     def test_installed_recursive_reviewer_rejection_stays_failed(self):
         self.recursive_fixture(verdict="REJECT")
