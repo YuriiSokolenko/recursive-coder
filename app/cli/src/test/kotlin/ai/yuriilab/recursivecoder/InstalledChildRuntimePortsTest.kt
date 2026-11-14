@@ -79,6 +79,26 @@ class InstalledChildRuntimePortsTest {
         assertEquals(RecursiveUsage(150, 3), ledger.accounted())
     }
 
+    @Test fun unknownUsageNeverDispatchesAnotherRole() = runBlocking {
+        val ledger = meter()
+        assertEquals("CHILD_USAGE_UNAVAILABLE",
+            ledger.recordRole(StageRoleUsage(1, null, null), false))
+        var called = false
+        val executor = MeteredChildRoleExecutor(object : StageRoleExecutor {
+            override suspend fun execute(request: StageRoleRequest,
+                events: StageRoleEventSink): StageRoleResult {
+                called = true
+                error("Poisoned child must never call its model delegate")
+            }
+        }, ledger)
+        val result = executor.execute(request, StageRoleEventSink { })
+        assertEquals(StageRoleOutcome.Denied("CHILD_USAGE_UNCONFIRMED"),
+            result.outcome)
+        assertEquals(correlation, result.correlation)
+        assertEquals(actor, result.agentId)
+        assertFalse(called)
+    }
+
     private fun authority() = StageToolAuthoritySource {
         StageToolHostSnapshot(graph, stageId, correlation.requestId, emptySet(),
             Path.of("/tmp/installed-meter-ports"), "0123456789012345678901234567890123456789",
