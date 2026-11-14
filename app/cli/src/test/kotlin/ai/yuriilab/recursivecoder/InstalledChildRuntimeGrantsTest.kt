@@ -68,6 +68,14 @@ class InstalledChildRuntimeGrantsTest {
         assertTrue(metered.hasUncertainUsage())
     }
 
+    @Test fun aFailedDelegateWithNoUsageCannotMasqueradeAsZero() {
+        val metered = meter(tokens = 250)
+        assertEquals("CHILD_USAGE_UNAVAILABLE",
+            metered.recordRole(StageRoleUsage(), false))
+        assertTrue(metered.hasUncertainUsage())
+        assertEquals(RecursiveUsage(250, 12), metered.accounted(failed = true))
+    }
+
     @Test fun trustedToolCallsAreCountedBeforeEveryInvocation() {
         val metered = meter(tools = 3)
         repeat(3) { assertNull(metered.authorizeToolCall()) }
