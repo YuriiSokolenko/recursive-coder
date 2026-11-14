@@ -3,6 +3,7 @@ package ai.yuriilab.recursivecoder
 import java.nio.file.Path
 import java.security.MessageDigest
 import java.time.Instant
+import kotlinx.coroutines.CancellationException
 
 /**
  * Opt-in, fake-only installed workflow bridge. Child workspaces are independently
@@ -17,7 +18,8 @@ internal data class InstalledChildCheckout(
     val locks: Path,
     val requestId: String,
     val dependsOnSelf: Boolean = false,
-    val outputArtifactId: ArtifactId? = null
+    val outputArtifactId: ArtifactId? = null,
+    val maxTokens: Long? = null
 )
 
 internal class InstalledRecursiveWorkflow(
@@ -51,6 +53,12 @@ internal class InstalledRecursiveWorkflow(
 
     private val origins = linkedMapOf<StageKind, Origin>()
     private var integrated: TwoOriginRecursiveOutcome.Completed? = null
+    @Volatile private var uncertainChildExecution = false
+    val reconciliationRequired: Boolean get() = uncertainChildExecution
+    private val requiredChildChecks = setOf("git_diff_check", "offline-check")
+    private val childToolCalls = requiredChildChecks.size.toLong() + 1L
+    private fun tokenGrant(kind: StageKind): Long =
+        children.getValue(kind).maxTokens ?: childTokens
     private val recursiveEvents: RecursiveEventSink
         get() = journal?.let(::CorrelatedRecursiveSessionEvents) ?: RecursiveEventSink { }
 
@@ -103,6 +111,20 @@ internal class InstalledRecursiveWorkflow(
             "origin-task-" + kind.name.lowercase(), writable, frozen)
     }
 
+    /** One canonical child target plan for both approvals and execution. */
+    private fun childTargets(kind: StageKind, childId: GraphId):
+        Map<StageKind, FiveRoleArtifactTarget> {
+        if (kind == StageKind.SDD) return targets
+        return targets.mapValues { (stage, value) ->
+            if (stage == StageKind.DEVELOP) {
+                value.copy(id = children.getValue(kind).outputArtifactId ?: value.id)
+            } else {
+                value.copy(id = ArtifactId("bootstrap-" + stage.name.lowercase() +
+                    "-" + digest(childId.value).take(12)))
+            }
+        }
+    }
+
     private fun childHost(kind: StageKind, grant: RecursiveRootGrant):
         Pair<LinuxFiveRoleWorkflowHost, StageRunId> {
         val config = children.getValue(kind)
@@ -126,19 +148,11 @@ internal class InstalledRecursiveWorkflow(
                 AgentId("actor-" + digest(firstStageId.value).take(24)))),
             emptyList(), StageBudget(maxTokens, maxDurationMillis, 0, 0)
         )
-        // The Developer child runs its own SDD/ATDD/TDD prerequisites.
-        // Give its bootstrap artifacts disjoint IDs; only the Developer
-        // artifact ID can be set explicitly for a conflict-negative fixture.
-        val childTargets = if (kind == StageKind.SDD) targets else targets.mapValues {
-            (stage, value) -> if (stage == StageKind.DEVELOP)
-                value.copy(id = config.outputArtifactId ?: value.id)
-            else value.copy(id = ArtifactId("bootstrap-" + stage.name.lowercase() +
-                "-" + digest(childId.value).take(12)))
-        }
+        val childTargets = childTargets(kind, childId)
         val host = LinuxFiveRoleWorkflowHost(
             config.root, childGraph, config.head, config.branch,
             mapOf("offline-check" to check),
-            setOf("git_diff_check", "offline-check"),
+            requiredChildChecks,
             { candidate, _, _ ->
                 val stage = listOf(StageKind.SDD, StageKind.ATDD, StageKind.TDD,
                     StageKind.DEVELOP).singleOrNull { it.role == candidate.ownerRole }
@@ -181,8 +195,8 @@ internal class InstalledRecursiveWorkflow(
             config.requestId, root.graphId, root.stageRunId, kind,
             "child-task-" + kind.name.lowercase(),
             dependsOn = if (config.dependsOnSelf) setOf(childId) else emptySet(),
-            writablePaths = root.writablePaths, maxTokens = childTokens,
-            maxToolCalls = 3, maxDurationMillis = minOf(60_000L, maxDurationMillis)
+            writablePaths = root.writablePaths, maxTokens = tokenGrant(kind),
+            maxToolCalls = childToolCalls, maxDurationMillis = minOf(60_000L, maxDurationMillis)
         )
         val decision = RecursiveGraphPolicy.admit(RecursiveSnapshot(listOf(root)),
             root.graphId, proposed,
@@ -193,7 +207,6 @@ internal class InstalledRecursiveWorkflow(
 
     private suspend fun produce(kind: StageKind, grant: RecursiveRootGrant): String? {
         val (host, childStageId) = childHost(kind, grant)
-        val config = children.getValue(kind)
         if (kind == StageKind.SDD) {
             val before = host.snapshot()
             val target = targets.getValue(StageKind.SDD)
@@ -204,15 +217,13 @@ internal class InstalledRecursiveWorkflow(
                     journal?.let(::CorrelatedRoleSessionEvents) ?: StageRoleEventSink { },
                     journal?.let(::CorrelatedPreparationSessionEvents)
                         ?: PreparationStageEventSink { })
+            if (result.outcome is PreparationStageOutcome.ReconciliationRequired)
+                uncertainChildExecution = true
             if (result.outcome !is PreparationStageOutcome.Accepted)
                 return "CHILD_SDD_NOT_ACCEPTED"
         } else {
-            val childTargets = targets.mapValues { (stage, value) ->
-                if (stage == StageKind.DEVELOP)
-                    value.copy(id = config.outputArtifactId ?: value.id)
-                else value.copy(id = ArtifactId("bootstrap-" + stage.name.lowercase() +
-                    "-" + digest(host.snapshot().graph.correlation.graphId.value).take(12)))
-            }
+            val childId = host.snapshot().graph.correlation.graphId
+            val childTargets = childTargets(kind, childId)
             val runner = RunFiveRoleWorkflowUseCase(
                 RunPreparationStageUseCase(childExecutor, host, host),
                 RunDeveloperStageUseCase(childExecutor, host, host),
@@ -225,6 +236,8 @@ internal class InstalledRecursiveWorkflow(
                     ?: PreparationStageEventSink { },
                 journal?.let(::CorrelatedReviewerSessionEvents)
                     ?: ReviewerDecisionSink { })
+            if (result is FiveRoleWorkflowOutcome.ReconciliationRequired)
+                uncertainChildExecution = true
             if (result !is FiveRoleWorkflowOutcome.Completed)
                 return "CHILD_DEVELOPER_NOT_ACCEPTED"
         }
@@ -246,8 +259,8 @@ internal class InstalledRecursiveWorkflow(
                 config.requestId, context.graphId, context.stageRunId,
                 context.origin, "child-task-" + origin.kind.name.lowercase(),
                 dependsOn = if (config.dependsOnSelf) setOf(childId) else emptySet(),
-                writablePaths = context.writablePaths, maxTokens = childTokens,
-                maxToolCalls = 3, maxDurationMillis = minOf(60_000L,
+                writablePaths = context.writablePaths, maxTokens = tokenGrant(origin.kind),
+                maxToolCalls = childToolCalls, maxDurationMillis = minOf(60_000L,
                     maxDurationMillis)))
             val child = (admission as? RecursiveDecision.Allowed)?.child
                 ?: return@RecursiveStageExecutor RecursiveExecutionOutcome.Denied(
@@ -257,8 +270,11 @@ internal class InstalledRecursiveWorkflow(
                     val receipt = origin.host.authenticatedAcceptedStage(origin.stageId)
                         ?: return@RecursiveStageExecutor RecursiveExecutionOutcome.Failed(
                             "AUTHENTICATED_CHILD_RECEIPT_MISSING")
-                    when (val charged = owned.charge(RecursiveUsage(childTokens,
-                            receipt.checkedIds.size.toLong() + 1))) {
+                    if (receipt.checkedIds != requiredChildChecks)
+                        return@RecursiveStageExecutor RecursiveExecutionOutcome.Failed(
+                            "CHILD_CHECK_RECEIPT_MISMATCH")
+                    when (val charged = owned.charge(RecursiveUsage(
+                            tokenGrant(origin.kind), childToolCalls))) {
                         is RecursiveDecision.Allowed -> RecursiveExecutionOutcome.Completed
                         is RecursiveDecision.Denied ->
                             RecursiveExecutionOutcome.Failed(charged.code)
@@ -290,7 +306,14 @@ internal class InstalledRecursiveWorkflow(
         if (kind in origins) return "REPEATED_RECURSIVE_ORIGIN"
         val grant = rootFor(request, kind) ?: return "RECURSIVE_PARENT_LEASE_INVALID"
         preflight(kind, grant)?.let { return it }
-        val produced = try { produce(kind, grant) } catch (_: Exception) {
+        val produced = try {
+            produce(kind, grant)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            // A child may have written or committed before the exception.
+            // Never label its host state as an ordinary safe denial.
+            uncertainChildExecution = true
             return "CHILD_EXECUTION_UNCONFIRMED"
         }
         if (produced != null) return produced
