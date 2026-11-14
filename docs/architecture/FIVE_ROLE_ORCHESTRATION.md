@@ -39,6 +39,61 @@ not installed **two-origin** acceptance. See [Writable CLI](WRITABLE_CLI.md).
 Issue #79 remains open until those production host gates and full
 negative acceptance cases pass.
 
+## Authenticated child write/check evidence — issue #79 follow-up
+
+The opt-in `LinuxFiveRoleWorkflowHost.authenticatedAcceptedStage(stageRunId)`
+now exposes a **read-only** host-attested accepted-stage receipt. It
+revalidates the actual TrustedWriteRuntime HMAC, generation-bound completed
+write/check records, required checks, accepted frozen manifest and **all**
+written postimages from the current workspace. Missing receipts, active
+writers, quarantine or byte drift yield no evidence. It never exports the HMAC
+key, grants workspace writes or upgrades a model-provided manifest.
+
+`LinuxAuthenticatedRecursiveChildIntegrationHost` adapts **real child-stage
+write/check evidence** to `RecursiveChildIntegrationHost` only when the
+trusted caller has bound the exact child stageRunId. The output's producer must
+be the child stage, and the authenticated stage graph, parent graph/stage IDs,
+request ID, derived graph/stage identity, origin, writable scope, and frozen
+scope must all agree. The adapter checks **every** host-attested
+`writtenPostimages` path (not just `manifest.declaredPath`) against the
+child's writable and frozen scopes. A single host-authorized multi-file write
+can still be denied when the child grant covers fewer files. A parent's
+accepted stage output **cannot** be relabelled as a child's result.
+`manifestsFor` remains nullable and fail-closed; `verifyChild` exposes
+a typed, call-local denial code for host diagnosis and regression tests,
+without treating a denial as accepted evidence. `acceptedArtifactIds`
+is a provisional list of authenticated stage IDs, not a substitute for
+per-child scope checks at manifest integration.
+
+The Linux integration suite exercises **two distinct actual host-generated
+child-stage outputs**, one SDD and one Developer. For Developer it runs the
+trusted SDD/ATDD/TDD predecessors and independent Reviewer in a second
+isolated checkout, then verifies the Developer's actual write/check receipt.
+The same recursive coordinator re-verifies both origins at parent integration
+and emits correlated recursive SessionEvents without synthetic receipt stores.
+FakeModel's token counts are fixture data, **not** a trusted token meter;
+the two-origin integration test conservatively charges each child its
+**full token grant** while counting genuine verified write/check calls.
+The host retains nullable stage usage for reporting but it is not assumed
+to be independently measured.
+The host can pre-bind the future Developer child stage identity only when it
+matches `RecursiveGraphPolicy.childId/childStageId` and the trusted
+parent/request correlation; this host-only input is not exposed to a model.
+The constructor also rejects duplicate preauthorized stage-run IDs (including
+ATDD/TDD/Developer aliases), so conflicts fail before later handoffs.
+Host receipts snapshot written-path/check collections defensively; nullable
+stage usage is retained without interpreting missing tokens as zero. The
+Linux regression suite covers real multi-file writes, parent-result
+impersonation, constructor denials and run-time collision checks.
+
+This prepares the trust boundary but **does not yet dispatch these
+child-stage writers from the installed five-role parent workflow** or merge
+their outputs into its single physical checkout. Therefore these Linux
+integration tests are **not installed two-origin recursive CLI E2E**.
+The installed CLI's five-role parent execution and journal remain separate
+until those child stages are scheduled, written, checked and committed under
+the parent host fence. Issue #79 remains open.
+
 ## Execution and authority
 
 The coordinator never executes a model tool directly and never grants physical

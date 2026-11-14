@@ -11,9 +11,48 @@ import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.BasicFileAttributeView
 import java.security.MessageDigest
 import java.security.SecureRandom
+import java.util.Collections
 import java.util.UUID
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
+
+/**
+ * A live, read-only view of a stage output whose approval is backed by the
+ * genuine write/check tool session and an HMAC held by the Linux host.
+ *
+ * This is NOT an independently issued child receipt or a writable capability.
+ * A child may consume it only when its own stage-run identity matches the
+ * producer recorded by the trusted host (no parent-to-child ID remapping).
+ */
+data class AuthenticatedAcceptedStageReceipt(
+    val graphCorrelation: GraphCorrelation,
+    val stageCorrelation: StageCorrelation,
+    val origin: StageKind,
+    val manifest: StageArtifactManifest,
+    val writeToolId: String,
+    val checkedIds: Set<String>,
+    val writtenPostimages: Map<String, String>,
+    /** Host-retained stage usage; nullable token counts are never coerced to zero. */
+    val usage: StageRoleUsage
+)
+
+/** Distinct call-local denial codes without changing the nullable integration port. */
+enum class ChildReceiptDenialCode {
+    MISSING_PARENT_IDENTITY,
+    INVALID_DERIVED_IDENTITY,
+    UNAUTHORIZED_STAGE,
+    HOST_RECEIPT_UNAVAILABLE,
+    SESSION_MISMATCH,
+    ORIGIN_MISMATCH,
+    CORRELATION_MISMATCH,
+    OUTSIDE_WRITABLE_SCOPE,
+    WRITES_FROZEN_PATH
+}
+
+sealed interface ChildReceiptVerification {
+    data class Accepted(val manifest: StageArtifactManifest) : ChildReceiptVerification
+    data class Denied(val code: ChildReceiptDenialCode) : ChildReceiptVerification
+}
 
 /**
  * One in-process, Linux-only five-role workflow authority.
@@ -31,7 +70,13 @@ class LinuxFiveRoleWorkflowHost(
     private val requiredChecks: Set<String>,
     private val approvalGateway:
         (StageArtifactManifest, StageValidationEvidence, StageRoleUsage) -> PreparationApproval,
-    lockDirectory: Path
+    lockDirectory: Path,
+    /**
+     * Trusted-host only: pre-admitted recursive stage identities for later
+     * stages. Never fill this map from a model or serialized plan.
+     */
+    private val preauthorizedStageIdentities: Map<StageKind, Pair<StageRunId, String>> =
+        emptyMap()
 ) : FiveRoleWorkflowHost, PreparationStageHost, StageToolSessionOpener {
     private val root = workspace.toRealPath(LinkOption.NOFOLLOW_LINKS)
     private val reconciler = LinuxStageGitBaselineReconciler(
@@ -79,6 +124,27 @@ class LinuxFiveRoleWorkflowHost(
             graph.stages.single().state in setOf(StageState.CREATED, StageState.READY) &&
             graph.artifacts.isEmpty())
         require(Regex("[0-9a-f]{40}").matches(head))
+        // A preauthorized identity is accepted only for a child graph whose
+        // exact parent and request derive this graph/stage ID. This cannot be
+        // repurposed to inject an arbitrary future stage identity.
+        require(preauthorizedStageIdentities.values.map { it.first }.toSet().size ==
+            preauthorizedStageIdentities.size) {
+            "Recursive child stage identities must be unique"
+        }
+        require(preauthorizedStageIdentities.all { (kind, identity) ->
+            val parentGraph = graph.correlation.parentGraphId
+            val parentStage = graph.correlation.parentStageRunId
+            if (kind in setOf(StageKind.SDD, StageKind.REVIEW) ||
+                parentGraph == null || parentStage == null ||
+                !ToolAuthorizationPolicy.validHostIdentifier(identity.second))
+                false
+            else {
+                val expectedChild = RecursiveGraphPolicy.childId(
+                    parentGraph, parentStage, identity.second)
+                graph.correlation.graphId == expectedChild &&
+                    identity.first == RecursiveGraphPolicy.childStageId(expectedChild)
+            }
+        })
         require("git_diff_check" in requiredChecks &&
             (requiredChecks - "git_diff_check").isNotEmpty() &&
             (requiredChecks - "git_diff_check").all { it in checks })
@@ -465,6 +531,60 @@ class LinuxFiveRoleWorkflowHost(
         return PreparationStageSnapshot(graph, accepted.toSet())
     }
 
+    /**
+     * Read-only, live evidence gate for recursive child integration. A manifest
+     * in the StageGraph (or a model-provided digest) is never sufficient. This
+     * checks the genuine generation-fenced TrustedWriteRuntime attestation,
+     * required checks, accepted/frozen output and all written bytes again.
+     *
+     * The caller must separately validate the child's recursive topology,
+     * ownership and stageRunId. No delegation or synthetic acceptance occurs.
+     */
+    @Synchronized
+    fun authenticatedAcceptedStage(stageRunId: StageRunId):
+        AuthenticatedAcceptedStageReceipt? {
+        if (quarantined || writer != null || reviewing != null) return null
+        val stage = graph.stages.singleOrNull {
+            it.correlation.stageRunId == stageRunId &&
+                it.state == StageState.ACCEPTED && it.kind != StageKind.REVIEW &&
+                it.supersededBy == null
+        } ?: return null
+        val evidence = completed[stageRunId] ?: return null
+        val proof = evidence.write
+        val manifest = graph.artifacts.singleOrNull {
+            it.id in stage.outputArtifacts
+        } ?: return null
+        if (stage.outputArtifacts.size != 1 ||
+            manifest.id !in accepted || manifest.producerStageRunId != stageRunId ||
+            manifest.ownerRole != stage.kind.role ||
+            manifest.kind != stage.kind.output ||
+            manifest.approval != ArtifactApproval.ACCEPTED ||
+            manifest.freeze != ArtifactFreeze.FROZEN ||
+            !authentic(proof) || proof.stageId != stageRunId ||
+            proof.validation.correlation != stage.correlation ||
+            proof.validation.actor != stage.agentId ||
+            !proof.validation.successful ||
+            proof.validation.deniedCode != null ||
+            proof.writeId.isBlank() ||
+            proof.validation.requiredChecks.map { it.checkId }.toSet() != requiredChecks ||
+            proof.validation.requiredChecks.size != requiredChecks.size ||
+            proof.validation.requiredChecks.any { it.deniedCode != null } ||
+            proof.files.none { it.path == manifest.declaredPath &&
+                it.after == manifest.sha256 } ||
+            proof.files.map { it.path }.toSet().size != proof.files.size ||
+            !frozenIntact()) return null
+        if (proof.files.any { item ->
+                readBytes(item.path)?.let { digest(it) == item.after } != true
+            }) return null
+        return AuthenticatedAcceptedStageReceipt(graph.correlation, stage.correlation,
+            stage.kind, manifest, proof.writeId,
+            Collections.unmodifiableSet(
+                proof.validation.requiredChecks.map { it.checkId }.toSet()),
+            Collections.unmodifiableMap(
+                proof.files.associate { it.path to it.after }),
+            evidence.usage.copy())
+    }
+
     private fun verifiedDeveloper(evidence: DeveloperReviewEvidence): Boolean {
         val acceptedEvidence = completed[evidence.manifest.producerStageRunId] ?: return false
         val proof = acceptedEvidence.write
@@ -498,6 +618,11 @@ class LinuxFiveRoleWorkflowHost(
             val evidence = developerHandoff ?: return null
             if (!verifiedDeveloper(evidence)) return null
         } else if (developerHandoff != null) return null
+        val planned = preauthorizedStageIdentities[next]
+        val newStageId = planned?.first ?: StageRunId(newId("run-" + next.name.lowercase()))
+        // Detect identity collisions BEFORE any Git ref mutation.
+        if (graph.stages.any { it.correlation.stageRunId == newStageId })
+            return null
         val frozen = graph.artifacts.filter { it.id in accepted &&
             proof.files.none { changed -> changed.path == it.declaredPath } }
             .associate { it.declaredPath to it.sha256 }
@@ -515,8 +640,7 @@ class LinuxFiveRoleWorkflowHost(
         }
         val newStage = StageNode(
             StageCorrelation(graph.correlation.sessionId, graph.correlation.graphId,
-                StageRunId(newId("run-" + next.name.lowercase())),
-                newId("request"), newId("correlation")),
+                newStageId, planned?.second ?: newId("request"), newId("correlation")),
             next, StageState.CREATED,
             AgentId(newId("actor-" + next.name.lowercase())),
             dependencies.map { it.correlation.stageRunId }.toSet(),
@@ -632,4 +756,107 @@ class LinuxFiveRoleWorkflowHost(
         graph = graph.copy(state = StageGraphState.SUCCEEDED)
         return graph
     }
+}
+
+/**
+ * Strict adapter for an already independently executed *child* stage. A
+ * trusted caller binds the exact child stage IDs; the adapter will not turn
+ * a parent's accepted write into an invented child receipt.
+ *
+ * A child-stage writer uses its actual RecursiveGraphPolicy-
+ * derived stageRunId as the authenticated Linux stage identity. An existing
+ * parent-stage output deliberately fails this check.
+ */
+class LinuxAuthenticatedRecursiveChildIntegrationHost(
+    private val host: LinuxFiveRoleWorkflowHost,
+    private val expectedSessionId: String,
+    authorizedChildStages: Set<StageRunId>
+) : RecursiveChildIntegrationHost {
+    private val authorizedChildStages = authorizedChildStages.toSet()
+    init { require(ToolAuthorizationPolicy.validHostIdentifier(expectedSessionId)) }
+
+    /**
+     * Shared host identity gate for both the provisional accepted-ID listing
+     * and the scope-checked per-child manifest integration. No caller-provided
+     * parent, graph, request or stage ID is substituted into the host receipt.
+     */
+    private sealed interface HostReceiptGate {
+        data class Accepted(val receipt: AuthenticatedAcceptedStageReceipt) : HostReceiptGate
+        data class Denied(val code: ChildReceiptDenialCode) : HostReceiptGate
+    }
+
+    private fun verifiedChildReceipt(id: StageRunId): HostReceiptGate {
+        fun denied(code: ChildReceiptDenialCode) = HostReceiptGate.Denied(code)
+        if (id !in authorizedChildStages)
+            return denied(ChildReceiptDenialCode.UNAUTHORIZED_STAGE)
+        val receipt = host.authenticatedAcceptedStage(id)
+            ?: return denied(ChildReceiptDenialCode.HOST_RECEIPT_UNAVAILABLE)
+        if (receipt.graphCorrelation.sessionId != expectedSessionId ||
+            receipt.stageCorrelation.sessionId != expectedSessionId)
+            return denied(ChildReceiptDenialCode.SESSION_MISMATCH)
+        val parentGraph = receipt.graphCorrelation.parentGraphId
+            ?: return denied(ChildReceiptDenialCode.MISSING_PARENT_IDENTITY)
+        val parentStage = receipt.graphCorrelation.parentStageRunId
+            ?: return denied(ChildReceiptDenialCode.MISSING_PARENT_IDENTITY)
+        val childGraph = RecursiveGraphPolicy.childId(
+            parentGraph, parentStage, receipt.stageCorrelation.requestId)
+        if (receipt.graphCorrelation.graphId != childGraph ||
+            receipt.stageCorrelation.graphId != childGraph ||
+            receipt.stageCorrelation.stageRunId != id ||
+            receipt.stageCorrelation.stageRunId != RecursiveGraphPolicy.childStageId(childGraph))
+            return denied(ChildReceiptDenialCode.INVALID_DERIVED_IDENTITY)
+        return HostReceiptGate.Accepted(receipt)
+    }
+
+    /** Provisional only: per-child writable/frozen scopes are enforced by manifestsFor. */
+    override fun acceptedArtifactIds(): Set<ArtifactId> =
+        authorizedChildStages.mapNotNull {
+            (verifiedChildReceipt(it) as? HostReceiptGate.Accepted)?.receipt?.manifest?.id
+        }.toSet()
+
+    /**
+     * A call-local, reasoned child gate. The parent/child identity is never
+     * rewritten, and ALL writes in the authenticated proof must fit the
+     * child's writable scope and avoid every frozen path.
+     */
+    fun verifyChild(child: RecursiveNode): ChildReceiptVerification {
+        fun denied(code: ChildReceiptDenialCode) = ChildReceiptVerification.Denied(code)
+        val parentId = child.parentGraphId
+            ?: return denied(ChildReceiptDenialCode.MISSING_PARENT_IDENTITY)
+        val parentStageId = child.parentStageRunId
+            ?: return denied(ChildReceiptDenialCode.MISSING_PARENT_IDENTITY)
+        val requestId = child.requestId
+            ?: return denied(ChildReceiptDenialCode.MISSING_PARENT_IDENTITY)
+        if (child.graphId != RecursiveGraphPolicy.childId(parentId, parentStageId, requestId) ||
+            child.stageRunId != RecursiveGraphPolicy.childStageId(child.graphId))
+            return denied(ChildReceiptDenialCode.INVALID_DERIVED_IDENTITY)
+        val receipt = when (val gate = verifiedChildReceipt(child.stageRunId)) {
+            is HostReceiptGate.Accepted -> gate.receipt
+            is HostReceiptGate.Denied -> return denied(gate.code)
+        }
+        if (receipt.origin != child.origin)
+            return denied(ChildReceiptDenialCode.ORIGIN_MISMATCH)
+        if (receipt.graphCorrelation.graphId != child.graphId ||
+            receipt.graphCorrelation.parentGraphId != parentId ||
+            receipt.graphCorrelation.parentStageRunId != parentStageId ||
+            receipt.stageCorrelation.stageRunId != child.stageRunId ||
+            receipt.stageCorrelation.requestId != requestId ||
+            receipt.stageCorrelation.graphId != child.graphId)
+            return denied(ChildReceiptDenialCode.CORRELATION_MISMATCH)
+        val writtenPaths = receipt.writtenPostimages.keys
+        if (receipt.manifest.declaredPath !in child.writablePaths ||
+            !child.writablePaths.containsAll(writtenPaths))
+            return denied(ChildReceiptDenialCode.OUTSIDE_WRITABLE_SCOPE)
+        if (receipt.manifest.declaredPath in child.frozenPaths ||
+            writtenPaths.any { it in child.frozenPaths })
+            return denied(ChildReceiptDenialCode.WRITES_FROZEN_PATH)
+        return ChildReceiptVerification.Accepted(receipt.manifest)
+    }
+
+    override fun manifestsFor(child: RecursiveNode): List<StageArtifactManifest>? =
+        (verifyChild(child) as? ChildReceiptVerification.Accepted)?.let {
+            listOf(it.manifest)
+        }
+
+    override fun readBytes(path: String): ByteArray? = host.readBytes(path)
 }
