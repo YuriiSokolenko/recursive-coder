@@ -4,6 +4,7 @@ import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.security.MessageDigest
+import java.time.Clock
 import java.time.Instant
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.*
@@ -94,9 +95,11 @@ internal object WritableWorkflowCli {
         }
         val planBytes = input(planPath)
         val plan = parse(planBytes)
-        only(plan, setOf("version", "sessionId", "workspace", "artifacts",
+        val requiredPlanFields = setOf("version", "sessionId", "workspace", "artifacts",
             "instructions", "developerTargets", "fakeProposals",
-            "fakeReviewerVerdict", "check", "limits"))
+            "fakeReviewerVerdict", "check", "limits")
+        require(plan.keys == requiredPlanFields ||
+            plan.keys == requiredPlanFields + "eventsPath")
         require(longAt(plan, "version") == 1L)
         val approval = parse(input(approvalPath))
         only(approval, setOf("version", "planSha256", "approvedSha256"))
@@ -129,6 +132,19 @@ internal object WritableWorkflowCli {
         val realLocks = realLocation(locks)
         gate(!realLocks.startsWith(checkout) && !checkout.startsWith(realLocks),
             "LOCK_OVERLAPS_CHECKOUT")
+        // An optional journal is exclusively created outside the checkout and
+        // lock scope. The journal is metadata-only, never an artifact approval.
+        val eventsPath = plan["eventsPath"]?.let {
+            val name = (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content
+                ?: error("Invalid event journal path")
+            val path = Path.of(name)
+            gate(path.isAbsolute && !realLocation(path).startsWith(checkout) &&
+                !realLocation(path).startsWith(realLocks) &&
+                !realLocks.startsWith(realLocation(path)) &&
+                !Files.exists(path, LinkOption.NOFOLLOW_LINKS),
+                "INVALID_EVENT_JOURNAL_PATH")
+            path
+        }
         val marker = checkout.resolve(".git/recursive-coder-isolated-workflow")
         gate(Files.isRegularFile(marker, LinkOption.NOFOLLOW_LINKS) &&
             Files.readString(marker) == "isolated-workflow-v1\n",
@@ -220,17 +236,37 @@ internal object WritableWorkflowCli {
             RunPreparationStageUseCase(executor, host, host),
             RunDeveloperStageUseCase(executor, host, host),
             RunReviewerStageUseCase(executor, host.reviewerHost), host)
+        val journal = try {
+            eventsPath?.let { path ->
+                SessionEventJournal(sessionId, sessionId + "-trace",
+                    sessionId + "-workflow", Clock.systemUTC(), JsonlEventSink.open(path))
+            }
+        } catch (_: Exception) {
+            return "denied" to "EVENT_JOURNAL_UNAVAILABLE"
+        }
         val result = try {
             runBlocking {
                 runner.execute(FiveRoleWorkflowPlan(targets, stageInstructions,
                     developerTargets, model, Instant.now().plusSeconds(deadlineSeconds),
-                    Cancellation()), StageRoleEventSink { }, PreparationStageEventSink { },
-                    ReviewerDecisionSink { })
+                    Cancellation()),
+                    journal?.let(::CorrelatedRoleSessionEvents) ?: StageRoleEventSink { },
+                    journal?.let(::CorrelatedPreparationSessionEvents)
+                        ?: PreparationStageEventSink { },
+                    journal?.let(::CorrelatedReviewerSessionEvents)
+                        ?: ReviewerDecisionSink { })
             }
         } catch (_: Exception) {
             // A stage may have written or advanced HEAD before an unexpected
             // failure. Never classify an unconfirmed runtime as a safe denial.
+            try { journal?.close() } catch (_: Exception) { }
             return "reconciliation_required" to "WORKFLOW_EXECUTION_UNCONFIRMED"
+        }
+        // A failed or partially flushed event stream cannot accompany a
+        // successful workflow. Always verify the real bytes after close.
+        if (journal != null) {
+            try { journal.finish() } catch (_: Exception) {
+                return "reconciliation_required" to "EVENT_JOURNAL_UNCONFIRMED"
+            }
         }
         return when (result) {
             is FiveRoleWorkflowOutcome.Completed ->
