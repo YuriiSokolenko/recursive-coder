@@ -63,6 +63,14 @@ class RecursiveStageContext internal constructor(
     fun requestChild(proposal: RecursiveChildProposal): RecursiveDecision =
         scheduler.requestFrom(this, proposal)
 
+    /**
+     * Execute only an admitted direct child through this stage-scoped port.
+     * The executor never receives the mutable scheduler or another origin's
+     * authority; the scheduler still enforces parent state and dependencies.
+     */
+    suspend fun executeChild(id: GraphId, executor: RecursiveStageExecutor):
+        RecursiveExecutionOutcome = scheduler.executeChildFrom(this, id, executor)
+
     /** Host-measured usage only. Unknown usage must be charged at its granted upper bound. */
     fun charge(usage: RecursiveUsage): RecursiveDecision = scheduler.chargeFrom(this, usage)
 
@@ -439,6 +447,25 @@ class RecursiveGraphScheduler(
                 }
             }
         }
+    }
+
+    /** A child executor cannot dispatch a sibling or a node from another root. */
+    internal suspend fun executeChildFrom(
+        context: RecursiveStageContext, id: GraphId, executor: RecursiveStageExecutor
+    ): RecursiveExecutionOutcome {
+        val permitted = synchronized(lock) {
+            val parent = snapshot.node(context.graphId)
+            val child = snapshot.node(id)
+            parent != null && child != null &&
+                parent.state == RecursiveNodeState.RUNNING &&
+                parent.stageRunId == context.stageRunId &&
+                parent.origin == context.origin &&
+                child.parentGraphId == parent.graphId &&
+                child.parentStageRunId == parent.stageRunId &&
+                child.origin == parent.origin
+        }
+        if (!permitted) return RecursiveExecutionOutcome.Denied("CHILD_OWNERSHIP_MISMATCH")
+        return execute(id, executor)
     }
 
     /** Cancel an entire subtree without revoking already-completed historical facts. */
