@@ -1,6 +1,6 @@
 # Recursive Coder — Standalone Architecture
 
-> **Status:** target architecture, RFC 0.3; implementation includes Koog single-role execution (#73) and the opt-in host tool port (#74), recursive child integration (#79 part 1) and an in-process five-role coordinator (#79 in progress) as of 2026-11-14  
+> **Status:** target architecture, RFC 0.3; implementation includes Koog single-role execution (#73), opt-in host tools (#74), recursive child integration (#79 part 1), the in-process five-role coordinator and the opt-in fake-only writable CLI (#79 CLI slice); two-origin nested execution remains open as of 2026-11-14  
 > **Technology:** Kotlin/JVM; isolated opt-in Koog single-role execution; configurable local/compatible LLM APIs  
 > **Core principle:** Recursive Coder must own the complete coding-agent lifecycle. No external workflow, repository, or service may be a mandatory coordinator.
 

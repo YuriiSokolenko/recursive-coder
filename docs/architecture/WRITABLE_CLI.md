@@ -45,11 +45,13 @@ all four write-role names to the **exact** expected output SHA-256 values).
 For the Developer, the approved output is the generated implementation
 manifest, not just an unverified model source. The candidate role, artifact ID,
 path and digest must all match the independently provisioned approval file;
-otherwise the trusted host rejects it. The plan hash covers `fakeReviewerVerdict`: changing that fixture invalidates
-the approvals. There is no separate signed Reviewer verdict; this coupling is
-only for fake-mode tests and is not a live-provider design. The callback is
-local and noninteractive: it is **not** a signature, user identity assertion
-or human approval workflow.
+otherwise the trusted host rejects it.
+
+The plan hash covers `fakeReviewerVerdict`: changing that fixture
+invalidates the approvals. There is no separate signed Reviewer verdict;
+this coupling is only for fake-mode tests and is not a live-provider design.
+The callback is local and noninteractive: it is **not** a signature, user
+identity assertion or human approval workflow.
 
 ## Checkout and trust boundary
 
@@ -60,6 +62,9 @@ directory. The operator must place the literal UTF-8 marker
 `<checkout>/.git/recursive-coder-isolated-workflow`.
 This is a deliberate operator assertion, **not** a sandbox of the workspace;
 isolate checkout access from untrusted same-UID processes separately.
+Canonical path checks and subsequent file use are not atomic: a concurrent
+same-UID actor can swap filesystem entries after inspection. These checks do
+not replace exclusive control over the isolated checkout and external inputs.
 
 The plan, approval file, and shared lock directory must live **outside** the
 checkout, even through symlinked parent directories. The CLI resolves real
@@ -81,6 +86,8 @@ or a typed Git baseline code. Input, paths, check output and prompts are
 never reflected into diagnostic messages.
 A host-uncertain state requiring out-of-band reconciliation exits 1, never
 automatically retries, and **may leave uncommitted workspace changes**.
+An exit 1 **without a JSON body** can instead mean an uncaught JVM-fatal
+`Error`; treat the checkout as uncertain and reconcile it independently.
 Do not reuse this checkout after an uncertain outcome without independent
 reconciliation.
 
