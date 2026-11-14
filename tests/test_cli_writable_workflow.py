@@ -123,7 +123,8 @@ class InstalledWritableWorkflowTest(unittest.TestCase):
         return plan, approvals
 
     def recursive_fixture(self, *, verdict="ACCEPT", protected=False,
-                          cycle=False, depth=None, child_tokens=None,
+                          cycle=False, developer_cycle=False,
+                          depth=None, child_tokens=None, developer_tokens=None,
                           integration_conflict=False):
         plan, approvals = self.fixture(verdict=verdict, protected=protected)
         configs = {}
@@ -153,6 +154,10 @@ class InstalledWritableWorkflowTest(unittest.TestCase):
             }
         if cycle:
             configs["SDD"]["dependsOnSelf"] = True
+        if developer_cycle:
+            configs["DEVELOP"]["dependsOnSelf"] = True
+        if developer_tokens is not None:
+            configs["DEVELOP"]["maxTokens"] = developer_tokens
         if integration_conflict:
             configs["DEVELOP"]["outputArtifactId"] = plan["artifacts"]["SDD"]["id"]
         plan["recursiveChildren"] = configs
@@ -220,6 +225,24 @@ class InstalledWritableWorkflowTest(unittest.TestCase):
                          "Recursive policy must deny before writing child files")
         self.assertFalse((self.repo / "src/main/FeatureFullManifest.xml").exists())
 
+    def test_developer_only_cycle_denied_before_any_child_write(self):
+        self.recursive_fixture(developer_cycle=True)
+        result = self.authorized()
+        self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
+        self.assertEqual(json.loads(result.stdout)["code"],
+                         "CYCLIC_RECURSIVE_GRAPH")
+        self.assertFalse((self.base / "child-sdd/specs/FeatureFull.md").exists())
+        self.assertEqual(self.original_head, self.git("rev-parse", "HEAD"))
+
+    def test_developer_only_token_exhaustion_denied_before_sdd_write(self):
+        self.recursive_fixture(developer_tokens=10001)
+        result = self.authorized()
+        self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
+        self.assertEqual(json.loads(result.stdout)["code"],
+                         "TOKEN_BUDGET_EXHAUSTED")
+        self.assertFalse((self.base / "child-sdd/specs/FeatureFull.md").exists())
+        self.assertEqual(self.original_head, self.git("rev-parse", "HEAD"))
+
     def test_installed_recursive_depth_limit_is_denied(self):
         self.recursive_fixture(depth=0)
         result = self.authorized()
@@ -245,7 +268,9 @@ class InstalledWritableWorkflowTest(unittest.TestCase):
     def test_installed_recursive_protected_test_mutation_is_rejected(self):
         self.recursive_fixture(protected=True)
         result = self.authorized()
-        self.assertNotEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
+        self.assertEqual(json.loads(result.stdout)["code"],
+                         "CHILD_DEVELOPER_NOT_ACCEPTED")
         self.assertEqual((self.repo / "src/main/FeatureFull.kt").read_text(), OLD)
 
     def test_installed_recursive_cross_origin_artifact_id_conflict(self):
