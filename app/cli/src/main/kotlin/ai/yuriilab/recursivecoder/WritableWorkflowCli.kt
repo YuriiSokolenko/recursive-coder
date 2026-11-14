@@ -19,6 +19,29 @@ import kotlinx.serialization.json.*
  * approval file before opting in. The marker is an explicit deployment assertion,
  * NOT a substitute for OS-level filesystem isolation of the checkout.
  */
+/**
+ * Pure, canonical child checkout scope validation. The CLI independently
+ * verifies the actual Git baseline/marker after this structural check.
+ * Inputs must already be canonicalized; no model controls any of these paths.
+ */
+internal fun installedChildCheckoutScopesDisjoint(
+    root: Path, locks: Path, parent: Path, parentLocks: Path,
+    configPaths: List<Path>, eventsPath: Path?,
+    earlierRoots: Set<Path>, earlierLocks: Set<Path>, cwd: Path
+): Boolean {
+    fun separate(a: Path, b: Path): Boolean =
+        !a.startsWith(b) && !b.startsWith(a)
+    if (!separate(root, locks) || !separate(root, parent) ||
+        !separate(root, parentLocks) || !separate(locks, parent) ||
+        !separate(locks, parentLocks) || cwd.startsWith(root)) return false
+    if (earlierRoots.any { !separate(root, it) || !separate(locks, it) } ||
+        earlierLocks.any { !separate(root, it) || !separate(locks, it) })
+        return false
+    return (configPaths + listOfNotNull(eventsPath)).none {
+        it.startsWith(root) || it.startsWith(locks)
+    }
+}
+
 internal object WritableWorkflowCli {
     private val kinds = listOf(StageKind.SDD, StageKind.ATDD, StageKind.TDD,
         StageKind.DEVELOP, StageKind.REVIEW)
@@ -102,7 +125,7 @@ internal object WritableWorkflowCli {
         val requiredPlanFields = setOf("version", "sessionId", "workspace", "artifacts",
             "instructions", "developerTargets", "fakeProposals",
             "fakeReviewerVerdict", "check", "limits")
-        only(plan, requiredPlanFields, setOf("eventsPath"))
+        only(plan, requiredPlanFields, setOf("eventsPath", "recursiveChildren"))
         require(longAt(plan, "version") == 1L)
         val approval = parse(input(approvalPath))
         only(approval, setOf("version", "planSha256", "approvedSha256"))
@@ -212,7 +235,8 @@ internal object WritableWorkflowCli {
         }
 
         val limits = objectAt(plan, "limits")
-        only(limits, setOf("maxTokens", "maxDurationMillis", "deadlineSeconds"))
+        only(limits, setOf("maxTokens", "maxDurationMillis", "deadlineSeconds"),
+            setOf("maxDepth", "maxChildren", "maxToolCalls", "childTokens"))
         val tokens = longAt(limits, "maxTokens")
         val duration = longAt(limits, "maxDurationMillis")
         val deadlineSeconds = longAt(limits, "deadlineSeconds")
@@ -221,6 +245,77 @@ internal object WritableWorkflowCli {
         val sessionId = stringAt(plan, "sessionId")
         require(sessionId.length <= 100 &&
             ToolAuthorizationPolicy.validHostIdentifier(sessionId))
+        val recursiveConfig = plan["recursiveChildren"]?.let { raw ->
+            val children = raw as? JsonObject ?: error("Invalid recursive children")
+            require(children.keys == setOf("SDD", "DEVELOP"))
+            val allRoots = mutableSetOf<Path>()
+            val allLocks = mutableSetOf<Path>()
+            listOf(StageKind.SDD, StageKind.DEVELOP).associateWith { kind ->
+                val entry = objectAt(children, kind.name)
+                only(entry, setOf("rootPath", "headSha", "branch",
+                    "lockDirectory", "requestId"),
+                    if (kind == StageKind.DEVELOP)
+                        setOf("dependsOnSelf", "outputArtifactId", "maxTokens")
+                    else setOf("dependsOnSelf", "maxTokens"))
+                val childPath = Path.of(stringAt(entry, "rootPath"))
+                val childLockPath = Path.of(stringAt(entry, "lockDirectory"))
+                val childHead = stringAt(entry, "headSha")
+                val childBranch = stringAt(entry, "branch")
+                val requestId = stringAt(entry, "requestId")
+                gate(childPath.isAbsolute && childLockPath.isAbsolute &&
+                    Files.isDirectory(childPath.resolve(".git"), LinkOption.NOFOLLOW_LINKS) &&
+                    headPattern.matches(childHead) && childHead == expectedHead &&
+                    childBranch == branch &&
+                    ToolAuthorizationPolicy.validHostIdentifier(requestId),
+                    "INVALID_CHILD_WORKSPACE")
+                val childRoot = childPath.toRealPath()
+                val childLocks = realLocation(childLockPath)
+                gate(childRoot == childPath.normalize() &&
+                    installedChildCheckoutScopesDisjoint(
+                        childRoot, childLocks, checkout, realLocks,
+                        listOf(realLocation(planPath), realLocation(approvalPath)),
+                        eventsPath?.let(::realLocation),
+                        allRoots, allLocks,
+                        Path.of("").toAbsolutePath().toRealPath()),
+                    "CHILD_WORKSPACE_OVERLAP")
+                allRoots.add(childRoot)
+                allLocks.add(childLocks)
+                val marker = childRoot.resolve(".git/recursive-coder-isolated-workflow")
+                gate(Files.isRegularFile(marker, LinkOption.NOFOLLOW_LINKS) &&
+                    Files.readString(marker) == "isolated-workflow-v1\n",
+                    "CHILD_MARKER_MISSING")
+                when (val state = LinuxStageGitBaselineReconciler(childRoot, childLocks)
+                    .inspectCleanBaseline(childHead, childBranch)) {
+                    StageGitBaselineResult.Clean -> Unit
+                    is StageGitBaselineResult.Denied ->
+                        throw WorkflowDenied(state.code)
+                }
+                val self = entry["dependsOnSelf"]?.let {
+                    (it as? JsonPrimitive)?.takeUnless { p -> p.isString }?.booleanOrNull
+                        ?: error("Invalid cyclic test fixture")
+                } ?: false
+                val overrideId = entry["outputArtifactId"]?.let {
+                    ArtifactId((it as? JsonPrimitive)?.takeIf { p -> p.isString }
+                        ?.content ?: error("Invalid child artifact ID"))
+                }
+                val childTokenOverride = entry["maxTokens"]?.let {
+                    (it as? JsonPrimitive)?.longOrNull
+                        ?: error("Invalid child token grant")
+                }
+                require(childTokenOverride == null ||
+                    childTokenOverride in 1..1000000)
+                InstalledChildCheckout(childRoot, childHead, childBranch,
+                    childLocks, requestId, self, overrideId, childTokenOverride)
+            }
+        }
+        val maxDepth = (limits["maxDepth"] as? JsonPrimitive)?.intOrNull ?: 1
+        val maxChildren = (limits["maxChildren"] as? JsonPrimitive)?.intOrNull ?: 1
+        val maxToolCalls = (limits["maxToolCalls"] as? JsonPrimitive)?.longOrNull ?: 6L
+        val childTokens = (limits["childTokens"] as? JsonPrimitive)?.longOrNull ?: 500L
+        require(maxDepth in 0..8 && maxChildren in 0..8 &&
+            maxToolCalls in 0..128 && childTokens in 1..1000000)
+        require(recursiveConfig != null || limits.keys ==
+            setOf("maxTokens", "maxDurationMillis", "deadlineSeconds"))
         val graphId = GraphId(sessionId + "-graph")
         val correlation = GraphCorrelation(sessionId, graphId, sessionId + "-workflow")
         val first = StageNode(StageCorrelation(sessionId, graphId,
@@ -242,11 +337,27 @@ internal object WritableWorkflowCli {
                     permittedDigests[kind] == candidate.sha256)
                     PreparationApproval.ACCEPT else PreparationApproval.REJECT
             }, locks)
-        val executor = ConfiguredFakeRoleExecutor(fixtureProposals, verdict)
+        // Child review is independently accepted in the offline fixture. The
+        // configured verdict remains authoritative for the parent Reviewer,
+        // including a rejection *after* successful child integration.
+        val childExecutor = ConfiguredFakeRoleExecutor(fixtureProposals, "ACCEPT")
+        val recursive = recursiveConfig?.let { configs ->
+            InstalledRecursiveWorkflow(sessionId, host,
+                StageIsolatedCheck(executable, arguments),
+                targets, stageInstructions, developerTargets,
+                permittedDigests, model,
+                Instant.now().plusSeconds(deadlineSeconds),
+                Cancellation(), childExecutor, configs, tokens, duration,
+                maxDepth, maxChildren, maxToolCalls, childTokens, null)
+        }
+        val callback: (suspend (StageRoleRequest) -> String?)? =
+            if (recursive == null) null
+            else { request -> recursive.beforeProposal(request) }
+        val executor = ConfiguredFakeRoleExecutor(fixtureProposals, verdict, callback)
         val runner = RunFiveRoleWorkflowUseCase(
             RunPreparationStageUseCase(executor, host, host),
             RunDeveloperStageUseCase(executor, host, host),
-            RunReviewerStageUseCase(executor, host.reviewerHost), host)
+            RunReviewerStageUseCase(executor, host.reviewerHost), recursive ?: host)
         val journal = try {
             eventsPath?.let { path ->
                 // If construction fails *after* CREATE_NEW, release the open
@@ -266,6 +377,7 @@ internal object WritableWorkflowCli {
         } catch (_: Exception) {
             return "denied" to "EVENT_JOURNAL_UNAVAILABLE"
         }
+        recursive?.attachJournal(journal)
         val result = try {
             runBlocking {
                 runner.execute(FiveRoleWorkflowPlan(targets, stageInstructions,
@@ -290,6 +402,8 @@ internal object WritableWorkflowCli {
                 return "reconciliation_required" to "EVENT_JOURNAL_UNCONFIRMED"
             }
         }
+        if (recursive?.reconciliationRequired == true)
+            return "reconciliation_required" to "CHILD_EXECUTION_UNCONFIRMED"
         return when (result) {
             is FiveRoleWorkflowOutcome.Completed ->
                 "completed" to result.graph.state.name
@@ -307,7 +421,8 @@ internal object WritableWorkflowCli {
      */
     private class ConfiguredFakeRoleExecutor(
         private val proposals: Map<StageKind, String>,
-        private val verdict: String
+        private val verdict: String,
+        private val beforeProposal: (suspend (StageRoleRequest) -> String?)? = null
     ) : StageRoleExecutor {
         private val gateway: ModelGateway = FakeModel()
 
@@ -318,6 +433,15 @@ internal object WritableWorkflowCli {
                 stage.correlation.requestId == request.requestId &&
                 request.requestedTools.isEmpty())
             gateway.negotiate(request.model, request.cancellation, request.deadline)
+            events.emit(StageRoleEvent(stage.correlation, stage.kind.role, stage.agentId,
+                StageRoleEventKind.STARTED, StageRoleUsage()))
+            val refusal = beforeProposal?.invoke(request)
+            if (refusal != null) {
+                events.emit(StageRoleEvent(stage.correlation, stage.kind.role,
+                    stage.agentId, StageRoleEventKind.DENIED, StageRoleUsage(), refusal))
+                return StageRoleResult(stage.correlation, stage.kind.role, stage.agentId,
+                    StageRoleOutcome.Denied(refusal), StageRoleUsage())
+            }
             val proposal = if (stage.kind == StageKind.REVIEW) {
                 val checks = Regex("""<verified-check id="([^"]+)" receipt="[^"]+" />""")
                     .findAll(request.instruction).map { "check:" + it.groupValues[1] }.toList()
@@ -335,8 +459,6 @@ internal object WritableWorkflowCli {
                 """{"verdict":"$verdict","code":"$code","scope":"$scope","evidence":[$refs]}"""
             } else proposals.getValue(stage.kind)
             val usage = StageRoleUsage(1, 100, 30)
-            events.emit(StageRoleEvent(stage.correlation, stage.kind.role, stage.agentId,
-                StageRoleEventKind.STARTED, StageRoleUsage()))
             events.emit(StageRoleEvent(stage.correlation, stage.kind.role, stage.agentId,
                 StageRoleEventKind.PROPOSED, usage))
             return StageRoleResult(stage.correlation, stage.kind.role, stage.agentId,

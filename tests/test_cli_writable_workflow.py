@@ -122,6 +122,59 @@ class InstalledWritableWorkflowTest(unittest.TestCase):
         self.approval_path.write_text(json.dumps(approvals))
         return plan, approvals
 
+    def recursive_fixture(self, *, verdict="ACCEPT", protected=False,
+                          cycle=False, developer_cycle=False,
+                          depth=None, child_tokens=None, developer_tokens=None,
+                          integration_conflict=False, child_check_fails=False):
+        plan, approvals = self.fixture(verdict=verdict, protected=protected)
+        configs = {}
+        for kind in ("SDD", "DEVELOP"):
+            child = self.base / ("child-" + kind.lower())
+            process = subprocess.run(
+                ["/usr/bin/git", "clone", "--local", "-b", "dev",
+                 str(self.repo), str(child)],
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                timeout=20,
+            )
+            self.assertEqual(0, process.returncode, process.stderr)
+            # Git does not track the empty role-output directories from the
+            # original fixture. Provision them as an explicit host setup step;
+            # do not weaken TrustedWriteRuntime's no-follow path checks.
+            for directory in ("specs", "tests/acceptance", "tests/unit", "src/main"):
+                (child / directory).mkdir(parents=True, exist_ok=True)
+            (child / ".git/recursive-coder-isolated-workflow").write_text(
+                "isolated-workflow-v1\n"
+            )
+            configs[kind] = {
+                "rootPath": str(child),
+                "headSha": self.original_head,
+                "branch": "dev",
+                "lockDirectory": str(self.base / ("locks-child-" + kind.lower())),
+                "requestId": "nested-" + kind.lower(),
+            }
+        if cycle:
+            configs["SDD"]["dependsOnSelf"] = True
+        if developer_cycle:
+            configs["DEVELOP"]["dependsOnSelf"] = True
+        if developer_tokens is not None:
+            configs["DEVELOP"]["maxTokens"] = developer_tokens
+        if integration_conflict:
+            configs["DEVELOP"]["outputArtifactId"] = plan["artifacts"]["SDD"]["id"]
+        plan["recursiveChildren"] = configs
+        if child_check_fails:
+            plan["check"]["arguments"] = [
+                "-q", "no-such-fixture-text", "src/main/FeatureFull.kt"
+            ]
+        plan["eventsPath"] = str(self.base / "recursive-events.jsonl")
+        if depth is not None:
+            plan["limits"]["maxDepth"] = depth
+        if child_tokens is not None:
+            plan["limits"]["childTokens"] = child_tokens
+        self.plan_path.write_text(json.dumps(plan, separators=(",", ":")))
+        approvals["planSha256"] = sha(self.plan_path.read_bytes())
+        self.approval_path.write_text(json.dumps(approvals))
+        return plan
+
     def invoke(self, *args):
         self.assertTrue(CLI.is_file(), "Run installDist before installed acceptance")
         return subprocess.run(
@@ -133,6 +186,151 @@ class InstalledWritableWorkflowTest(unittest.TestCase):
     def authorized(self):
         return self.invoke("--approvals", str(self.approval_path),
                            "--enable-stage-writes")
+
+    def test_installed_two_origin_recursive_cli_gates_parent_and_records_events(self):
+        self.recursive_fixture()
+        result = self.authorized()
+        diagnostic = (self.base / "recursive-events.jsonl")
+        metadata = []
+        if diagnostic.is_file():
+            metadata = [{
+                "kind": (item.get("metadata", {}).get("recursiveEvent") or
+                         item.get("metadata", {}).get("roleEvent") or
+                         item.get("metadata", {}).get("stageState")),
+                "code": item.get("metadata", {}).get("code"),
+                "role": item.get("metadata", {}).get("role"),
+                "stage": item.get("metadata", {}).get("stageRunId"),
+            } for item in (json.loads(line) for line in
+                           diagnostic.read_text().splitlines())][-16:]
+        self.assertEqual(result.returncode, 0,
+                         result.stderr + result.stdout + " journal=" + repr(metadata))
+        self.assertEqual(json.loads(result.stdout),
+                         {"outcome": "completed", "code": "SUCCEEDED"})
+        self.assertEqual((self.repo / "src/main/FeatureFull.kt").read_text(), NEW)
+        self.assertEqual((self.repo / "specs/FeatureFull.md").read_text(), SPEC)
+        self.assertEqual("", self.git("status", "--porcelain=v1", "--ignored=matching"))
+        records = [json.loads(line) for line in
+                   (self.base / "recursive-events.jsonl").read_text().splitlines()]
+        text = json.dumps(records)
+        self.assertIn('"origin": "SDD"', text)
+        self.assertIn('"origin": "DEVELOP"', text)
+        self.assertIn("INTEGRATED", text)
+        self.assertIn("CHILD_RESERVED", text)
+        for kind in ("SDD", "ATDD", "TDD", "DEVELOPER", "REVIEWER"):
+            self.assertIn(kind, text)
+        self.assertNotIn(NEW, text)
+
+    def test_installed_recursive_cycle_is_denied(self):
+        self.recursive_fixture(cycle=True)
+        result = self.authorized()
+        self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
+        self.assertEqual(json.loads(result.stdout)["code"], "CYCLIC_RECURSIVE_GRAPH")
+        self.assertFalse((self.base / "child-sdd/specs/FeatureFull.md").exists(),
+                         "Recursive policy must deny before writing child files")
+        self.assertFalse((self.repo / "src/main/FeatureFullManifest.xml").exists())
+
+    def test_developer_only_cycle_denied_before_any_child_write(self):
+        self.recursive_fixture(developer_cycle=True)
+        result = self.authorized()
+        self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
+        self.assertEqual(json.loads(result.stdout)["code"],
+                         "CYCLIC_RECURSIVE_GRAPH")
+        self.assertFalse((self.base / "child-sdd/specs/FeatureFull.md").exists())
+        self.assertEqual(self.original_head, self.git("rev-parse", "HEAD"))
+
+    def test_developer_only_token_exhaustion_denied_before_sdd_write(self):
+        self.recursive_fixture(developer_tokens=10001)
+        result = self.authorized()
+        self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
+        self.assertEqual(json.loads(result.stdout)["code"],
+                         "TOKEN_BUDGET_EXHAUSTED")
+        self.assertFalse((self.base / "child-sdd/specs/FeatureFull.md").exists())
+        self.assertEqual(self.original_head, self.git("rev-parse", "HEAD"))
+
+    def test_installed_recursive_depth_limit_is_denied(self):
+        self.recursive_fixture(depth=0)
+        result = self.authorized()
+        self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
+        self.assertEqual(json.loads(result.stdout)["code"], "DEPTH_LIMIT")
+        self.assertFalse((self.base / "child-sdd/specs/FeatureFull.md").exists(),
+                         "Recursive policy must deny before writing child files")
+
+    def test_installed_recursive_budget_is_denied(self):
+        self.recursive_fixture(child_tokens=10001)
+        result = self.authorized()
+        self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
+        self.assertEqual(json.loads(result.stdout)["code"], "TOKEN_BUDGET_EXHAUSTED")
+        self.assertFalse((self.base / "child-sdd/specs/FeatureFull.md").exists(),
+                         "Recursive policy must deny before writing child files")
+
+    def test_failed_child_post_write_check_requires_reconciliation(self):
+        self.recursive_fixture(child_check_fails=True)
+        result = self.authorized()
+        self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+        self.assertEqual(json.loads(result.stdout), {
+            "outcome": "reconciliation_required",
+            "code": "CHILD_EXECUTION_UNCONFIRMED",
+        })
+        self.assertTrue((self.base / "child-sdd/specs/FeatureFull.md").exists())
+        self.assertEqual(self.original_head, self.git("rev-parse", "HEAD"))
+        self.assertEqual((self.repo / "src/main/FeatureFull.kt").read_text(), OLD)
+
+    def test_installed_recursive_reviewer_rejection_stays_failed(self):
+        self.recursive_fixture(verdict="REJECT")
+        result = self.authorized()
+        self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
+        self.assertEqual(json.loads(result.stdout)["code"], "REVIEWER_REJECTED")
+
+    def test_installed_recursive_protected_test_mutation_is_rejected(self):
+        self.recursive_fixture(protected=True)
+        result = self.authorized()
+        self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+        self.assertEqual(json.loads(result.stdout), {
+            "outcome": "reconciliation_required",
+            "code": "CHILD_EXECUTION_UNCONFIRMED",
+        })
+        child = self.base / "child-develop"
+        # The child Developer's bootstrap stages already wrote/committed.
+        # An ordinary stopped/denied result must not conceal that checkout.
+        self.assertEqual((child / "specs/FeatureFull.md").read_text(), SPEC)
+        self.assertEqual((child / "tests/unit/FeatureFullTest.kt").read_text(), TDD)
+        self.assertNotEqual(self.original_head,
+                            subprocess.run(["/usr/bin/git", "-C", str(child),
+                                            "rev-parse", "HEAD"],
+                                           text=True, capture_output=True,
+                                           check=True).stdout.strip())
+        self.assertEqual((self.repo / "src/main/FeatureFull.kt").read_text(), OLD)
+        self.assertEqual((self.repo / "tests/unit/FeatureFullTest.kt").read_text(), TDD)
+        self.assertFalse((self.repo / "src/main/FeatureFullManifest.xml").exists())
+
+    def test_stopped_developer_child_with_bootstrap_writes_requires_reconciliation(self):
+        plan = self.recursive_fixture()
+        plan["fakeProposals"]["DEVELOP"] = '{"files":[invalid-json'
+        self.plan_path.write_text(json.dumps(plan, separators=(",", ":")))
+        approval = json.loads(self.approval_path.read_text())
+        approval["planSha256"] = sha(self.plan_path.read_bytes())
+        self.approval_path.write_text(json.dumps(approval))
+        result = self.authorized()
+        self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+        self.assertEqual(json.loads(result.stdout), {
+            "outcome": "reconciliation_required",
+            "code": "CHILD_EXECUTION_UNCONFIRMED",
+        })
+        child = self.base / "child-develop"
+        self.assertEqual((child / "specs/FeatureFull.md").read_text(), SPEC)
+        self.assertEqual((child / "tests/acceptance/FeatureFull.feature").read_text(),
+                         ATDD)
+        self.assertFalse((child / "src/main/FeatureFullManifest.xml").exists())
+        self.assertEqual((self.repo / "src/main/FeatureFull.kt").read_text(), OLD)
+        self.assertFalse((self.repo / "src/main/FeatureFullManifest.xml").exists())
+
+    def test_installed_recursive_cross_origin_artifact_id_conflict(self):
+        self.recursive_fixture(integration_conflict=True)
+        result = self.authorized()
+        self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
+        self.assertEqual(json.loads(result.stdout)["code"],
+                         "CROSS_ORIGIN_ARTIFACT_CONFLICT")
+        self.assertEqual((self.repo / "src/main/FeatureFull.kt").read_text(), OLD)
 
     def test_installed_five_role_workflow_has_clean_baseline(self):
         self.fixture()
