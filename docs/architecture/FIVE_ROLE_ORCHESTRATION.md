@@ -54,9 +54,16 @@ write/check evidence** to `RecursiveChildIntegrationHost` only when the
 trusted caller has bound the exact child stageRunId. The output's producer must
 be the child stage, and the authenticated stage graph, parent graph/stage IDs,
 request ID, derived graph/stage identity, origin, writable scope, and frozen
-scope must all agree. A parent's accepted stage output **cannot** be
-relabelled as a child's result. The port returns empty/unavailable on
-mismatch, rather than manufacturing an accepted receipt.
+scope must all agree. The adapter checks **every** host-attested
+`writtenPostimages` path (not just `manifest.declaredPath`) against the
+child's writable and frozen scopes. A single host-authorized multi-file write
+can still be denied when the child grant covers fewer files. A parent's
+accepted stage output **cannot** be relabelled as a child's result.
+`manifestsFor` remains nullable and fail-closed; `verifyChild` exposes
+a typed, call-local denial code for host diagnosis and regression tests,
+without treating a denial as accepted evidence. `acceptedArtifactIds`
+is a provisional list of authenticated stage IDs, not a substitute for
+per-child scope checks at manifest integration.
 
 The Linux integration suite exercises **two distinct actual host-generated
 child-stage outputs**, one SDD and one Developer. For Developer it runs the
@@ -72,6 +79,12 @@ to be independently measured.
 The host can pre-bind the future Developer child stage identity only when it
 matches `RecursiveGraphPolicy.childId/childStageId` and the trusted
 parent/request correlation; this host-only input is not exposed to a model.
+The constructor also rejects duplicate preauthorized stage-run IDs (including
+ATDD/TDD/Developer aliases), so conflicts fail before later handoffs.
+Host receipts snapshot written-path/check collections defensively; nullable
+stage usage is retained without interpreting missing tokens as zero. The
+Linux regression suite covers real multi-file writes, parent-result
+impersonation, constructor denials and run-time collision checks.
 
 This prepares the trust boundary but **does not yet dispatch these
 child-stage writers from the installed five-role parent workflow** or merge
