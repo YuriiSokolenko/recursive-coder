@@ -134,8 +134,9 @@ internal object InstalledRecursiveAdmissionPolicy {
         requestId: String, dependsOnSelf: Boolean,
         tokens: Long, toolCalls: Long,
         limits: RecursiveLimits, now: Instant
-    ): String? {
-        if (!now.isBefore(limits.deadline)) return "GLOBAL_DEADLINE"
+    ): RecursiveDecision {
+        if (!now.isBefore(limits.deadline))
+            return RecursiveDecision.Denied("GLOBAL_DEADLINE")
         val budget = grant.graph.budget
         val root = RecursiveNode(
             grant.graph.correlation.graphId, grant.stageRunId,
@@ -365,7 +366,7 @@ internal class InstalledRecursiveWorkflow(
         if (kind == StageKind.SDD) {
             val before = host.snapshot()
             val target = targets.getValue(StageKind.SDD)
-            val result = RunPreparationStageUseCase(roles, host, tools)
+            val result = RunPreparationStageUseCase(roles, tools, host)
                 .execute(PreparationStageCommand(before.graph, before.acceptedIds,
                     childStageId, target.id, target.path,
                     instructions.getValue(StageKind.SDD), model,
@@ -383,8 +384,8 @@ internal class InstalledRecursiveWorkflow(
             val childId = host.snapshot().graph.correlation.graphId
             val childTargets = childTargets(kind, childId)
             val runner = RunFiveRoleWorkflowUseCase(
-                RunPreparationStageUseCase(roles, host, tools),
-                RunDeveloperStageUseCase(roles, host, tools),
+                RunPreparationStageUseCase(roles, tools, host),
+                RunDeveloperStageUseCase(roles, tools, host),
                 RunReviewerStageUseCase(roles, host.reviewerHost), host)
             val result = runner.execute(
                 FiveRoleWorkflowPlan(childTargets, instructions,
