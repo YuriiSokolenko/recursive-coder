@@ -22,6 +22,46 @@ internal data class InstalledChildCheckout(
     val maxTokens: Long? = null
 )
 
+/**
+ * Pure second gate after the Linux hosts independently authenticate the real
+ * write/check receipts. This function does NOT authenticate its arguments;
+ * callers must retrieve them from LinuxFiveRoleWorkflowHost, not a model.
+ * Stable mismatch codes make each digest/scope/integration branch testable.
+ */
+internal object InstalledRecursiveEvidencePolicy {
+    fun mismatch(kind: StageKind, target: FiveRoleArtifactTarget,
+        parent: AuthenticatedAcceptedStageReceipt,
+        child: AuthenticatedAcceptedStageReceipt,
+        integrated: StageArtifactManifest?,
+        parentBytes: ByteArray?, childBytes: ByteArray?): String? {
+        if (parent.origin != kind || child.origin != kind)
+            return "CHILD_ORIGIN_MISMATCH"
+        if (parent.manifest.id != target.id || child.manifest.id != target.id)
+            return "CHILD_ARTIFACT_ID_MISMATCH"
+        if (parent.manifest.declaredPath != target.path ||
+            child.manifest.declaredPath != target.path)
+            return "CHILD_ARTIFACT_PATH_MISMATCH"
+        if (parent.manifest.sha256 != child.manifest.sha256)
+            return "CHILD_ARTIFACT_DIGEST_MISMATCH"
+        if (parent.writtenPostimages != child.writtenPostimages)
+            return "CHILD_WRITTEN_POSTIMAGES_MISMATCH"
+        if (kind == StageKind.DEVELOP) {
+            if (integrated == null) return "CHILD_RESULT_NOT_INTEGRATED"
+            if (integrated != child.manifest)
+                return "CHILD_INTEGRATED_MANIFEST_MISMATCH"
+        }
+        if (parentBytes == null || childBytes == null)
+            return "CHILD_ARTIFACT_BYTES_MISSING"
+        if (!parentBytes.contentEquals(childBytes))
+            return "CHILD_ARTIFACT_BYTES_MISMATCH"
+        val hash = MessageDigest.getInstance("SHA-256").digest(parentBytes)
+            .joinToString("") { "%02x".format(it) }
+        if (hash != parent.manifest.sha256)
+            return "CHILD_ARTIFACT_CONTENT_DIGEST_MISMATCH"
+        return null
+    }
+}
+
 internal class InstalledRecursiveWorkflow(
     private val sessionId: String,
     private val parent: LinuxFiveRoleWorkflowHost,
@@ -387,23 +427,12 @@ internal class InstalledRecursiveWorkflow(
             parentStage.correlation.stageRunId) ?: return false
         val childReceipt = origin.host.authenticatedAcceptedStage(
             origin.stageId) ?: return false
-        val target = targets.getValue(kind)
-        val parentManifest = parentReceipt.manifest
-        val childManifest = childReceipt.manifest
-        if (parentManifest.id != target.id ||
-            childManifest.id != target.id ||
-            parentManifest.declaredPath != target.path ||
-            childManifest.declaredPath != target.path ||
-            parentManifest.sha256 != childManifest.sha256 ||
-            parentReceipt.writtenPostimages != childReceipt.writtenPostimages)
-            return false
-        if (kind == StageKind.DEVELOP) {
-            val result = integrated?.integrated?.get(kind) ?: return false
-            if (result.artifacts.singleOrNull()?.manifest != childManifest)
-                return false
-        }
-        return parent.readBytes(target.path)?.contentEquals(
-            origin.host.readBytes(target.path) ?: return false) == true
+        val childBytes = origin.host.readBytes(targets.getValue(kind).path)
+        val parentBytes = parent.readBytes(targets.getValue(kind).path)
+        val integratedManifest = integrated?.integrated?.get(kind)
+            ?.artifacts?.singleOrNull()?.manifest
+        return InstalledRecursiveEvidencePolicy.mismatch(kind, targets.getValue(kind),
+            parentReceipt, childReceipt, integratedManifest, parentBytes, childBytes) == null
     }
 
     override fun snapshot(): PreparationStageSnapshot = parent.snapshot()
