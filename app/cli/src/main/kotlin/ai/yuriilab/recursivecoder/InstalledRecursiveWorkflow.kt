@@ -320,6 +320,7 @@ internal class InstalledRecursiveWorkflow(
 
     private suspend fun produce(kind: StageKind, grant: RecursiveRootGrant): String? {
         val (host, childStageId) = childHost(kind, grant)
+        val config = children.getValue(kind)
         if (kind == StageKind.SDD) {
             val before = host.snapshot()
             val target = targets.getValue(StageKind.SDD)
