@@ -83,7 +83,10 @@ internal class InstalledChildRuntimeMeter(
             usageUncertain = true
             return "CHILD_USAGE_INVALID"
         }
-        if ((proposed && usage.modelRequests == 0) ||
+        // This method is called only AFTER delegate.execute ran; even a
+        // non-proposed result without complete counters is not proof of zero.
+        if (usage.modelRequests == 0 && input == null && output == null ||
+            (proposed && usage.modelRequests == 0) ||
             (usage.modelRequests > 0 && (input == null || output == null))) {
             usageUncertain = true
             return "CHILD_USAGE_UNAVAILABLE"
