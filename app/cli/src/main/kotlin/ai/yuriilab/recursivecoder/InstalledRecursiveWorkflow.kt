@@ -204,6 +204,14 @@ internal class InstalledRecursiveWorkflow(
         val meter: InstalledChildRuntimeMeter
     )
 
+    init {
+        // This internal bridge is not a live-provider capability: its usage
+        // source is the deterministic FakeModel fixture, not provider billing.
+        require(model.provider == "fake" && model.modelId == "fake-v1") {
+            "Installed recursive workflow is offline-only"
+        }
+    }
+
     private val origins = linkedMapOf<StageKind, Origin>()
     private var integrated: TwoOriginRecursiveOutcome.Completed? = null
     @Volatile private var uncertainChildExecution = false
