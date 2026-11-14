@@ -232,8 +232,8 @@ internal object WritableWorkflowCli {
                 only(entry, setOf("rootPath", "headSha", "branch",
                     "lockDirectory", "requestId"),
                     if (kind == StageKind.DEVELOP)
-                        setOf("dependsOnSelf", "outputArtifactId")
-                    else setOf("dependsOnSelf"))
+                        setOf("dependsOnSelf", "outputArtifactId", "maxTokens")
+                    else setOf("dependsOnSelf", "maxTokens"))
                 val childPath = Path.of(stringAt(entry, "rootPath"))
                 val childLockPath = Path.of(stringAt(entry, "lockDirectory"))
                 val childHead = stringAt(entry, "headSha")
@@ -283,8 +283,14 @@ internal object WritableWorkflowCli {
                     ArtifactId((it as? JsonPrimitive)?.takeIf { p -> p.isString }
                         ?.content ?: error("Invalid child artifact ID"))
                 }
+                val childTokenOverride = entry["maxTokens"]?.let {
+                    (it as? JsonPrimitive)?.longOrNull
+                        ?: error("Invalid child token grant")
+                }
+                require(childTokenOverride == null ||
+                    childTokenOverride in 1..1000000)
                 InstalledChildCheckout(childRoot, childHead, childBranch,
-                    childLocks, requestId, self, overrideId)
+                    childLocks, requestId, self, overrideId, childTokenOverride)
             }.also {
                 val pair = it.values.toList()
                 gate(pair[0].root != pair[1].root &&
@@ -334,7 +340,7 @@ internal object WritableWorkflowCli {
             InstalledRecursiveWorkflow(sessionId, host,
                 StageIsolatedCheck(executable, arguments),
                 targets, stageInstructions, developerTargets,
-                permittedDigests.mapKeys { it.key }, model,
+                permittedDigests, model,
                 Instant.now().plusSeconds(deadlineSeconds),
                 Cancellation(), childExecutor, configs, tokens, duration,
                 maxDepth, maxChildren, maxToolCalls, childTokens, null)
@@ -391,6 +397,8 @@ internal object WritableWorkflowCli {
                 return "reconciliation_required" to "EVENT_JOURNAL_UNCONFIRMED"
             }
         }
+        if (recursive?.reconciliationRequired == true)
+            return "reconciliation_required" to "CHILD_EXECUTION_UNCONFIRMED"
         return when (result) {
             is FiveRoleWorkflowOutcome.Completed ->
                 "completed" to result.graph.state.name
