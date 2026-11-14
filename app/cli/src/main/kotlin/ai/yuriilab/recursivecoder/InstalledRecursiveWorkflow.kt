@@ -128,7 +128,7 @@ internal object InstalledRecursiveOriginPolicy {
  * tool-call grant. No child host, Git checkout or model call can run here.
  */
 internal object InstalledRecursiveAdmissionPolicy {
-    fun preflight(
+    fun admit(
         kind: StageKind, grant: RecursiveRootGrant,
         requestId: String, dependsOnSelf: Boolean,
         tokens: Long, toolCalls: Long,
@@ -157,11 +157,18 @@ internal object InstalledRecursiveAdmissionPolicy {
             maxToolCalls = toolCalls,
             maxDurationMillis = minOf(60_000L, limits.maxStageDurationMillis)
         )
-        val decision = RecursiveGraphPolicy.admit(
+        return RecursiveGraphPolicy.admit(
             RecursiveSnapshot(listOf(root)), root.graphId, proposed,
             limits, budget, now)
-        return (decision as? RecursiveDecision.Denied)?.code
     }
+
+    fun preflight(
+        kind: StageKind, grant: RecursiveRootGrant,
+        requestId: String, dependsOnSelf: Boolean,
+        tokens: Long, toolCalls: Long,
+        limits: RecursiveLimits, now: Instant
+    ): String? = (admit(kind, grant, requestId, dependsOnSelf,
+        tokens, toolCalls, limits, now) as? RecursiveDecision.Denied)?.code
 }
 
 internal class InstalledRecursiveWorkflow(
@@ -190,7 +197,9 @@ internal class InstalledRecursiveWorkflow(
         val grant: RecursiveRootGrant,
         val host: LinuxFiveRoleWorkflowHost,
         val stageId: StageRunId,
-        val config: InstalledChildCheckout
+        val config: InstalledChildCheckout,
+        val admitted: RecursiveNode,
+        val meter: InstalledChildRuntimeMeter
     )
 
     private val origins = linkedMapOf<StageKind, Origin>()
@@ -198,7 +207,11 @@ internal class InstalledRecursiveWorkflow(
     @Volatile private var uncertainChildExecution = false
     val reconciliationRequired: Boolean get() = uncertainChildExecution
     private val requiredChildChecks = setOf("git_diff_check", "offline-check")
-    private val childToolCalls = requiredChildChecks.size.toLong() + 1L
+    // SDD does one write/check cycle. Developer runs 3 preparation
+    // stages plus its own write/check cycle, with one shared grant.
+    private fun childToolCalls(kind: StageKind): Long =
+        (requiredChildChecks.size.toLong() + 1L) *
+            if (kind == StageKind.SDD) 1L else 4L
     private fun tokenGrant(kind: StageKind): Long =
         children.getValue(kind).maxTokens ?: childTokens
     private val recursiveEvents: RecursiveEventSink
@@ -266,8 +279,8 @@ internal class InstalledRecursiveWorkflow(
         }
     }
 
-    private fun childHost(kind: StageKind, grant: RecursiveRootGrant):
-        Pair<LinuxFiveRoleWorkflowHost, StageRunId> {
+    private fun childHost(kind: StageKind, grant: RecursiveRootGrant,
+        admitted: RecursiveNode): Pair<LinuxFiveRoleWorkflowHost, StageRunId> {
         val config = children.getValue(kind)
         val childId = RecursiveGraphPolicy.childId(grant.graph.correlation.graphId,
             grant.stageRunId, config.requestId)
@@ -287,7 +300,8 @@ internal class InstalledRecursiveWorkflow(
                 "stage-" + digest(firstStageId.value).take(24)),
                 StageKind.SDD, StageState.CREATED,
                 AgentId("actor-" + digest(firstStageId.value).take(24)))),
-            emptyList(), StageBudget(maxTokens, maxDurationMillis, 0, 0)
+            emptyList(), StageBudget(admitted.granted.tokens,
+                minOf(60_000L, maxDurationMillis), 0, 0)
         )
         val childTargets = childTargets(kind, childId)
         val host = LinuxFiveRoleWorkflowHost(
@@ -309,14 +323,17 @@ internal class InstalledRecursiveWorkflow(
         return host to childStageId
     }
 
-    private fun preflight(kind: StageKind, grant: RecursiveRootGrant): String? {
+    private fun admit(kind: StageKind, grant: RecursiveRootGrant): RecursiveDecision {
         val config = children.getValue(kind)
-        return InstalledRecursiveAdmissionPolicy.preflight(
+        return InstalledRecursiveAdmissionPolicy.admit(
             kind, grant, config.requestId, config.dependsOnSelf,
-            tokenGrant(kind), childToolCalls,
+            tokenGrant(kind), childToolCalls(kind),
             RecursiveLimits(maxToolCalls, maxChildren, maxDurationMillis, deadline),
             Instant.now())
     }
+
+    private fun preflight(kind: StageKind, grant: RecursiveRootGrant): String? =
+        (admit(kind, grant) as? RecursiveDecision.Denied)?.code
 
     /**
      * A failed child of either origin may have already accepted bootstrap
@@ -335,16 +352,21 @@ internal class InstalledRecursiveWorkflow(
             false
         }
 
-    private suspend fun produce(kind: StageKind, grant: RecursiveRootGrant): String? {
-        val (host, childStageId) = childHost(kind, grant)
+    private suspend fun produce(kind: StageKind, grant: RecursiveRootGrant,
+        admitted: RecursiveNode): String? {
+        val (host, childStageId) = childHost(kind, grant, admitted)
         val config = children.getValue(kind)
+        val meter = InstalledChildRuntimeMeter(admitted)
+        val roles = MeteredChildRoleExecutor(childExecutor, meter)
+        val tools = MeteredChildTools(host, meter)
         if (kind == StageKind.SDD) {
             val before = host.snapshot()
             val target = targets.getValue(StageKind.SDD)
-            val result = RunPreparationStageUseCase(childExecutor, host, host)
+            val result = RunPreparationStageUseCase(roles, host, tools)
                 .execute(PreparationStageCommand(before.graph, before.acceptedIds,
                     childStageId, target.id, target.path,
-                    instructions.getValue(StageKind.SDD), model, deadline, cancellation),
+                    instructions.getValue(StageKind.SDD), model,
+                    admitted.deadline, cancellation),
                     journal?.let(::CorrelatedRoleSessionEvents) ?: StageRoleEventSink { },
                     journal?.let(::CorrelatedPreparationSessionEvents)
                         ?: PreparationStageEventSink { })
@@ -358,12 +380,12 @@ internal class InstalledRecursiveWorkflow(
             val childId = host.snapshot().graph.correlation.graphId
             val childTargets = childTargets(kind, childId)
             val runner = RunFiveRoleWorkflowUseCase(
-                RunPreparationStageUseCase(childExecutor, host, host),
-                RunDeveloperStageUseCase(childExecutor, host, host),
-                RunReviewerStageUseCase(childExecutor, host.reviewerHost), host)
+                RunPreparationStageUseCase(roles, host, tools),
+                RunDeveloperStageUseCase(roles, host, tools),
+                RunReviewerStageUseCase(roles, host.reviewerHost), host)
             val result = runner.execute(
                 FiveRoleWorkflowPlan(childTargets, instructions,
-                    developerTargets, model, deadline, cancellation),
+                    developerTargets, model, admitted.deadline, cancellation),
                 journal?.let(::CorrelatedRoleSessionEvents) ?: StageRoleEventSink { },
                 journal?.let(::CorrelatedPreparationSessionEvents)
                     ?: PreparationStageEventSink { },
@@ -386,7 +408,8 @@ internal class InstalledRecursiveWorkflow(
                 uncertainChildExecution = true
             return "AUTHENTICATED_CHILD_RECEIPT_MISSING"
         }
-        origins[kind] = Origin(kind, grant, host, childStageId, config)
+        origins[kind] = Origin(kind, grant, host, childStageId, config,
+            admitted, meter)
         return null
     }
 
@@ -398,13 +421,19 @@ internal class InstalledRecursiveWorkflow(
         val executor = RecursiveStageExecutor { context ->
             val childId = RecursiveGraphPolicy.childId(context.graphId,
                 context.stageRunId, config.requestId)
+            val remaining = java.time.Duration.between(
+                Instant.now(), origin.admitted.deadline).toMillis()
+            if (remaining <= 0L)
+                return@RecursiveStageExecutor RecursiveExecutionOutcome.Denied(
+                    "STAGE_DEADLINE")
             val admission = context.requestChild(RecursiveChildProposal(
                 config.requestId, context.graphId, context.stageRunId,
                 context.origin, "child-task-" + origin.kind.name.lowercase(),
                 dependsOn = if (config.dependsOnSelf) setOf(childId) else emptySet(),
-                writablePaths = context.writablePaths, maxTokens = tokenGrant(origin.kind),
-                maxToolCalls = childToolCalls, maxDurationMillis = minOf(60_000L,
-                    maxDurationMillis)))
+                writablePaths = context.writablePaths,
+                maxTokens = origin.admitted.granted.tokens,
+                maxToolCalls = origin.admitted.granted.toolCalls,
+                maxDurationMillis = remaining))
             val child = (admission as? RecursiveDecision.Allowed)?.child
                 ?: return@RecursiveStageExecutor RecursiveExecutionOutcome.Denied(
                     (admission as RecursiveDecision.Denied).code)
@@ -416,8 +445,14 @@ internal class InstalledRecursiveWorkflow(
                     if (receipt.checkedIds != requiredChildChecks)
                         return@RecursiveStageExecutor RecursiveExecutionOutcome.Failed(
                             "CHILD_CHECK_RECEIPT_MISMATCH")
-                    when (val charged = owned.charge(RecursiveUsage(
-                            tokenGrant(origin.kind), childToolCalls))) {
+                    origin.meter.deadlineDenial()?.let {
+                        return@RecursiveStageExecutor RecursiveExecutionOutcome.Failed(it)
+                    }
+                    val measured = origin.meter.measured()
+                    if (measured.toolCalls < requiredChildChecks.size + 1L)
+                        return@RecursiveStageExecutor RecursiveExecutionOutcome.Failed(
+                            "CHILD_TOOL_USAGE_UNCONFIRMED")
+                    when (val charged = owned.charge(measured)) {
                         is RecursiveDecision.Allowed -> RecursiveExecutionOutcome.Completed
                         is RecursiveDecision.Denied ->
                             RecursiveExecutionOutcome.Failed(charged.code)
@@ -448,7 +483,9 @@ internal class InstalledRecursiveWorkflow(
         if (kind !in children) return null
         if (kind in origins) return "REPEATED_RECURSIVE_ORIGIN"
         val grant = rootFor(request, kind) ?: return "RECURSIVE_PARENT_LEASE_INVALID"
-        preflight(kind, grant)?.let { return it }
+        val admission = admit(kind, grant)
+        if (admission is RecursiveDecision.Denied) return admission.code
+        val admitted = (admission as RecursiveDecision.Allowed).child
         // Both origin grant policies must pass before *any* child checkout
         // gets its first physical write. Refuse later-origin-only cycles and
         // budgets before starting the SDD child.
@@ -456,7 +493,7 @@ internal class InstalledRecursiveWorkflow(
             preflightFutureDeveloper(request)?.let { return it }
         }
         val produced = try {
-            produce(kind, grant)
+            produce(kind, grant, admitted)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Exception) {
@@ -472,8 +509,13 @@ internal class InstalledRecursiveWorkflow(
             val result = RunTwoOriginRecursiveChildrenUseCase(events = recursiveEvents)
                 .execute(source(first), source(second))
             integrated = result as? TwoOriginRecursiveOutcome.Completed
-            if (integrated == null)
+            if (integrated == null) {
+                // Both physical child checkouts have already committed writes.
+                // A stopped integration is a known-dirty multi-origin state:
+                // preserve both checkouts and require operator reconciliation.
+                uncertainChildExecution = true
                 return (result as TwoOriginRecursiveOutcome.Stopped).code
+            }
             // The parent Developer writer lease is intentionally live here.
             // authenticatedAcceptedStage() is deliberately unavailable while
             // any writer holds that lease. SDD was already authenticated at
