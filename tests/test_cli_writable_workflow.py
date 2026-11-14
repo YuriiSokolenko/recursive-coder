@@ -180,8 +180,10 @@ class InstalledWritableWorkflowTest(unittest.TestCase):
         metadata = []
         if diagnostic.is_file():
             metadata = [{
-                "type": item.get("type"), "code": item.get("code"),
-                "event": item.get("event"), "stage": item.get("stageRunId"),
+                "kind": item.get("metadata", {}).get("eventKind"),
+                "code": item.get("metadata", {}).get("code"),
+                "role": item.get("metadata", {}).get("role"),
+                "stage": item.get("metadata", {}).get("stageRunId"),
             } for item in (json.loads(line) for line in diagnostic.read_text().splitlines())]
         self.assertEqual(result.returncode, 0,
                          result.stderr + result.stdout + " journal=" + repr(metadata))
