@@ -39,6 +39,31 @@ not installed **two-origin** acceptance. See [Writable CLI](WRITABLE_CLI.md).
 Issue #79 remains open until those production host gates and full
 negative acceptance cases pass.
 
+## Authenticated child write/check evidence — issue #79 follow-up
+
+The opt-in `LinuxFiveRoleWorkflowHost.authenticatedAcceptedStage(stageRunId)`
+now exposes a **read-only** host-attested accepted-stage receipt. It
+revalidates the actual TrustedWriteRuntime HMAC, generation-bound completed
+write/check records, required checks, accepted frozen manifest and **all**
+written postimages from the current workspace. Missing receipts, active
+writers, quarantine or byte drift yield no evidence. It never exports the HMAC
+key, grants workspace writes or upgrades a model-provided manifest.
+
+`LinuxAuthenticatedRecursiveChildIntegrationHost` adapts **real child-stage
+write/check evidence** to `RecursiveChildIntegrationHost` only when the
+trusted caller has bound the exact child stageRunId. The output's producer must
+be the child stage, and the authenticated stage graph, parent graph/stage IDs,
+request ID, derived graph/stage identity, origin, writable scope, and frozen
+scope must all agree. A parent's accepted stage output **cannot** be
+relabelled as a child's result. The port returns empty/unavailable on
+mismatch, rather than manufacturing an accepted receipt.
+
+This prepares the trust boundary but does **not** yet deploy the child-stage
+writers for both SDD and Developer from the installed workflow. The existing
+CLI's five-role parent execution and journal cannot be treated as two-origin
+recursive E2E until those actual child stages are scheduled, written, checked,
+integrated and tested via the installed distribution. Issue #79 remains open.
+
 ## Execution and authority
 
 The coordinator never executes a model tool directly and never grants physical
