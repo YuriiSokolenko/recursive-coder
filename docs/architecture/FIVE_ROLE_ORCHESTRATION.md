@@ -192,8 +192,8 @@ It does not prevent arbitrary external processes from modifying the workspace;
 a production host must control that access and quarantine uncertain state.
 The in-process host now publishes the committed HEAD together with the next
 graph stage before admitting further work. It quarantines uncertain state
-instead of silently retrying. **Writable CLI opt-in, durable recovery and
-two-origin recursive installed E2E are not yet implemented.**
+instead of silently retrying. **An explicit fake-only writable CLI is now available;
+durable recovery and two-origin recursive installed E2E are not yet implemented.**
 
 `LinuxStageGitBaselineReconcilerTest` tests Git handoffs and now the direct
 typed read-only API on Linux, including malformed head/branch, HEAD/branch
@@ -208,15 +208,17 @@ or a crash-recovery guarantee.
 ## Compatibility
 
 The existing `recursive-coder run` command remains read-only and unchanged.
-No `FiveRoleWorkflowHost` binding is provided by default session composition.
+The separate, explicitly opted-in `recursive-coder workflow` command composes
+this Linux host with offline proposals and exact plan-bound approvals; see
+[Writable CLI](WRITABLE_CLI.md). No `FiveRoleWorkflowHost` binding is provided
+by default session composition.
 The native TaskScheduler and Session Protocol v1 schema are unchanged.
 
 ## Outstanding issue #79 acceptance
 
-- Independently validate/review the production Linux host in Draft PR #92;
-  production deployment still requires an isolated workspace and lock scope.
-- Wire an explicit opt-in scoped-write CLI route and stage-specific deterministic
-  FakeModel fixtures. An executable CLI E2E must cover all five roles.
+- Production deployment still requires an isolated workspace and lock scope;
+  PR #92 delivered the host and PR #93 adds a separate fake-only installed CLI.
+- Review/extend the installed CLI E2E beyond the five-role sequential fixture.
 - Wire bounded `RecursiveGraphScheduler` child graphs with **two distinct
   nested stage origins**, accepted child manifests and parent integration.
 - Exercise negative CLI acceptance: dependency cycle, budget limit, Reviewer
