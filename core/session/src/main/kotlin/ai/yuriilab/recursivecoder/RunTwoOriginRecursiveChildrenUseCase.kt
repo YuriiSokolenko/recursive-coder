@@ -1,6 +1,8 @@
 package ai.yuriilab.recursivecoder
 
 import java.security.MessageDigest
+import java.text.Normalizer
+import java.util.Locale
 import java.time.Clock
 import kotlinx.coroutines.CancellationException
 
@@ -40,6 +42,17 @@ sealed interface TwoOriginRecursiveOutcome {
  * SessionEventJournal to correlate both origins. The journal owner MUST finish
  * and verify its checksum before publishing an overall successful result.
  */
+/**
+ * Case-insensitive and Unicode-canonical conflict key. The existing write
+ * policy already requires a lexical relative path with no dot segments.
+ * We deliberately reject ambiguous aliases even on a case-sensitive host,
+ * because accepted child results may later be checked out on other filesystems.
+ */
+internal fun childArtifactConflictKey(path: String): String? {
+    if (!ToolAuthorizationPolicy.validDeclaredPath(path)) return null
+    return Normalizer.normalize(path, Normalizer.Form.NFC).lowercase(Locale.ROOT)
+}
+
 class RunTwoOriginRecursiveChildrenUseCase(
     private val clock: Clock = Clock.systemUTC(),
     private val events: RecursiveEventSink = RecursiveEventSink { }
@@ -108,10 +121,14 @@ class RunTwoOriginRecursiveChildrenUseCase(
             if (results.childOrder.isEmpty() || results.artifacts.isEmpty()) {
                 return TwoOriginRecursiveOutcome.Stopped(kind, "CHILD_RESULTS_MISSING")
             }
-            if (results.artifacts.any {
-                    !usedIds.add(it.manifest.id) || !usedPaths.add(it.manifest.declaredPath)
-                }) {
-                return TwoOriginRecursiveOutcome.Stopped(kind, "CROSS_ORIGIN_ARTIFACT_CONFLICT")
+            for (receipt in results.artifacts) {
+                val pathKey = childArtifactConflictKey(receipt.manifest.declaredPath)
+                    ?: return TwoOriginRecursiveOutcome.Stopped(kind,
+                        "CROSS_ORIGIN_ARTIFACT_PATH_INVALID")
+                if (!usedIds.add(receipt.manifest.id) || !usedPaths.add(pathKey)) {
+                    return TwoOriginRecursiveOutcome.Stopped(kind,
+                        "CROSS_ORIGIN_ARTIFACT_CONFLICT")
+                }
             }
             integrated[kind] = results
             snapshots[kind] = scheduler.current()
