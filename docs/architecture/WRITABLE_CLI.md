@@ -1,4 +1,4 @@
-# Opt-in writable five-role and recursive CLI (Issue #79)
+# Opt-in writable five-role and recursive CLI (Issues #79, #97)
 
 The installed CLI now has a separate **offline-only** `workflow` command.
 `recursive-coder run REQUEST` remains SessionRequest v1, **read-only**, and
@@ -51,15 +51,18 @@ The workflow plan is UTF-8 JSON (version 1, maximum 64 KiB), with exactly:
 - `limits`: positive `maxTokens`, `maxDurationMillis` and
   `deadlineSeconds` within the CLI's bounded ranges. If recursive work is
   enabled, optional `maxDepth` (default 1), `maxChildren` (default 1),
-  `maxToolCalls` (default 6) and `childTokens` (default 500) apply to each
+  `maxToolCalls` (default 16) and `childTokens` (default 1000) apply to each
   independently bounded origin; a depth of 0 or insufficient budget denies
   child admission rather than silently omitting the work.
 - Optional `recursiveChildren`: **both** `SDD` and `DEVELOP` checkout records
   are mandatory when recursion is enabled. Each record provides absolute
   `rootPath`, `headSha`, `branch`, `lockDirectory`, and a host-selected
   `requestId`, optionally `maxTokens` as a per-origin override of
-  `limits.childTokens`. The override is positive, bounded by 1,000,000
-  tokens, and is still subject to the parent's recursive token policy;
+  `limits.childTokens`, plus an optional `maxToolCalls` fixture override.
+  Both overrides are strict unquoted, integral JSON numbers; malformed,
+  null, fractional and quoted values are rejected. Token overrides are
+  positive, bounded by 1,000,000, and tool overrides are 0–128;
+  both are still subject to the parent's recursive policy;
   it does not bypass budget admission. Both SDD and future Developer
   admissions are preflighted at the SDD hook before either child writes;
   Developer is re-authorized against its real running parent lease
@@ -68,11 +71,13 @@ The workflow plan is UTF-8 JSON (version 1, maximum 64 KiB), with exactly:
   the parent, with its own isolation marker and disjoint external lock
   scope. The child workspaces may not overlap each other, the parent
   checkout, plan/approvals or journal. The CLI process **working directory
-  must be outside every child checkout**, including paths inside a child
-  through an equivalent canonical location.
+  must be outside every child checkout and disjoint from every child
+  external lock directory**, including equality and canonical ancestors.
   Offline negative-fixture fields are `dependsOnSelf` (boolean) and, for
   the Developer child only, `outputArtifactId` (tests an authenticated
-  cross-origin ID collision). Both are bound by the approval plan SHA-256.
+  cross-origin ID collision). These are **strictly offline-only** test knobs,
+  not production recursive workflow features; all are bound by the approval
+  plan SHA-256. Present optional numeric fields are never silently defaulted.
 
 The separate approvals file also has version 1 and **exactly** `planSha256`
 (the SHA-256 of the plan file's raw bytes) and `approvedSha256` (a map of
@@ -150,7 +155,11 @@ or user namespace support in CI is a **failure**, not a silent skip.
 
 The offline provider uses the existing `FakeModel` capability handshake plus
 fixed per-role proposals; it is **not** a production LLM completion provider.
-The role usage is fixture data, not measured token consumption.
+The FakeModel role executor reports deterministic fixture usage (100 input +
+30 output tokens per invocation), not independent provider-billed tokens.
+The host-owned runtime meter checks this reported usage without treating
+missing values as zero; **no live model or unattended production writable
+execution is enabled by this implementation**.
 
 ## Authenticated recursive opt-in
 
@@ -175,10 +184,41 @@ SDD/ATDD/TDD bootstrap artifacts before a later Developer/Reviewer denial.
 If the child baseline changed or is unverifiable, the CLI returns
 `reconciliation_required / CHILD_EXECUTION_UNCONFIRMED` (exit 1), preserving
 the child checkout for out-of-band reconciliation rather than reporting a
-safe `stopped`. Cancellation propagates instead of being treated as a normal
-model denial. FakeModel usage is *not* provider-measured: the recursive
-scheduler charges the entire allocated child token cap and counts the
-genuine write plus required checks.
+safe `stopped`. Cancellation propagates instead of being treated as a normal model denial.
+For #97 the installed child graph's `StageBudget` contains the admitted
+child's token and duration grants, **not the parent's full budget**. The
+child role requests and whole Developer five-role plan use the bounded
+child deadline. A single host-owned meter sums all role executions' input
+and output tokens across that child and counts *attempted* trusted write
+and check invocations before dispatch (SDD: 1 write + 2 checks; Developer:
+4 write/check cycles; Reviewer does not write). The meter denies missing,
+negative and over-limit token usage, checks the deadline at model and tool
+boundaries, and prevents any later unauthorized trusted call. The recursive
+scheduler's `charge` receives those measured totals rather than a fabricated
+charge equal to the grant. A completed physical child must still present its
+authenticated receipt and checks; metadata alone never permits integration.
+
+**Provenance:** the admission comes from host projection of a live parent
+stage, `RecursiveGraphPolicy.admit`, and the validated operator plan.
+Runtime usage comes from trusted `StageRoleResult.usage` returned by the
+in-process FakeModel executor and from the `StageToolSession` wrapper around
+the Linux trusted host. The former is **fixture-reported** (not independently
+verified provider metering); the latter counts real in-process invocations,
+not invented artifact receipts. The installed CLI constructs `FakeModel`
+with a fixed provider and rejects any unrecognized plan fields. It does not
+accept live provider credentials, endpoints, tools, or dynamic model settings.
+A future live-provider release must prove accurate provider metering and
+recheck all fail-closed gates in CI/security review; none is authorized today.
+
+**Known-dirty multi-origin stop:** after both child checkouts have accepted
+writes, a later `RunTwoOriginRecursiveChildrenUseCase.Stopped` (for example,
+a cross-origin conflict) is always surfaced as
+`reconciliation_required / CHILD_EXECUTION_UNCONFIRMED`. Both checkouts and
+the parent must be inspected and reconciled/reset by an operator; **neither
+checkout is automatically reverted, deleted, or safe to reuse**. The in-memory
+`origins` map and `integrated` result are owned by the single sequential
+installed workflow invocation. This mutable state is not safe for a
+concurrent executor refactor without explicit serialized ownership.
 
 The parent must write the same approved artifact bytes through its **own**
 trusted stage tools. It never copies child checkout files into the parent
@@ -196,9 +236,11 @@ source bytes, secrets or tool output.
 The installed regression suite includes successful five parent roles, both
 nested origins, a clean final Git baseline and correlated events; cycle,
 depth/token ceilings, rejected Reviewer, protected test paths and
-cross-origin artifact ID conflict. These are deterministic offline fixtures
+cross-origin artifact ID conflict, cumulative token overrun, actual tool-call
+budget exhaustion, strict optional numeric fields and child-lock/CWD scopes.
+These are deterministic offline fixtures
 only, **not** live-model integration or a full isolation guarantee against
 same-UID adversarial processes. No checkpoint/restart after uncertain
 writes (#10), external issue tracker, CI coordinator or production API is
-introduced. Keep issue #79 open until the current branch passes all required
-CI gates and a security review.
+introduced. Issue #79 is already completed in the offline-only scope;
+issue #97 continues to gate any future live-provider release.
