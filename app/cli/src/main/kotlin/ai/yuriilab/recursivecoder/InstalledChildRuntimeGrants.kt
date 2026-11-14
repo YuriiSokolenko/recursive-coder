@@ -15,8 +15,26 @@ internal class InstalledChildRuntimeMeter(
     val admitted: RecursiveNode,
     private val clock: Clock = Clock.systemUTC()
 ) {
+    // Physical usage can exceed the admitted grant before a provider returns.
+    // Preserve that observation rather than silently truncating it to the grant.
     private var tokens = 0L
     private var tools = 0L
+    private var usageUncertain = false
+
+    /** Forensic observation; may exceed the reservation and is not chargeable. */
+    @Synchronized fun observed(): RecursiveUsage = RecursiveUsage(tokens, tools)
+
+    /**
+     * The policy ledger is bounded by the non-refundable reservation. Any
+     * unknown usage, overflow, or failed physical run consumes its full grant.
+     * This is a conservative allocation, not fabricated measured consumption.
+     */
+    @Synchronized fun accounted(failed: Boolean = false): RecursiveUsage =
+        if (failed || usageUncertain || tokens > admitted.granted.tokens)
+            admitted.granted
+        else RecursiveUsage(tokens, tools)
+
+    @Synchronized fun hasUncertainUsage(): Boolean = usageUncertain
 
     @Synchronized
     fun deadlineDenial(): String? =
@@ -27,7 +45,7 @@ internal class InstalledChildRuntimeMeter(
         ?: if (tokens >= admitted.granted.tokens) "TOKEN_BUDGET_EXHAUSTED" else null
 
     @Synchronized
-    fun remainingTokens(): Long = admitted.granted.tokens - tokens
+    fun remainingTokens(): Long = (admitted.granted.tokens - tokens).coerceAtLeast(0L)
 
     /**
      * The usage fields are supplied by the trusted executor's provider adapter,
@@ -36,25 +54,42 @@ internal class InstalledChildRuntimeMeter(
      */
     @Synchronized
     fun recordRole(usage: StageRoleUsage, proposed: Boolean): String? {
-        deadlineDenial()?.let { return it }
-        if (usage.modelRequests < 0 ||
-            (proposed && usage.modelRequests == 0) ||
-            (usage.modelRequests > 0 && (usage.inputTokens == null ||
-                usage.outputTokens == null)))
-            return "CHILD_USAGE_UNAVAILABLE"
         val input = usage.inputTokens
         val output = usage.outputTokens
-        if (input != null && input < 0 || output != null && output < 0)
+        // Keep every non-negative, representable observation even when the
+        // model returned after the deadline or consumed past its grant.
+        // Missing/invalid counters cannot be treated as exact zero usage.
+        if (input != null && input >= 0 && output != null && output >= 0) {
+            if (input > Long.MAX_VALUE - output ||
+                tokens > Long.MAX_VALUE - input - output) {
+                usageUncertain = true
+                tokens = Long.MAX_VALUE
+            } else {
+                tokens += input + output
+            }
+        } else if (input != null && input >= 0 || output != null && output >= 0) {
+            val known = listOfNotNull(input?.takeIf { it >= 0 },
+                output?.takeIf { it >= 0 })
+            for (value in known) {
+                tokens = if (value > Long.MAX_VALUE - tokens)
+                    Long.MAX_VALUE else tokens + value
+            }
+            usageUncertain = true
+        }
+        if (usage.modelRequests < 0 || input != null && input < 0 ||
+            output != null && output < 0 ||
+            usage.modelRequests == 0 && (input != null && input != 0L ||
+                output != null && output != 0L)) {
+            usageUncertain = true
             return "CHILD_USAGE_INVALID"
-        if (usage.modelRequests == 0 && (input != null && input != 0L ||
-                output != null && output != 0L))
-            return "CHILD_USAGE_INVALID"
-        val usedInput = input ?: 0L
-        val usedOutput = output ?: 0L
-        val remaining = remainingTokens()
-        if (usedInput > remaining || usedOutput > remaining - usedInput)
-            return "TOKEN_BUDGET_EXHAUSTED"
-        tokens += usedInput + usedOutput
+        }
+        if ((proposed && usage.modelRequests == 0) ||
+            (usage.modelRequests > 0 && (input == null || output == null))) {
+            usageUncertain = true
+            return "CHILD_USAGE_UNAVAILABLE"
+        }
+        if (usageUncertain) return "CHILD_USAGE_INVALID"
+        if (tokens > admitted.granted.tokens) return "TOKEN_BUDGET_EXHAUSTED"
         return deadlineDenial()
     }
 
@@ -68,7 +103,7 @@ internal class InstalledChildRuntimeMeter(
     }
 
     @Synchronized
-    fun measured(): RecursiveUsage = RecursiveUsage(tokens, tools)
+    fun measured(): RecursiveUsage = observed()
 }
 
 /** The child never receives a parent/global deadline or unbounded output cap. */
@@ -132,16 +167,25 @@ internal class MeteredChildTools(
             }
 
             override fun verify(): StageValidationEvidence {
-                val late = meter.deadlineDenial()
-                if (late == null) return session.verify()
-                val current = authority.current()
-                    ?: error("Child authority unavailable after deadline")
-                val stage = current.graph.stages.single {
-                    it.correlation.stageRunId == current.stageRunId
+                val early = meter.deadlineDenial()
+                // A verified host snapshot is necessary to construct a typed
+                // denial. If identity is missing, fail closed as unconfirmed.
+                fun denied(code: String): StageValidationEvidence {
+                    val current = authority.current()
+                        ?: throw IllegalStateException("CHILD_AUTHORITY_UNCONFIRMED")
+                    val stage = current.graph.stages.singleOrNull {
+                        it.correlation.stageRunId == current.stageRunId
+                    } ?: throw IllegalStateException("CHILD_STAGE_UNCONFIRMED")
+                    val actor = stage.agentId
+                        ?: throw IllegalStateException("CHILD_ACTOR_UNCONFIRMED")
+                    return StageValidationEvidence(stage.correlation, actor,
+                        emptyList(), false, code)
                 }
-                return StageValidationEvidence(stage.correlation,
-                    stage.agentId ?: error("Missing host stage actor"),
-                    emptyList(), false, late)
+                if (early != null) return denied(early)
+                val result = session.verify()
+                // verify() itself may take longer than the admitted deadline.
+                val late = meter.deadlineDenial()
+                return if (late == null) result else denied(late)
             }
 
             override fun close() = session.close()
