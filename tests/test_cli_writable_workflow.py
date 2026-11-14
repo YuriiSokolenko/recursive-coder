@@ -215,8 +215,8 @@ class InstalledWritableWorkflowTest(unittest.TestCase):
     def test_installed_recursive_reviewer_rejection_stays_failed(self):
         self.recursive_fixture(verdict="REJECT")
         result = self.authorized()
-        self.assertNotEqual(result.returncode, 0, result.stderr + result.stdout)
-        self.assertNotEqual(json.loads(result.stdout)["outcome"], "completed")
+        self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
+        self.assertEqual(json.loads(result.stdout)["code"], "REVIEWER_REJECTED")
 
     def test_installed_recursive_protected_test_mutation_is_rejected(self):
         self.recursive_fixture(protected=True)
