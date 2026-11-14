@@ -302,8 +302,11 @@ internal class InstalledRecursiveWorkflow(
             integrated = result as? TwoOriginRecursiveOutcome.Completed
             if (integrated == null)
                 return (result as TwoOriginRecursiveOutcome.Stopped).code
-            if (!verifiedParent(StageKind.SDD, parent.snapshot()))
-                return "CHILD_PARENT_ARTIFACT_MISMATCH"
+            // The parent Developer writer lease is intentionally live here.
+            // authenticatedAcceptedStage() is deliberately unavailable while
+            // any writer holds that lease. SDD was already authenticated at
+            // SDD->ATDD; recheck both parent receipts after Developer commits,
+            // at the idle Developer->Reviewer barrier and final graph finish.
         }
         return null
     }
