@@ -87,6 +87,11 @@ class LinuxFiveRoleWorkflowHostTest {
     }
 
     private fun newHost(
+        startingStageId: StageRunId = StageRunId("host-sdd"),
+        startingGraphId: GraphId = GraphId("host-graph"),
+        startingRequestId: String = "host-request",
+        parentGraphId: GraphId? = null,
+        parentStageRunId: StageRunId? = null,
         gateway: (StageArtifactManifest, StageValidationEvidence, StageRoleUsage) ->
             PreparationApproval = { _, _, _ -> PreparationApproval.ACCEPT }
     ): Pair<LinuxFiveRoleWorkflowHost, Path> {
@@ -103,14 +108,16 @@ class LinuxFiveRoleWorkflowHostTest {
         Files.writeString(repo.resolve("src/main/FeatureFull.kt"), oldSource)
         git(repo, "add", "README.md", ".gitignore", "src/main/FeatureFull.kt")
         git(repo, "commit", "-m", "Initial")
-        val id = GraphId("host-graph")
+        val id = startingGraphId
         val stage = StageNode(
-            StageCorrelation("host-session", id, StageRunId("host-sdd"),
-                "host-request", "host-stage-correlation"),
+            StageCorrelation("host-session", id, startingStageId,
+                startingRequestId, "host-stage-correlation"),
             StageKind.SDD, StageState.CREATED, AgentId("host-sdd-actor")
         )
         val graph = StageGraph(GraphCorrelation("host-session", id,
-            "host-graph-correlation"), StageGraphState.RUNNING, listOf(stage),
+            "host-graph-correlation", parentGraphId = parentGraphId,
+            parentStageRunId = parentStageRunId),
+            StageGraphState.RUNNING, listOf(stage),
             emptyList(), StageBudget(10_000, 60_000, 0, 0))
         assertEquals(StageGateDecision.Permit, StageGraphPolicy.validate(graph))
         val host = LinuxFiveRoleWorkflowHost(repo, graph, git(repo, "rev-parse", "HEAD"),
@@ -118,6 +125,67 @@ class LinuxFiveRoleWorkflowHostTest {
             setOf("git_diff_check", "smoke"),
             gateway, temp.resolve("locks"))
         return host to repo
+    }
+
+    @Test fun realAcceptedChildWriteCheckReceiptIsBoundToExactRecursiveIdentity() =
+        runBlocking {
+        val parentGraphId = GraphId("trusted-parent-graph")
+        val parentStageRunId = StageRunId("trusted-parent-stage")
+        val requestId = "trusted-child-request"
+        val childGraphId = RecursiveGraphPolicy.childId(
+            parentGraphId, parentStageRunId, requestId)
+        val childStageId = RecursiveGraphPolicy.childStageId(childGraphId)
+        val (host, repo) = newHost(startingStageId = childStageId,
+            startingGraphId = childGraphId, startingRequestId = requestId,
+            parentGraphId = parentGraphId, parentStageRunId = parentStageRunId)
+        val child = RecursiveNode(childGraphId, childStageId, parentGraphId,
+            parentStageRunId, requestId, StageKind.SDD, "child-task",
+            emptySet(), 1, setOf("specs/FeatureFull.md"), emptySet(),
+            emptySet(), RecursiveUsage(100, 2), deadline = Instant.now().plusSeconds(90))
+        val bridge = LinuxAuthenticatedRecursiveChildIntegrationHost(host,
+            setOf(childStageId))
+
+        // The existence of a graph or path does not convey accepted evidence.
+        assertNull(bridge.manifestsFor(child))
+        assertTrue(bridge.acceptedArtifactIds().isEmpty())
+        val stage = host.snapshot()
+        val output = targets.getValue(StageKind.SDD)
+        val result = RunPreparationStageUseCase(OfflineFiveRoleModel(), host, host)
+            .execute(PreparationStageCommand(stage.graph, stage.acceptedIds,
+                childStageId, output.id, output.path, "Write authenticated child",
+                model, Instant.now().plusSeconds(90), Cancellation()),
+                noopRole, noopStage)
+        assertIs<PreparationStageOutcome.Accepted>(result.outcome, result.outcome.toString())
+
+        val receipt = assertNotNull(host.authenticatedAcceptedStage(childStageId))
+        assertEquals(childGraphId, receipt.graphCorrelation.graphId)
+        assertEquals(parentGraphId, receipt.graphCorrelation.parentGraphId)
+        assertEquals(parentStageRunId, receipt.graphCorrelation.parentStageRunId)
+        assertEquals(setOf("git_diff_check", "smoke"), receipt.checkedIds)
+        assertTrue(receipt.writeToolId.isNotBlank())
+        assertEquals(setOf(output.path), receipt.writtenPostimages.keys)
+        assertEquals(listOf(receipt.manifest), bridge.manifestsFor(child))
+        assertEquals(setOf(output.id), bridge.acceptedArtifactIds())
+        assertEquals(receipt.manifest.sha256,
+            sha(assertNotNull(bridge.readBytes(output.path)).toString(Charsets.UTF_8)))
+
+        assertNull(bridge.manifestsFor(child.copy(
+            parentStageRunId = StageRunId("forged-parent"))))
+        assertNull(bridge.manifestsFor(child.copy(
+            requestId = "forged-request")))
+        assertNull(bridge.manifestsFor(child.copy(
+            origin = StageKind.DEVELOP)))
+        assertNull(bridge.manifestsFor(child.copy(
+            writablePaths = setOf("specs/Other.md"))))
+        val noAuthority = LinuxAuthenticatedRecursiveChildIntegrationHost(host,
+            emptySet())
+        assertNull(noAuthority.manifestsFor(child))
+        assertTrue(noAuthority.acceptedArtifactIds().isEmpty())
+        // A live byte change revokes even a previously accepted host receipt.
+        Files.writeString(repo.resolve(output.path), "post-acceptance tampering\\n")
+        assertNull(host.authenticatedAcceptedStage(childStageId))
+        assertNull(bridge.manifestsFor(child))
+        assertTrue(bridge.acceptedArtifactIds().isEmpty())
     }
 
     @Test fun cannotForgeAcceptanceWithoutARealTrustedWriteReceipt() {
