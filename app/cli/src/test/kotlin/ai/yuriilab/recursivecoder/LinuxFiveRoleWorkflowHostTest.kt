@@ -345,6 +345,184 @@ class LinuxFiveRoleWorkflowHostTest {
         assertTrue(events.contains("INTEGRATED"))
     }
 
+    @Test fun allAuthenticatedWritePostimagesMustFitChildScope() {
+        val parentGraph = GraphId("scope-parent")
+        val parentStage = StageRunId("scope-parent-stage")
+        val request = "scope-child-request"
+        val childGraph = RecursiveGraphPolicy.childId(parentGraph, parentStage, request)
+        val childStage = RecursiveGraphPolicy.childStageId(childGraph)
+        val (host, _) = newHost(startingStageId = childStage,
+            startingGraphId = childGraph, startingRequestId = request,
+            parentGraphId = parentGraph, parentStageRunId = parentStage,
+            checkoutName = "scope-extra-write")
+        val snapshot = host.snapshot()
+        val lease = assertNotNull(host.beginStage(snapshot.graph, childStage,
+            snapshot.acceptedIds))
+        val output = targets.getValue(StageKind.SDD)
+        val extra = "specs/Unexpected.md"
+        val primaryText = "Host-approved primary artifact\n"
+        val extraText = "Host-approved but child-unauthorized write\n"
+        val session = assertIs<StageToolOpenResult.Granted>(
+            host.open(lease.authority)).session
+        val evidence = try {
+            val write = session.write(listOf(
+                StageWrite.Create(output.path, primaryText),
+                StageWrite.Create(extra, extraText)))
+            assertTrue(write.permitted, write.deniedCode)
+            for (check in listOf("git_diff_check", "smoke")) {
+                val result = session.runCheck(check)
+                assertTrue(result.passed, result.deniedCode)
+            }
+            session.verify()
+        } finally {
+            session.close()
+        }
+        assertTrue(evidence.successful, evidence.deniedCode)
+        val candidate = StageArtifactManifest(output.id,
+            StageArtifactKind.REQUIREMENTS, output.path, sha(primaryText),
+            EngineeringRole.SDD, childStage, 1L,
+            ArtifactApproval.DRAFT, ArtifactFreeze.EDITABLE)
+        val usage = StageRoleUsage(1, null, null)
+        assertEquals(PreparationApproval.ACCEPT, host.approve(candidate, evidence, usage))
+        val frozen = candidate.copy(approval = ArtifactApproval.ACCEPTED,
+            freeze = ArtifactFreeze.FROZEN)
+        val accepted = lease.graph.copy(
+            stages = lease.graph.stages.map {
+                it.copy(state = StageState.ACCEPTED, outputArtifacts = setOf(frozen.id))
+            },
+            artifacts = listOf(frozen))
+        assertTrue(host.finishStage(lease, accepted, setOf(frozen.id)))
+        val receipt = assertNotNull(host.authenticatedAcceptedStage(childStage))
+        assertEquals(setOf(output.path, extra), receipt.writtenPostimages.keys)
+        assertEquals(usage, receipt.usage)
+        assertNull(receipt.usage.inputTokens)
+        assertNull(receipt.usage.outputTokens)
+        assertFailsWith<UnsupportedOperationException> {
+            (receipt.writtenPostimages as MutableMap<String, String>)[extra] = "forged"
+        }
+        assertFailsWith<UnsupportedOperationException> {
+            (receipt.checkedIds as MutableSet<String>).clear()
+        }
+
+        val child = RecursiveNode(childGraph, childStage, parentGraph,
+            parentStage, request, StageKind.SDD, "scope-task",
+            emptySet(), 1, setOf(output.path), emptySet(),
+            emptySet(), RecursiveUsage(100, 2), deadline = Instant.now().plusSeconds(90))
+        val bridge = LinuxAuthenticatedRecursiveChildIntegrationHost(host,
+            "host-session", setOf(childStage))
+        // A valid host receipt can still be forbidden by a narrower child grant.
+        assertEquals(ChildReceiptVerification.Denied(
+            ChildReceiptDenialCode.OUTSIDE_WRITABLE_SCOPE), bridge.verifyChild(child))
+        assertNull(bridge.manifestsFor(child))
+        val permittedChild = child.copy(writablePaths = setOf(output.path, extra))
+        assertEquals(ChildReceiptVerification.Accepted(frozen),
+            bridge.verifyChild(permittedChild))
+        assertEquals(listOf(frozen), bridge.manifestsFor(permittedChild))
+        assertEquals(ChildReceiptVerification.Denied(
+            ChildReceiptDenialCode.WRITES_FROZEN_PATH),
+            bridge.verifyChild(permittedChild.copy(frozenPaths = setOf(extra))))
+    }
+
+    @Test fun acceptedParentStageCannotBeRelabelledAsRecursiveChild() = runBlocking {
+        val (host, _) = newHost(checkoutName = "parent-forgery")
+        val stage = host.snapshot()
+        val parentStage = StageRunId("host-sdd")
+        val target = targets.getValue(StageKind.SDD)
+        val outcome = RunPreparationStageUseCase(OfflineFiveRoleModel(), host, host)
+            .execute(PreparationStageCommand(stage.graph, stage.acceptedIds,
+                parentStage, target.id, target.path, "Parent output", model,
+                Instant.now().plusSeconds(90), Cancellation()), noopRole, noopStage)
+        assertIs<PreparationStageOutcome.Accepted>(outcome.outcome)
+        assertNotNull(host.authenticatedAcceptedStage(parentStage),
+            "The parent receipt is genuine; only its child identity is invalid")
+        val bridge = LinuxAuthenticatedRecursiveChildIntegrationHost(host,
+            "host-session", setOf(parentStage))
+        assertTrue(bridge.acceptedArtifactIds().isEmpty())
+        val claimedParent = GraphId("forged-parent-graph")
+        val claimedParentStage = StageRunId("forged-parent-stage")
+        val request = "forged-child-request"
+        val claimedChildGraph = RecursiveGraphPolicy.childId(
+            claimedParent, claimedParentStage, request)
+        val counterfeit = RecursiveNode(claimedChildGraph, parentStage,
+            claimedParent, claimedParentStage, request, StageKind.SDD, "forged-task",
+            emptySet(), 1, setOf(target.path), emptySet(),
+            emptySet(), RecursiveUsage(100, 2), deadline = Instant.now().plusSeconds(90))
+        assertEquals(ChildReceiptVerification.Denied(
+            ChildReceiptDenialCode.INVALID_DERIVED_IDENTITY),
+            bridge.verifyChild(counterfeit))
+        assertNull(bridge.manifestsFor(counterfeit))
+    }
+
+    @Test fun preauthorizedChildIdentitiesRejectBadConstructorsAndCollisions() =
+        runBlocking {
+        val parent = GraphId("preauth-parent")
+        val parentStage = StageRunId("preauth-parent-stage")
+        val request = "preauth-request"
+        val childGraph = RecursiveGraphPolicy.childId(parent, parentStage, request)
+        val childStage = RecursiveGraphPolicy.childStageId(childGraph)
+        var sequence = 0
+        fun construct(
+            stages: Map<StageKind, Pair<StageRunId, String>>,
+            graph: GraphId = childGraph,
+            parentGraph: GraphId? = parent,
+            parentRun: StageRunId? = parentStage,
+            startingId: StageRunId = StageRunId("preauth-sdd")
+        ): Pair<LinuxFiveRoleWorkflowHost, Path> =
+            newHost(startingStageId = startingId, startingGraphId = graph,
+                startingRequestId = request, parentGraphId = parentGraph,
+                parentStageRunId = parentRun,
+                preauthorizedStages = stages, checkoutName = "preauth-" + sequence++)
+
+        for (kind in listOf(StageKind.SDD, StageKind.REVIEW)) {
+            assertFailsWith<IllegalArgumentException> {
+                construct(mapOf(kind to (childStage to request)))
+            }
+        }
+        assertFailsWith<IllegalArgumentException> {
+            construct(mapOf(StageKind.ATDD to (childStage to request)),
+                parentGraph = null, parentRun = null)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            construct(mapOf(StageKind.ATDD to (childStage to request)),
+                parentRun = null)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            construct(mapOf(StageKind.ATDD to (childStage to "invalid/request")))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            construct(mapOf(StageKind.ATDD to
+                (StageRunId("wrong-child-stage") to request)))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            construct(mapOf(StageKind.ATDD to (childStage to request)),
+                graph = GraphId("wrong-child-graph"))
+        }
+        // Every stage kind maps to the same policy child-stage ID; reject twice
+        // pre-authorizing it instead of failing at the later ATDD/TDD handoff.
+        assertFailsWith<IllegalArgumentException> {
+            construct(mapOf(StageKind.ATDD to (childStage to request),
+                StageKind.TDD to (childStage to request)))
+        }
+
+        // The run-time collision guard also rejects a planned stage ID that
+        // is already used by the initial SDD, before Git reconciliation.
+        val (host, repo) = construct(
+            mapOf(StageKind.ATDD to (childStage to request)),
+            startingId = childStage)
+        val initial = host.snapshot()
+        val target = targets.getValue(StageKind.SDD)
+        val completed = RunPreparationStageUseCase(OfflineFiveRoleModel(), host, host)
+            .execute(PreparationStageCommand(initial.graph, initial.acceptedIds,
+                childStage, target.id, target.path, "Collision fixture", model,
+                Instant.now().plusSeconds(90), Cancellation()), noopRole, noopStage)
+        assertIs<PreparationStageOutcome.Accepted>(completed.outcome)
+        val before = git(repo, "rev-parse", "HEAD")
+        val ready = host.snapshot()
+        assertNull(host.advance(ready, StageKind.ATDD))
+        assertEquals(ready, host.snapshot())
+        assertEquals(before, git(repo, "rev-parse", "HEAD"))
+    }
+
     @Test fun cannotForgeAcceptanceWithoutARealTrustedWriteReceipt() {
         val (host, _) = newHost()
         val first = host.snapshot()
