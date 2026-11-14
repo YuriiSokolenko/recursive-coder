@@ -57,15 +57,19 @@ The workflow plan is UTF-8 JSON (version 1, maximum 64 KiB), with exactly:
 - Optional `recursiveChildren`: **both** `SDD` and `DEVELOP` checkout records
   are mandatory when recursion is enabled. Each record provides absolute
   `rootPath`, `headSha`, `branch`, `lockDirectory`, and a host-selected
-  `requestId`, optionally `maxTokens` for a stricter per-origin child
-  token grant (otherwise the shared `limits.childTokens` is used). Both
-  SDD and future Developer admissions are preflighted at the SDD hook
-  before either child writes; Developer is re-authorized against its
-  real running parent lease before executing. Each checkout must be a
-  separately provisioned clean Linux
-  Git checkout at the **same initial HEAD and branch** as the parent, with its
-  own isolation marker and disjoint external lock scope. The child workspaces
-  may not overlap each other, the parent checkout, plan/approvals or journal.
+  `requestId`, optionally `maxTokens` as a per-origin override of
+  `limits.childTokens`. The override is positive, bounded by 1,000,000
+  tokens, and is still subject to the parent's recursive token policy;
+  it does not bypass budget admission. Both SDD and future Developer
+  admissions are preflighted at the SDD hook before either child writes;
+  Developer is re-authorized against its real running parent lease
+  before executing. Each checkout must be a separately provisioned
+  clean Linux Git checkout at the **same initial HEAD and branch** as
+  the parent, with its own isolation marker and disjoint external lock
+  scope. The child workspaces may not overlap each other, the parent
+  checkout, plan/approvals or journal. The CLI process **working directory
+  must be outside every child checkout**, including paths inside a child
+  through an equivalent canonical location.
   Offline negative-fixture fields are `dependsOnSelf` (boolean) and, for
   the Developer child only, `outputArtifactId` (tests an authenticated
   cross-origin ID collision). Both are bound by the approval plan SHA-256.
@@ -164,11 +168,17 @@ bind each result to its derived child graph/stage/request identity. The
 and integrates both sources through authenticated child receipt adapters.
 Missing approvals, cycles, depth/child/token/tool limits, conflicts and stale
 evidence fail closed. A denial of Developer's preflight occurs before SDD
-writes. An unconfirmed child execution requires out-of-band reconciliation:
-its physical checkout may already have changed; cancellation is propagated
-rather than treated as a normal model denial. FakeModel usage is *not* provider-measured: the
-recursive scheduler charges the entire allocated child token cap and
-counts the genuine write plus required checks.
+writes. On either child origin, non-accepted execution is not assumed to
+be side-effect-free: the host re-inspects that child's initial Git baseline.
+A stopped child Developer workflow may have committed its own
+SDD/ATDD/TDD bootstrap artifacts before a later Developer/Reviewer denial.
+If the child baseline changed or is unverifiable, the CLI returns
+`reconciliation_required / CHILD_EXECUTION_UNCONFIRMED` (exit 1), preserving
+the child checkout for out-of-band reconciliation rather than reporting a
+safe `stopped`. Cancellation propagates instead of being treated as a normal
+model denial. FakeModel usage is *not* provider-measured: the recursive
+scheduler charges the entire allocated child token cap and counts the
+genuine write plus required checks.
 
 The parent must write the same approved artifact bytes through its **own**
 trusted stage tools. It never copies child checkout files into the parent
