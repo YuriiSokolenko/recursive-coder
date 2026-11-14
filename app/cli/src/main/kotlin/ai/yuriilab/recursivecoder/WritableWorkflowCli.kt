@@ -19,6 +19,29 @@ import kotlinx.serialization.json.*
  * approval file before opting in. The marker is an explicit deployment assertion,
  * NOT a substitute for OS-level filesystem isolation of the checkout.
  */
+/**
+ * Pure, canonical child checkout scope validation. The CLI independently
+ * verifies the actual Git baseline/marker after this structural check.
+ * Inputs must already be canonicalized; no model controls any of these paths.
+ */
+internal fun installedChildCheckoutScopesDisjoint(
+    root: Path, locks: Path, parent: Path, parentLocks: Path,
+    configPaths: List<Path>, eventsPath: Path?,
+    earlierRoots: Set<Path>, earlierLocks: Set<Path>, cwd: Path
+): Boolean {
+    fun separate(a: Path, b: Path): Boolean =
+        !a.startsWith(b) && !b.startsWith(a)
+    if (!separate(root, locks) || !separate(root, parent) ||
+        !separate(root, parentLocks) || !separate(locks, parent) ||
+        !separate(locks, parentLocks) || cwd.startsWith(root)) return false
+    if (earlierRoots.any { !separate(root, it) || !separate(locks, it) } ||
+        earlierLocks.any { !separate(root, it) || !separate(locks, it) })
+        return false
+    return (configPaths + listOfNotNull(eventsPath)).none {
+        it.startsWith(root) || it.startsWith(locks)
+    }
+}
+
 internal object WritableWorkflowCli {
     private val kinds = listOf(StageKind.SDD, StageKind.ATDD, StageKind.TDD,
         StageKind.DEVELOP, StageKind.REVIEW)
@@ -248,23 +271,15 @@ internal object WritableWorkflowCli {
                 val childRoot = childPath.toRealPath()
                 val childLocks = realLocation(childLockPath)
                 gate(childRoot == childPath.normalize() &&
-                    childRoot != checkout && allRoots.add(childRoot) &&
-                    !childRoot.startsWith(checkout) &&
-                    !checkout.startsWith(childRoot) &&
-                    !childRoot.startsWith(realLocks) &&
-                    !realLocks.startsWith(childRoot) &&
-                    !childLocks.startsWith(checkout) &&
-                    !checkout.startsWith(childLocks) &&
-                    !childLocks.startsWith(realLocks) &&
-                    !realLocks.startsWith(childLocks) &&
-                    !childLocks.startsWith(childRoot) &&
-                    !childRoot.startsWith(childLocks) &&
-                    allLocks.add(childLocks) &&
-                    !realLocation(planPath).startsWith(childRoot) &&
-                    !realLocation(approvalPath).startsWith(childRoot) &&
-                    eventsPath?.let { !realLocation(it).startsWith(childRoot) &&
-                        !realLocation(it).startsWith(childLocks) } != false,
+                    installedChildCheckoutScopesDisjoint(
+                        childRoot, childLocks, checkout, realLocks,
+                        listOf(realLocation(planPath), realLocation(approvalPath)),
+                        eventsPath?.let(::realLocation),
+                        allRoots, allLocks,
+                        Path.of("").toAbsolutePath().toRealPath()),
                     "CHILD_WORKSPACE_OVERLAP")
+                allRoots.add(childRoot)
+                allLocks.add(childLocks)
                 val marker = childRoot.resolve(".git/recursive-coder-isolated-workflow")
                 gate(Files.isRegularFile(marker, LinkOption.NOFOLLOW_LINKS) &&
                     Files.readString(marker) == "isolated-workflow-v1\n",
@@ -291,16 +306,6 @@ internal object WritableWorkflowCli {
                     childTokenOverride in 1..1000000)
                 InstalledChildCheckout(childRoot, childHead, childBranch,
                     childLocks, requestId, self, overrideId, childTokenOverride)
-            }.also {
-                val pair = it.values.toList()
-                gate(pair[0].root != pair[1].root &&
-                    pair.none { p -> pair.any { q ->
-                        p !== q && (p.root.startsWith(q.locks) ||
-                            q.root.startsWith(p.locks) ||
-                            p.locks.startsWith(q.root) ||
-                            p.locks.startsWith(q.locks) ||
-                            q.locks.startsWith(p.locks))
-                    } }, "CHILD_WORKSPACE_OVERLAP")
             }
         }
         val maxDepth = (limits["maxDepth"] as? JsonPrimitive)?.intOrNull ?: 1
