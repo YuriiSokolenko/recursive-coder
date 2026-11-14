@@ -281,6 +281,23 @@ class InstalledWritableWorkflowTest(unittest.TestCase):
                                  "INVALID_WORKFLOW_CONFIGURATION")
         self.assertEqual(self.original_head, self.git("rev-parse", "HEAD"))
 
+    def test_live_provider_configuration_is_not_a_workflow_feature(self):
+        plan = self.recursive_fixture()
+        plan["model"] = {
+            "provider": "openai",
+            "baseUrl": "https://example.invalid/v1",
+        }
+        self.plan_path.write_text(json.dumps(plan, separators=(",", ":")))
+        approval = json.loads(self.approval_path.read_text())
+        approval["planSha256"] = sha(self.plan_path.read_bytes())
+        self.approval_path.write_text(json.dumps(approval))
+        result = self.authorized()
+        self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
+        self.assertEqual(json.loads(result.stdout)["code"],
+                         "INVALID_WORKFLOW_CONFIGURATION")
+        self.assertFalse((self.base / "child-sdd/specs/FeatureFull.md").exists())
+        self.assertEqual(self.original_head, self.git("rev-parse", "HEAD"))
+
     def test_installed_recursive_cycle_is_denied(self):
         self.recursive_fixture(cycle=True)
         result = self.authorized()
