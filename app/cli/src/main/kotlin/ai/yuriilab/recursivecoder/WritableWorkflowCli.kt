@@ -97,7 +97,10 @@ internal object WritableWorkflowCli {
         val branch = stringAt(workspace, "branch")
         require(root.isAbsolute && locks.isAbsolute &&
             headPattern.matches(expectedHead) &&
-            ToolAuthorizationPolicy.validHostIdentifier(branch) &&
+            Regex("[A-Za-z0-9][A-Za-z0-9._/-]{0,127}").matches(branch) &&
+            !branch.contains("..") && !branch.contains("//") &&
+            !branch.endsWith("/") && !branch.endsWith(".lock") &&
+            branch.split('/').none { it.startsWith(".") } &&
             Files.isDirectory(root.resolve(".git"), LinkOption.NOFOLLOW_LINKS)) {
             "A dedicated branch checkout is required"
         }
@@ -164,7 +167,8 @@ internal object WritableWorkflowCli {
         require(tokens in 100..1000000 && duration in 1000..600000 &&
             deadlineSeconds in 1..600)
         val sessionId = stringAt(plan, "sessionId")
-        require(ToolAuthorizationPolicy.validHostIdentifier(sessionId))
+        require(sessionId.length <= 100 &&
+            ToolAuthorizationPolicy.validHostIdentifier(sessionId))
         val graphId = GraphId(sessionId + "-graph")
         val correlation = GraphCorrelation(sessionId, graphId, sessionId + "-workflow")
         val first = StageNode(StageCorrelation(sessionId, graphId,
@@ -191,11 +195,17 @@ internal object WritableWorkflowCli {
             RunPreparationStageUseCase(executor, host, host),
             RunDeveloperStageUseCase(executor, host, host),
             RunReviewerStageUseCase(executor, host.reviewerHost), host)
-        val result = runBlocking {
-            runner.execute(FiveRoleWorkflowPlan(targets, stageInstructions,
-                developerTargets, model, Instant.now().plusSeconds(deadlineSeconds),
-                Cancellation()), StageRoleEventSink { }, PreparationStageEventSink { },
-                ReviewerDecisionSink { })
+        val result = try {
+            runBlocking {
+                runner.execute(FiveRoleWorkflowPlan(targets, stageInstructions,
+                    developerTargets, model, Instant.now().plusSeconds(deadlineSeconds),
+                    Cancellation()), StageRoleEventSink { }, PreparationStageEventSink { },
+                    ReviewerDecisionSink { })
+            }
+        } catch (_: Exception) {
+            // A stage may have written or advanced HEAD before an unexpected
+            // failure. Never classify an unconfirmed runtime as a safe denial.
+            return "reconciliation_required" to "WORKFLOW_EXECUTION_UNCONFIRMED"
         }
         return when (result) {
             is FiveRoleWorkflowOutcome.Completed ->
