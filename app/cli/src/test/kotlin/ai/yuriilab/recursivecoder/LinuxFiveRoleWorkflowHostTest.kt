@@ -193,6 +193,127 @@ class LinuxFiveRoleWorkflowHostTest {
         assertTrue(bridge.acceptedArtifactIds().isEmpty())
     }
 
+    @Test fun twoRealLinuxChildWriteCheckOriginsIntegrateWithoutFakeReceiptStores() =
+        runBlocking {
+        val sessionId = "real-children-session"
+        val requests = mapOf(StageKind.SDD to "child-sdd",
+            StageKind.DEVELOP to "child-develop")
+        fun rootId(kind: StageKind) = GraphId("trusted-root-" + kind.name.lowercase())
+        fun parentId(kind: StageKind) = StageRunId(
+            "trusted-root-stage-" + kind.name.lowercase())
+        fun childId(kind: StageKind) = RecursiveGraphPolicy.childId(rootId(kind),
+            parentId(kind), requests.getValue(kind))
+        fun childStageId(kind: StageKind) = RecursiveGraphPolicy.childStageId(childId(kind))
+
+        // SDD child is a separately admitted Linux stage with actual write/check
+        // receipts; it is not a fabricated in-memory integration host.
+        val (sddHost, _) = newHost(
+            startingGraphId = childId(StageKind.SDD),
+            startingStageId = childStageId(StageKind.SDD),
+            startingRequestId = requests.getValue(StageKind.SDD),
+            parentGraphId = rootId(StageKind.SDD),
+            parentStageRunId = parentId(StageKind.SDD),
+            sessionId = sessionId, checkoutName = "sdd-child")
+        val first = sddHost.snapshot()
+        val sddTarget = targets.getValue(StageKind.SDD)
+        val prepared = RunPreparationStageUseCase(OfflineFiveRoleModel(), sddHost, sddHost)
+            .execute(PreparationStageCommand(first.graph, first.acceptedIds,
+                childStageId(StageKind.SDD), sddTarget.id, sddTarget.path,
+                "Child SDD", model, Instant.now().plusSeconds(120),
+                Cancellation()), noopRole, noopStage)
+        assertIs<PreparationStageOutcome.Accepted>(prepared.outcome,
+            prepared.outcome.toString())
+
+        // A Developer child also needs genuine trusted SDD/ATDD/TDD input
+        // provenance. Run its complete standalone host workflow and pre-bind
+        // only the Developer child's policy-derived run/request identity.
+        val (developerHost, _) = newHost(
+            startingGraphId = childId(StageKind.DEVELOP),
+            parentGraphId = rootId(StageKind.DEVELOP),
+            parentStageRunId = parentId(StageKind.DEVELOP),
+            sessionId = sessionId, checkoutName = "developer-child",
+            preauthorizedStages = mapOf(StageKind.DEVELOP to
+                (childStageId(StageKind.DEVELOP) to requests.getValue(StageKind.DEVELOP))))
+        val workflow = RunFiveRoleWorkflowUseCase(
+            RunPreparationStageUseCase(OfflineFiveRoleModel(), developerHost, developerHost),
+            RunDeveloperStageUseCase(OfflineFiveRoleModel(), developerHost, developerHost),
+            RunReviewerStageUseCase(OfflineFiveRoleModel(), developerHost.reviewerHost),
+            developerHost
+        ).execute(FiveRoleWorkflowPlan(targets,
+            StageKind.entries.associateWith { "Child " + it.name },
+            listOf(DeveloperFileTarget("src/main/FeatureFull.kt", sha(oldSource))),
+            model, Instant.now().plusSeconds(120), Cancellation()),
+            noopRole, noopStage, noopReview)
+        assertIs<FiveRoleWorkflowOutcome.Completed>(workflow, workflow.toString())
+        assertNotNull(developerHost.authenticatedAcceptedStage(
+            childStageId(StageKind.DEVELOP)))
+
+        fun source(kind: StageKind, host: LinuxFiveRoleWorkflowHost): RecursiveOriginSource {
+            val rootGraph = rootId(kind)
+            val rootStage = parentId(kind)
+            val target = targets.getValue(kind)
+            val graph = StageGraph(GraphCorrelation(sessionId, rootGraph,
+                "root-correlation-" + kind.name.lowercase()), StageGraphState.RUNNING,
+                listOf(StageNode(StageCorrelation(sessionId, rootGraph, rootStage,
+                    "root-request-" + kind.name.lowercase(), "stage-correlation-" +
+                        kind.name.lowercase()),
+                    kind, StageState.RUNNING,
+                    AgentId("root-actor-" + kind.name.lowercase()))),
+                emptyList(), StageBudget(500, 30_000, 2, 2))
+            val grant = RecursiveRootGrant(graph, rootStage,
+                "root-task-" + kind.name.lowercase(), setOf(target.path), emptySet())
+            val executor = RecursiveStageExecutor { context ->
+                val child = context.requestChild(RecursiveChildProposal(
+                    requests.getValue(kind), context.graphId, context.stageRunId,
+                    kind, "child-task-" + kind.name.lowercase(),
+                    writablePaths = setOf(target.path), maxTokens = 100,
+                    maxToolCalls = 2, maxDurationMillis = 5000))
+                val admitted = child as? RecursiveDecision.Allowed
+                    ?: return@RecursiveStageExecutor RecursiveExecutionOutcome.Failed(
+                        (child as RecursiveDecision.Denied).code)
+                val childResult = context.executeChild(admitted.child.graphId,
+                    RecursiveStageExecutor { RecursiveExecutionOutcome.Completed })
+                if (childResult != RecursiveExecutionOutcome.Completed)
+                    return@RecursiveStageExecutor childResult
+                when (val integrated = context.integrateChildren()) {
+                    is ChildIntegrationDecision.Accepted -> RecursiveExecutionOutcome.Completed
+                    is ChildIntegrationDecision.Denied ->
+                        RecursiveExecutionOutcome.Failed(integrated.code)
+                }
+            }
+            return RecursiveOriginSource(grant, RecursiveLimits(5, 2, 20_000,
+                Instant.now().plusSeconds(60)),
+                LinuxAuthenticatedRecursiveChildIntegrationHost(host, sessionId,
+                    setOf(childStageId(kind))), executor)
+        }
+
+        val journalPath = temp.resolve("authenticated-child-events.jsonl")
+        val journal = SessionEventJournal(sessionId, "real-child-trace",
+            "real-child-request", java.time.Clock.systemUTC(),
+            JsonlEventSink.open(journalPath))
+        val completed = RunTwoOriginRecursiveChildrenUseCase(
+            events = CorrelatedRecursiveSessionEvents(journal)).execute(
+                source(StageKind.DEVELOP, developerHost),
+                source(StageKind.SDD, sddHost))
+        assertIs<TwoOriginRecursiveOutcome.Completed>(completed,
+            completed.toString())
+        assertEquals(listOf(StageKind.SDD, StageKind.DEVELOP),
+            completed.integrated.keys.toList())
+        for (kind in listOf(StageKind.SDD, StageKind.DEVELOP)) {
+            val artifact = completed.integrated.getValue(kind).artifacts.single()
+            assertEquals(childStageId(kind), artifact.manifest.producerStageRunId)
+            assertEquals(targets.getValue(kind).path, artifact.manifest.declaredPath)
+            assertTrue(completed.snapshots.getValue(kind).nodes.all {
+                it.state == RecursiveNodeState.SUCCEEDED
+            })
+        }
+        assertEquals(64, journal.finish().length)
+        val events = Files.readString(journalPath)
+        assertTrue(events.contains("\\"origin\\":\\"SDD\\""))
+        assertTrue(events.contains("\\"origin\\":\\"DEVELOP\\""))
+        assertTrue(events.contains("INTEGRATED"))
+    }
+
     @Test fun cannotForgeAcceptanceWithoutARealTrustedWriteReceipt() {
         val (host, _) = newHost()
         val first = host.snapshot()
