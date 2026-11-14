@@ -131,6 +131,23 @@ class LinuxFiveRoleWorkflowHostTest {
         return host to repo
     }
 
+    @Test fun installedRecursiveConstructorRejectsNonFakeProviderAndModelId() {
+        val (host, _) = newHost(checkoutName = "offline-gate")
+        fun workflow(modelConfig: ModelConfig) = InstalledRecursiveWorkflow(
+            "host-session", host,
+            StageIsolatedCheck(Path.of("/usr/bin/true")), targets,
+            emptyMap(), emptyList(), emptyMap(), modelConfig,
+            Instant.now().plusSeconds(120), Cancellation(), OfflineFiveRoleModel(),
+            emptyMap(), 10_000, 60_000, 1, 1, 16, 1000, null)
+        assertFailsWith<IllegalArgumentException> {
+            workflow(model.copy(provider = "openai"))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            workflow(model.copy(modelId = "different"))
+        }
+        workflow(model)
+    }
+
     @Test fun realAcceptedChildWriteCheckReceiptIsBoundToExactRecursiveIdentity() =
         runBlocking {
         val parentGraphId = GraphId("trusted-parent-graph")
