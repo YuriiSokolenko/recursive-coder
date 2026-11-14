@@ -336,8 +336,10 @@ internal object WritableWorkflowCli {
                 Cancellation(), childExecutor, configs, tokens, duration,
                 maxDepth, maxChildren, maxToolCalls, childTokens, null)
         }
-        val executor = ConfiguredFakeRoleExecutor(fixtureProposals, verdict,
-            recursive?.let { adapter -> { request -> adapter.beforeProposal(request) } })
+        val callback: (suspend (StageRoleRequest) -> String?)? =
+            if (recursive == null) null
+            else { request -> recursive.beforeProposal(request) }
+        val executor = ConfiguredFakeRoleExecutor(fixtureProposals, verdict, callback)
         val runner = RunFiveRoleWorkflowUseCase(
             RunPreparationStageUseCase(executor, host, host),
             RunDeveloperStageUseCase(executor, host, host),
