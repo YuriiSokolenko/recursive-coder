@@ -1,0 +1,258 @@
+package ai.yuriilab.recursivecoder
+
+import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.nio.file.Path
+import java.security.MessageDigest
+import java.time.Instant
+import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+
+/**
+ * A deliberately separate, fake-only installed CLI entry point. It does not make
+ * SessionRequest v1 or the native task scheduler writable. Only the Linux host
+ * owns Git, artifact acceptance and trusted stage-tool capabilities.
+ *
+ * The operator provisions a dedicated checkout and a separate, plan-bound
+ * approval file before opting in. The marker is an explicit deployment assertion,
+ * NOT a substitute for OS-level filesystem isolation of the checkout.
+ */
+internal object WritableWorkflowCli {
+    private val kinds = listOf(StageKind.SDD, StageKind.ATDD, StageKind.TDD,
+        StageKind.DEVELOP, StageKind.REVIEW)
+    private val writers = kinds.dropLast(1)
+    private val digestPattern = Regex("[0-9a-f]{64}")
+    private val headPattern = Regex("[0-9a-f]{40}")
+
+    private fun sha(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")
+        .digest(bytes).joinToString("") { "%02x".format(it) }
+
+    private fun objectAt(value: JsonObject, name: String): JsonObject =
+        value.getValue(name) as? JsonObject ?: error("Invalid $name")
+    private fun stringAt(value: JsonObject, name: String): String =
+        (value.getValue(name) as? JsonPrimitive)?.takeIf { it.isString }?.content
+            ?: error("Invalid $name")
+    private fun longAt(value: JsonObject, name: String): Long =
+        (value.getValue(name) as? JsonPrimitive)?.longOrNull
+            ?: error("Invalid $name")
+    private fun only(value: JsonObject, names: Set<String>) {
+        require(value.keys == names) { "Unexpected workflow configuration fields" }
+    }
+
+    private fun input(path: Path): ByteArray {
+        require(path.isAbsolute && Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) &&
+            Files.size(path) in 1..65536) { "Invalid operator configuration file" }
+        return Files.readAllBytes(path)
+    }
+
+    private fun parse(bytes: ByteArray): JsonObject =
+        Json.parseToJsonElement(bytes.toString(Charsets.UTF_8)) as? JsonObject
+            ?: error("Configuration must be a JSON object")
+
+    fun execute(planPath: Path, approvalPath: Path): Int {
+        val outcome = try { run(planPath, approvalPath) }
+        catch (_: Exception) {
+            // No file contents, prompt, check output or credential may be logged here.
+            System.err.println("Writable workflow configuration or execution denied")
+            return 2
+        }
+        System.out.println(buildJsonObject {
+            put("outcome", outcome.first)
+            put("code", outcome.second)
+        })
+        return when (outcome.first) {
+            "completed" -> 0
+            "reconciliation_required" -> 1
+            else -> 2
+        }
+    }
+
+    private fun run(planPath: Path, approvalPath: Path): Pair<String, String> {
+        require(System.getProperty("os.name").lowercase().contains("linux")) {
+            "Writable workflows require Linux"
+        }
+        val planBytes = input(planPath)
+        val plan = parse(planBytes)
+        only(plan, setOf("version", "sessionId", "workspace", "artifacts",
+            "instructions", "developerTargets", "fakeProposals",
+            "fakeReviewerVerdict", "check", "limits"))
+        require(longAt(plan, "version") == 1L)
+        val approval = parse(input(approvalPath))
+        only(approval, setOf("version", "planSha256", "approvedSha256"))
+        require(longAt(approval, "version") == 1L &&
+            stringAt(approval, "planSha256") == sha(planBytes)) {
+            "Approvals do not match the exact plan bytes"
+        }
+        val approved = objectAt(approval, "approvedSha256")
+        require(approved.keys == writers.map { it.name }.toSet())
+        val permittedDigests = writers.associateWith { kind ->
+            stringAt(approved, kind.name).also { require(digestPattern.matches(it)) }
+        }
+
+        val workspace = objectAt(plan, "workspace")
+        only(workspace, setOf("rootPath", "headSha", "branch", "lockDirectory"))
+        val root = Path.of(stringAt(workspace, "rootPath"))
+        val locks = Path.of(stringAt(workspace, "lockDirectory"))
+        val expectedHead = stringAt(workspace, "headSha")
+        val branch = stringAt(workspace, "branch")
+        require(root.isAbsolute && locks.isAbsolute &&
+            headPattern.matches(expectedHead) &&
+            ToolAuthorizationPolicy.validHostIdentifier(branch) &&
+            Files.isDirectory(root.resolve(".git"), LinkOption.NOFOLLOW_LINKS)) {
+            "A dedicated branch checkout is required"
+        }
+        val checkout = root.toRealPath(LinkOption.NOFOLLOW_LINKS)
+        require(checkout != Path.of("").toAbsolutePath().normalize() &&
+            !planPath.normalize().startsWith(checkout) &&
+            !approvalPath.normalize().startsWith(checkout) &&
+            !locks.normalize().startsWith(checkout) &&
+            Files.isRegularFile(checkout.resolve(".git/recursive-coder-isolated-workflow"),
+                LinkOption.NOFOLLOW_LINKS) &&
+            Files.readString(checkout.resolve(".git/recursive-coder-isolated-workflow")) ==
+                "isolated-workflow-v1\n") {
+            "Isolated checkout marker and out-of-tree configuration are required"
+        }
+        val artifacts = objectAt(plan, "artifacts")
+        val instructions = objectAt(plan, "instructions")
+        val proposals = objectAt(plan, "fakeProposals")
+        require(artifacts.keys == writers.map { it.name }.toSet() &&
+            instructions.keys == kinds.map { it.name }.toSet() &&
+            proposals.keys == writers.map { it.name }.toSet())
+        val targets = writers.associateWith { kind ->
+            val target = objectAt(artifacts, kind.name)
+            only(target, setOf("id", "path"))
+            FiveRoleArtifactTarget(ArtifactId(stringAt(target, "id")),
+                stringAt(target, "path"))
+        }
+        val stageInstructions = kinds.associateWith { stringAt(instructions, it.name) }
+        val fixtureProposals = writers.associateWith { stringAt(proposals, it.name) }
+        require(stageInstructions.values.all { it.isNotBlank() } &&
+            fixtureProposals.values.all { it.isNotBlank() })
+        val developerTargets = (plan.getValue("developerTargets") as? JsonArray)
+            ?.map { entry ->
+                val target = entry as? JsonObject ?: error("Invalid Developer target")
+                require(target.keys == setOf("path", "expectedSha256") ||
+                    target.keys == setOf("path"))
+                val before = target["expectedSha256"]?.let {
+                    (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content
+                        ?: error("Invalid Developer preimage")
+                }
+                if (before != null) require(digestPattern.matches(before))
+                DeveloperFileTarget(stringAt(target, "path"), before)
+            } ?: error("Developer targets are required")
+        val verdict = stringAt(plan, "fakeReviewerVerdict")
+        require(verdict in setOf("ACCEPT", "REJECT", "NEEDS_HUMAN"))
+
+        val check = objectAt(plan, "check")
+        only(check, setOf("executable", "arguments"))
+        val executable = Path.of(stringAt(check, "executable"))
+        val arguments = (check.getValue("arguments") as? JsonArray)?.map {
+            (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content
+                ?: error("Invalid check argument")
+        } ?: error("Invalid check arguments")
+        require(executable.isAbsolute && Files.isExecutable(executable) &&
+            executable.toString() !in setOf("/usr/bin/true", "/bin/true") &&
+            arguments.size <= 16 && arguments.all { it.length <= 1024 }) {
+            "A meaningful operator-selected isolated check is required"
+        }
+
+        val limits = objectAt(plan, "limits")
+        only(limits, setOf("maxTokens", "maxDurationMillis", "deadlineSeconds"))
+        val tokens = longAt(limits, "maxTokens")
+        val duration = longAt(limits, "maxDurationMillis")
+        val deadlineSeconds = longAt(limits, "deadlineSeconds")
+        require(tokens in 100..1000000 && duration in 1000..600000 &&
+            deadlineSeconds in 1..600)
+        val sessionId = stringAt(plan, "sessionId")
+        require(ToolAuthorizationPolicy.validHostIdentifier(sessionId))
+        val graphId = GraphId(sessionId + "-graph")
+        val correlation = GraphCorrelation(sessionId, graphId, sessionId + "-workflow")
+        val first = StageNode(StageCorrelation(sessionId, graphId,
+            StageRunId(sessionId + "-sdd"), sessionId + "-request",
+            sessionId + "-sdd-correlation"),
+            StageKind.SDD, StageState.CREATED, AgentId(sessionId + "-sdd-agent"))
+        val graph = StageGraph(correlation, StageGraphState.RUNNING, listOf(first),
+            emptyList(), StageBudget(tokens, duration, 0, 0))
+        require(StageGraphPolicy.validate(graph) == StageGateDecision.Permit)
+        val model = ModelConfig("fake", "fake-v1", "http://localhost/unused",
+            "env:FAKE_UNUSED", 8192, 512, setOf("tool_calls"), null, 1000, 1000)
+        val host = LinuxFiveRoleWorkflowHost(checkout, graph, expectedHead, branch,
+            mapOf("offline-check" to StageIsolatedCheck(executable, arguments)),
+            setOf("git_diff_check", "offline-check"),
+            { candidate, _, _ ->
+                val kind = writers.singleOrNull { it.role == candidate.ownerRole }
+                if (kind != null && targets.getValue(kind).path == candidate.declaredPath &&
+                    targets.getValue(kind).id == candidate.id &&
+                    permittedDigests[kind] == candidate.sha256)
+                    PreparationApproval.ACCEPT else PreparationApproval.REJECT
+            }, locks)
+        val executor = ConfiguredFakeRoleExecutor(fixtureProposals, verdict)
+        val runner = RunFiveRoleWorkflowUseCase(
+            RunPreparationStageUseCase(executor, host, host),
+            RunDeveloperStageUseCase(executor, host, host),
+            RunReviewerStageUseCase(executor, host.reviewerHost), host)
+        val result = runBlocking {
+            runner.execute(FiveRoleWorkflowPlan(targets, stageInstructions,
+                developerTargets, model, Instant.now().plusSeconds(deadlineSeconds),
+                Cancellation()), StageRoleEventSink { }, PreparationStageEventSink { },
+                ReviewerDecisionSink { })
+        }
+        return when (result) {
+            is FiveRoleWorkflowOutcome.Completed ->
+                "completed" to result.graph.state.name
+            is FiveRoleWorkflowOutcome.Stopped ->
+                "stopped" to result.code
+            is FiveRoleWorkflowOutcome.ReconciliationRequired ->
+                "reconciliation_required" to result.code
+        }
+    }
+
+    /**
+     * Offline stage fixture (not a live LLM). Validates the real FakeModel gateway
+     * contract and emits proposal metadata, never hands a model write authority.
+     * Review evidence IDs come from the trusted Reviewer prompt at execution time.
+     */
+    private class ConfiguredFakeRoleExecutor(
+        private val proposals: Map<StageKind, String>,
+        private val verdict: String
+    ) : StageRoleExecutor {
+        private val gateway: ModelGateway = FakeModel()
+
+        override suspend fun execute(request: StageRoleRequest,
+            events: StageRoleEventSink): StageRoleResult {
+            val stage = request.graph.stages.single { it.correlation.stageRunId == request.stageRunId }
+            require(stage.kind.role == request.expectedRole &&
+                stage.correlation.requestId == request.requestId &&
+                request.requestedTools.isEmpty())
+            gateway.negotiate(request.model, request.cancellation, request.deadline)
+            val proposal = if (stage.kind == StageKind.REVIEW) {
+                val checks = Regex("""<verified-check id="([^"]+)" receipt="[^"]+" />""")
+                    .findAll(request.instruction).map { "check:" + it.groupValues[1] }.toList()
+                val write = Regex("""<verified-write id="([^"]+)" />""")
+                    .find(request.instruction)?.groupValues?.get(1)
+                    ?: error("Trusted Reviewer write evidence missing")
+                val refs = (checks + "write:$write").joinToString(",") {
+                    "\"$it\""
+                }
+                val (code, scope) = when (verdict) {
+                    "ACCEPT" -> "OK" to "NONE"
+                    "REJECT" -> "IMPLEMENTATION_DEFECT" to "IMPLEMENTATION_ONLY"
+                    else -> "EVIDENCE_MISSING" to "NONE"
+                }
+                """{"verdict":"$verdict","code":"$code","scope":"$scope","evidence":[$refs]}"""
+            } else proposals.getValue(stage.kind)
+            val usage = StageRoleUsage(1, 100, 30)
+            events.emit(StageRoleEvent(stage.correlation, stage.kind.role, stage.agentId,
+                StageRoleEventKind.STARTED, StageRoleUsage()))
+            events.emit(StageRoleEvent(stage.correlation, stage.kind.role, stage.agentId,
+                StageRoleEventKind.PROPOSED, usage))
+            return StageRoleResult(stage.correlation, stage.kind.role, stage.agentId,
+                StageRoleOutcome.Proposed(proposal), usage)
+        }
+    }
+}
