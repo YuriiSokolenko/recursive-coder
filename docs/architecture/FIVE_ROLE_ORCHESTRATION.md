@@ -10,6 +10,35 @@ exercises the real trusted write/check port, authenticated stage handoffs,
 real Git reconciliation and independent Reviewer completion. This remains
 **not** an installed writable CLI or a completed issue #79.
 
+## Two-origin recursive child coordination — PR #94
+
+`RunTwoOriginRecursiveChildrenUseCase` in `:core:session` coordinates
+two distinct authorized stage origins (covered by nested SDD and Developer
+fixtures). Each origin owns a separate `RecursiveGraphScheduler`, trusted
+`RecursiveChildIntegrationHost`, child budget, dependency graph and
+authorization scope. The host, not an agent, provides accepted/frozen
+manifest evidence. Stage-scoped `RecursiveStageContext.executeChild`
+checks direct parent ownership before dispatch; the executor never receives
+a mutable scheduler.
+
+The coordinator orders origins deterministically, requires explicit
+child-result integration and rejects failed children, duplicate origins,
+conflicting artifact identities and paths. Conflict keys use NFC Unicode
+normalization and locale-invariant case folding so path aliases cannot
+silently survive on a case-insensitive checkout. After both trees finish,
+both hosts' accepted IDs, manifests and file digests are re-read. Failure
+of the correlated recursive event sink is observable and blocks success;
+the session's journal owner must also verify `finish()`.
+
+**Trust-boundary limitation:** the two-origin scenario is currently
+demonstrated using independent host-owned fake receipt sources, not
+authenticated child write/check receipts in the installed Linux five-role
+workflow. The installed CLI can independently persist metadata-only
+correlated SDD–Reviewer events when opted into `eventsPath`, but this is
+not installed **two-origin** acceptance. See [Writable CLI](WRITABLE_CLI.md).
+Issue #79 remains open until those production host gates and full
+negative acceptance cases pass.
+
 ## Execution and authority
 
 The coordinator never executes a model tool directly and never grants physical
