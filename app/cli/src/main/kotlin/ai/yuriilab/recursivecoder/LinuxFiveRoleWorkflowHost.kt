@@ -589,6 +589,11 @@ class LinuxFiveRoleWorkflowHost(
             val evidence = developerHandoff ?: return null
             if (!verifiedDeveloper(evidence)) return null
         } else if (developerHandoff != null) return null
+        val planned = preauthorizedStageIdentities[next]
+        val newStageId = planned?.first ?: StageRunId(newId("run-" + next.name.lowercase()))
+        // Detect identity collisions BEFORE any Git ref mutation.
+        if (graph.stages.any { it.correlation.stageRunId == newStageId })
+            return null
         val frozen = graph.artifacts.filter { it.id in accepted &&
             proof.files.none { changed -> changed.path == it.declaredPath } }
             .associate { it.declaredPath to it.sha256 }
@@ -603,12 +608,6 @@ class LinuxFiveRoleWorkflowHost(
         head = newHead
         val dependencies = graph.stages.filter {
             it.kind.output in next.requiredInputs && it.state == StageState.ACCEPTED
-        }
-        val planned = preauthorizedStageIdentities[next]
-        val newStageId = planned?.first ?: StageRunId(newId("run-" + next.name.lowercase()))
-        if (graph.stages.any { it.correlation.stageRunId == newStageId }) {
-            quarantined = true
-            return null
         }
         val newStage = StageNode(
             StageCorrelation(graph.correlation.sessionId, graph.correlation.graphId,
