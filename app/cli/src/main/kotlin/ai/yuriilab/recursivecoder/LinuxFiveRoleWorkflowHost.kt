@@ -49,7 +49,13 @@ class LinuxFiveRoleWorkflowHost(
     private val requiredChecks: Set<String>,
     private val approvalGateway:
         (StageArtifactManifest, StageValidationEvidence, StageRoleUsage) -> PreparationApproval,
-    lockDirectory: Path
+    lockDirectory: Path,
+    /**
+     * Trusted-host only: pre-admitted recursive stage identities for later
+     * stages. Never fill this map from a model or serialized plan.
+     */
+    private val preauthorizedStageIdentities: Map<StageKind, Pair<StageRunId, String>> =
+        emptyMap()
 ) : FiveRoleWorkflowHost, PreparationStageHost, StageToolSessionOpener {
     private val root = workspace.toRealPath(LinkOption.NOFOLLOW_LINKS)
     private val reconciler = LinuxStageGitBaselineReconciler(
@@ -97,6 +103,10 @@ class LinuxFiveRoleWorkflowHost(
             graph.stages.single().state in setOf(StageState.CREATED, StageState.READY) &&
             graph.artifacts.isEmpty())
         require(Regex("[0-9a-f]{40}").matches(head))
+        require(preauthorizedStageIdentities.keys.all { it != StageKind.SDD } &&
+            preauthorizedStageIdentities.values.all { (_, requestId) ->
+                ToolAuthorizationPolicy.validHostIdentifier(requestId)
+            })
         require("git_diff_check" in requiredChecks &&
             (requiredChecks - "git_diff_check").isNotEmpty() &&
             (requiredChecks - "git_diff_check").all { it in checks })
@@ -581,10 +591,15 @@ class LinuxFiveRoleWorkflowHost(
         val dependencies = graph.stages.filter {
             it.kind.output in next.requiredInputs && it.state == StageState.ACCEPTED
         }
+        val planned = preauthorizedStageIdentities[next]
+        val newStageId = planned?.first ?: StageRunId(newId("run-" + next.name.lowercase()))
+        if (graph.stages.any { it.correlation.stageRunId == newStageId }) {
+            quarantined = true
+            return null
+        }
         val newStage = StageNode(
             StageCorrelation(graph.correlation.sessionId, graph.correlation.graphId,
-                StageRunId(newId("run-" + next.name.lowercase())),
-                newId("request"), newId("correlation")),
+                newStageId, planned?.second ?: newId("request"), newId("correlation")),
             next, StageState.CREATED,
             AgentId(newId("actor-" + next.name.lowercase())),
             dependencies.map { it.correlation.stageRunId }.toSet(),
