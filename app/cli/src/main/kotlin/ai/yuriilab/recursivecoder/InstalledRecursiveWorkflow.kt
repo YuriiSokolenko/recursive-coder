@@ -63,10 +63,6 @@ internal object InstalledRecursiveEvidencePolicy {
 }
 
 /**
- * Pure admission decision, including deliberate self-cycles and a bounded
- * tool-call grant. No child host, Git checkout or model call can run here.
- */
-/**
  * Pure origin projection and authenticated-parent identity precheck. A projected
  * grant is never sufficient to begin a trusted Linux child write; the production
  * host and recursive scheduler independently verify their current leases.
@@ -127,6 +123,10 @@ internal object InstalledRecursiveOriginPolicy {
     }
 }
 
+/**
+ * Pure admission decision, including deliberate self-cycles and a bounded
+ * tool-call grant. No child host, Git checkout or model call can run here.
+ */
 internal object InstalledRecursiveAdmissionPolicy {
     fun preflight(
         kind: StageKind, grant: RecursiveRootGrant,
@@ -319,9 +319,10 @@ internal class InstalledRecursiveWorkflow(
     }
 
     /**
-     * On a failed isolated SDD child, distinguish an unchanged initial Git
-     * baseline from an uncommitted/uncertain physical write. Never convert an
-     * inaccessible checkout into a safe ordinary denial.
+     * A failed child of either origin may have already accepted bootstrap
+     * stages, committed HEAD or left uncommitted trusted-tool writes behind.
+     * Only a verified unchanged initial Git baseline permits an ordinary
+     * denial; an inaccessible or modified checkout requires reconciliation.
      */
     private fun initialChildBaselineIntact(config: InstalledChildCheckout): Boolean =
         try {
@@ -368,13 +369,23 @@ internal class InstalledRecursiveWorkflow(
                     ?: PreparationStageEventSink { },
                 journal?.let(::CorrelatedReviewerSessionEvents)
                     ?: ReviewerDecisionSink { })
-            if (result is FiveRoleWorkflowOutcome.ReconciliationRequired)
-                uncertainChildExecution = true
-            if (result !is FiveRoleWorkflowOutcome.Completed)
+            if (result !is FiveRoleWorkflowOutcome.Completed) {
+                // Stopped/Denied after child bootstrap writes can be as dirty
+                // as an explicit ReconciliationRequired outcome. Check the
+                // real Git baseline instead of assuming Stopped means clean.
+                if (result is FiveRoleWorkflowOutcome.ReconciliationRequired ||
+                    !initialChildBaselineIntact(config))
+                    uncertainChildExecution = true
                 return "CHILD_DEVELOPER_NOT_ACCEPTED"
+            }
         }
-        if (host.authenticatedAcceptedStage(childStageId) == null)
+        if (host.authenticatedAcceptedStage(childStageId) == null) {
+            // A completed child run without a verifiable final receipt is
+            // never enough to assume its physical checkout is unchanged.
+            if (!initialChildBaselineIntact(config))
+                uncertainChildExecution = true
             return "AUTHENTICATED_CHILD_RECEIPT_MISSING"
+        }
         origins[kind] = Origin(kind, grant, host, childStageId, config)
         return null
     }
