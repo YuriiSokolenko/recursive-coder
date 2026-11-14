@@ -86,6 +86,13 @@ class FiveRoleWorkflowCoordinatorUnitTest {
             return manifest to PreparationStageSnapshot(updated, state.acceptedIds + artifactId)
         }
 
+        private fun committedDenial(kind: StageKind): PreparationStageSnapshot {
+            state = state.copy(graph = state.graph.copy(stages = state.graph.stages.map {
+                if (it.kind == kind) it.copy(state = StageState.FAILED) else it
+            }))
+            return state
+        }
+
         override suspend fun prepare(command: PreparationStageCommand,
             roleEvents: StageRoleEventSink, events: PreparationStageEventSink
         ): PreparationStageResult {
@@ -95,6 +102,13 @@ class FiveRoleWorkflowCoordinatorUnitTest {
             called += kind
             if (prepareMode == "denied") return PreparationStageResult(
                 state.graph, state.acceptedIds, PreparationStageOutcome.Denied("DENIED_BY_STAGE"))
+            if (prepareMode.startsWith("denied-committed")) {
+                val finished = committedDenial(kind)
+                return PreparationStageResult(
+                    if (prepareMode == "denied-committed-missing") null else finished.graph,
+                    if (prepareMode == "denied-committed-missing") null else finished.acceptedIds,
+                    PreparationStageOutcome.Denied("DENIED_BY_STAGE"))
+            }
             if (prepareMode == "failed") return PreparationStageResult(
                 state.graph, state.acceptedIds, PreparationStageOutcome.Failed("STAGE_FAILED"))
             if (prepareMode == "uncertain") return PreparationStageResult(null, null,
@@ -126,6 +140,13 @@ class FiveRoleWorkflowCoordinatorUnitTest {
             when (developMode) {
                 "denied" -> return DeveloperStageResult(state.graph, state.acceptedIds,
                     DeveloperStageOutcome.Denied("DEVELOPER_DENIED"))
+                "denied-committed", "denied-committed-missing" -> {
+                    val finished = committedDenial(StageKind.DEVELOP)
+                    return DeveloperStageResult(
+                        if (developMode == "denied-committed-missing") null else finished.graph,
+                        if (developMode == "denied-committed-missing") null else finished.acceptedIds,
+                        DeveloperStageOutcome.Denied("DEVELOPER_DENIED"))
+                }
                 "failed", "failed-dirty" -> return DeveloperStageResult(
                     state.graph, state.acceptedIds,
                     DeveloperStageOutcome.Failed("DEVELOPER_FAILED",
@@ -165,6 +186,13 @@ class FiveRoleWorkflowCoordinatorUnitTest {
             when (reviewMode) {
                 "denied" -> return ReviewerStageResult(state.graph, state.acceptedIds,
                     ReviewerStageOutcome.Denied("REVIEWER_DENIED"))
+                "denied-committed", "denied-committed-missing" -> {
+                    val finished = committedDenial(StageKind.REVIEW)
+                    return ReviewerStageResult(
+                        if (reviewMode == "denied-committed-missing") null else finished.graph,
+                        if (reviewMode == "denied-committed-missing") null else finished.acceptedIds,
+                        ReviewerStageOutcome.Denied("REVIEWER_DENIED"))
+                }
                 "failed" -> return ReviewerStageResult(state.graph, state.acceptedIds,
                     ReviewerStageOutcome.Failed("REVIEWER_FAILED"))
                 "uncertain" -> return ReviewerStageResult(null, null,
@@ -258,6 +286,37 @@ class FiveRoleWorkflowCoordinatorUnitTest {
         assertEquals(code, outcome.code)
         assertEquals(stage, outcome.stage)
         assertEquals(workspaceMayBeDirty, outcome.workspaceMayBeDirty)
+    }
+
+    @Test fun deniedRolesVerifyTheCommittedSnapshotAndMissingEvidenceCannotBeInvented() =
+        runBlocking {
+        for (kind in listOf(StageKind.SDD, StageKind.DEVELOP, StageKind.REVIEW)) {
+            val expectedCode = when (kind) {
+                StageKind.SDD -> "DENIED_BY_STAGE"
+                StageKind.DEVELOP -> "DEVELOPER_DENIED"
+                StageKind.REVIEW -> "REVIEWER_DENIED"
+                else -> error("Unsupported fixture")
+            }
+            for (missing in listOf(false, true)) {
+                val fixture = Fixture()
+                val mode = if (missing) "denied-committed-missing"
+                    else "denied-committed"
+                when (kind) {
+                    StageKind.SDD -> fixture.prepareMode = mode
+                    StageKind.DEVELOP -> fixture.developMode = mode
+                    StageKind.REVIEW -> fixture.reviewMode = mode
+                    else -> error("Unsupported fixture")
+                }
+                val outcome = assertIs<FiveRoleWorkflowOutcome.Stopped>(fixture.run())
+                assertEquals(kind, outcome.stage)
+                assertEquals(expectedCode, outcome.code)
+                if (missing) assertNull(outcome.authoritative)
+                else assertEquals(fixture.state, outcome.authoritative)
+                assertEquals(StageState.FAILED,
+                    fixture.state.graph.stages.single { it.kind == kind }.state)
+                assertEquals(kind, fixture.called.last())
+            }
+        }
     }
 
     @Test fun invalidPlansCannotReachAnyRoleOrHost() = runBlocking {
