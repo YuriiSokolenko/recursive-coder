@@ -19,7 +19,8 @@ internal data class InstalledChildCheckout(
     val requestId: String,
     val dependsOnSelf: Boolean = false,
     val outputArtifactId: ArtifactId? = null,
-    val maxTokens: Long? = null
+    val maxTokens: Long? = null,
+    val maxToolCalls: Long? = null
 )
 
 /**
@@ -210,8 +211,10 @@ internal class InstalledRecursiveWorkflow(
     // SDD does one write/check cycle. Developer runs 3 preparation
     // stages plus its own write/check cycle, with one shared grant.
     private fun childToolCalls(kind: StageKind): Long =
-        (requiredChildChecks.size.toLong() + 1L) *
-            if (kind == StageKind.SDD) 1L else 4L
+        children.getValue(kind).maxToolCalls ?: (
+            (requiredChildChecks.size.toLong() + 1L) *
+                if (kind == StageKind.SDD) 1L else 4L
+        )
     private fun tokenGrant(kind: StageKind): Long =
         children.getValue(kind).maxTokens ?: childTokens
     private val recursiveEvents: RecursiveEventSink
