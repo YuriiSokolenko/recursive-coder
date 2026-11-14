@@ -40,8 +40,13 @@ internal class InstalledChildRuntimeMeter(
     fun deadlineDenial(): String? =
         if (!Instant.now(clock).isBefore(admitted.deadline)) "STAGE_DEADLINE" else null
 
+    /** Poisoned usage cannot authorize more work, regardless of remaining grant. */
     @Synchronized
-    fun beforeModel(): String? = deadlineDenial()
+    fun executionDenial(): String? = deadlineDenial()
+        ?: if (usageUncertain) "CHILD_USAGE_UNCONFIRMED" else null
+
+    @Synchronized
+    fun beforeModel(): String? = executionDenial()
         ?: if (tokens >= admitted.granted.tokens) "TOKEN_BUDGET_EXHAUSTED" else null
 
     @Synchronized
@@ -99,7 +104,7 @@ internal class InstalledChildRuntimeMeter(
     /** Attempted invocations are charged, including failed writes and checks. */
     @Synchronized
     fun authorizeToolCall(): String? {
-        deadlineDenial()?.let { return it }
+        executionDenial()?.let { return it }
         if (tools >= admitted.granted.toolCalls) return "TOOL_BUDGET_EXHAUSTED"
         tools++
         return null
@@ -146,7 +151,7 @@ internal class MeteredChildTools(
     private val meter: InstalledChildRuntimeMeter
 ) : StageToolSessionOpener {
     override fun open(authority: StageToolAuthoritySource): StageToolOpenResult {
-        meter.deadlineDenial()?.let { return StageToolOpenResult.Denied(it) }
+        meter.executionDenial()?.let { return StageToolOpenResult.Denied(it) }
         val opened = delegate.open(authority)
         if (opened !is StageToolOpenResult.Granted) return opened
         val session = opened.session
@@ -170,7 +175,7 @@ internal class MeteredChildTools(
             }
 
             override fun verify(): StageValidationEvidence {
-                val early = meter.deadlineDenial()
+                val early = meter.executionDenial()
                 // A verified host snapshot is necessary to construct a typed
                 // denial. If identity is missing, fail closed as unconfirmed.
                 fun denied(code: String): StageValidationEvidence {
@@ -187,7 +192,7 @@ internal class MeteredChildTools(
                 if (early != null) return denied(early)
                 val result = session.verify()
                 // verify() itself may take longer than the admitted deadline.
-                val late = meter.deadlineDenial()
+                val late = meter.executionDenial()
                 return if (late == null) result else denied(late)
             }
 
