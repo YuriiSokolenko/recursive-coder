@@ -373,7 +373,7 @@ class InstalledWritableWorkflowTest(unittest.TestCase):
             str(self.repo / "events.jsonl"),
             str(self.base / "locks" / "events.jsonl"),
             str(self.base),  # parent of the lock scope
-            "bad\\u0000events.jsonl",  # Path.of throws InvalidPathException
+            "bad" + chr(0) + "events.jsonl",  # Path.of throws InvalidPathException
         ):
             with self.subTest(path=repr(path)):
                 self.with_journal(path)
