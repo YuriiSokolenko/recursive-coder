@@ -71,7 +71,41 @@ internal class InstalledRecursiveWorkflow(
         .digest(text.toByteArray(Charsets.UTF_8))
         .joinToString("") { "%02x".format(it) }
 
-    /** Project a live RUNNING lease into a host-owned distinct origin namespace. */
+    /**
+     * Pure projection: a future-stage projection is a policy preflight only,
+     * never an authority token. Real execution still requires rootFor() to
+     * verify the current running Linux parent lease and exact request identity.
+     */
+    private fun projectedGrant(stage: StageNode, parentGraphId: GraphId,
+        frozen: Set<String>): RecursiveRootGrant? {
+        val kind = stage.kind
+        val id = stage.correlation.stageRunId
+        val rootId = GraphId("origin-" +
+            digest(parentGraphId.value + ":" + id.value))
+        val projectedStage = stage.copy(
+            correlation = stage.correlation.copy(graphId = rootId),
+            dependencies = emptySet(), inputArtifacts = emptySet(),
+            outputArtifacts = emptySet()
+        )
+        val graph = StageGraph(
+            GraphCorrelation(sessionId, rootId,
+                "origin-" + digest(id.value).take(24),
+                causationId = stage.correlation.requestId),
+            StageGraphState.RUNNING, listOf(projectedStage), emptyList(),
+            StageBudget(maxTokens, maxDurationMillis, maxDepth, maxChildren)
+        )
+        if (StageGraphPolicy.validate(graph) != StageGateDecision.Permit) return null
+        val writable = if (kind == StageKind.SDD) {
+            setOf(targets.getValue(kind).path)
+        } else {
+            developerTargets.map { it.path }.toSet() + targets.getValue(kind).path
+        }
+        if (writable.any { it in frozen }) return null
+        return RecursiveRootGrant(graph, id,
+            "origin-task-" + kind.name.lowercase(), writable, frozen)
+    }
+
+    /** Actual running parent Linux lease is mandatory for runtime child execution. */
     private fun rootFor(request: StageRoleRequest, kind: StageKind): RecursiveRootGrant? {
         val live = parent.snapshot()
         val stage = live.graph.stages.singleOrNull {
@@ -84,31 +118,32 @@ internal class InstalledRecursiveWorkflow(
             }?.state != StageState.READY ||
             stage.correlation.requestId != request.requestId ||
             live.graph.correlation.sessionId != sessionId) return null
-        val rootId = GraphId("origin-" +
-            digest(live.graph.correlation.graphId.value + ":" + request.stageRunId.value))
-        val projectedStage = stage.copy(
-            correlation = stage.correlation.copy(graphId = rootId),
-            dependencies = emptySet(), inputArtifacts = emptySet(),
-            outputArtifacts = emptySet()
-        )
-        val projected = StageGraph(
-            GraphCorrelation(sessionId, rootId,
-                "origin-" + digest(request.stageRunId.value).take(24),
-                causationId = request.requestId),
-            StageGraphState.RUNNING, listOf(projectedStage), emptyList(),
-            StageBudget(maxTokens, maxDurationMillis, maxDepth, maxChildren)
-        )
-        if (StageGraphPolicy.validate(projected) != StageGateDecision.Permit) return null
-        val writable = if (kind == StageKind.SDD) {
-            setOf(targets.getValue(kind).path)
-        } else {
-            developerTargets.map { it.path }.toSet() + targets.getValue(kind).path
-        }
         val frozen = live.graph.artifacts.filter { it.id in live.acceptedIds }
             .map { it.declaredPath }.toSet()
-        if (writable.any { it in frozen }) return null
-        return RecursiveRootGrant(projected, request.stageRunId,
-            "origin-task-" + kind.name.lowercase(), writable, frozen)
+        return projectedGrant(stage, live.graph.correlation.graphId, frozen)
+    }
+
+    /**
+     * At the *first* SDD hook, preflight Developer as a future, non-executable
+     * policy-only projection. The real Developer lease ID does not yet exist
+     * (it will be generated after TDD), so this cannot be a runtime grant.
+     * Actual Developer admission is repeated once the host owns that lease.
+     */
+    private fun preflightFutureDeveloper(request: StageRoleRequest): String? {
+        val graphId = request.graph.correlation.graphId
+        val futureId = StageRunId("preflight-develop-" +
+            digest(graphId.value + ":DEVELOP").take(24))
+        val futureRequest = "preflight-request-develop"
+        val stage = StageNode(
+            StageCorrelation(sessionId, graphId, futureId,
+                futureRequest, "preflight-develop-correlation"),
+            StageKind.DEVELOP, StageState.RUNNING,
+            AgentId("preflight-develop-actor"))
+        val frozen = setOf(StageKind.SDD, StageKind.ATDD, StageKind.TDD)
+            .mapTo(mutableSetOf()) { targets.getValue(it).path }
+        val projected = projectedGrant(stage, graphId, frozen)
+            ?: return "RECURSIVE_DEVELOPER_PREFLIGHT_INVALID"
+        return preflight(StageKind.DEVELOP, projected)
     }
 
     /** One canonical child target plan for both approvals and execution. */
@@ -306,6 +341,12 @@ internal class InstalledRecursiveWorkflow(
         if (kind in origins) return "REPEATED_RECURSIVE_ORIGIN"
         val grant = rootFor(request, kind) ?: return "RECURSIVE_PARENT_LEASE_INVALID"
         preflight(kind, grant)?.let { return it }
+        // Both origin grant policies must pass before *any* child checkout
+        // gets its first physical write. Refuse later-origin-only cycles and
+        // budgets before starting the SDD child.
+        if (kind == StageKind.SDD) {
+            preflightFutureDeveloper(request)?.let { return it }
+        }
         val produced = try {
             produce(kind, grant)
         } catch (cancelled: CancellationException) {
