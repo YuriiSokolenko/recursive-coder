@@ -11,6 +11,7 @@ import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.BasicFileAttributeView
 import java.security.MessageDigest
 import java.security.SecureRandom
+import java.util.Collections
 import java.util.UUID
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
@@ -577,10 +578,10 @@ class LinuxFiveRoleWorkflowHost(
             }) return null
         return AuthenticatedAcceptedStageReceipt(graph.correlation, stage.correlation,
             stage.kind, manifest, proof.writeId,
-            java.util.Collections.unmodifiableSet(
-                proof.validation.requiredChecks.map { it.checkId }.toMutableSet()),
-            java.util.Collections.unmodifiableMap(
-                proof.files.associate { it.path to it.after }.toMutableMap()),
+            Collections.unmodifiableSet(
+                proof.validation.requiredChecks.map { it.checkId }.toSet()),
+            Collections.unmodifiableMap(
+                proof.files.associate { it.path to it.after }),
             evidence.usage.copy())
     }
 
@@ -774,26 +775,44 @@ class LinuxAuthenticatedRecursiveChildIntegrationHost(
     private val authorizedChildStages = authorizedChildStages.toSet()
     init { require(ToolAuthorizationPolicy.validHostIdentifier(expectedSessionId)) }
 
-    /** Apply the full live child identity gate to accepted IDs as well as manifests. */
-    private fun verifiedChildReceipt(id: StageRunId): AuthenticatedAcceptedStageReceipt? {
-        if (id !in authorizedChildStages) return null
-        val receipt = host.authenticatedAcceptedStage(id) ?: return null
-        val parentGraph = receipt.graphCorrelation.parentGraphId ?: return null
-        val parentStage = receipt.graphCorrelation.parentStageRunId ?: return null
-        val childGraph = RecursiveGraphPolicy.childId(
-            parentGraph, parentStage, receipt.stageCorrelation.requestId)
-        if (receipt.graphCorrelation.sessionId != expectedSessionId ||
-            receipt.stageCorrelation.sessionId != expectedSessionId ||
-            receipt.graphCorrelation.graphId != childGraph ||
-            receipt.stageCorrelation.graphId != childGraph ||
-            receipt.stageCorrelation.stageRunId != RecursiveGraphPolicy.childStageId(childGraph))
-            return null
-        return receipt
+    /**
+     * Shared host identity gate for both the provisional accepted-ID listing
+     * and the scope-checked per-child manifest integration. No caller-provided
+     * parent, graph, request or stage ID is substituted into the host receipt.
+     */
+    private sealed interface HostReceiptGate {
+        data class Accepted(val receipt: AuthenticatedAcceptedStageReceipt) : HostReceiptGate
+        data class Denied(val code: ChildReceiptDenialCode) : HostReceiptGate
     }
 
+    private fun verifiedChildReceipt(id: StageRunId): HostReceiptGate {
+        fun denied(code: ChildReceiptDenialCode) = HostReceiptGate.Denied(code)
+        if (id !in authorizedChildStages)
+            return denied(ChildReceiptDenialCode.UNAUTHORIZED_STAGE)
+        val receipt = host.authenticatedAcceptedStage(id)
+            ?: return denied(ChildReceiptDenialCode.HOST_RECEIPT_UNAVAILABLE)
+        if (receipt.graphCorrelation.sessionId != expectedSessionId ||
+            receipt.stageCorrelation.sessionId != expectedSessionId)
+            return denied(ChildReceiptDenialCode.SESSION_MISMATCH)
+        val parentGraph = receipt.graphCorrelation.parentGraphId
+            ?: return denied(ChildReceiptDenialCode.MISSING_PARENT_IDENTITY)
+        val parentStage = receipt.graphCorrelation.parentStageRunId
+            ?: return denied(ChildReceiptDenialCode.MISSING_PARENT_IDENTITY)
+        val childGraph = RecursiveGraphPolicy.childId(
+            parentGraph, parentStage, receipt.stageCorrelation.requestId)
+        if (receipt.graphCorrelation.graphId != childGraph ||
+            receipt.stageCorrelation.graphId != childGraph ||
+            receipt.stageCorrelation.stageRunId != id ||
+            receipt.stageCorrelation.stageRunId != RecursiveGraphPolicy.childStageId(childGraph))
+            return denied(ChildReceiptDenialCode.INVALID_DERIVED_IDENTITY)
+        return HostReceiptGate.Accepted(receipt)
+    }
+
+    /** Provisional only: per-child writable/frozen scopes are enforced by manifestsFor. */
     override fun acceptedArtifactIds(): Set<ArtifactId> =
-        authorizedChildStages.mapNotNull { verifiedChildReceipt(it)?.manifest?.id }
-            .toSet()
+        authorizedChildStages.mapNotNull {
+            (verifiedChildReceipt(it) as? HostReceiptGate.Accepted)?.receipt?.manifest?.id
+        }.toSet()
 
     /**
      * A call-local, reasoned child gate. The parent/child identity is never
@@ -811,13 +830,10 @@ class LinuxAuthenticatedRecursiveChildIntegrationHost(
         if (child.graphId != RecursiveGraphPolicy.childId(parentId, parentStageId, requestId) ||
             child.stageRunId != RecursiveGraphPolicy.childStageId(child.graphId))
             return denied(ChildReceiptDenialCode.INVALID_DERIVED_IDENTITY)
-        if (child.stageRunId !in authorizedChildStages)
-            return denied(ChildReceiptDenialCode.UNAUTHORIZED_STAGE)
-        val receipt = host.authenticatedAcceptedStage(child.stageRunId)
-            ?: return denied(ChildReceiptDenialCode.HOST_RECEIPT_UNAVAILABLE)
-        if (receipt.graphCorrelation.sessionId != expectedSessionId ||
-            receipt.stageCorrelation.sessionId != expectedSessionId)
-            return denied(ChildReceiptDenialCode.SESSION_MISMATCH)
+        val receipt = when (val gate = verifiedChildReceipt(child.stageRunId)) {
+            is HostReceiptGate.Accepted -> gate.receipt
+            is HostReceiptGate.Denied -> return denied(gate.code)
+        }
         if (receipt.origin != child.origin)
             return denied(ChildReceiptDenialCode.ORIGIN_MISMATCH)
         if (receipt.graphCorrelation.graphId != child.graphId ||
