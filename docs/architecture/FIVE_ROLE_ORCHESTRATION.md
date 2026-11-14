@@ -64,6 +64,11 @@ trusted SDD/ATDD/TDD predecessors and independent Reviewer in a second
 isolated checkout, then verifies the Developer's actual write/check receipt.
 The same recursive coordinator re-verifies both origins at parent integration
 and emits correlated recursive SessionEvents without synthetic receipt stores.
+FakeModel's token counts are fixture data, **not** a trusted token meter;
+the two-origin integration test conservatively charges each child its
+**full token grant** while counting genuine verified write/check calls.
+The host retains nullable stage usage for reporting but it is not assumed
+to be independently measured.
 The host can pre-bind the future Developer child stage identity only when it
 matches `RecursiveGraphPolicy.childId/childStageId` and the trusted
 parent/request correlation; this host-only input is not exposed to a model.
