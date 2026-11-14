@@ -278,8 +278,12 @@ class InstalledWritableWorkflowTest(unittest.TestCase):
         approval["approvedSha256"]["SDD"] = "0" * 64
         self.approval_path.write_text(json.dumps(approval))
         result = self.authorized()
-        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
-        self.assertEqual(json.loads(result.stdout)["code"], "HOST_REJECTED")
+        # The SDD write precedes the host's digest rejection. The host may
+        # have uncommitted bytes, so denying it as safely stopped is incorrect.
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout),
+                         {"outcome": "reconciliation_required",
+                          "code": "HOST_STOP_SNAPSHOT_UNAVAILABLE"})
         self.assertEqual(self.original_head, self.git("rev-parse", "HEAD"))
 
     def test_true_executable_is_not_meaningful_check(self):
@@ -313,7 +317,9 @@ class InstalledWritableWorkflowTest(unittest.TestCase):
         response = json.loads(result.stdout)
         self.assertEqual(response["outcome"], "reconciliation_required")
         self.assertNotEqual(response["code"], "SUCCEEDED")
-        self.assertEqual(self.original_head, self.git("rev-parse", "HEAD"))
+        # SDD, ATDD and TDD are already committed clean Git baselines.
+        # The failed Developer check leaves its write for reconciliation.
+        self.assertNotEqual(self.original_head, self.git("rev-parse", "HEAD"))
         self.assertEqual(NEW, (self.repo / "src/main/FeatureFull.kt").read_text())
 
 
