@@ -4,6 +4,8 @@ import java.nio.file.Path
 import java.security.MessageDigest
 import java.time.Instant
 import kotlinx.coroutines.CancellationException
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 
 /**
  * Opt-in, fake-only installed workflow bridge. Child workspaces are independently
@@ -173,6 +175,13 @@ internal object InstalledRecursiveAdmissionPolicy {
         tokens, toolCalls, limits, now) as? RecursiveDecision.Denied)?.code
 }
 
+/** Strict model gate independent of the CLI parser's exact-field checks. */
+internal fun requireInstalledRecursiveFakeModel(model: ModelConfig) {
+    require(model.provider == "fake" && model.modelId == "fake-v1") {
+        "Installed recursive workflow is offline-only"
+    }
+}
+
 internal class InstalledRecursiveWorkflow(
     private val sessionId: String,
     private val parent: LinuxFiveRoleWorkflowHost,
@@ -207,12 +216,40 @@ internal class InstalledRecursiveWorkflow(
     init {
         // This internal bridge is not a live-provider capability: its usage
         // source is the deterministic FakeModel fixture, not provider billing.
-        require(model.provider == "fake" && model.modelId == "fake-v1") {
-            "Installed recursive workflow is offline-only"
-        }
+        requireInstalledRecursiveFakeModel(model)
     }
 
+    private data class Attempt(val admitted: RecursiveNode,
+        val meter: InstalledChildRuntimeMeter)
+    private val attempts = linkedMapOf<StageKind, Attempt>()
     private val origins = linkedMapOf<StageKind, Origin>()
+
+    /**
+     * A physical child executes before the two-origin scheduler is constructed.
+     * An aborted physical attempt is therefore not a scheduler usage charge:
+     * preserve observed usage and account its full, non-refundable host grant.
+     * The installed workflow cannot retry and never promotes such an attempt.
+     */
+    private fun auditFailedAttempt(kind: StageKind, code: String) {
+        val attempt = attempts[kind] ?: return
+        val observed = attempt.meter.observed()
+        val reserved = attempt.admitted.granted
+        val accounted = attempt.meter.accounted(failed = true)
+        journal?.append("session.error", "failed",
+            correlationId = attempt.admitted.requestId,
+            extra = buildJsonObject {
+                put("childResourceAudit", "FAILED_RESERVED")
+                put("origin", kind.name)
+                put("code", code)
+                put("observedTokens", observed.tokens)
+                put("observedToolCalls", observed.toolCalls)
+                put("grantTokens", reserved.tokens)
+                put("grantToolCalls", reserved.toolCalls)
+                put("accountedTokens", accounted.tokens)
+                put("accountedToolCalls", accounted.toolCalls)
+                put("usageUncertain", attempt.meter.hasUncertainUsage())
+            })
+    }
     private var integrated: TwoOriginRecursiveOutcome.Completed? = null
     @Volatile private var uncertainChildExecution = false
     val reconciliationRequired: Boolean get() = uncertainChildExecution
@@ -369,6 +406,7 @@ internal class InstalledRecursiveWorkflow(
         val (host, childStageId) = childHost(kind, grant, admitted)
         val config = children.getValue(kind)
         val meter = InstalledChildRuntimeMeter(admitted)
+        attempts[kind] = Attempt(admitted, meter)
         val roles = MeteredChildRoleExecutor(childExecutor, meter)
         val tools = MeteredChildTools(host, meter)
         if (kind == StageKind.SDD) {
@@ -461,6 +499,11 @@ internal class InstalledRecursiveWorkflow(
                         return@RecursiveStageExecutor RecursiveExecutionOutcome.Failed(it)
                     }
                     val measured = origin.meter.measured()
+                    if (origin.meter.hasUncertainUsage() ||
+                        measured.tokens > origin.admitted.granted.tokens ||
+                        measured.toolCalls > origin.admitted.granted.toolCalls)
+                        return@RecursiveStageExecutor RecursiveExecutionOutcome.Failed(
+                            "CHILD_USAGE_UNCONFIRMED")
                     if (measured.toolCalls < requiredChildChecks.size + 1L)
                         return@RecursiveStageExecutor RecursiveExecutionOutcome.Failed(
                             "CHILD_TOOL_USAGE_UNCONFIRMED")
@@ -512,9 +555,13 @@ internal class InstalledRecursiveWorkflow(
             // A child may have written or committed before the exception.
             // Never label its host state as an ordinary safe denial.
             uncertainChildExecution = true
+            auditFailedAttempt(kind, "CHILD_EXECUTION_UNCONFIRMED")
             return "CHILD_EXECUTION_UNCONFIRMED"
         }
-        if (produced != null) return produced
+        if (produced != null) {
+            auditFailedAttempt(kind, produced)
+            return produced
+        }
         if (kind == StageKind.DEVELOP) {
             val first = origins[StageKind.SDD] ?: return "MISSING_SDD_CHILD_ORIGIN"
             val second = origins.getValue(StageKind.DEVELOP)
@@ -526,7 +573,16 @@ internal class InstalledRecursiveWorkflow(
                 // A stopped integration is a known-dirty multi-origin state:
                 // preserve both checkouts and require operator reconciliation.
                 uncertainChildExecution = true
-                return (result as TwoOriginRecursiveOutcome.Stopped).code
+                val stopped = result as TwoOriginRecursiveOutcome.Stopped
+                // Preserve the exact cause for operator reconciliation even
+                // though the public exit contract stays generic.
+                journal?.append("session.error", "failed",
+                    extra = buildJsonObject {
+                        put("recursiveStopCode", stopped.code)
+                        put("origin", stopped.origin?.name ?: "BOTH")
+                        put("requiresReconciliation", true)
+                    })
+                return stopped.code
             }
             // The parent Developer writer lease is intentionally live here.
             // authenticatedAcceptedStage() is deliberately unavailable while
