@@ -1,4 +1,4 @@
-# Opt-in writable five-role CLI (Issue #79, CLI slice)
+# Opt-in writable five-role and recursive CLI (Issue #79)
 
 The installed CLI now has a separate **offline-only** `workflow` command.
 `recursive-coder run REQUEST` remains SessionRequest v1, **read-only**, and
@@ -48,8 +48,22 @@ The workflow plan is UTF-8 JSON (version 1, maximum 64 KiB), with exactly:
   `arguments` (at most 16), run in the existing bubblewrap sandbox as
   `offline-check` after each write; `/usr/bin/true` cannot be used.
   `git_diff_check` is also always required.
-- `limits`: positive `maxTokens`, `maxDurationMillis` and
-  `deadlineSeconds` within the CLI's bounded ranges.
+- \`limits\`: positive \`maxTokens\`, \`maxDurationMillis\` and
+  \`deadlineSeconds\` within the CLI's bounded ranges. If recursive work is
+  enabled, optional \`maxDepth\` (default 1), \`maxChildren\` (default 1),
+  \`maxToolCalls\` (default 6) and \`childTokens\` (default 500) apply to each
+  independently bounded origin; a depth of 0 or insufficient budget denies
+  child admission rather than silently omitting the work.
+- Optional \`recursiveChildren\`: **both** \`SDD\` and \`DEVELOP\` checkout records
+  are mandatory when recursion is enabled. Each record provides absolute
+  \`rootPath\`, \`headSha\`, \`branch\`, \`lockDirectory\`, and a host-selected
+  \`requestId\`. Each checkout must be a separately provisioned clean Linux
+  Git checkout at the **same initial HEAD and branch** as the parent, with its
+  own isolation marker and disjoint external lock scope. The child workspaces
+  may not overlap each other, the parent checkout, plan/approvals or journal.
+  Offline negative-fixture fields are \`dependsOnSelf\` (boolean) and, for
+  the Developer child only, \`outputArtifactId\` (tests an authenticated
+  cross-origin ID collision). Both are bound by the approval plan SHA-256.
 
 The separate approvals file also has version 1 and **exactly** `planSha256`
 (the SHA-256 of the plan file's raw bytes) and `approvedSha256` (a map of
@@ -129,21 +143,44 @@ The offline provider uses the existing `FakeModel` capability handshake plus
 fixed per-role proposals; it is **not** a production LLM completion provider.
 The role usage is fixture data, not measured token consumption.
 
-The `core:session` two-origin coordinator independently schedules and
-integrates nested child graphs under **distinct host-supplied trusted
-integration sources**, rejects repeated origins and cross-origin artifact
-conflicts, and sends both streams to one correlated SessionEvent sink.
-Its current tests use two nested origins (SDD and Developer) and trusted fake
-receipt stores. This coordinator is deliberately **not yet connected** to
-the production Linux write/check host or installed CLI: an executor may
-request a child, but cannot mint the authenticated receipts required for
-parent integration. Never treat in-memory fixture receipts as production
-attestation. The installed workflow now verifies five-role SessionEvent correlation when
-an events path is supplied, but does not yet prove installed, production-host
-two-origin child-graph integration, production provider compatibility,
-durable checkpoint/crash-resume (#10) or
-an externally authenticated human approval system. Child manifest path
-conflicts are compared using NFC-normalized, case-folded relative paths even
-on case-sensitive hosts; this intentionally rejects portable aliases.
-Issue #79 remains open
-until the nested and journal acceptance suites are delivered.
+## Authenticated recursive opt-in
+
+When \`recursiveChildren\` is present, the same installed \`workflow\` command
+runs child SDD while the real parent SDD writer lease is active, and runs an
+independent full five-stage child workflow while the real parent Developer
+lease is active. The latter preauthorizes only the policy-derived Developer
+child stage identity, after its genuine SDD/ATDD/TDD prerequisites. No
+child is given the parent checkout as its writable workspace.
+
+The production Linux child hosts perform their own TrustedWriteRuntime
+writes and mandatory Git/sandbox checks, retain HMAC-backed receipts, and
+bind each result to its derived child graph/stage/request identity. The
+\`RunTwoOriginRecursiveChildrenUseCase\` then independently admits, charges
+and integrates both sources through authenticated child receipt adapters.
+Missing approvals, cycles, depth/child/token/tool limits, conflicts and stale
+evidence fail closed. FakeModel usage is *not* provider-measured: the
+recursive scheduler charges the entire allocated child token cap and
+counts the genuine write plus required checks.
+
+The parent must write the same approved artifact bytes through its **own**
+trusted stage tools. It never copies child checkout files into the parent
+behind the TrustedWriteRuntime gate. Before SDD→ATDD, and before
+Developer→Reviewer and the final successful graph transition, the wrapper
+rechecks both sides' authenticated manifests, declared paths, output digests
+and full write postimages, plus the accepted two-origin integration.
+The independent Reviewer gate remains authoritative; a successful child
+alone cannot approve the parent. The same optional Session Protocol v1
+journal correlates parent role, nested child role, child admission, usage,
+integration and Reviewer events; missing/dropped journal bytes still
+prevent publication of success. Journaling never records model prompts,
+source bytes, secrets or tool output.
+
+The installed regression suite includes successful five parent roles, both
+nested origins, a clean final Git baseline and correlated events; cycle,
+depth/token ceilings, rejected Reviewer, protected test paths and
+cross-origin artifact ID conflict. These are deterministic offline fixtures
+only, **not** live-model integration or a full isolation guarantee against
+same-UID adversarial processes. No checkpoint/restart after uncertain
+writes (#10), external issue tracker, CI coordinator or production API is
+introduced. Keep issue #79 open until the current branch passes all required
+CI gates and a security review.
