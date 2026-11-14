@@ -614,7 +614,7 @@ internal class InstalledRecursiveWorkflow(
                 // audit via the admitted host-generated request correlation.
                 try {
                     journal?.append("session.error", "failed",
-                        correlationId = attempts[stopped.origin]?.admitted?.requestId
+                        correlationId = stopped.origin?.let { attempts[it] }?.admitted?.requestId
                             ?: second.admitted.requestId,
                         extra = buildJsonObject {
                             put("recursiveStopCode", stopped.code)
