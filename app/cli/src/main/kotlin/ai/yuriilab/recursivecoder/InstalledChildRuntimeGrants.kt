@@ -139,7 +139,8 @@ internal class MeteredChildTools(
                 val stage = current.graph.stages.single {
                     it.correlation.stageRunId == current.stageRunId
                 }
-                return StageValidationEvidence(stage.correlation, stage.agentId,
+                return StageValidationEvidence(stage.correlation,
+                    stage.agentId ?: error("Missing host stage actor"),
                     emptyList(), false, late)
             }
 
