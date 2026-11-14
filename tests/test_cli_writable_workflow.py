@@ -32,7 +32,8 @@ class InstalledWritableWorkflowTest(unittest.TestCase):
         self.git("init", "-b", "dev")
         self.git("config", "user.name", "CLI Fixture")
         self.git("config", "user.email", "fixture@example.invalid")
-        (self.repo / "src/main").mkdir(parents=True)
+        for directory in ("src/main", "specs", "tests/acceptance", "tests/unit"):
+            (self.repo / directory).mkdir(parents=True)
         (self.repo / "README.md").write_text("Isolated test checkout\n")
         (self.repo / "src/main/FeatureFull.kt").write_text(OLD)
         self.git("add", "README.md", "src/main/FeatureFull.kt")
