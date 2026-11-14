@@ -278,16 +278,12 @@ class LinuxFiveRoleWorkflowHostTest {
                         val attested = host.authenticatedAcceptedStage(childStageId(kind))
                             ?: return@RecursiveStageExecutor RecursiveExecutionOutcome.Failed(
                                 "AUTHENTICATED_CHILD_RECEIPT_MISSING")
-                        val input = attested.usage.inputTokens
-                        val output = attested.usage.outputTokens
-                        // Unknown model usage consumes the child's full grant,
-                        // never a synthetic zero. The fixture provides real
-                        // host-retained 100+30 token counts per stage.
-                        val tokens = if (input == null || output == null) 500L
-                            else try { Math.addExact(input, output) }
-                                catch (_: ArithmeticException) { 500L }
+                        // FakeModel reports fixture usage, not independently
+                        // measured tokens. Bill the full child token grant,
+                        // never assume an unverified report means zero.
+                        // Write + mandatory checks have genuine host receipts.
                         when (val billed = childContext.charge(RecursiveUsage(
-                                tokens, attested.checkedIds.size.toLong() + 1))) {
+                                500, attested.checkedIds.size.toLong() + 1))) {
                             is RecursiveDecision.Allowed -> RecursiveExecutionOutcome.Completed
                             is RecursiveDecision.Denied ->
                                 RecursiveExecutionOutcome.Failed(billed.code)
@@ -326,8 +322,8 @@ class LinuxFiveRoleWorkflowHostTest {
             val charged = completed.snapshots.getValue(kind).nodes.single {
                 it.stageRunId == childStageId(kind)
             }
-            assertEquals(RecursiveUsage(130, 3), charged.spent,
-                "Actual host stage usage and write/check calls must be charged")
+            assertEquals(RecursiveUsage(500, 3), charged.spent,
+                "Fixture tokens charge the full cap; real write/check calls are counted")
             assertTrue(completed.snapshots.getValue(kind).nodes.all {
                 it.state == RecursiveNodeState.SUCCEEDED
             })
