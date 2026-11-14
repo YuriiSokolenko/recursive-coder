@@ -58,11 +58,23 @@ scope must all agree. A parent's accepted stage output **cannot** be
 relabelled as a child's result. The port returns empty/unavailable on
 mismatch, rather than manufacturing an accepted receipt.
 
-This prepares the trust boundary but does **not** yet deploy the child-stage
-writers for both SDD and Developer from the installed workflow. The existing
-CLI's five-role parent execution and journal cannot be treated as two-origin
-recursive E2E until those actual child stages are scheduled, written, checked,
-integrated and tested via the installed distribution. Issue #79 remains open.
+The Linux integration suite exercises **two distinct actual host-generated
+child-stage outputs**, one SDD and one Developer. For Developer it runs the
+trusted SDD/ATDD/TDD predecessors and independent Reviewer in a second
+isolated checkout, then verifies the Developer's actual write/check receipt.
+The same recursive coordinator re-verifies both origins at parent integration
+and emits correlated recursive SessionEvents without synthetic receipt stores.
+The host can pre-bind the future Developer child stage identity only when it
+matches `RecursiveGraphPolicy.childId/childStageId` and the trusted
+parent/request correlation; this host-only input is not exposed to a model.
+
+This prepares the trust boundary but **does not yet dispatch these
+child-stage writers from the installed five-role parent workflow** or merge
+their outputs into its single physical checkout. Therefore these Linux
+integration tests are **not installed two-origin recursive CLI E2E**.
+The installed CLI's five-role parent execution and journal remain separate
+until those child stages are scheduled, written, checked and committed under
+the parent host fence. Issue #79 remains open.
 
 ## Execution and authority
 
