@@ -6,8 +6,8 @@ import org.junit.jupiter.api.Test
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
-/** Only tests canonical path geometry; real no-follow Git checks remain Linux E2E. */
-@Tag("unit")
+/** Canonical path-geometry tests; the tier verifier classifies java.nio.file.Path as integration. */
+@Tag("integration")
 class InstalledChildCheckoutScopesTest {
     private val root = Path.of("/isolated/child-sdd")
     private val locks = Path.of("/locks/child-sdd")
