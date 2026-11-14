@@ -309,8 +309,8 @@ class LinuxFiveRoleWorkflowHostTest {
         }
         assertEquals(64, journal.finish().length)
         val events = Files.readString(journalPath)
-        assertTrue(events.contains("\\"origin\\":\\"SDD\\""))
-        assertTrue(events.contains("\\"origin\\":\\"DEVELOP\\""))
+        assertTrue(events.contains("\"origin\":\"SDD\""))
+        assertTrue(events.contains("\"origin\":\"DEVELOP\""))
         assertTrue(events.contains("INTEGRATED"))
     }
 
