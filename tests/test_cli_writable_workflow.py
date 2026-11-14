@@ -447,6 +447,30 @@ class InstalledWritableWorkflowTest(unittest.TestCase):
         self.assertIn("CROSS_ORIGIN_ARTIFACT_CONFLICT",
                       [m.get("recursiveStopCode")
                        for m in self.recursive_metadata()])
+        # The physical child runs finished before cross-origin integration
+        # detected the conflict. Both attempts must still have a terminal audit.
+        records = [json.loads(line) for line in
+                   (self.base / "recursive-events.jsonl").read_text().splitlines()]
+        audits = [record for record in records if
+                  record.get("metadata", {}).get("childResourceAudit") ==
+                  "FAILED_RESERVED"]
+        self.assertEqual({r["metadata"]["origin"] for r in audits},
+                         {"SDD", "DEVELOP"})
+        self.assertEqual(len(audits), 2)
+        self.assertTrue(all(r["metadata"]["schedulerChargeRecorded"]
+                            for r in audits))
+        for audit in audits:
+            metadata = audit["metadata"]
+            self.assertEqual(metadata["accountedTokens"],
+                             metadata["grantTokens"])
+            self.assertEqual(metadata["accountedToolCalls"],
+                             metadata["grantToolCalls"])
+        stops = [record for record in records if
+                 record.get("metadata", {}).get("recursiveStopCode") ==
+                 "CROSS_ORIGIN_ARTIFACT_CONFLICT"]
+        self.assertEqual(len(stops), 1)
+        self.assertIn(stops[0]["correlationId"],
+                      {record["correlationId"] for record in audits})
 
 
     def test_installed_five_role_workflow_has_clean_baseline(self):
