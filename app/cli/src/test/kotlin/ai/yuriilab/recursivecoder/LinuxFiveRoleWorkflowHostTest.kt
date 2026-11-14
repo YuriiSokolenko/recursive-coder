@@ -122,7 +122,8 @@ class LinuxFiveRoleWorkflowHostTest {
             parentStageRunId = parentStageRunId),
             StageGraphState.RUNNING, listOf(stage),
             emptyList(), StageBudget(10_000, 60_000, 0, 0))
-        assertEquals(StageGateDecision.Permit, StageGraphPolicy.validate(graph))
+        // The host itself validates the graph; negative constructor fixtures
+        // intentionally supply invalid parent correlations.
         val host = LinuxFiveRoleWorkflowHost(repo, graph, git(repo, "rev-parse", "HEAD"),
             "dev", mapOf("smoke" to StageIsolatedCheck(Path.of("/usr/bin/true"))),
             setOf("git_diff_check", "smoke"),
@@ -272,13 +273,15 @@ class LinuxFiveRoleWorkflowHostTest {
                     kind, StageState.RUNNING,
                     AgentId("root-actor-" + kind.name.lowercase()))),
                 emptyList(), StageBudget(1_000, 30_000, 2, 2))
+            val writable = if (kind == StageKind.DEVELOP)
+                setOf(target.path, "src/main/FeatureFull.kt") else setOf(target.path)
             val grant = RecursiveRootGrant(graph, rootStage,
-                "root-task-" + kind.name.lowercase(), setOf(target.path), emptySet())
+                "root-task-" + kind.name.lowercase(), writable, emptySet())
             val executor = RecursiveStageExecutor { context ->
                 val child = context.requestChild(RecursiveChildProposal(
                     requests.getValue(kind), context.graphId, context.stageRunId,
                     kind, "child-task-" + kind.name.lowercase(),
-                    writablePaths = setOf(target.path), maxTokens = childTokenGrant,
+                    writablePaths = writable, maxTokens = childTokenGrant,
                     maxToolCalls = 5, maxDurationMillis = 5000))
                 val admitted = child as? RecursiveDecision.Allowed
                     ?: return@RecursiveStageExecutor RecursiveExecutionOutcome.Failed(
