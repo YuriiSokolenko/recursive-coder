@@ -66,6 +66,67 @@ internal object InstalledRecursiveEvidencePolicy {
  * Pure admission decision, including deliberate self-cycles and a bounded
  * tool-call grant. No child host, Git checkout or model call can run here.
  */
+/**
+ * Pure origin projection and authenticated-parent identity precheck. A projected
+ * grant is never sufficient to begin a trusted Linux child write; the production
+ * host and recursive scheduler independently verify their current leases.
+ */
+internal object InstalledRecursiveOriginPolicy {
+    private fun digest(value: String) = MessageDigest.getInstance("SHA-256")
+        .digest(value.toByteArray(Charsets.UTF_8))
+        .joinToString("") { "%02x".format(it) }
+
+    fun liveStage(request: StageRoleRequest, kind: StageKind,
+        live: PreparationStageSnapshot, sessionId: String): StageNode? {
+        val stage = live.graph.stages.singleOrNull {
+            it.correlation.stageRunId == request.stageRunId &&
+                it.kind == kind && it.state == StageState.RUNNING
+        } ?: return null
+        val requested = request.graph.stages.singleOrNull {
+            it.correlation.stageRunId == request.stageRunId
+        } ?: return null
+        if (live.graph.correlation.sessionId != sessionId ||
+            request.graph.correlation != live.graph.correlation ||
+            request.expectedRole != kind.role ||
+            requested.kind != kind || requested.state != StageState.READY ||
+            requested.correlation != stage.correlation ||
+            stage.correlation.requestId != request.requestId)
+            return null
+        return stage
+    }
+
+    fun project(sessionId: String, stage: StageNode, parentGraphId: GraphId,
+        frozen: Set<String>, targets: Map<StageKind, FiveRoleArtifactTarget>,
+        developerTargets: List<DeveloperFileTarget>,
+        budget: StageBudget): RecursiveRootGrant? {
+        val kind = stage.kind
+        val id = stage.correlation.stageRunId
+        val rootId = GraphId("origin-" +
+            digest(parentGraphId.value + ":" + id.value))
+        val projectedStage = stage.copy(
+            correlation = stage.correlation.copy(graphId = rootId),
+            dependencies = emptySet(), inputArtifacts = emptySet(),
+            outputArtifacts = emptySet()
+        )
+        val graph = StageGraph(
+            GraphCorrelation(sessionId, rootId,
+                "origin-" + digest(id.value).take(24),
+                causationId = stage.correlation.requestId),
+            StageGraphState.RUNNING, listOf(projectedStage), emptyList(), budget
+        )
+        if (StageGraphPolicy.validate(graph) != StageGateDecision.Permit) return null
+        val target = targets[kind] ?: return null
+        val writable = if (kind == StageKind.SDD) {
+            setOf(target.path)
+        } else {
+            developerTargets.mapTo(mutableSetOf()) { it.path } + target.path
+        }
+        if (writable.any { it in frozen }) return null
+        return RecursiveRootGrant(graph, id,
+            "origin-task-" + kind.name.lowercase(), writable, frozen)
+    }
+}
+
 internal object InstalledRecursiveAdmissionPolicy {
     fun preflight(
         kind: StageKind, grant: RecursiveRootGrant,
@@ -152,55 +213,19 @@ internal class InstalledRecursiveWorkflow(
         .digest(text.toByteArray(Charsets.UTF_8))
         .joinToString("") { "%02x".format(it) }
 
-    /**
-     * Pure projection: a future-stage projection is a policy preflight only,
-     * never an authority token. Real execution still requires rootFor() to
-     * verify the current running Linux parent lease and exact request identity.
-     */
     private fun projectedGrant(stage: StageNode, parentGraphId: GraphId,
-        frozen: Set<String>): RecursiveRootGrant? {
-        val kind = stage.kind
-        val id = stage.correlation.stageRunId
-        val rootId = GraphId("origin-" +
-            digest(parentGraphId.value + ":" + id.value))
-        val projectedStage = stage.copy(
-            correlation = stage.correlation.copy(graphId = rootId),
-            dependencies = emptySet(), inputArtifacts = emptySet(),
-            outputArtifacts = emptySet()
-        )
-        val graph = StageGraph(
-            GraphCorrelation(sessionId, rootId,
-                "origin-" + digest(id.value).take(24),
-                causationId = stage.correlation.requestId),
-            StageGraphState.RUNNING, listOf(projectedStage), emptyList(),
-            StageBudget(maxTokens, maxDurationMillis, maxDepth, maxChildren)
-        )
-        if (StageGraphPolicy.validate(graph) != StageGateDecision.Permit) return null
-        val writable = if (kind == StageKind.SDD) {
-            setOf(targets.getValue(kind).path)
-        } else {
-            developerTargets.map { it.path }.toSet() + targets.getValue(kind).path
-        }
-        if (writable.any { it in frozen }) return null
-        return RecursiveRootGrant(graph, id,
-            "origin-task-" + kind.name.lowercase(), writable, frozen)
-    }
+        frozen: Set<String>): RecursiveRootGrant? =
+        InstalledRecursiveOriginPolicy.project(sessionId, stage, parentGraphId,
+            frozen, targets, developerTargets,
+            StageBudget(maxTokens, maxDurationMillis, maxDepth, maxChildren))
 
-    /** Actual running parent Linux lease is mandatory for runtime child execution. */
+    /** Real host snapshot and request provenance are mandatory at runtime. */
     private fun rootFor(request: StageRoleRequest, kind: StageKind): RecursiveRootGrant? {
         val live = parent.snapshot()
-        val stage = live.graph.stages.singleOrNull {
-            it.correlation.stageRunId == request.stageRunId &&
-                it.kind == kind && it.state == StageState.RUNNING
-        } ?: return null
-        if (request.graph.correlation != live.graph.correlation ||
-            request.graph.stages.singleOrNull {
-                it.correlation.stageRunId == request.stageRunId
-            }?.state != StageState.READY ||
-            stage.correlation.requestId != request.requestId ||
-            live.graph.correlation.sessionId != sessionId) return null
+        val stage = InstalledRecursiveOriginPolicy.liveStage(
+            request, kind, live, sessionId) ?: return null
         val frozen = live.graph.artifacts.filter { it.id in live.acceptedIds }
-            .map { it.declaredPath }.toSet()
+            .mapTo(mutableSetOf()) { it.declaredPath }
         return projectedGrant(stage, live.graph.correlation.graphId, frozen)
     }
 
