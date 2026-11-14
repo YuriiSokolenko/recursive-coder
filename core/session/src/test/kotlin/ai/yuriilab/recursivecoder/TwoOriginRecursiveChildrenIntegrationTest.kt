@@ -184,6 +184,18 @@ class TwoOriginRecursiveChildrenIntegrationTest {
         assertEquals("CROSS_ORIGIN_ARTIFACT_CONFLICT", denied.code)
     }
 
+    @Test fun secondOriginCannotInvalidateFirstOriginsAcceptedBytes() = runBlocking {
+        val firstHost = TrustedHost()
+        val result = RunTwoOriginRecursiveChildrenUseCase(clock).execute(
+            source(StageKind.SDD, firstHost),
+            source(StageKind.DEVELOP, TrustedHost(), onExecute = {
+                firstHost.bytes["specs/Leaf.md"] = "tampered".toByteArray()
+            }))
+        val denied = assertIs<TwoOriginRecursiveOutcome.Stopped>(result)
+        assertEquals(StageKind.SDD, denied.origin)
+        assertEquals("CHILD_EVIDENCE_STALE", denied.code)
+    }
+
     @Test fun lostSessionEventsMakeTwoOriginSuccessImpossible() = runBlocking {
         val failure = RecursiveEventSink { _: RecursiveEvent -> error("journal write failure") }
         val result = RunTwoOriginRecursiveChildrenUseCase(clock, failure).execute(
