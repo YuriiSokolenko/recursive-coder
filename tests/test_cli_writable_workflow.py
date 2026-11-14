@@ -185,11 +185,14 @@ class InstalledWritableWorkflowTest(unittest.TestCase):
         metadata = []
         if diagnostic.is_file():
             metadata = [{
-                "kind": item.get("metadata", {}).get("eventKind"),
+                "kind": (item.get("metadata", {}).get("recursiveEvent") or
+                         item.get("metadata", {}).get("roleEvent") or
+                         item.get("metadata", {}).get("stageState")),
                 "code": item.get("metadata", {}).get("code"),
                 "role": item.get("metadata", {}).get("role"),
                 "stage": item.get("metadata", {}).get("stageRunId"),
-            } for item in (json.loads(line) for line in diagnostic.read_text().splitlines())]
+            } for item in (json.loads(line) for line in
+                           diagnostic.read_text().splitlines())][-16:]
         self.assertEqual(result.returncode, 0,
                          result.stderr + result.stdout + " journal=" + repr(metadata))
         self.assertEqual(json.loads(result.stdout),
@@ -213,6 +216,8 @@ class InstalledWritableWorkflowTest(unittest.TestCase):
         result = self.authorized()
         self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
         self.assertEqual(json.loads(result.stdout)["code"], "CYCLIC_RECURSIVE_GRAPH")
+        self.assertFalse((self.base / "child-sdd/specs/FeatureFull.md").exists(),
+                         "Recursive policy must deny before writing child files")
         self.assertFalse((self.repo / "src/main/FeatureFullManifest.xml").exists())
 
     def test_installed_recursive_depth_limit_is_denied(self):
@@ -220,12 +225,16 @@ class InstalledWritableWorkflowTest(unittest.TestCase):
         result = self.authorized()
         self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
         self.assertEqual(json.loads(result.stdout)["code"], "DEPTH_LIMIT")
+        self.assertFalse((self.base / "child-sdd/specs/FeatureFull.md").exists(),
+                         "Recursive policy must deny before writing child files")
 
     def test_installed_recursive_budget_is_denied(self):
         self.recursive_fixture(child_tokens=10001)
         result = self.authorized()
         self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
         self.assertEqual(json.loads(result.stdout)["code"], "TOKEN_BUDGET_EXHAUSTED")
+        self.assertFalse((self.base / "child-sdd/specs/FeatureFull.md").exists(),
+                         "Recursive policy must deny before writing child files")
 
     def test_installed_recursive_reviewer_rejection_stays_failed(self):
         self.recursive_fixture(verdict="REJECT")
