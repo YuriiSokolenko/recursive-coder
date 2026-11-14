@@ -76,7 +76,7 @@ class InstalledChildRuntimePortsTest {
         assertEquals(listOf(150L, 20L), outputCaps)
         assertEquals(2, invocations)
         assertEquals(RecursiveUsage(260, 0), ledger.observed())
-        assertEquals(RecursiveUsage(150, 0), ledger.accounted())
+        assertEquals(RecursiveUsage(150, 3), ledger.accounted())
     }
 
     private fun authority() = StageToolAuthoritySource {
