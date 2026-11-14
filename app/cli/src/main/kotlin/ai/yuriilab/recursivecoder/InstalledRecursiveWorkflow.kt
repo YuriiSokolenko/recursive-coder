@@ -62,6 +62,47 @@ internal object InstalledRecursiveEvidencePolicy {
     }
 }
 
+/**
+ * Pure admission decision, including deliberate self-cycles and a bounded
+ * tool-call grant. No child host, Git checkout or model call can run here.
+ */
+internal object InstalledRecursiveAdmissionPolicy {
+    fun preflight(
+        kind: StageKind, grant: RecursiveRootGrant,
+        requestId: String, dependsOnSelf: Boolean,
+        tokens: Long, toolCalls: Long,
+        limits: RecursiveLimits, now: Instant
+    ): String? {
+        if (!now.isBefore(limits.deadline)) return "GLOBAL_DEADLINE"
+        val budget = grant.graph.budget
+        val root = RecursiveNode(
+            grant.graph.correlation.graphId, grant.stageRunId,
+            null, null, null, kind, grant.taskId,
+            emptySet(), 0, grant.writablePaths, grant.frozenPaths,
+            grant.allowedReadTools,
+            RecursiveUsage(budget.maxTokens, limits.maxToolCalls),
+            deadline = minOf(limits.deadline,
+                now.plusMillis(minOf(budget.maxDurationMillis,
+                    limits.maxStageDurationMillis))),
+            state = RecursiveNodeState.RUNNING
+        )
+        val childId = RecursiveGraphPolicy.childId(root.graphId,
+            root.stageRunId, requestId)
+        val proposed = RecursiveChildProposal(
+            requestId, root.graphId, root.stageRunId, kind,
+            "child-task-" + kind.name.lowercase(),
+            dependsOn = if (dependsOnSelf) setOf(childId) else emptySet(),
+            writablePaths = root.writablePaths, maxTokens = tokens,
+            maxToolCalls = toolCalls,
+            maxDurationMillis = minOf(60_000L, limits.maxStageDurationMillis)
+        )
+        val decision = RecursiveGraphPolicy.admit(
+            RecursiveSnapshot(listOf(root)), root.graphId, proposed,
+            limits, budget, now)
+        return (decision as? RecursiveDecision.Denied)?.code
+    }
+}
+
 internal class InstalledRecursiveWorkflow(
     private val sessionId: String,
     private val parent: LinuxFiveRoleWorkflowHost,
@@ -243,41 +284,13 @@ internal class InstalledRecursiveWorkflow(
         return host to childStageId
     }
 
-    /**
-     * Pure host-selected admission before creating or writing a child checkout.
-     * Post-execution scheduling repeats every policy, ownership, dependency and
-     * receipt check. Never perform unapproved physical effects first and
-     * discover a depth/tool/token/cycle denial only after the fact.
-     */
     private fun preflight(kind: StageKind, grant: RecursiveRootGrant): String? {
         val config = children.getValue(kind)
-        val now = Instant.now()
-        if (!now.isBefore(deadline)) return "GLOBAL_DEADLINE"
-        val budget = grant.graph.budget
-        val window = minOf(budget.maxDurationMillis, maxDurationMillis)
-        val root = RecursiveNode(
-            grant.graph.correlation.graphId, grant.stageRunId,
-            null, null, null, kind, grant.taskId,
-            emptySet(), 0, grant.writablePaths, grant.frozenPaths,
-            grant.allowedReadTools,
-            RecursiveUsage(budget.maxTokens, maxToolCalls),
-            deadline = minOf(deadline, now.plusMillis(window)),
-            state = RecursiveNodeState.RUNNING
-        )
-        val childId = RecursiveGraphPolicy.childId(root.graphId,
-            root.stageRunId, config.requestId)
-        val proposed = RecursiveChildProposal(
-            config.requestId, root.graphId, root.stageRunId, kind,
-            "child-task-" + kind.name.lowercase(),
-            dependsOn = if (config.dependsOnSelf) setOf(childId) else emptySet(),
-            writablePaths = root.writablePaths, maxTokens = tokenGrant(kind),
-            maxToolCalls = childToolCalls, maxDurationMillis = minOf(60_000L, maxDurationMillis)
-        )
-        val decision = RecursiveGraphPolicy.admit(RecursiveSnapshot(listOf(root)),
-            root.graphId, proposed,
+        return InstalledRecursiveAdmissionPolicy.preflight(
+            kind, grant, config.requestId, config.dependsOnSelf,
+            tokenGrant(kind), childToolCalls,
             RecursiveLimits(maxToolCalls, maxChildren, maxDurationMillis, deadline),
-            budget, now)
-        return (decision as? RecursiveDecision.Denied)?.code
+            Instant.now())
     }
 
     private suspend fun produce(kind: StageKind, grant: RecursiveRootGrant): String? {
