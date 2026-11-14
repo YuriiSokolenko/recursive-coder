@@ -176,7 +176,15 @@ class InstalledWritableWorkflowTest(unittest.TestCase):
     def test_installed_two_origin_recursive_cli_gates_parent_and_records_events(self):
         self.recursive_fixture()
         result = self.authorized()
-        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        diagnostic = (self.base / "recursive-events.jsonl")
+        metadata = []
+        if diagnostic.is_file():
+            metadata = [{
+                "type": item.get("type"), "code": item.get("code"),
+                "event": item.get("event"), "stage": item.get("stageRunId"),
+            } for item in (json.loads(line) for line in diagnostic.read_text().splitlines())]
+        self.assertEqual(result.returncode, 0,
+                         result.stderr + result.stdout + " journal=" + repr(metadata))
         self.assertEqual(json.loads(result.stdout),
                          {"outcome": "completed", "code": "SUCCEEDED"})
         self.assertEqual((self.repo / "src/main/FeatureFull.kt").read_text(), NEW)
