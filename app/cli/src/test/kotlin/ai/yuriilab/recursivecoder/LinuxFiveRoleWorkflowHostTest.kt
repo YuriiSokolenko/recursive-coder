@@ -184,8 +184,10 @@ class LinuxFiveRoleWorkflowHostTest {
             "host-session", emptySet())
         assertNull(noAuthority.manifestsFor(child))
         assertTrue(noAuthority.acceptedArtifactIds().isEmpty())
-        assertNull(LinuxAuthenticatedRecursiveChildIntegrationHost(host,
-            "other-session", setOf(childStageId)).manifestsFor(child))
+        val crossSession = LinuxAuthenticatedRecursiveChildIntegrationHost(host,
+            "other-session", setOf(childStageId))
+        assertNull(crossSession.manifestsFor(child))
+        assertTrue(crossSession.acceptedArtifactIds().isEmpty())
         // A live byte change revokes even a previously accepted host receipt.
         Files.writeString(repo.resolve(output.path), "post-acceptance tampering\\n")
         assertNull(host.authenticatedAcceptedStage(childStageId))
