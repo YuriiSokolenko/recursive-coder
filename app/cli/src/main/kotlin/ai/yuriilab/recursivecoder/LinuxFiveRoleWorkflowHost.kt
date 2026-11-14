@@ -35,6 +35,24 @@ data class AuthenticatedAcceptedStageReceipt(
     val usage: StageRoleUsage
 )
 
+/** Distinct call-local denial codes without changing the nullable integration port. */
+enum class ChildReceiptDenialCode {
+    MISSING_PARENT_IDENTITY,
+    INVALID_DERIVED_IDENTITY,
+    UNAUTHORIZED_STAGE,
+    HOST_RECEIPT_UNAVAILABLE,
+    SESSION_MISMATCH,
+    ORIGIN_MISMATCH,
+    CORRELATION_MISMATCH,
+    OUTSIDE_WRITABLE_SCOPE,
+    WRITES_FROZEN_PATH
+}
+
+sealed interface ChildReceiptVerification {
+    data class Accepted(val manifest: StageArtifactManifest) : ChildReceiptVerification
+    data class Denied(val code: ChildReceiptDenialCode) : ChildReceiptVerification
+}
+
 /**
  * One in-process, Linux-only five-role workflow authority.
  *
@@ -775,29 +793,52 @@ class LinuxAuthenticatedRecursiveChildIntegrationHost(
         authorizedChildStages.mapNotNull { verifiedChildReceipt(it)?.manifest?.id }
             .toSet()
 
-    override fun manifestsFor(child: RecursiveNode): List<StageArtifactManifest>? {
-        val parentId = child.parentGraphId ?: return null
-        val parentStageId = child.parentStageRunId ?: return null
-        val requestId = child.requestId ?: return null
-        if (child.stageRunId !in authorizedChildStages ||
-            child.graphId != RecursiveGraphPolicy.childId(parentId, parentStageId, requestId) ||
+    /**
+     * A call-local, reasoned child gate. The parent/child identity is never
+     * rewritten, and ALL writes in the authenticated proof must fit the
+     * child's writable scope and avoid every frozen path.
+     */
+    fun verifyChild(child: RecursiveNode): ChildReceiptVerification {
+        fun denied(code: ChildReceiptDenialCode) = ChildReceiptVerification.Denied(code)
+        val parentId = child.parentGraphId
+            ?: return denied(ChildReceiptDenialCode.MISSING_PARENT_IDENTITY)
+        val parentStageId = child.parentStageRunId
+            ?: return denied(ChildReceiptDenialCode.MISSING_PARENT_IDENTITY)
+        val requestId = child.requestId
+            ?: return denied(ChildReceiptDenialCode.MISSING_PARENT_IDENTITY)
+        if (child.graphId != RecursiveGraphPolicy.childId(parentId, parentStageId, requestId) ||
             child.stageRunId != RecursiveGraphPolicy.childStageId(child.graphId))
-            return null
-        val receipt = verifiedChildReceipt(child.stageRunId) ?: return null
-        if (receipt.origin != child.origin ||
-            receipt.graphCorrelation.sessionId != expectedSessionId ||
-            receipt.stageCorrelation.sessionId != expectedSessionId ||
-            receipt.graphCorrelation.graphId != child.graphId ||
-            receipt.graphCorrelation.parentGraphId != child.parentGraphId ||
-            receipt.graphCorrelation.parentStageRunId != child.parentStageRunId ||
+            return denied(ChildReceiptDenialCode.INVALID_DERIVED_IDENTITY)
+        if (child.stageRunId !in authorizedChildStages)
+            return denied(ChildReceiptDenialCode.UNAUTHORIZED_STAGE)
+        val receipt = host.authenticatedAcceptedStage(child.stageRunId)
+            ?: return denied(ChildReceiptDenialCode.HOST_RECEIPT_UNAVAILABLE)
+        if (receipt.graphCorrelation.sessionId != expectedSessionId ||
+            receipt.stageCorrelation.sessionId != expectedSessionId)
+            return denied(ChildReceiptDenialCode.SESSION_MISMATCH)
+        if (receipt.origin != child.origin)
+            return denied(ChildReceiptDenialCode.ORIGIN_MISMATCH)
+        if (receipt.graphCorrelation.graphId != child.graphId ||
+            receipt.graphCorrelation.parentGraphId != parentId ||
+            receipt.graphCorrelation.parentStageRunId != parentStageId ||
             receipt.stageCorrelation.stageRunId != child.stageRunId ||
             receipt.stageCorrelation.requestId != requestId ||
-            receipt.stageCorrelation.graphId != child.graphId ||
-            receipt.manifest.declaredPath !in child.writablePaths ||
-            receipt.manifest.declaredPath in child.frozenPaths)
-            return null
-        return listOf(receipt.manifest)
+            receipt.stageCorrelation.graphId != child.graphId)
+            return denied(ChildReceiptDenialCode.CORRELATION_MISMATCH)
+        val writtenPaths = receipt.writtenPostimages.keys
+        if (receipt.manifest.declaredPath !in child.writablePaths ||
+            !child.writablePaths.containsAll(writtenPaths))
+            return denied(ChildReceiptDenialCode.OUTSIDE_WRITABLE_SCOPE)
+        if (receipt.manifest.declaredPath in child.frozenPaths ||
+            writtenPaths.any { it in child.frozenPaths })
+            return denied(ChildReceiptDenialCode.WRITES_FROZEN_PATH)
+        return ChildReceiptVerification.Accepted(receipt.manifest)
     }
+
+    override fun manifestsFor(child: RecursiveNode): List<StageArtifactManifest>? =
+        (verifyChild(child) as? ChildReceiptVerification.Accepted)?.let {
+            listOf(it.manifest)
+        }
 
     override fun readBytes(path: String): ByteArray? = host.readBytes(path)
 }
