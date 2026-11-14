@@ -136,6 +136,11 @@ class InstalledWritableWorkflowTest(unittest.TestCase):
                 timeout=20,
             )
             self.assertEqual(0, process.returncode, process.stderr)
+            # Git does not track the empty role-output directories from the
+            # original fixture. Provision them as an explicit host setup step;
+            # do not weaken TrustedWriteRuntime's no-follow path checks.
+            for directory in ("specs", "tests/acceptance", "tests/unit", "src/main"):
+                (child / directory).mkdir(parents=True, exist_ok=True)
             (child / ".git/recursive-coder-isolated-workflow").write_text(
                 "isolated-workflow-v1\n"
             )
