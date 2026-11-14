@@ -200,7 +200,7 @@ class TwoOriginRecursiveChildrenIntegrationTest {
         assertEquals("src/main/example.kt", childArtifactConflictKey(
             "src/main/Example.kt"))
         assertEquals(childArtifactConflictKey("specs/Café.md"),
-            childArtifactConflictKey("specs/Cafe\\u0301.md"))
+            childArtifactConflictKey("specs/Cafe" + 0x0301.toChar() + ".md"))
         assertEquals(childArtifactConflictKey("src/main/FILE.kt"),
             childArtifactConflictKey("src/main/file.kt"))
         assertEquals(null, childArtifactConflictKey("src/main/../Escape.kt"))
