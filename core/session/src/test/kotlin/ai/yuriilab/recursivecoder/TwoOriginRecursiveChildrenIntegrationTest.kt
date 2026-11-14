@@ -82,7 +82,7 @@ class TwoOriginRecursiveChildrenIntegrationTest {
                     writablePaths = setOf(parentPath, leafPath),
                     maxTokens = 200, maxToolCalls = 4, maxDurationMillis = 1_000)
             )).child
-            assertEquals(RecursiveExecutionOutcome.Completed, context.executeChild(
+            val parentOutcome = context.executeChild(
                 parent.graphId, RecursiveStageExecutor { intermediate ->
                     val leaf = assertIs<RecursiveDecision.Allowed>(intermediate.requestChild(
                         RecursiveChildProposal("leaf-" + identity, intermediate.graphId,
@@ -104,10 +104,13 @@ class TwoOriginRecursiveChildrenIntegrationTest {
                         host.accept(parent, parentPath)
                     }
                     RecursiveExecutionOutcome.Completed
-                }))
-            if (acceptChildren) {
-                assertIs<ChildIntegrationDecision.Accepted>(context.integrateChildren())
+                })
+            if (!acceptChildren) {
+                return@RecursiveStageExecutor RecursiveExecutionOutcome.Failed(
+                    "CHILD_NOT_APPROVED")
             }
+            assertEquals(RecursiveExecutionOutcome.Completed, parentOutcome)
+            assertIs<ChildIntegrationDecision.Accepted>(context.integrateChildren())
             RecursiveExecutionOutcome.Completed
         }
         return RecursiveOriginSource(root,
