@@ -271,8 +271,9 @@ internal object WritableWorkflowCli {
                 only(entry, setOf("rootPath", "headSha", "branch",
                     "lockDirectory", "requestId"),
                     if (kind == StageKind.DEVELOP)
-                        setOf("dependsOnSelf", "outputArtifactId", "maxTokens")
-                    else setOf("dependsOnSelf", "maxTokens"))
+                        setOf("dependsOnSelf", "outputArtifactId",
+                            "maxTokens", "maxToolCalls")
+                    else setOf("dependsOnSelf", "maxTokens", "maxToolCalls"))
                 val childPath = Path.of(stringAt(entry, "rootPath"))
                 val childLockPath = Path.of(stringAt(entry, "lockDirectory"))
                 val childHead = stringAt(entry, "headSha")
@@ -318,10 +319,14 @@ internal object WritableWorkflowCli {
                 // adversarial fixture knobs, never live-provider features.
                 val childTokenOverride = if ("maxTokens" in entry)
                     strictLong(entry["maxTokens"], "child maxTokens") else null
+                val childToolOverride = if ("maxToolCalls" in entry)
+                    strictLong(entry["maxToolCalls"], "child maxToolCalls") else null
                 require(childTokenOverride == null ||
                     childTokenOverride in 1..1000000)
+                require(childToolOverride == null || childToolOverride in 0..128)
                 InstalledChildCheckout(childRoot, childHead, childBranch,
-                    childLocks, requestId, self, overrideId, childTokenOverride)
+                    childLocks, requestId, self, overrideId,
+                    childTokenOverride, childToolOverride)
             }
         }
         val maxDepth = optionalInt(limits, "maxDepth", 1)
