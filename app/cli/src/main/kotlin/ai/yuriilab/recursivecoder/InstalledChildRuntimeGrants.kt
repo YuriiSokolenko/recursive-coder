@@ -88,8 +88,8 @@ internal class InstalledChildRuntimeMeter(
             usageUncertain = true
             return "CHILD_USAGE_UNAVAILABLE"
         }
-        if (usageUncertain) return "CHILD_USAGE_INVALID"
         if (tokens > admitted.granted.tokens) return "TOKEN_BUDGET_EXHAUSTED"
+        if (usageUncertain) return "CHILD_USAGE_INVALID"
         return deadlineDenial()
     }
 
