@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -321,6 +322,112 @@ class InstalledWritableWorkflowTest(unittest.TestCase):
         # The failed Developer check leaves its write for reconciliation.
         self.assertNotEqual(self.original_head, self.git("rev-parse", "HEAD"))
         self.assertEqual(NEW, (self.repo / "src/main/FeatureFull.kt").read_text())
+
+
+    def test_opt_in_session_events_are_correlated_and_redacted(self):
+        plan, approvals = self.fixture()
+        journal_path = self.base / "workflow-events.jsonl"
+        plan["eventsPath"] = str(journal_path)
+        self.plan_path.write_text(json.dumps(plan))
+        approvals["planSha256"] = sha(self.plan_path.read_bytes())
+        self.approval_path.write_text(json.dumps(approvals))
+        result = self.authorized()
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        records = [json.loads(line) for line in journal_path.read_text().splitlines()]
+        self.assertGreaterEqual(len(records), 10)
+        self.assertEqual(list(range(1, len(records) + 1)),
+                         [record["sequence"] for record in records])
+        for index, record in enumerate(records):
+            self.assertEqual(record["sessionId"], "installed-fixture")
+            self.assertEqual(record["version"], "1.0")
+            self.assertEqual(record["redaction"]["mode"], "metadata-only")
+            self.assertEqual(record["causationId"],
+                             None if index == 0 else records[index - 1]["eventId"])
+            self.assertNotIn("Perform SDD", json.dumps(record))
+            self.assertNotIn("rawToolOutput", record.get("metadata", {}))
+        roles = {r["metadata"]["role"] for r in records
+                 if "roleEvent" in r.get("metadata", {})}
+        self.assertEqual(roles, {"SDD", "ATDD", "TDD", "DEVELOPER", "REVIEWER"})
+        self.assertTrue(any(r["metadata"].get("verdict") == "ACCEPT"
+                            for r in records))
+
+    def with_journal(self, events_path, *, verdict="ACCEPT"):
+        plan, approvals = self.fixture(verdict=verdict)
+        plan["eventsPath"] = str(events_path)
+        self.plan_path.write_text(json.dumps(plan))
+        approvals["planSha256"] = sha(self.plan_path.read_bytes())
+        self.approval_path.write_text(json.dumps(approvals))
+        return events_path
+
+    def test_journal_open_failure_reports_unavailable_before_any_write(self):
+        path = self.with_journal(self.base / "missing-parent" / "events.jsonl")
+        result = self.authorized()
+        self.assert_denial(result, "EVENT_JOURNAL_UNAVAILABLE")
+        self.assertFalse(path.exists())
+        self.assertFalse((self.repo / "specs/FeatureFull.md").exists())
+        self.assertEqual("", self.git("status", "--porcelain=v1"))
+
+    def test_event_journal_path_denials_are_typed_and_precede_stage_writes(self):
+        for path in (
+            "relative-events.jsonl",
+            str(self.repo / "events.jsonl"),
+            str(self.base / "locks" / "events.jsonl"),
+            str(self.base),  # parent of the lock scope
+            "bad" + chr(0) + "events.jsonl",  # Path.of throws InvalidPathException
+        ):
+            with self.subTest(path=repr(path)):
+                self.with_journal(path)
+                result = self.authorized()
+                self.assert_denial(result, "INVALID_EVENT_JOURNAL_PATH")
+                self.assertFalse((self.repo / "specs/FeatureFull.md").exists())
+                self.assertEqual("", self.git("status", "--porcelain=v1"))
+
+    def test_lost_journal_after_started_events_requires_reconciliation(self):
+        journal = self.with_journal(self.base / "lost-events.jsonl")
+        self.assertTrue(CLI.is_file(), "Run installDist before installed acceptance")
+        proc = subprocess.Popen(
+            [str(CLI), "workflow", str(self.plan_path),
+             "--approvals", str(self.approval_path), "--enable-stage-writes"],
+            cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        try:
+            # Wait for an acknowledged event before removing the journal pathname.
+            # Linux keeps the writer's open fd valid, but finish() must fail
+            # to verify the absent on-disk JSONL and return reconciliation_required.
+            deadline = time.monotonic() + 50
+            while time.monotonic() < deadline:
+                if journal.exists() and journal.stat().st_size > 0:
+                    break
+                if proc.poll() is not None:
+                    self.fail("Workflow completed before journal was observable")
+                time.sleep(0.01)
+            else:
+                self.fail("Workflow did not create a journal with acknowledged events")
+            journal.unlink()
+            stdout, stderr = proc.communicate(timeout=150)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.communicate(timeout=20)
+        self.assertEqual(proc.returncode, 1, stdout + stderr)
+        self.assertEqual(json.loads(stdout),
+                         {"outcome": "reconciliation_required",
+                          "code": "EVENT_JOURNAL_UNCONFIRMED"})
+        self.assertFalse(journal.exists())
+        self.assertNotEqual(self.original_head, self.git("rev-parse", "HEAD"))
+        self.assertEqual(NEW, (self.repo / "src/main/FeatureFull.kt").read_text())
+
+    def test_existing_event_journal_is_rejected_before_writing(self):
+        plan, approvals = self.fixture()
+        journal_path = self.base / "workflow-events.jsonl"
+        journal_path.write_text("untouched\n")
+        plan["eventsPath"] = str(journal_path)
+        self.plan_path.write_text(json.dumps(plan))
+        approvals["planSha256"] = sha(self.plan_path.read_bytes())
+        self.approval_path.write_text(json.dumps(approvals))
+        result = self.authorized()
+        self.assert_denial(result, "INVALID_EVENT_JOURNAL_PATH")
+        self.assertEqual(journal_path.read_text(), "untouched\n")
 
 
 if __name__ == "__main__":

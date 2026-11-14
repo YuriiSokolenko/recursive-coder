@@ -18,6 +18,18 @@ opening any stage. There is no interactive or implicit authorization fallback.
 The workflow plan is UTF-8 JSON (version 1, maximum 64 KiB), with exactly:
 
 - `sessionId`: a valid host identifier (short enough to fit suffixed stage IDs).
+- Optional `eventsPath`: absolute path of a **new** JSONL Session Protocol v1
+  journal outside the isolated checkout and lock scope. Existing files are
+  never overwritten. The output is a correlated, metadata-only audit stream
+  for five role invocations, preparation acceptance and Reviewer decisions.
+  An unavailable journal prevents stage execution (`EVENT_JOURNAL_UNAVAILABLE`).
+  A journal append/close/checksum failure during execution prevents a
+  **successful outcome from being published**, but stages may **already have
+  written to or committed the checkout** before the failure is detected.
+  In this case the CLI returns `reconciliation_required` with
+  `EVENT_JOURNAL_UNCONFIRMED`; this is not a rollback. A stopped/denied
+  stage result is also upgraded to this uncertain outcome if the journal
+  cannot be verified. Crash recovery remains #10.
 - `workspace`: `rootPath`, `headSha` (exact 40-digit lowercase Git HEAD),
   `branch`, `lockDirectory` (absolute external lock scope).
 - `artifacts`: keys `SDD`, `ATDD`, `TDD`, `DEVELOP`; values each contain
@@ -89,7 +101,14 @@ automatically retries, and **may leave uncommitted workspace changes**.
 An exit 1 **without a JSON body** can instead mean an uncaught JVM-fatal
 `Error`; treat the checkout as uncertain and reconcile it independently.
 Do not reuse this checkout after an uncertain outcome without independent
-reconciliation.
+reconciliation. A journal file is exclusively created with `CREATE_NEW`.
+If an attempt created a file before failing, it is deliberately **not**
+deleted or overwritten (even when journal construction fails after open).
+Close the sink, preserve it as diagnostic evidence, and provision a **new
+journal path** on retry after independently reconciling any uncertain
+workspace state. Invalid, relative, overlapping, or pre-existing journal
+paths yield `INVALID_EVENT_JOURNAL_PATH`; a failed open yields
+`EVENT_JOURNAL_UNAVAILABLE`.
 
 ## Test and scope
 
@@ -100,13 +119,31 @@ dirty checkout, independent Reviewer rejection and protected test paths.
 It additionally checks missing approvals, markers, canonical paths (including
 symlinked parents), wrong HEAD/branch, per-artifact digests, invalid checks,
 `NEEDS_HUMAN`, and genuine post-write failure requiring reconciliation.
+Journal acceptance additionally exercises unavailable files, relative/NUL/
+checkout/lock-overlapping paths, loss of the on-disk journal after events
+were emitted, and the resulting `EVENT_JOURNAL_UNCONFIRMED` decision.
 The GitHub `kotlin` job runs these cases after `installDist`. Missing bwrap
 or user namespace support in CI is a **failure**, not a silent skip.
 
 The offline provider uses the existing `FakeModel` capability handshake plus
 fixed per-role proposals; it is **not** a production LLM completion provider.
-The role usage is fixture data, not measured token consumption. The result
-does not prove two-origin child-graph integration, SessionEvent correlation,
-production provider compatibility, durable checkpoint/crash-resume (#10) or
-an externally authenticated human approval system. Issue #79 remains open
+The role usage is fixture data, not measured token consumption.
+
+The `core:session` two-origin coordinator independently schedules and
+integrates nested child graphs under **distinct host-supplied trusted
+integration sources**, rejects repeated origins and cross-origin artifact
+conflicts, and sends both streams to one correlated SessionEvent sink.
+Its current tests use two nested origins (SDD and Developer) and trusted fake
+receipt stores. This coordinator is deliberately **not yet connected** to
+the production Linux write/check host or installed CLI: an executor may
+request a child, but cannot mint the authenticated receipts required for
+parent integration. Never treat in-memory fixture receipts as production
+attestation. The installed workflow now verifies five-role SessionEvent correlation when
+an events path is supplied, but does not yet prove installed, production-host
+two-origin child-graph integration, production provider compatibility,
+durable checkpoint/crash-resume (#10) or
+an externally authenticated human approval system. Child manifest path
+conflicts are compared using NFC-normalized, case-folded relative paths even
+on case-sensitive hosts; this intentionally rejects portable aliases.
+Issue #79 remains open
 until the nested and journal acceptance suites are delivered.

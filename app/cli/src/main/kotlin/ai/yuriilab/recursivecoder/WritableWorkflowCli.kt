@@ -2,8 +2,10 @@ package ai.yuriilab.recursivecoder
 
 import java.nio.file.Files
 import java.nio.file.LinkOption
+import java.nio.file.InvalidPathException
 import java.nio.file.Path
 import java.security.MessageDigest
+import java.time.Clock
 import java.time.Instant
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.*
@@ -55,8 +57,11 @@ internal object WritableWorkflowCli {
     private fun longAt(value: JsonObject, name: String): Long =
         (value.getValue(name) as? JsonPrimitive)?.longOrNull
             ?: error("Invalid $name")
-    private fun only(value: JsonObject, names: Set<String>) {
-        require(value.keys == names) { "Unexpected workflow configuration fields" }
+    private fun only(value: JsonObject, names: Set<String>,
+        optional: Set<String> = emptySet()) {
+        require(value.keys.containsAll(names) && (value.keys - names).all { it in optional }) {
+            "Unexpected workflow configuration fields"
+        }
     }
 
     private fun input(path: Path): ByteArray {
@@ -94,9 +99,10 @@ internal object WritableWorkflowCli {
         }
         val planBytes = input(planPath)
         val plan = parse(planBytes)
-        only(plan, setOf("version", "sessionId", "workspace", "artifacts",
+        val requiredPlanFields = setOf("version", "sessionId", "workspace", "artifacts",
             "instructions", "developerTargets", "fakeProposals",
-            "fakeReviewerVerdict", "check", "limits"))
+            "fakeReviewerVerdict", "check", "limits")
+        only(plan, requiredPlanFields, setOf("eventsPath"))
         require(longAt(plan, "version") == 1L)
         val approval = parse(input(approvalPath))
         only(approval, setOf("version", "planSha256", "approvedSha256"))
@@ -129,6 +135,27 @@ internal object WritableWorkflowCli {
         val realLocks = realLocation(locks)
         gate(!realLocks.startsWith(checkout) && !checkout.startsWith(realLocks),
             "LOCK_OVERLAPS_CHECKOUT")
+        // An optional journal is exclusively created outside the checkout and
+        // lock scope. The journal is metadata-only, never an artifact approval.
+        val eventsPath = plan["eventsPath"]?.let {
+            val name = (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content
+                ?: throw WorkflowDenied("INVALID_EVENT_JOURNAL_PATH")
+            val path = try { Path.of(name) }
+                catch (_: InvalidPathException) {
+                    throw WorkflowDenied("INVALID_EVENT_JOURNAL_PATH")
+                }
+            gate(path.isAbsolute, "INVALID_EVENT_JOURNAL_PATH")
+            val location = try { realLocation(path) }
+                catch (_: Exception) {
+                    throw WorkflowDenied("INVALID_EVENT_JOURNAL_PATH")
+                }
+            gate(!location.startsWith(checkout) &&
+                !location.startsWith(realLocks) &&
+                !realLocks.startsWith(location) &&
+                !Files.exists(path, LinkOption.NOFOLLOW_LINKS),
+                "INVALID_EVENT_JOURNAL_PATH")
+            path
+        }
         val marker = checkout.resolve(".git/recursive-coder-isolated-workflow")
         gate(Files.isRegularFile(marker, LinkOption.NOFOLLOW_LINKS) &&
             Files.readString(marker) == "isolated-workflow-v1\n",
@@ -220,17 +247,48 @@ internal object WritableWorkflowCli {
             RunPreparationStageUseCase(executor, host, host),
             RunDeveloperStageUseCase(executor, host, host),
             RunReviewerStageUseCase(executor, host.reviewerHost), host)
+        val journal = try {
+            eventsPath?.let { path ->
+                // If construction fails *after* CREATE_NEW, release the open
+                // writer. Keep the file as diagnostic evidence: a retry must
+                // use a newly provisioned path, never overwrite an old journal.
+                val sink = JsonlEventSink.open(path)
+                try {
+                    SessionEventJournal(sessionId, sessionId + "-trace",
+                        sessionId + "-workflow", Clock.systemUTC(), sink)
+                } catch (failure: Exception) {
+                    try { sink.close() } catch (closing: Exception) {
+                        failure.addSuppressed(closing)
+                    }
+                    throw failure
+                }
+            }
+        } catch (_: Exception) {
+            return "denied" to "EVENT_JOURNAL_UNAVAILABLE"
+        }
         val result = try {
             runBlocking {
                 runner.execute(FiveRoleWorkflowPlan(targets, stageInstructions,
                     developerTargets, model, Instant.now().plusSeconds(deadlineSeconds),
-                    Cancellation()), StageRoleEventSink { }, PreparationStageEventSink { },
-                    ReviewerDecisionSink { })
+                    Cancellation()),
+                    journal?.let(::CorrelatedRoleSessionEvents) ?: StageRoleEventSink { },
+                    journal?.let(::CorrelatedPreparationSessionEvents)
+                        ?: PreparationStageEventSink { },
+                    journal?.let(::CorrelatedReviewerSessionEvents)
+                        ?: ReviewerDecisionSink { })
             }
         } catch (_: Exception) {
             // A stage may have written or advanced HEAD before an unexpected
             // failure. Never classify an unconfirmed runtime as a safe denial.
+            try { journal?.close() } catch (_: Exception) { }
             return "reconciliation_required" to "WORKFLOW_EXECUTION_UNCONFIRMED"
+        }
+        // A failed or partially flushed event stream cannot accompany a
+        // successful workflow. Always verify the real bytes after close.
+        if (journal != null) {
+            try { journal.finish() } catch (_: Exception) {
+                return "reconciliation_required" to "EVENT_JOURNAL_UNCONFIRMED"
+            }
         }
         return when (result) {
             is FiveRoleWorkflowOutcome.Completed ->
