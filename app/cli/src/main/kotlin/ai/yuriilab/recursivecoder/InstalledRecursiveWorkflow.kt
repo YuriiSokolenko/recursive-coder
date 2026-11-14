@@ -39,7 +39,7 @@ internal class InstalledRecursiveWorkflow(
     private val maxChildren: Int,
     private val maxToolCalls: Long,
     private val childTokens: Long,
-    private val journal: SessionEventJournal?
+    private var journal: SessionEventJournal?
 ) : FiveRoleWorkflowHost {
     private data class Origin(
         val kind: StageKind,
@@ -51,8 +51,13 @@ internal class InstalledRecursiveWorkflow(
 
     private val origins = linkedMapOf<StageKind, Origin>()
     private var integrated: TwoOriginRecursiveOutcome.Completed? = null
-    private val recursiveEvents: RecursiveEventSink =
-        journal?.let(::CorrelatedRecursiveSessionEvents) ?: RecursiveEventSink { }
+    private val recursiveEvents: RecursiveEventSink
+        get() = journal?.let(::CorrelatedRecursiveSessionEvents) ?: RecursiveEventSink { }
+
+    fun attachJournal(value: SessionEventJournal?) {
+        check(journal == null) { "Recursive journal already attached" }
+        journal = value
+    }
 
     private fun digest(text: String): String = MessageDigest.getInstance("SHA-256")
         .digest(text.toByteArray(Charsets.UTF_8))
