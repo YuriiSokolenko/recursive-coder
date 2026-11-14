@@ -284,10 +284,45 @@ class InstalledWritableWorkflowTest(unittest.TestCase):
     def test_installed_recursive_protected_test_mutation_is_rejected(self):
         self.recursive_fixture(protected=True)
         result = self.authorized()
-        self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
-        self.assertEqual(json.loads(result.stdout)["code"],
-                         "CHILD_DEVELOPER_NOT_ACCEPTED")
+        self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+        self.assertEqual(json.loads(result.stdout), {
+            "outcome": "reconciliation_required",
+            "code": "CHILD_EXECUTION_UNCONFIRMED",
+        })
+        child = self.base / "child-develop"
+        # The child Developer's bootstrap stages already wrote/committed.
+        # An ordinary stopped/denied result must not conceal that checkout.
+        self.assertEqual((child / "specs/FeatureFull.md").read_text(), SPEC)
+        self.assertEqual((child / "tests/unit/FeatureFullTest.kt").read_text(), TDD)
+        self.assertNotEqual(self.original_head,
+                            subprocess.run(["/usr/bin/git", "-C", str(child),
+                                            "rev-parse", "HEAD"],
+                                           text=True, capture_output=True,
+                                           check=True).stdout.strip())
         self.assertEqual((self.repo / "src/main/FeatureFull.kt").read_text(), OLD)
+        self.assertEqual((self.repo / "tests/unit/FeatureFullTest.kt").read_text(), TDD)
+        self.assertFalse((self.repo / "src/main/FeatureFullManifest.xml").exists())
+
+    def test_stopped_developer_child_with_bootstrap_writes_requires_reconciliation(self):
+        plan = self.recursive_fixture()
+        plan["fakeProposals"]["DEVELOP"] = '{"files":[invalid-json'
+        self.plan_path.write_text(json.dumps(plan, separators=(",", ":")))
+        approval = json.loads(self.approval_path.read_text())
+        approval["planSha256"] = sha(self.plan_path.read_bytes())
+        self.approval_path.write_text(json.dumps(approval))
+        result = self.authorized()
+        self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+        self.assertEqual(json.loads(result.stdout), {
+            "outcome": "reconciliation_required",
+            "code": "CHILD_EXECUTION_UNCONFIRMED",
+        })
+        child = self.base / "child-develop"
+        self.assertEqual((child / "specs/FeatureFull.md").read_text(), SPEC)
+        self.assertEqual((child / "tests/acceptance/FeatureFull.feature").read_text(),
+                         ATDD)
+        self.assertFalse((child / "src/main/FeatureFullManifest.xml").exists())
+        self.assertEqual((self.repo / "src/main/FeatureFull.kt").read_text(), OLD)
+        self.assertFalse((self.repo / "src/main/FeatureFullManifest.xml").exists())
 
     def test_installed_recursive_cross_origin_artifact_id_conflict(self):
         self.recursive_fixture(integration_conflict=True)
