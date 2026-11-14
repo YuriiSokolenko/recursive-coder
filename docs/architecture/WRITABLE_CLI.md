@@ -45,9 +45,11 @@ all four write-role names to the **exact** expected output SHA-256 values).
 For the Developer, the approved output is the generated implementation
 manifest, not just an unverified model source. The candidate role, artifact ID,
 path and digest must all match the independently provisioned approval file;
-otherwise the trusted host rejects it. The approval callback is local and
-noninteractive: it is **not** a signature, user identity assertion or human
-approval workflow.
+otherwise the trusted host rejects it. The plan hash covers `fakeReviewerVerdict`: changing that fixture invalidates
+the approvals. There is no separate signed Reviewer verdict; this coupling is
+only for fake-mode tests and is not a live-provider design. The callback is
+local and noninteractive: it is **not** a signature, user identity assertion
+or human approval workflow.
 
 ## Checkout and trust boundary
 
@@ -60,7 +62,9 @@ This is a deliberate operator assertion, **not** a sandbox of the workspace;
 isolate checkout access from untrusted same-UID processes separately.
 
 The plan, approval file, and shared lock directory must live **outside** the
-checkout. The checkout cannot be the CLI process's current working directory.
+checkout, even through symlinked parent directories. The CLI resolves real
+locations, including the existing parent prefix of a new lock directory.
+The CLI process's working directory cannot be **inside** the checkout.
 The Linux production host checks the exact HEAD, branch, local Git
 configuration and pristine index/worktree before beginning. The host owns
 StageGraph transitions, HMAC-backed receipts, accepted artifacts, frozen
@@ -70,6 +74,11 @@ the protected-spec/test write policy.
 
 On successful execution, the command reports `{"outcome":"completed",
 "code":"SUCCEEDED"}` and exits 0. Stopped/rejected workflows exit 2.
+Pre-execution denials exit 2 with JSON `{"outcome":"denied","code":"..."}`
+and fixed, non-sensitive codes such as `APPROVAL_MISMATCH`,
+`MARKER_MISSING`, `CONFIG_INSIDE_CHECKOUT`, `LOCK_OVERLAPS_CHECKOUT`,
+or a typed Git baseline code. Input, paths, check output and prompts are
+never reflected into diagnostic messages.
 A host-uncertain state requiring out-of-band reconciliation exits 1, never
 automatically retries, and **may leave uncommitted workspace changes**.
 Do not reuse this checkout after an uncertain outcome without independent
@@ -81,6 +90,9 @@ reconciliation.
 not an in-process shortcut. It covers all five roles with a real Git worktree
 and sandbox checks, a clean final baseline, missing opt-in, stale approvals,
 dirty checkout, independent Reviewer rejection and protected test paths.
+It additionally checks missing approvals, markers, canonical paths (including
+symlinked parents), wrong HEAD/branch, per-artifact digests, invalid checks,
+`NEEDS_HUMAN`, and genuine post-write failure requiring reconciliation.
 The GitHub `kotlin` job runs these cases after `installDist`. Missing bwrap
 or user namespace support in CI is a **failure**, not a silent skip.
 

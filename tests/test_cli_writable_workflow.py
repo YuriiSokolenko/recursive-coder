@@ -193,6 +193,129 @@ class InstalledWritableWorkflowTest(unittest.TestCase):
         self.assertEqual(OLD, (self.repo / "src/main/FeatureFull.kt").read_text())
         self.assertEqual("", self.git("status", "--porcelain=v1"))
 
+    def assert_denial(self, result, code):
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout),
+                         {"outcome": "denied", "code": code})
+        self.assertEqual(self.original_head, self.git("rev-parse", "HEAD"))
+
+    def test_missing_approvals_reports_required_flag(self):
+        self.fixture()
+        result = self.invoke("--enable-stage-writes")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--approvals is required", result.stderr)
+        self.assertEqual(self.original_head, self.git("rev-parse", "HEAD"))
+
+    def test_missing_or_invalid_isolation_marker(self):
+        for value in (None, "bad-marker\\n"):
+            with self.subTest(value=value):
+                self.fixture()
+                marker = self.repo / ".git/recursive-coder-isolated-workflow"
+                if value is None:
+                    marker.unlink()
+                else:
+                    marker.write_text(value)
+                self.assert_denial(self.authorized(), "MARKER_MISSING")
+                marker.write_text("isolated-workflow-v1\\n")
+
+    def test_plan_via_symlinked_parent_into_checkout_is_rejected(self):
+        self.fixture()
+        inside = self.repo / "operator"
+        inside.mkdir()
+        (inside / "plan.json").write_bytes(self.plan_path.read_bytes())
+        alias = self.base / "plan-alias"
+        alias.symlink_to(self.repo, target_is_directory=True)
+        self.plan_path = alias / "operator/plan.json"
+        self.assert_denial(self.authorized(), "CONFIG_INSIDE_CHECKOUT")
+
+    def test_approvals_via_symlinked_parent_into_checkout_are_rejected(self):
+        self.fixture()
+        inside = self.repo / "operator"
+        inside.mkdir()
+        (inside / "approvals.json").write_bytes(self.approval_path.read_bytes())
+        alias = self.base / "approvals-alias"
+        alias.symlink_to(self.repo, target_is_directory=True)
+        self.approval_path = alias / "operator/approvals.json"
+        self.assert_denial(self.authorized(), "CONFIG_INSIDE_CHECKOUT")
+
+    def test_new_lock_path_via_symlinked_parent_into_checkout_is_rejected(self):
+        plan, approval = self.fixture()
+        inside = self.repo / "operator"
+        inside.mkdir()
+        alias = self.base / "locks-alias"
+        alias.symlink_to(inside, target_is_directory=True)
+        plan["workspace"]["lockDirectory"] = str(alias / "new-locks")
+        self.plan_path.write_text(json.dumps(plan))
+        approval["planSha256"] = sha(self.plan_path.read_bytes())
+        self.approval_path.write_text(json.dumps(approval))
+        self.assert_denial(self.authorized(), "LOCK_OVERLAPS_CHECKOUT")
+
+    def test_cwd_below_checkout_is_rejected(self):
+        self.fixture()
+        result = subprocess.run(
+            [str(CLI), "workflow", str(self.plan_path),
+             "--approvals", str(self.approval_path), "--enable-stage-writes"],
+            cwd=self.repo / "src/main", text=True, capture_output=True, timeout=20
+        )
+        self.assert_denial(result, "CWD_INSIDE_CHECKOUT")
+
+    def test_head_and_branch_rejected_with_git_baseline_codes(self):
+        for field, value, code in (
+            ("branch", "another-branch", "STAGE_BRANCH_CHANGED"),
+            ("headSha", "0" * 40, "STAGE_BASELINE_CHANGED"),
+            ("branch", "../bad-ref", "INVALID_GIT_BASELINE"),
+        ):
+            with self.subTest(field=field, value=value):
+                plan, approval = self.fixture()
+                plan["workspace"][field] = value
+                self.plan_path.write_text(json.dumps(plan))
+                approval["planSha256"] = sha(self.plan_path.read_bytes())
+                self.approval_path.write_text(json.dumps(approval))
+                self.assert_denial(self.authorized(), code)
+
+    def test_per_artifact_digest_mismatch_is_not_approved(self):
+        _, approval = self.fixture()
+        approval["approvedSha256"]["SDD"] = "0" * 64
+        self.approval_path.write_text(json.dumps(approval))
+        result = self.authorized()
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout)["code"], "HOST_REJECTED")
+        self.assertEqual(self.original_head, self.git("rev-parse", "HEAD"))
+
+    def test_true_executable_is_not_meaningful_check(self):
+        plan, approval = self.fixture()
+        plan["check"] = {"executable": "/usr/bin/true", "arguments": []}
+        self.plan_path.write_text(json.dumps(plan))
+        approval["planSha256"] = sha(self.plan_path.read_bytes())
+        self.approval_path.write_text(json.dumps(approval))
+        self.assert_denial(self.authorized(), "INVALID_WORKFLOW_CONFIGURATION")
+
+    def test_needs_human_reviewer_does_not_claim_success(self):
+        self.fixture(verdict="NEEDS_HUMAN")
+        result = self.authorized()
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout),
+                         {"outcome": "stopped", "code": "REVIEWER_NEEDS_HUMAN"})
+        self.assertEqual("", self.git("status", "--porcelain=v1"))
+
+    def test_post_write_failed_check_returns_reconciliation_required(self):
+        plan, approval = self.fixture()
+        # SDD, ATDD and TDD see OLD and pass. Developer writes NEW first;
+        # the same check then fails and the host must not claim safe denial.
+        plan["check"]["arguments"] = [
+            "-q", "fun featureFull() = 1", "src/main/FeatureFull.kt"
+        ]
+        self.plan_path.write_text(json.dumps(plan))
+        approval["planSha256"] = sha(self.plan_path.read_bytes())
+        self.approval_path.write_text(json.dumps(approval))
+        result = self.authorized()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        response = json.loads(result.stdout)
+        self.assertEqual(response["outcome"], "reconciliation_required")
+        self.assertNotEqual(response["code"], "SUCCEEDED")
+        self.assertEqual(self.original_head, self.git("rev-parse", "HEAD"))
+        self.assertEqual(NEW, (self.repo / "src/main/FeatureFull.kt").read_text())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -137,6 +137,7 @@ private class WritableWorkflowCommand : CliktCommand(name = "workflow") {
 
     override fun run() {
         if (!enabled) throw UsageError("Writable workflow requires --enable-stage-writes")
+        if (approvalPaths.isEmpty()) throw UsageError("--approvals is required")
         val approvals = once(approvalPaths, "--approvals", Path.of(""))
         if (!approvals.isAbsolute || !planPath.isAbsolute)
             throw UsageError("Absolute plan and approval paths are required")

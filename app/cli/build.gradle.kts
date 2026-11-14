@@ -16,7 +16,6 @@ dependencies {
     implementation(libs.koin.core)
     testImplementation(libs.koin.test)
     implementation(libs.coroutines.core)
-    testImplementation(libs.coroutines.core)
 }
 
 application {

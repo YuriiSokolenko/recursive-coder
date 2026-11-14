@@ -24,6 +24,26 @@ internal object WritableWorkflowCli {
     private val digestPattern = Regex("[0-9a-f]{64}")
     private val headPattern = Regex("[0-9a-f]{40}")
 
+    private class WorkflowDenied(val code: String) : IllegalArgumentException()
+
+    private fun gate(allowed: Boolean, code: String) {
+        if (!allowed) throw WorkflowDenied(code)
+    }
+
+    /** Resolve symlinked parents, including the existing prefix of new lock paths. */
+    private fun realLocation(path: Path): Path {
+        require(path.isAbsolute)
+        var prefix = path.normalize()
+        val missing = ArrayDeque<Path>()
+        while (!Files.exists(prefix, LinkOption.NOFOLLOW_LINKS)) {
+            missing.addFirst(prefix.fileName ?: error("Invalid external path"))
+            prefix = prefix.parent ?: error("Invalid external path")
+        }
+        var resolved = prefix.toRealPath()
+        for (component in missing) resolved = resolved.resolve(component)
+        return resolved.normalize()
+    }
+
     private fun sha(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")
         .digest(bytes).joinToString("") { "%02x".format(it) }
 
@@ -51,10 +71,11 @@ internal object WritableWorkflowCli {
 
     fun execute(planPath: Path, approvalPath: Path): Int {
         val outcome = try { run(planPath, approvalPath) }
-        catch (_: Exception) {
-            // No file contents, prompt, check output or credential may be logged here.
-            System.err.println("Writable workflow configuration or execution denied")
-            return 2
+        catch (denied: WorkflowDenied) {
+            "denied" to denied.code
+        } catch (_: Exception) {
+            // Never expose paths, prompts, Git output, checks or credentials.
+            "denied" to "INVALID_WORKFLOW_CONFIGURATION"
         }
         System.out.println(buildJsonObject {
             put("outcome", outcome.first)
@@ -79,10 +100,9 @@ internal object WritableWorkflowCli {
         require(longAt(plan, "version") == 1L)
         val approval = parse(input(approvalPath))
         only(approval, setOf("version", "planSha256", "approvedSha256"))
-        require(longAt(approval, "version") == 1L &&
-            stringAt(approval, "planSha256") == sha(planBytes)) {
-            "Approvals do not match the exact plan bytes"
-        }
+        gate(longAt(approval, "version") == 1L &&
+            stringAt(approval, "planSha256") == sha(planBytes),
+            "APPROVAL_MISMATCH")
         val approved = objectAt(approval, "approvedSha256")
         require(approved.keys == writers.map { it.name }.toSet())
         val permittedDigests = writers.associateWith { kind ->
@@ -95,25 +115,30 @@ internal object WritableWorkflowCli {
         val locks = Path.of(stringAt(workspace, "lockDirectory"))
         val expectedHead = stringAt(workspace, "headSha")
         val branch = stringAt(workspace, "branch")
-        require(root.isAbsolute && locks.isAbsolute &&
+        gate(root.isAbsolute && locks.isAbsolute &&
             headPattern.matches(expectedHead) &&
-            Regex("[A-Za-z0-9][A-Za-z0-9._/-]{0,127}").matches(branch) &&
-            !branch.contains("..") && !branch.contains("//") &&
-            !branch.endsWith("/") && !branch.endsWith(".lock") &&
-            branch.split('/').none { it.startsWith(".") } &&
-            Files.isDirectory(root.resolve(".git"), LinkOption.NOFOLLOW_LINKS)) {
-            "A dedicated branch checkout is required"
-        }
-        val checkout = root.toRealPath(LinkOption.NOFOLLOW_LINKS)
-        require(checkout != Path.of("").toAbsolutePath().normalize() &&
-            !planPath.normalize().startsWith(checkout) &&
-            !approvalPath.normalize().startsWith(checkout) &&
-            !locks.normalize().startsWith(checkout) &&
-            Files.isRegularFile(checkout.resolve(".git/recursive-coder-isolated-workflow"),
-                LinkOption.NOFOLLOW_LINKS) &&
-            Files.readString(checkout.resolve(".git/recursive-coder-isolated-workflow")) ==
-                "isolated-workflow-v1\n") {
-            "Isolated checkout marker and out-of-tree configuration are required"
+            Files.isDirectory(root.resolve(".git"), LinkOption.NOFOLLOW_LINKS),
+            "INVALID_WORKSPACE")
+        val checkout = root.toRealPath()
+        gate(checkout == root.normalize(), "INVALID_WORKSPACE")
+        gate(!Path.of("").toAbsolutePath().toRealPath().startsWith(checkout),
+            "CWD_INSIDE_CHECKOUT")
+        gate(!realLocation(planPath).startsWith(checkout) &&
+            !realLocation(approvalPath).startsWith(checkout),
+            "CONFIG_INSIDE_CHECKOUT")
+        val realLocks = realLocation(locks)
+        gate(!realLocks.startsWith(checkout) && !checkout.startsWith(realLocks),
+            "LOCK_OVERLAPS_CHECKOUT")
+        val marker = checkout.resolve(".git/recursive-coder-isolated-workflow")
+        gate(Files.isRegularFile(marker, LinkOption.NOFOLLOW_LINKS) &&
+            Files.readString(marker) == "isolated-workflow-v1\n",
+            "MARKER_MISSING")
+        // The shared read-only reconciler owns Git ref validation and typed
+        // baseline denial codes. The workflow host independently rechecks.
+        when (val baseline = LinuxStageGitBaselineReconciler(checkout, locks)
+            .inspectCleanBaseline(expectedHead, branch)) {
+            StageGitBaselineResult.Clean -> Unit
+            is StageGitBaselineResult.Denied -> throw WorkflowDenied(baseline.code)
         }
         val artifacts = objectAt(plan, "artifacts")
         val instructions = objectAt(plan, "instructions")
