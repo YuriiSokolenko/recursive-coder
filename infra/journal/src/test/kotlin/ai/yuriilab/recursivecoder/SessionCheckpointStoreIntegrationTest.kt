@@ -915,6 +915,58 @@ class SessionCheckpointStoreIntegrationTest {
         }
     }
 
+    @Test fun operatorApprovalIsDurableAndRetryIsIdempotentAfterAuditFsync() {
+        createPreExecutionCheckpoint()
+        assertEquals("RESUME_ADMISSION_UNCONFIRMED",
+            assertFailsWith<SessionResumeUnconfirmed> {
+                SessionResumeAdmission.admitWithFault(store(), context(), ledger(),
+                    resumeAttestation()) { throw IllegalStateException("crash after anchor") }
+            }.code)
+        val prepared = ledger().resolveSibling("events.ledger.resume-anchor-000000000001.rca")
+        val expectedFence = Files.readString(prepared).split("\n")[2]
+        val approval = PreparedFenceReconciliation(1L, expectedFence, "reviewer-one", true)
+        val audit = ledger().resolveSibling("events.ledger.resume-audit-000000000001.rcaudit")
+        assertEquals("RESUME_ADMISSION_UNCONFIRMED",
+            assertFailsWith<SessionResumeUnconfirmed> {
+                SessionResumeAdmission.reconcilePreparedWithFault(store(), context(), ledger(),
+                    resumeAttestation(), approval) {
+                    throw IllegalStateException("crash after audit force, before fence")
+                }
+            }.code)
+        assertTrue(Files.exists(audit))
+        assertFalse(Files.exists(store().resolve("resume-000000000001.rcf")))
+        val originalAudit = Files.readAllBytes(audit)
+        val fields = Files.readString(audit).split("\n")
+        assertEquals("RCAUD1", fields[0])
+        assertEquals("1", fields[1])
+        assertEquals(expectedFence, fields[2])
+        assertEquals("reviewer-one", fields[6])
+        assertEquals("true", fields[7])
+        assertEquals("RESUME_FENCE_AUDIT_CONFLICT",
+            assertFailsWith<SessionResumeUnconfirmed> {
+                SessionResumeAdmission.reconcilePreparedAdmission(
+                    store(), context(), ledger(), resumeAttestation(),
+                    approval.copy(operatorId = "other-reviewer"))
+            }.code)
+        val orphan = ledger().resolveSibling(
+            ".events.ledger.resume-audit-pending-" + UUID.randomUUID() + ".tmp")
+        Files.writeString(orphan, "old partial approval")
+        SessionResumeAdmission.reconcilePreparedAdmission(store(), context(), ledger(),
+            resumeAttestation(), approval).use {
+            assertEquals(1L, it.generation)
+            it.assertCurrent()
+        }
+        assertFalse(Files.exists(orphan))
+        assertContentEquals(originalAudit, Files.readAllBytes(audit))
+        assertEquals(1L, SessionResumeAdmission.currentGeneration(store(), context(), ledger()))
+        val corrupted = Files.readString(audit).replace("reviewer-one", "reviewer-two")
+        Files.writeString(audit, corrupted)
+        assertEquals("RESUME_FENCE_AUDIT_UNCONFIRMED",
+            assertFailsWith<SessionResumeUnconfirmed> {
+                SessionResumeAdmission.currentGeneration(store(), context(), ledger())
+            }.code)
+    }
+
     @Test fun anchorParentRequiresPrivateOwnerModeAndIgnoresUnrelatedSiblings() {
         createPreExecutionCheckpoint()
         val unrelated = ledger().resolveSibling("events.ledger.resume-anchor-not-a-generation.rca")

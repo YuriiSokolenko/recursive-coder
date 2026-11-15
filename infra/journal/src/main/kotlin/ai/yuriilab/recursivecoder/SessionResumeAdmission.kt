@@ -259,6 +259,7 @@ class SessionResumeLease internal constructor(
     @Synchronized fun assertCurrent() {
         if (closed || !lock.isValid)
             throw SessionResumeUnconfirmed("RESUME_FENCE_STALE_WRITER")
+        requireLedgerPath(ledgerPath)
         ResumeFenceStorage.requireHead(directory, generation, admittedFenceSha256)
         ResumeFenceAnchor.requireHead(ledgerPath, generation, admittedFenceSha256,
             admittedAnchorSha256)
@@ -337,12 +338,22 @@ object SessionResumeAdmission {
     ): SessionResumeLease =
         admitChecked(directory, context, ledgerPath, attestation, operator) { }
 
-    /** Test-only fault seam immediately after the independent anchor is durable. */
+    /** Integration-test-only fault seam, not an application API or service port.
+     * Compiled in production only to support deterministic crash-boundary tests.
+     */
     internal fun admitWithFault(
         directory: Path, context: CheckpointHostContext, ledgerPath: Path,
         attestation: ResumeHostAttestation, afterAnchorCommitted: () -> Unit
     ): SessionResumeLease =
         admitChecked(directory, context, ledgerPath, attestation, null, afterAnchorCommitted)
+
+    /** Integration-test-only fault seam for a crash after durable operator audit. */
+    internal fun reconcilePreparedWithFault(
+        directory: Path, context: CheckpointHostContext, ledgerPath: Path,
+        attestation: ResumeHostAttestation, operator: PreparedFenceReconciliation,
+        afterAuditCommitted: () -> Unit
+    ): SessionResumeLease =
+        admitChecked(directory, context, ledgerPath, attestation, operator, afterAuditCommitted)
 
     private fun admitChecked(
         directory: Path, context: CheckpointHostContext, ledgerPath: Path,
@@ -359,6 +370,7 @@ object SessionResumeAdmission {
         val authoritySha256 = ResumeReadAuthority.fingerprint(context, attestation.readPolicyFacts)
         if (!attestation.externalActionsReconciled)
             fail("RESUME_EXTERNAL_EFFECTS_UNCONFIRMED")
+        val ledgerKeyBeforeInspect = ledgerFileKey(ledgerPath)
         val dir = SessionCheckpointStore.checkedAdmissionDirectory(directory, context)
         val lockPath = dir.resolve("resume.lock")
         if (!heldLocks.add(lockPath)) fail("RESUME_LEASE_HELD")
@@ -405,6 +417,8 @@ object SessionResumeAdmission {
                     prior.toolAuthoritySha256 != authoritySha256))
                     fail("RESUME_FENCE_CONTEXT_CHANGED")
                 val ledgerKey = ledgerFileKey(ledgerPath)
+                if (ledgerKey != ledgerKeyBeforeInspect)
+                    fail("RESUME_LEDGER_PATH_CHANGED")
                 ResumeFenceStorage.cleanOrphanedTemps(checkedDir)
                 ResumeFenceAnchor.cleanOrphanedTemps(ledgerPath)
                 var preparedAnchor: ResumeFenceAnchorRecord? = null
@@ -416,8 +430,13 @@ object SessionResumeAdmission {
                         if (operator.expectedPreparedGeneration != prepared.generation ||
                             operator.expectedPreparedFenceSha256 != prepared.sha256)
                             fail("RESUME_FENCE_RECONCILIATION_UNCONFIRMED")
-                        ResumeFenceAnchor.verifyPrepared(ledgerPath, prior, prepared)
+                        ResumeFenceAnchor.verifyPrepared(ledgerPath, prior, prepared).also { anchor ->
+                            ResumeFenceAnchor.recordOperatorApproval(ledgerPath, prepared,
+                                anchor, operator)
+                        }
                     }
+                    if (ledgerFileKey(ledgerPath) != ledgerKey)
+                        fail("RESUME_LEDGER_PATH_CHANGED")
                     afterAnchorCommitted()
                 }
                 val anchor = preparedAnchor ?: fail("RESUME_FENCE_ANCHOR_UNCONFIRMED")

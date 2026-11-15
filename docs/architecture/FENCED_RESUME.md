@@ -7,6 +7,17 @@ external operations before broader resume boundaries become available.
 
 ## Boundary and trusted inputs
 
+### Required host filesystem setup
+
+Before enabling fenced admission, provision a **Linux/POSIX checkpoint
+directory and the parent directory of the durable ledger**, each outside
+the workspace, as real directories owned by the effective numeric UID with
+exact mode **0700**. The ledger is a separate regular file in that private
+parent. A public or group-readable ledger parent is not accepted for fencing;
+the ordinary non-fencing checkpoint interface can continue to operate
+without creating anchors. All operators and reconciliation callers must
+use the same trusted host identity and current Git/policy inspection.
+
 `SessionResumeAdmission.admit(directory, context, ledgerPath, attestation)`
 requires the same private, Linux/POSIX, effective-UID-owned 0700 checkpoint
 directory and out-of-workspace durable event ledger as issue #103. The host,
@@ -145,7 +156,14 @@ before its fence requires explicit operator reconciliation.
    The implementation acquires the exclusive OS lease, validates the complete
    checkpoint/ledger and pre-execution boundary, recomputes the proposed fence,
    verifies its SHA-256 against exactly one authenticated trailing anchor,
-   then durably completes that fence without replaying any model/tool action.
+   then writes a **write-once, fsynced**
+   `<ledger-name>.resume-audit-NNNNNNNNNNNN.rcaudit` record containing the
+   approved host operator ID, `operatorApproved=true`, generation, exact
+   fence/anchor/checkpoint/policy SHA-256, and a host timestamp. The record is
+   published before completing the fence and its checksum is verified on read.
+   A retry after a crash reuses the matching audit bytes, never changes the
+   operator or time, and refuses a conflicting identity or digest.
+   Only then does it durably complete the fence without replaying any model/tool action.
    The returned lease owns N+1, not a silently new generation.
 4. Validate the returned lease and inspect the full fence/anchor chains.
    If publication remains uncertain or operator approval is denied, stop;
@@ -153,15 +171,36 @@ before its fence requires explicit operator reconciliation.
    full production crash-resume: the existing ledger still cannot safely
    reopen for append and existing runtime receipts are not generation-fenced.
 
-The operator receipt is a trusted host assertion, **not** cryptographic
-proof that a person independently reviewed the situation. Never expose
+The operator ID and `operatorApproved` are **host-supplied assertions, not
+user authentication, proof of a human decision, or independently verified
+authorization**. The host must authenticate and authorize the operator
+before constructing `PreparedFenceReconciliation`. The immutable audit is
+checksum-validated and durable but is not tamper-proof against the trusted
+same-UID filesystem owner, who can delete files. It is stored outside the
+closed ledger because that ledger has no safe append/reopen API. An unknown,
+missing or conflicting audit must never be silently overwritten.
+Never expose
 this method to model-authored commands or unauthenticated host services.
 A different prepared hash, invalid operator ID or unapproved recovery
 fails closed with `RESUME_FENCE_RECONCILIATION_UNCONFIRMED`.
 A negative expected generation has its own
 `RESUME_FENCE_EXPECTED_GENERATION_INVALID` denial. An admitted lease
-also pins the ledger's Linux file key so replacing the inode at the same
-path invalidates fenced checkpoint writes.
+also compares the ledger's Linux file key **before and after verified
+ledger inspection** and rechecks it for fenced publications so replacing the
+inode at the same path invalidates the lease. File keys can be recycled by a
+filesystem after deletion/recreation; protection against a malicious same-UID
+writer remains out of scope.
+
+**If recovery cannot reproduce the prepared fence digest** because Git,
+frozen inputs, policy facts, read-tool grants, checkpoint contents or ledger
+evidence changed, the operator API deliberately refuses and the old store
+remains blocked. Never edit, delete, roll back, or force-advance its anchor
+and fence records. The last-resort manual workflow is to stop all related
+writers, archive the immutable original checkpoint directory, anchors,
+audit and ledger for investigation, independently reconcile any uncertain
+external effects, then provision a **new session/trace identity and fresh
+ledger/checkpoint store** with a newly authenticated baseline and policy.
+This is an explicit new session, not a continuation of the old one.
 
 This implementation cannot fence **unrelated existing** workspace writes,
 receipts or model/tool operations that do not accept `SessionResumeLease`.
@@ -174,5 +213,6 @@ Tests under the integration tier cover pre-execution admission, fenced/unfenced
 save, stale callbacks, generation CAS, changes to HEAD/policy/frozen inputs,
 unsafe execution boundaries, corrupt fence files, independent process lock
 races, external anchor rollback, interrupted prepared-anchor reconciliation,
-anchor-directory security, inode changes, stale live-writer callbacks,
-orphan cleanup and OS lease release after force-kill. All tests run offline.
+anchor-directory security, pre/post-inspection inode checks, durable audit
+and idempotent retry after audit fsync, conflicting operator rejection, stale
+live-writer callbacks, orphan cleanup and OS lease release after force-kill. All tests run offline.
