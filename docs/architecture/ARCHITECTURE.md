@@ -30,8 +30,10 @@ This project is not a plugin for another orchestration platform. Cloud providers
           /       |       \
     Workspace  Checks   Model Gateway
                |            |
-       Event Journal / Checkpoints (checkpoints planned)
+       Event Journal / Checkpoints (opt-in verified snapshots; no resume)
 ```
+
+The opt-in [atomic checkpoint layer](SESSION_CHECKPOINTS.md) (#103) stores immutable, journal-bound metadata-only snapshots. Inspection is read-only and cannot authorize restart or replay. Live usage values are host assertions, not reconciled journal evidence. Crash-resume remains a separate gated milestone.
 
 ### Current Gradle module boundaries
 

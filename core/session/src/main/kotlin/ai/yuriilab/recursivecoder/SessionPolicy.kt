@@ -13,6 +13,15 @@ internal enum class SessionPhase(val wire: String, val terminal: Boolean = false
     FAILED("failed", true)
 }
 
+/** The only supported Session Protocol lifecycle wire vocabulary.
+ * Kept adjacent to SessionPhase so adapters cannot invent recovery-only phases.
+ */
+object SessionPhaseVocabulary {
+    val wires: Set<String> = SessionPhase.entries.mapTo(linkedSetOf()) { it.wire }
+    val terminalWires: Set<String> = SessionPhase.entries.filter { it.terminal }
+        .mapTo(linkedSetOf()) { it.wire }
+}
+
 internal enum class SessionEndReason { SUCCESS, REFUSAL, CANCELLATION, TIMEOUT, FAILURE }
 
 internal sealed interface PhaseDecision {

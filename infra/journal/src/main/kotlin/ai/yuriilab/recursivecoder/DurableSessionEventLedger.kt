@@ -25,7 +25,9 @@ data class VerifiedSessionEventLedger(
     val events: List<JsonObject>,
     val lastSequence: Int,
     val headSha256: String,
-    val fileSha256: String
+    val fileSha256: String,
+    /** Exact verified byte boundary, not an acknowledgement of tool side effects. */
+    val lastTrustedOffset: Long
 )
 
 /** No corrupt, incomplete or unsupported log may be treated as recoverable. */
@@ -51,6 +53,9 @@ class DurableSessionEventLedger private constructor(
     private val leaseChannel: FileChannel,
     private val lease: FileLock
 ) : EventSink {
+    /** Host-only path for verifying the checkpoint storage boundary. */
+    internal val checkpointStoragePath: Path get() = path
+
     private var closed = false
     private var closeVerified = false
     private var poisoned = false
@@ -330,6 +335,55 @@ class DurableSessionEventLedger private constructor(
             throw SessionLedgerUnconfirmed("LEDGER_EVENT_INVALID_JSON", e)
         }
 
+        /** Internal parser; external inspect still requires an exclusive ledger lease. */
+        private fun replayUnlocked(file: Path): VerifiedSessionEventLedger {
+            FileChannel.open(file, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS).use { reader ->
+                val size = reader.size()
+                if (size < MAGIC.size || size > MAX_LEDGER_BYTES)
+                    throw SessionLedgerUnconfirmed("LEDGER_SIZE_INVALID")
+                val whole = MessageDigest.getInstance("SHA-256")
+                val header = readFully(reader, MAGIC.size)
+                if (!header.contentEquals(MAGIC))
+                    throw SessionLedgerUnconfirmed("LEDGER_VERSION_UNSUPPORTED")
+                whole.update(header)
+                val events = ArrayList<JsonObject>()
+                var previousHash = ByteArray(32)
+                var previousId: String? = null
+                var identity: Pair<String, String>? = null
+                var sequence = 0
+                while (reader.position() < size) {
+                    if (++sequence > MAX_EVENTS || size - reader.position() < 4)
+                        throw SessionLedgerUnconfirmed("LEDGER_TRUNCATED")
+                    val sizeBytes = readFully(reader, 4)
+                    val payloadSize = ByteBuffer.wrap(sizeBytes).int
+                    if (payloadSize !in 1..MAX_EVENT_BYTES)
+                        throw SessionLedgerUnconfirmed("LEDGER_RECORD_SIZE_INVALID")
+                    if (size - reader.position() < 32L + payloadSize)
+                        throw SessionLedgerUnconfirmed("LEDGER_TRUNCATED")
+                    val recordedHash = readFully(reader, 32)
+                    val payload = readFully(reader, payloadSize)
+                    whole.update(sizeBytes)
+                    whole.update(recordedHash)
+                    whole.update(payload)
+                    val digest = chain(previousHash, payload)
+                    if (!recordedHash.contentEquals(digest))
+                        throw SessionLedgerUnconfirmed("LEDGER_HASH_MISMATCH")
+                    val event = decode(payload)
+                    validate(event, sequence, previousId)
+                    val observedIdentity = (event["sessionId"] as JsonPrimitive).content to
+                        (event["traceId"] as JsonPrimitive).content
+                    if (identity != null && identity != observedIdentity)
+                        throw SessionLedgerUnconfirmed("LEDGER_IDENTITY_CHANGED")
+                    identity = observedIdentity
+                    previousId = (event["eventId"] as JsonPrimitive).content
+                    previousHash = digest
+                    events.add(event)
+                }
+                return VerifiedSessionEventLedger(events, sequence,
+                    hex(previousHash), hex(whole.digest()), size)
+            }
+    }
+
         /** Immutable, fully checked read. Never interprets a prefix as safe resume. */
         fun inspect(path: Path): VerifiedSessionEventLedger {
             val file = guardedPath(path)
@@ -338,51 +392,7 @@ class DurableSessionEventLedger private constructor(
             val (owner, lock) = acquire(file, createLock = false)
             var inspectionFailure: Throwable? = null
             try {
-                FileChannel.open(file, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS).use { reader ->
-                    val size = reader.size()
-                    if (size < MAGIC.size || size > MAX_LEDGER_BYTES)
-                        throw SessionLedgerUnconfirmed("LEDGER_SIZE_INVALID")
-                    val whole = MessageDigest.getInstance("SHA-256")
-                    val header = readFully(reader, MAGIC.size)
-                    if (!header.contentEquals(MAGIC))
-                        throw SessionLedgerUnconfirmed("LEDGER_VERSION_UNSUPPORTED")
-                    whole.update(header)
-                    val events = ArrayList<JsonObject>()
-                    var previousHash = ByteArray(32)
-                    var previousId: String? = null
-                    var identity: Pair<String, String>? = null
-                    var sequence = 0
-                    while (reader.position() < size) {
-                        if (++sequence > MAX_EVENTS || size - reader.position() < 4)
-                            throw SessionLedgerUnconfirmed("LEDGER_TRUNCATED")
-                        val sizeBytes = readFully(reader, 4)
-                        val payloadSize = ByteBuffer.wrap(sizeBytes).int
-                        if (payloadSize !in 1..MAX_EVENT_BYTES)
-                            throw SessionLedgerUnconfirmed("LEDGER_RECORD_SIZE_INVALID")
-                        if (size - reader.position() < 32L + payloadSize)
-                            throw SessionLedgerUnconfirmed("LEDGER_TRUNCATED")
-                        val recordedHash = readFully(reader, 32)
-                        val payload = readFully(reader, payloadSize)
-                        whole.update(sizeBytes)
-                        whole.update(recordedHash)
-                        whole.update(payload)
-                        val digest = chain(previousHash, payload)
-                        if (!recordedHash.contentEquals(digest))
-                            throw SessionLedgerUnconfirmed("LEDGER_HASH_MISMATCH")
-                        val event = decode(payload)
-                        validate(event, sequence, previousId)
-                        val observedIdentity = (event["sessionId"] as JsonPrimitive).content to
-                            (event["traceId"] as JsonPrimitive).content
-                        if (identity != null && identity != observedIdentity)
-                            throw SessionLedgerUnconfirmed("LEDGER_IDENTITY_CHANGED")
-                        identity = observedIdentity
-                        previousId = (event["eventId"] as JsonPrimitive).content
-                        previousHash = digest
-                        events.add(event)
-                    }
-                    return VerifiedSessionEventLedger(events, sequence,
-                        hex(previousHash), hex(whole.digest()))
-                }
+                return replayUnlocked(file)
             } catch (failure: Throwable) {
                 inspectionFailure = failure
                 throw failure
@@ -400,6 +410,29 @@ class DurableSessionEventLedger private constructor(
         /** Adapts the workspace-aware creation contract to the existing EventSinkFactory port. */
         fun factory(workspaceRoot: Path): EventSinkFactory =
             EventSinkFactory { file -> create(file, workspaceRoot) }
+    }
+
+    /**
+     * The active writer can take a checkpoint at an acknowledged event boundary.
+     * Hold its monitor across the snapshot write so append/flush cannot race
+     * with the journal anchor. The lock-file inode is never reopened.
+     */
+    @Synchronized internal fun <T> withCommittedCheckpointAnchor(
+        maxBytes: Long = 4L * 1024 * 1024,
+        block: (VerifiedSessionEventLedger) -> T
+    ): T {
+        if (closed || poisoned || pending != null)
+            throw SessionLedgerUnconfirmed("LEDGER_UNACKNOWLEDGED_APPEND")
+        // Refuse before replay so checkpointing cannot hold the append monitor
+        // across a larger ledger than the opt-in bounded persistence contract.
+        if (channel.size() > maxBytes)
+            throw SessionLedgerUnconfirmed("LEDGER_CHECKPOINT_SIZE_EXCEEDED")
+        val verified = replayUnlocked(path)
+        if (verified.lastSequence != committedSequence ||
+            verified.headSha256 != hex(lastDigest) ||
+            verified.lastTrustedOffset != channel.position())
+            throw SessionLedgerUnconfirmed("LEDGER_COMMITTED_PREFIX_CHANGED")
+        return block(verified)
     }
 
     @Synchronized override fun append(event: JsonObject) {
