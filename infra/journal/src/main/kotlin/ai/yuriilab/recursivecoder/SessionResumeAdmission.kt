@@ -37,6 +37,20 @@ data class PreparedFenceReconciliation(
     val operatorApproved: Boolean
 )
 
+/** Informational state only. It never authenticates or authorizes resume. */
+enum class ResumeReconciliationState {
+    PREPARED_UNAPPROVED,
+    APPROVED_PENDING,
+    COMPLETED
+}
+
+data class ResumeReconciliationStatus(
+    val generation: Long,
+    val fenceSha256: String,
+    val operatorId: String?,
+    val state: ResumeReconciliationState
+)
+
 /** Read-only authority is evaluated and canonically hashed from host policy facts. */
 internal object ResumeReadAuthority {
     fun fingerprint(context: CheckpointHostContext, facts: ReadPolicyFacts): String {
@@ -324,6 +338,20 @@ object SessionResumeAdmission {
         throw e
     }
 
+    /**
+     * Read-only operator diagnostics. Unlike currentGeneration/inspect, this
+     * can report a *validated* prepared head without treating it as admission.
+     * Any corrupt/inconsistent evidence fails closed; no state is mutated.
+     */
+    fun reconciliationStatus(directory: Path, context: CheckpointHostContext,
+                             ledgerPath: Path): ResumeReconciliationStatus? =
+        SessionCheckpointStore.withAdmissionEvidence(directory, context, ledgerPath) {
+                checkedDir, verified, _ ->
+            val head = ResumeFenceStorage.latest(checkedDir)
+            ResumeFenceAnchor.recoveryStatus(ledgerPath, head, verified.sha256,
+                verified.snapshot.binding.policySha256)
+        }
+
     fun admit(directory: Path, context: CheckpointHostContext, ledgerPath: Path,
               attestation: ResumeHostAttestation): SessionResumeLease =
         admitChecked(directory, context, ledgerPath, attestation, null) { }
@@ -340,9 +368,12 @@ object SessionResumeAdmission {
      */
     internal fun admitWithFault(
         directory: Path, context: CheckpointHostContext, ledgerPath: Path,
-        attestation: ResumeHostAttestation, afterAnchorCommitted: () -> Unit
+        attestation: ResumeHostAttestation,
+        beforeInspection: () -> Unit = {},
+        afterAnchorCommitted: () -> Unit
     ): SessionResumeLease =
-        admitChecked(directory, context, ledgerPath, attestation, null, afterAnchorCommitted)
+        admitChecked(directory, context, ledgerPath, attestation, null,
+            beforeInspection, afterAnchorCommitted)
 
     /** Integration-test-only fault seam for a crash after durable operator audit. */
     internal fun reconcilePreparedWithFault(
@@ -355,6 +386,7 @@ object SessionResumeAdmission {
     private fun admitChecked(
         directory: Path, context: CheckpointHostContext, ledgerPath: Path,
         attestation: ResumeHostAttestation, operator: PreparedFenceReconciliation?,
+        beforeInspection: () -> Unit = {},
         afterAnchorCommitted: () -> Unit
     ): SessionResumeLease {
         if (attestation.expectedFenceGeneration < 0)
@@ -388,6 +420,9 @@ object SessionResumeAdmission {
             }
             val acquiredOwner = owner
             val acquiredLock = lock
+            // Integration test seam: must run after key capture and before
+            // actual ledger inspection, while the resume OS lock is held.
+            beforeInspection()
             val result = SessionCheckpointStore.withAdmissionEvidence(dir, context, ledgerPath) {
                     checkedDir, verified, ledger ->
                 val s = verified.snapshot
@@ -416,6 +451,10 @@ object SessionResumeAdmission {
                 val ledgerKey = ledgerFileKey(ledgerPath)
                 if (ledgerKey != ledgerKeyBeforeInspect)
                     fail("RESUME_LEDGER_PATH_CHANGED")
+                // Probe both mounts before the first irreversible anchor/audit.
+                // The two directories need not share a filesystem.
+                ResumeImmutablePublication.requireHardLinks(checkedDir)
+                ResumeFenceAnchor.requirePublicationSupport(ledgerPath)
                 ResumeFenceStorage.cleanOrphanedTemps(checkedDir)
                 ResumeFenceAnchor.cleanOrphanedTemps(ledgerPath)
                 var preparedAnchor: ResumeFenceAnchorRecord? = null

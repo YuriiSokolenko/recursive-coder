@@ -15,21 +15,16 @@ import java.util.Locale
 import java.util.UUID
 
 /**
- * Separate durable fence-head anchor next to the closed event ledger, not in
- * the checkpoint directory. It detects a partial rollback of checkpoint files.
- * Publish anchor first: a crash before fence publication requires reconciliation.
- * Both directories rolled back by a trusted same-UID owner remain outside scope.
- */
-/**
  * Same-directory publication by hard link rather than rename. CREATE_NEW
  * checks and advisory locks alone do not prevent rename-replacement races.
  * Callers have already fsynced the temporary content before linking.
  */
 internal object ResumeImmutablePublication {
     fun linkAndSync(directory: Path, temporary: Path, destination: Path,
-                    conflictCode: String, unavailableCode: String) {
+                    conflictCode: String, unavailableCode: String,
+                    createHardLink: (Path, Path) -> Path = Files::createLink) {
         try {
-            Files.createLink(destination, temporary)
+            createHardLink(destination, temporary)
             FileChannel.open(directory, StandardOpenOption.READ).use { it.force(true) }
         } catch (e: FileAlreadyExistsException) {
             throw SessionResumeUnconfirmed(conflictCode, e)
@@ -39,8 +34,51 @@ internal object ResumeImmutablePublication {
             throw SessionResumeUnconfirmed(unavailableCode, e)
         }
     }
+
+    /**
+     * Best-effort read/write capability preflight on a single filesystem.
+     * Test both target directories *before* publishing the first anchor, since
+     * the checkpoint and ledger directories may be on different mounts.
+     * This does not guarantee that a later device error cannot still occur.
+     */
+    fun requireHardLinks(directory: Path,
+                         createHardLink: (Path, Path) -> Path = Files::createLink) {
+        val id = UUID.randomUUID().toString()
+        val source = directory.resolve(".resume-hardlink-probe-" + id + ".tmp")
+        val link = directory.resolve(".resume-hardlink-probe-" + id + ".link")
+        var error: SessionResumeUnconfirmed? = null
+        try {
+            Files.createFile(source, PosixFilePermissions.asFileAttribute(setOf(
+                PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE)))
+            FileChannel.open(source, StandardOpenOption.WRITE,
+                LinkOption.NOFOLLOW_LINKS).use { it.force(true) }
+            createHardLink(link, source)
+            if (!Files.isSameFile(source, link))
+                throw IllegalStateException("hard-link probe changed file identity")
+            FileChannel.open(directory, StandardOpenOption.READ).use { it.force(true) }
+        } catch (e: Exception) {
+            error = SessionResumeUnconfirmed("RESUME_FENCE_HARD_LINK_UNAVAILABLE", e)
+        } finally {
+            try {
+                Files.deleteIfExists(link)
+                Files.deleteIfExists(source)
+                FileChannel.open(directory, StandardOpenOption.READ).use { it.force(true) }
+            } catch (e: Exception) {
+                val cleanup = SessionResumeUnconfirmed(
+                    "RESUME_FENCE_HARD_LINK_PROBE_CLEANUP_UNCONFIRMED", e)
+                if (error == null) error = cleanup else error.addSuppressed(cleanup)
+            }
+        }
+        error?.let { throw it }
+    }
 }
 
+/**
+ * Separate durable fence-head anchor next to the closed event ledger, not in
+ * the checkpoint directory. It detects a partial rollback of checkpoint files.
+ * Publish anchor first: a crash before fence publication requires reconciliation.
+ * Both directories rolled back by a trusted same-UID owner remain outside scope.
+ */
 internal data class ResumeFenceAnchorRecord(
     val generation: Long,
     val fenceSha256: String,
@@ -95,6 +133,11 @@ internal object ResumeFenceAnchor {
         } catch (e: Exception) {
             throw SessionResumeUnconfirmed("RESUME_FENCE_ANCHOR_UNSAFE_DIRECTORY", e)
         }
+    }
+
+    /** Validate the external anchor filesystem before any new anchor is written. */
+    fun requirePublicationSupport(ledger: Path) {
+        ResumeImmutablePublication.requireHardLinks(parent(ledger))
     }
 
     private fun prefix(ledger: Path) =
@@ -249,6 +292,73 @@ internal object ResumeFenceAnchor {
                     LinkOption.NOFOLLOW_LINKS))
                 fail("RESUME_FENCE_ANCHOR_MISMATCH")
             return previous
+        } catch (e: SessionResumeUnconfirmed) {
+            throw e
+        } catch (e: Exception) {
+            throw SessionResumeUnconfirmed("RESUME_FENCE_ANCHOR_UNCONFIRMED", e)
+        }
+    }
+
+    /**
+     * Informational read only. Validates the complete committed anchor chain,
+     * then inspects at most one prepared generation. Does not grant admission,
+     * authenticate an operator, or publish/clean any files.
+     */
+    fun recoveryStatus(ledger: Path, head: ResumeFenceRecord?,
+                       checkpointSha: String, policySha: String): ResumeReconciliationStatus? {
+        try {
+            val dir = parent(ledger)
+            val count = head?.generation ?: 0L
+            var previous: ResumeFenceAnchorRecord? = null
+            for (gen in 1L..count) {
+                val anchor = read(dir.resolve(name(ledger, gen)))
+                if (anchor.generation != gen || anchor.previousSha256 != previous?.sha256)
+                    fail("RESUME_FENCE_ANCHOR_MISMATCH")
+                verifyAuditIfPresent(ledger, anchor)
+                previous = anchor
+            }
+            if (previous?.fenceSha256 != head?.sha256)
+                fail("RESUME_FENCE_ANCHOR_MISMATCH")
+            val pendingName = dir.resolve(name(ledger, count + 1L))
+            val pendingAudit = dir.resolve(auditName(ledger, count + 1L))
+            val strayLaterAnchor = dir.resolve(name(ledger, count + 2L))
+            val strayLaterAudit = dir.resolve(auditName(ledger, count + 2L))
+            if (Files.exists(strayLaterAnchor, LinkOption.NOFOLLOW_LINKS) ||
+                Files.exists(strayLaterAudit, LinkOption.NOFOLLOW_LINKS))
+                fail("RESUME_FENCE_ANCHOR_MISMATCH")
+            if (Files.exists(pendingName, LinkOption.NOFOLLOW_LINKS)) {
+                val prepared = read(pendingName)
+                if (prepared.generation != count + 1L ||
+                    prepared.previousSha256 != previous?.sha256)
+                    fail("RESUME_FENCE_ANCHOR_MISMATCH")
+                if (!Files.exists(pendingAudit, LinkOption.NOFOLLOW_LINKS))
+                    return ResumeReconciliationStatus(prepared.generation,
+                        prepared.fenceSha256, null,
+                        ResumeReconciliationState.PREPARED_UNAPPROVED)
+                val audit = readAudit(pendingAudit)
+                if (audit.generation != prepared.generation ||
+                    audit.anchorSha256 != prepared.sha256 ||
+                    audit.fenceSha256 != prepared.fenceSha256 ||
+                    audit.checkpointSha256 != checkpointSha ||
+                    audit.policySha256 != policySha)
+                    fail("RESUME_FENCE_AUDIT_UNCONFIRMED")
+                return ResumeReconciliationStatus(prepared.generation,
+                    prepared.fenceSha256, audit.operatorId,
+                    ResumeReconciliationState.APPROVED_PENDING)
+            }
+            if (Files.exists(pendingAudit, LinkOption.NOFOLLOW_LINKS))
+                fail("RESUME_FENCE_AUDIT_UNCONFIRMED")
+            if (head == null) return null
+            val committedAudit = dir.resolve(auditName(ledger, count))
+            if (!Files.exists(committedAudit, LinkOption.NOFOLLOW_LINKS)) return null
+            val audit = readAudit(committedAudit)
+            if (audit.generation != count || audit.anchorSha256 != previous?.sha256 ||
+                audit.fenceSha256 != head.sha256 ||
+                audit.checkpointSha256 != head.checkpointSha256 ||
+                audit.policySha256 != head.policySha256)
+                fail("RESUME_FENCE_AUDIT_UNCONFIRMED")
+            return ResumeReconciliationStatus(count, head.sha256, audit.operatorId,
+                ResumeReconciliationState.COMPLETED)
         } catch (e: SessionResumeUnconfirmed) {
             throw e
         } catch (e: Exception) {

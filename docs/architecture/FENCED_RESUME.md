@@ -64,7 +64,12 @@ including "known" usage, are not independent usage/accounting receipts.
    tool-authority digest, plus a SHA-256 payload checksum. The write uses
    CREATE_NEW temp, file force(true), atomic hard-link publication
    (`Files.createLink`) that fails if the destination already exists, and
-   parent directory force(true). Hard-link publication is limited to Linux
+   parent directory force(true). **Before** any anchor is committed, admission
+   probes hard-link creation and directory fsync separately in both the
+   checkpoint directory and the ledger parent, without requiring the directories
+   to share a filesystem. Unsupported links abort with
+   `RESUME_FENCE_HARD_LINK_UNAVAILABLE` before changing the generation.
+   This is an availability preflight, not a guarantee against later I/O errors. Hard-link publication is limited to Linux
    filesystems that support same-directory hard links; unsupported filesystems
    fail closed. Temp names are later removed without unlinking committed data.
    All published fences and their chain are verified on every checkpoint read.
@@ -142,6 +147,28 @@ Legacy `inspect`/save paths adapt fence storage errors to the existing
 `SessionResumeUnconfirmed`. A crash after publishing a sidecar anchor but
 before its fence requires explicit operator reconciliation.
 
+### Read-only recovery diagnostics
+
+`SessionResumeAdmission.reconciliationStatus(directory, context, ledgerPath)`
+validates the checkpoint, closed ledger and committed anchor chain under the
+short checkpoint lock, then checks **at most one** prepared generation and
+its audit. The result is informational, not authorization:
+
+- `PREPARED_UNAPPROVED`: one extra durable anchor; no operator audit yet
+  (`operatorId=null`)
+- `APPROVED_PENDING`: a valid audit commits the operator's approval, but
+  the corresponding fence is **not published**; retry only with that same
+  operator and exactly the approved digest
+- `COMPLETED`: a valid audit is bound to the latest published fence;
+  a normal admission without a recovery audit returns `null`
+
+It reports the generation, prepared/published fence SHA-256, and recorded
+operator ID where available. Inconsistent evidence refuses; it never repairs,
+cleans temps, opens the ledger for append, or grants a session lease.
+It is not a substitute for a fresh trusted attestation and external-effect
+reconciliation. A missing audit removed by the trusted same-UID owner remains
+outside the threat model.
+
 ### Interrupted anchor prepare — operator procedure
 
 1. Stop the prior process and verify no one holds `resume.lock` or
@@ -210,10 +237,11 @@ inode at the same path invalidates the lease. File keys can be recycled by a
 filesystem after deletion/recreation; protection against a malicious same-UID
 writer remains out of scope.
 
-The `admitWithFault` and `reconcilePreparedWithFault` entry points are
-`internal` deterministic integration-test seams compiled in production
-sources. They are **not supported application APIs** and must not be wired
-to external callers, model tools, or operator endpoints.
+The `admitWithFault` (including its `beforeInspection` callback) and
+`reconcilePreparedWithFault` entry points are `internal` deterministic
+integration-test seams compiled in production sources. They are **not
+supported application APIs** and must not be wired to external callers,
+model tools, or operator endpoints.
 
 **If recovery cannot reproduce the prepared fence digest** because Git,
 frozen inputs, policy facts, read-tool grants, checkpoint contents or ledger
@@ -233,14 +261,22 @@ claiming end-to-end generation fencing. The checkpoint API alone guarantees
 fenced checkpoint publication and prevents a stale checkpoint writer from
 overwriting a newer generation. No default CLI behavior changes.
 
-Tests under the integration tier cover pre-execution admission, fenced/unfenced
-save, stale callbacks, generation CAS, changes to HEAD/policy/frozen inputs,
-unsafe execution boundaries, corrupt fence files, independent process lock
-races, external anchor rollback, interrupted prepared-anchor reconciliation,
-anchor-directory security, a ledger inode swap in the after-anchor admission
-seam (pre/post-inspection identity checks are also in code, but that earlier
-race has no dedicated fault-injection test), atomic no-replace hard links,
-valid-checksum but mismatched audit, audit beyond the current fence head,
-durable approval/pending status and idempotent retry after audit fsync,
-conflicting operator rejection, stale live-writer callbacks, orphan cleanup
-and OS lease release after force-kill. All tests run offline.
+### Verification coverage
+
+The Linux integration tier tests these failure boundaries offline:
+
+- Read-only pre-execution admission, read-tool authority, generation CAS,
+  and changes to HEAD, policy, frozen inputs and unsafe execution state
+- Live ledger and stale callbacks; independent process lock and forced release
+- Anchor rollback, interrupted prepares, audit/fsync recovery and idempotent
+  operator retries, including conflicting operator rejection
+- `reconciliationStatus` transitions from unaudited prepare to approved
+  pending to completed without publishing or cleaning evidence
+- Hard-link publication without overwrite, both-directory preflight, injected
+  unsupported hard-link failure, and scoped temp cleanup
+- Ledger inode replacement both before inspection and after anchor publication
+- Corrupt or semantically mismatched audits with valid checksums, plus audit
+  records beyond the current fence head
+
+These tests run offline. They verify cooperating-process behavior, not
+protection from a malicious same-UID filesystem owner.
