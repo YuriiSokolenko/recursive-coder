@@ -63,7 +63,8 @@ including "known" usage, are not independent usage/accounting receipts.
    generation. This is never automatic. This detects partial
    checkpoint-directory rollback, not a same-UID rollback of BOTH directories.
    Orphan `.resume-pending-*.tmp` fence temps and
-   `.resume-anchor-pending-*.tmp` ledger-sibling temps are cleaned during
+   `.<ledger-name>.resume-anchor-pending-*.tmp` ledger-sibling temps
+   are cleaned only for their own ledger during
    admission under both OS locks. The ledger's parent must also be
    effective-UID-owned and mode 0700 for anchored operation. Unfenced legacy
    checkpoint operations check only the exact first anchor filename without

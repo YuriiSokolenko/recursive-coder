@@ -29,7 +29,9 @@ internal data class ResumeFenceAnchorRecord(
 internal object ResumeFenceAnchor {
     private const val MAX = 256
     private val SHA = Regex("[0-9a-f]{64}")
-    private val TEMP = Regex("\\.resume-anchor-pending-[a-f0-9-]{36}\\.tmp")
+    private val TEMP_SUFFIX = Regex("[a-f0-9-]{36}\\.tmp")
+    private fun tempPrefix(ledger: Path) =
+        "." + ledger.toAbsolutePath().normalize().fileName.toString() + ".resume-anchor-pending-"
     private fun fail(code: String): Nothing = throw SessionResumeUnconfirmed(code)
     private fun parent(ledger: Path): Path {
         val absolute = ledger.toAbsolutePath().normalize()
@@ -145,10 +147,15 @@ internal object ResumeFenceAnchor {
     /** Admission-only cleanup, never invoked by read-only legacy inspection. */
     fun cleanOrphanedTemps(ledger: Path) {
         val directory = parent(ledger)
+        val ownPrefix = tempPrefix(ledger)
         var removed = false
         try {
             Files.newDirectoryStream(directory).use { entries ->
-                entries.filter { TEMP.matches(it.fileName.toString()) }.forEach { file ->
+                entries.filter { file ->
+                    val name = file.fileName.toString()
+                    name.startsWith(ownPrefix) &&
+                        TEMP_SUFFIX.matches(name.removePrefix(ownPrefix))
+                }.forEach { file ->
                     if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS))
                         fail("RESUME_FENCE_ANCHOR_UNCONFIRMED")
                     Files.delete(file)
@@ -177,7 +184,7 @@ internal object ResumeFenceAnchor {
             previous?.sha256, checksum)
         val bytes = (header + checksum + "\n").toByteArray(StandardCharsets.UTF_8)
         val destination = directory.resolve(name(ledger, fence.generation))
-        val temporary = directory.resolve(".resume-anchor-pending-" + UUID.randomUUID() + ".tmp")
+        val temporary = directory.resolve(tempPrefix(ledger) + UUID.randomUUID() + ".tmp")
         try {
             if (Files.exists(destination, LinkOption.NOFOLLOW_LINKS))
                 fail("RESUME_FENCE_CAS_FAILED")

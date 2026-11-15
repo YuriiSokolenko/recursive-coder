@@ -896,14 +896,19 @@ class SessionCheckpointStoreIntegrationTest {
                     store(), context(), ledger(), resumeAttestation(),
                     approved.copy(operatorApproved = false))
             }.code)
-        val orphanTemp = ledger().resolveSibling(".resume-anchor-pending-" + UUID.randomUUID() + ".tmp")
+        val orphanTemp = ledger().resolveSibling(
+            ".events.ledger.resume-anchor-pending-" + UUID.randomUUID() + ".tmp")
+        val unrelatedTemp = ledger().resolveSibling(
+            ".other.ledger.resume-anchor-pending-" + UUID.randomUUID() + ".tmp")
         Files.writeString(orphanTemp, "orphaned")
+        Files.writeString(unrelatedTemp, "another ledger's active temp")
         SessionResumeAdmission.reconcilePreparedAdmission(
             store(), context(), ledger(), resumeAttestation(), approved).use { repaired ->
             assertEquals(1L, repaired.generation)
             repaired.assertCurrent()
         }
         assertFalse(Files.exists(orphanTemp))
+        assertTrue(Files.exists(unrelatedTemp))
         assertEquals(1L, SessionResumeAdmission.currentGeneration(store(), context(), ledger()))
         SessionResumeAdmission.admit(store(), context(), ledger(), resumeAttestation(1)).use {
             assertEquals(2L, it.generation)
