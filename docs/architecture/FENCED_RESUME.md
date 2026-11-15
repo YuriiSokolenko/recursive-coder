@@ -77,7 +77,8 @@ including "known" usage, are not independent usage/accounting receipts.
    Probe files are not committed evidence; inspection never deletes them.
    A subsequent admission removes checkpoint probes and **only its own
    ledger's** orphan probes in the shared parent, fsyncing changed directories.
-   checkpoint files and unsafe probe types refuse. Hard-link publication is
+   Nonmatching checkpoint files and unsafe probe types refuse.
+   Hard-link publication is
    limited to Linux filesystems supporting same-directory hard links.
    Unsupported filesystems fail closed. Temp names are cleaned without
    unlinking committed data.
