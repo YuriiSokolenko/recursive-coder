@@ -690,28 +690,32 @@ object SessionCheckpointStore {
             throw CheckpointUnconfirmed(code, e)
         }
 
-    /** An old or unfenced callback cannot publish after the first resume fence. */
+    /** An old or retired callback cannot publish after the first resume fence. */
     fun saveFenced(lease: SessionResumeLease, directory: Path,
                    context: CheckpointHostContext, ledgerPath: Path,
                    snapshot: SessionCheckpoint, expectedPreviousSha256: String?): VerifiedSessionCheckpoint =
-        persist(directory, context, snapshot, expectedPreviousSha256, {},
-            LinuxCheckpointOwner::effectiveUid, lease) {
-            inspectLedger(ledgerPath, context.workspaceRoot)
+        lease.publishIfCurrent {
+            persist(directory, context, snapshot, expectedPreviousSha256, {},
+                LinuxCheckpointOwner::effectiveUid, lease) {
+                inspectLedger(ledgerPath, context.workspaceRoot)
+            }
         }
 
     fun saveFromOpenLedgerFenced(lease: SessionResumeLease, directory: Path,
                    context: CheckpointHostContext, ledger: DurableSessionEventLedger,
                    snapshot: SessionCheckpoint, expectedPreviousSha256: String?): VerifiedSessionCheckpoint =
-        try {
-            assertLedgerOutsideWorkspace(ledger.checkpointStoragePath, context.workspaceRoot)
-            ledger.withCommittedCheckpointAnchor { anchor ->
-                persist(directory, context, snapshot, expectedPreviousSha256, {},
-                    LinuxCheckpointOwner::effectiveUid, lease) { anchor }
+        lease.publishIfCurrent {
+            try {
+                assertLedgerOutsideWorkspace(ledger.checkpointStoragePath, context.workspaceRoot)
+                ledger.withCommittedCheckpointAnchor { anchor ->
+                    persist(directory, context, snapshot, expectedPreviousSha256, {},
+                        LinuxCheckpointOwner::effectiveUid, lease) { anchor }
+                }
+            } catch (e: SessionLedgerUnconfirmed) {
+                val code = if (e.code == DurableSessionEventLedger.LIVE_CHECKPOINT_SIZE_EXCEEDED_CODE)
+                    "CHECKPOINT_LIVE_LEDGER_TOO_LARGE" else "CHECKPOINT_JOURNAL_UNCONFIRMED"
+                throw CheckpointUnconfirmed(code, e)
             }
-        } catch (e: SessionLedgerUnconfirmed) {
-            val code = if (e.code == DurableSessionEventLedger.LIVE_CHECKPOINT_SIZE_EXCEEDED_CODE)
-                "CHECKPOINT_LIVE_LEDGER_TOO_LARGE" else "CHECKPOINT_JOURNAL_UNCONFIRMED"
-            throw CheckpointUnconfirmed(code, e)
         }
 
     private fun persist(directory: Path, context: CheckpointHostContext,
