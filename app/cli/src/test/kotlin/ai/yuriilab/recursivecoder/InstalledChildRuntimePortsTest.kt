@@ -3,6 +3,7 @@ package ai.yuriilab.recursivecoder
 import java.nio.file.Path
 import java.time.Clock
 import java.time.Instant
+import kotlinx.coroutines.CancellationException
 import java.time.ZoneId
 import java.time.ZoneOffset
 import java.util.concurrent.atomic.AtomicReference
@@ -13,6 +14,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 /** Pure fake ports plus a test-only host snapshot; no Linux writes or network. */
@@ -77,6 +79,59 @@ class InstalledChildRuntimePortsTest {
         assertEquals(2, invocations)
         assertEquals(RecursiveUsage(260, 0), ledger.observed())
         assertEquals(RecursiveUsage(150, 3), ledger.accounted())
+    }
+
+    @Test fun integrationExceptionMarksDirtyAndReturnsTypedStop() = runBlocking {
+        var uncertain = false
+        val audits = mutableListOf<String>()
+        val result = runInstalledOriginIntegration(
+            markUncertain = { uncertain = true },
+            audit = { code ->
+                assertTrue(uncertain)
+                audits.add(code)
+            }
+        ) {
+            throw IllegalStateException("test scheduler exception")
+        }
+        assertEquals(TwoOriginRecursiveOutcome.Stopped(
+            null, "ORIGIN_EXECUTION_UNCONFIRMED"), result)
+        assertTrue(uncertain)
+        assertEquals(listOf("ORIGIN_EXECUTION_UNCONFIRMED"), audits)
+    }
+
+    @Test fun integrationCancellationMarksDirtyBeforeAuditAndRethrows() {
+        var uncertain = false
+        val audits = mutableListOf<String>()
+        val cancelled = CancellationException("test cancellation")
+        val thrown = assertFailsWith<CancellationException> {
+            runBlocking {
+                runInstalledOriginIntegration(
+                    markUncertain = { uncertain = true },
+                    audit = { code ->
+                        assertTrue(uncertain)
+                        audits.add(code)
+                    }
+                ) {
+                    throw cancelled
+                }
+            }
+        }
+        assertSame(cancelled, thrown)
+        assertTrue(uncertain)
+        assertEquals(listOf("ORIGIN_CANCELLED"), audits)
+    }
+
+    @Test fun successfulIntegrationDoesNotMarkDirtyOrProduceAudit() = runBlocking {
+        var uncertain = false
+        val audits = mutableListOf<String>()
+        val finished = TwoOriginRecursiveOutcome.Completed(emptyMap(), emptyMap())
+        val result = runInstalledOriginIntegration(
+            markUncertain = { uncertain = true },
+            audit = { audits.add(it) }
+        ) { finished }
+        assertSame(finished, result)
+        assertFalse(uncertain)
+        assertTrue(audits.isEmpty())
     }
 
     @Test fun unknownUsageNeverDispatchesAnotherRole() = runBlocking {
