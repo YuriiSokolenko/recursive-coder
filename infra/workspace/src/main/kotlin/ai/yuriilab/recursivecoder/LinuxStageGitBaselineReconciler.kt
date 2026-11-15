@@ -37,6 +37,38 @@ data class StageGitReconciliationRequest(
     val frozenArtifacts: Map<String, String> = emptyMap()
 )
 
+
+/** Retained by the trusted host before entering an unaccepted Developer write. */
+data class StageGitUnacceptedFile(
+    val path: String,
+    val beforeBytes: ByteArray?,
+    val attemptedSha256: String
+)
+
+/**
+ * The caller must establish the terminal, non-accepted graph/CAS generation
+ * before submitting this in-memory evidence. Not a model-facing authority.
+ * These before-images are deliberately not serialized or restart durable.
+ */
+data class StageGitFailedWriteRequest(
+    val expectedHead: String,
+    val branch: String,
+    val stageRunId: StageRunId,
+    val leaseGeneration: String,
+    val files: List<StageGitUnacceptedFile>,
+    val frozenArtifacts: Map<String, String>
+)
+
+sealed interface StageGitFailedWriteResult {
+    /** All changes were restored or already equal to the pinned clean baseline. */
+    data class Recovered(val restoredPaths: Int, val auditSha256: String) :
+        StageGitFailedWriteResult
+    /** No mutation was attempted; human intervention must establish provenance. */
+    data class NeedsHuman(val code: String) : StageGitFailedWriteResult
+    /** A mutation may have occurred; retain quarantine even on subsequent attempts. */
+    data class ReconciliationRequired(val code: String) : StageGitFailedWriteResult
+}
+
 /** Exact, safe-to-expose operator result for a read-only pinned checkout check. */
 sealed interface StageGitBaselineResult {
     data object Clean : StageGitBaselineResult
@@ -582,6 +614,241 @@ class LinuxStageGitBaselineReconciler internal constructor(
         } finally {
             try { index?.let { Files.deleteIfExists(it) } } catch (_: Exception) {
                 // An orphaned private temporary index is not an accepted result.
+            }
+        }
+    }
+
+
+    /**
+     * Recover only the exact unaccepted Developer postimages retained by the host.
+     * No git reset/checkout, no deleting arbitrary untracked files and no model
+     * commands. Clean baseline, Git index, paths and frozen hashes are rechecked.
+     *
+     * The workspace and Git index must also be isolated from foreign writers;
+     * the shared advisory lease cannot protect against a hostile same-UID process.
+     * A crash loses the in-memory proof and must go to #10/human recovery.
+     */
+    fun recoverFailedDeveloper(request: StageGitFailedWriteRequest):
+        StageGitFailedWriteResult {
+        var mutationStarted = false
+        try {
+            check(gitObjectId.matches(request.expectedHead) &&
+                gitRef.matches(request.branch) &&
+                !request.branch.contains("..") && !request.branch.contains("//") &&
+                !request.branch.endsWith("/") && !request.branch.endsWith(".lock") &&
+                request.branch.split('/').none { it.startsWith(".") } &&
+                ToolAuthorizationPolicy.validHostIdentifier(request.leaseGeneration),
+                "INVALID_GIT_BASELINE")
+            val changes = request.files
+            check(changes.isNotEmpty() && changes.size <= 8 &&
+                changes.map { it.path.lowercase() }.toSet().size == changes.size &&
+                changes.all { item ->
+                    val kind = if (item.beforeBytes == null) WriteOperationKind.CREATE
+                        else WriteOperationKind.EDIT
+                    ToolAuthorizationPolicy.authorizeWrite(WriteAuthorizationFacts(
+                        EngineeringRole.DEVELOPER, kind, item.path,
+                        immutableArtifactPaths = request.frozenArtifacts.keys
+                    )) == ToolAuthorizationDecision.Permit &&
+                        sha256.matches(item.attemptedSha256) &&
+                        (item.beforeBytes == null || item.beforeBytes.size <= 4 * 1024 * 1024)
+                } && request.frozenArtifacts.all { (path, hash) ->
+                    ToolAuthorizationPolicy.validDeclaredPath(path) && sha256.matches(hash)
+                }, "INVALID_FAILED_WRITE_EVIDENCE")
+            val real = canonicalRoot()
+            check(lockDirectory.isAbsolute && !Files.isSymbolicLink(lockDirectory),
+                "WORKSPACE_LOCK_UNAVAILABLE")
+            Files.createDirectories(lockDirectory)
+            val locks = lockDirectory.toRealPath()
+            check(!locks.startsWith(real) && !real.startsWith(locks),
+                "WORKSPACE_LOCK_UNAVAILABLE")
+            val key = digest(real.toString().toByteArray())
+            FileChannel.open(locks.resolve("$key.lock"), StandardOpenOption.CREATE,
+                StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS).use { channel ->
+                val lease = try { channel.tryLock() } catch (_: Exception) { null }
+                check(lease != null, "WORKSPACE_LOCKED")
+                requireNotNull(lease).use {
+                    check(git(real, listOf("rev-parse", "--show-toplevel")) ==
+                        real.toString() &&
+                        Path.of(git(real, listOf("rev-parse", "--absolute-git-dir")))
+                            .toRealPath() == real.resolve(".git").toRealPath(),
+                        "UNSUPPORTED_WORKSPACE")
+                    check(git(real, listOf("rev-parse", "HEAD")) == request.expectedHead &&
+                        git(real, listOf("symbolic-ref", "-q", "HEAD")) ==
+                            "refs/heads/" + request.branch, "STAGE_BASELINE_CHANGED")
+                    verifyRepositoryConfiguration(real)
+                    val pinnedIndex = git(real, listOf("ls-files", "--stage", "-z"))
+                    for ((path, hash) in request.frozenArtifacts)
+                        check(digest(read(real, path).bytes) == hash,
+                            "FROZEN_ARTIFACT_CHANGED")
+                    val expectedStatus = linkedMapOf<String, String>()
+                    val restore = mutableListOf<StageGitUnacceptedFile>()
+                    for (item in changes.sortedBy { it.path }) {
+                        val tree = git(real, listOf("ls-tree", "HEAD", "--", item.path))
+                        val before = item.beforeBytes
+                        if (before == null) check(tree.isEmpty(), "FOREIGN_GIT_ENTRY")
+                        else {
+                            val tokens = tree.substringBefore('\t').split(' ')
+                            check(tokens.size == 3 &&
+                                tokens[0] in setOf("100644", "100755") &&
+                                tokens[1] == "blob" &&
+                                git(real, listOf("hash-object", "--stdin"), before) ==
+                                    tokens[2], "INVALID_BEFORE_IMAGE")
+                        }
+                        val current = failedWriteReadOptional(real, item.path)
+                        val original = before?.let(::digest)
+                        val currentHash = current?.let { digest(it.bytes) }
+                        check(currentHash == original ||
+                            (current != null &&
+                                currentHash == item.attemptedSha256), "FOREIGN_WORKTREE_EDIT")
+                        if (currentHash != original) {
+                            val present = current ?: throw Reject("FAILED_WRITE_DISAPPEARED")
+                            val expectedMode = if (before == null) "100644"
+                                else tree.substringBefore(' ')
+                            check(present.gitMode == expectedMode, "FOREIGN_FILE_MODE")
+                            expectedStatus[item.path] = if (before == null) "??" else " M"
+                            restore += item
+                        }
+                    }
+                    check(status(real) == expectedStatus &&
+                        git(real, listOf("ls-files", "--stage", "-z")) == pinnedIndex,
+                        "FOREIGN_GIT_OR_INDEX_EDIT")
+                    for (item in restore) {
+                        // A preflight-to-mutation external edit must not be overwritten.
+                        check(git(real, listOf("ls-files", "--stage", "-z")) == pinnedIndex &&
+                            git(real, listOf("rev-parse", "HEAD")) == request.expectedHead,
+                            "FOREIGN_GIT_OR_INDEX_EDIT")
+                        mutationStarted = true
+                        failedWriteRestoreExact(real, item)
+                    }
+                    // Git status alone cannot prove byte-precise restoration.
+                    // Re-open each target with nofollow and hash every preimage.
+                    for (item in changes) {
+                        val actual = failedWriteReadOptional(real, item.path)
+                        val original = item.beforeBytes
+                        if (original == null)
+                            check(actual == null, "POST_RESTORE_IMAGE_UNCONFIRMED")
+                        else
+                            check(actual != null &&
+                                digest(actual.bytes) == digest(original),
+                                "POST_RESTORE_IMAGE_UNCONFIRMED")
+                    }
+                    check(git(real, listOf("ls-files", "--stage", "-z")) == pinnedIndex &&
+                        inspectCleanBaseline(request.expectedHead, request.branch) ==
+                            StageGitBaselineResult.Clean, "POST_RESTORE_BASELINE_UNCONFIRMED")
+                    for ((path, hash) in request.frozenArtifacts)
+                        check(digest(read(real, path).bytes) == hash,
+                            "POST_RESTORE_FROZEN_CHANGED")
+                    val audit = digest(("recursive-coder/developer-failed-write-recovery/v1\u0000" +
+                        request.stageRunId.value + "\u0000" +
+                        request.leaseGeneration + "\u0000" + request.expectedHead +
+                        "\u0000" + changes.sortedBy { it.path }.joinToString("\u0000") {
+                            it.path + ":" + (it.beforeBytes?.let(::digest) ?: "CREATE") +
+                                ":" + it.attemptedSha256
+                        }).toByteArray(Charsets.UTF_8))
+                    return StageGitFailedWriteResult.Recovered(restore.size, audit)
+                }
+            }
+        } catch (failure: Reject) {
+            return if (mutationStarted)
+                StageGitFailedWriteResult.ReconciliationRequired(failure.code)
+            else StageGitFailedWriteResult.NeedsHuman(failure.code)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            return StageGitFailedWriteResult.ReconciliationRequired("RECOVERY_INTERRUPTED")
+        } catch (_: Exception) {
+            return if (mutationStarted)
+                StageGitFailedWriteResult.ReconciliationRequired("RECOVERY_UNCONFIRMED")
+            else StageGitFailedWriteResult.NeedsHuman("RECOVERY_UNAVAILABLE")
+        }
+    }
+
+    private fun <T> withFailedWriteParent(root: Path, path: String,
+        action: (SecureDirectoryStream<Path>, Path) -> T): T {
+        check(ToolAuthorizationPolicy.validDeclaredPath(path), "INVALID_STAGE_PATH")
+        val rootKey = Files.readAttributes(root, BasicFileAttributes::class.java,
+            LinkOption.NOFOLLOW_LINKS).fileKey()
+        Files.newDirectoryStream(root).use { opened ->
+            val stream = opened as? SecureDirectoryStream<Path>
+                ?: throw Reject("SANDBOX_UNAVAILABLE")
+            check(stream.getFileAttributeView(BasicFileAttributeView::class.java)
+                .readAttributes().fileKey() == rootKey, "WORKSPACE_REPLACED")
+            var current = stream
+            val handles = mutableListOf<SecureDirectoryStream<Path>>()
+            try {
+                val parts = path.split('/')
+                for (part in parts.dropLast(1)) {
+                    check(current.any { it.fileName.toString() == part },
+                        "UNSAFE_STAGE_PATH")
+                    val next = try {
+                        current.newDirectoryStream(Path.of(part), LinkOption.NOFOLLOW_LINKS)
+                    } catch (_: Exception) { throw Reject("UNSAFE_STAGE_PATH") }
+                    handles += next
+                    current = next
+                }
+                val leaf = parts.last()
+                check(current.none {
+                    it.fileName.toString() != leaf &&
+                        it.fileName.toString().equals(leaf, ignoreCase = true)
+                }, "UNSAFE_STAGE_PATH")
+                return action(current, Path.of(leaf))
+            } finally {
+                handles.asReversed().forEach { it.close() }
+            }
+        }
+    }
+
+    private fun failedWriteReadOptional(root: Path, path: String): OpenedFile? =
+        withFailedWriteParent(root, path) { dir, name ->
+            val attributes = try {
+                dir.getFileAttributeView(name, BasicFileAttributeView::class.java,
+                    LinkOption.NOFOLLOW_LINKS).readAttributes()
+            } catch (_: java.nio.file.NoSuchFileException) { null }
+            catch (_: Exception) { throw Reject("UNSAFE_STAGE_FILE") }
+            if (attributes == null) null else {
+                check(attributes.isRegularFile && attributes.size() <= 4 * 1024 * 1024,
+                    "UNSAFE_STAGE_FILE")
+                read(root, path, requireCanonicalMode = true)
+            }
+        }
+
+    private fun failedWriteRestoreExact(root: Path, item: StageGitUnacceptedFile) {
+        withFailedWriteParent(root, item.path) { dir, name ->
+            val attrs = try {
+                dir.getFileAttributeView(name, BasicFileAttributeView::class.java,
+                    LinkOption.NOFOLLOW_LINKS).readAttributes()
+            } catch (_: Exception) { throw Reject("UNSAFE_STAGE_FILE") }
+            check(attrs.isRegularFile && attrs.size() <= 4 * 1024 * 1024,
+                "UNSAFE_STAGE_FILE")
+            if (item.beforeBytes == null) {
+                // Delete only the exact known CREATE postimage; never a foreign file.
+                check(digest(read(root, item.path, true).bytes) == item.attemptedSha256,
+                    "FOREIGN_WORKTREE_EDIT")
+                val now = dir.getFileAttributeView(name, BasicFileAttributeView::class.java,
+                    LinkOption.NOFOLLOW_LINKS).readAttributes()
+                check(now.fileKey() == attrs.fileKey(), "FOREIGN_WORKTREE_EDIT")
+                dir.deleteFile(name)
+            } else {
+                // Read and validate via the SAME nofollow descriptor we overwrite.
+                dir.newByteChannel(name, setOf<OpenOption>(StandardOpenOption.READ,
+                    StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)).use { channel ->
+                    val current = ByteArrayOutputStream()
+                    val buf = ByteBuffer.allocate(8192)
+                    while (true) {
+                        val count = channel.read(buf)
+                        if (count < 0) break
+                        if (count == 0) continue
+                        buf.flip()
+                        current.write(buf.array(), 0, count)
+                        buf.clear()
+                        check(current.size() <= 4 * 1024 * 1024, "STAGE_FILE_TOO_LARGE")
+                    }
+                    check(digest(current.toByteArray()) == item.attemptedSha256,
+                        "FOREIGN_WORKTREE_EDIT")
+                    channel.position(0)
+                    channel.truncate(0)
+                    val old = ByteBuffer.wrap(item.beforeBytes)
+                    while (old.hasRemaining()) channel.write(old)
+                }
             }
         }
     }
