@@ -62,7 +62,11 @@ including "known" usage, are not independent usage/accounting receipts.
    `RCFEN1` header, monotonic generation, preceding fence digest, exact
    admitted checkpoint digest, session/trace identity, policy digest, and
    tool-authority digest, plus a SHA-256 payload checksum. The write uses
-   CREATE_NEW temp, file force(true), ATOMIC_MOVE, parent directory force(true).
+   CREATE_NEW temp, file force(true), atomic hard-link publication
+   (`Files.createLink`) that fails if the destination already exists, and
+   parent directory force(true). Hard-link publication is limited to Linux
+   filesystems that support same-directory hard links; unsupported filesystems
+   fail closed. Temp names are later removed without unlinking committed data.
    All published fences and their chain are verified on every checkpoint read.
    Before fence publication, an immutable SHA-256 chained
    `<ledger-name>.resume-anchor-NNNNNNNNNNNN.rca` is published and fsynced in
@@ -165,9 +169,21 @@ before its fence requires explicit operator reconciliation.
    operator or time, and refuses a conflicting identity or digest.
    Only then does it durably complete the fence without replaying any model/tool action.
    The returned lease owns N+1, not a silently new generation.
+   **The approval audit is an immutable intent record, not proof of completed
+   recovery.** It can be durable while fence N+1 is still absent. The state is
+   `approved/pending` while the audit and prepared anchor exist without that
+   fence; it becomes `completed` only when the matching, verified fence N+1
+   is durably published. Do not infer completion from `operatorApproved=true`.
 4. Validate the returned lease and inspect the full fence/anchor chains.
    If publication remains uncertain or operator approval is denied, stop;
-   **do not truncate or retry blindly**. Completing this prepare is not
+   **do not truncate or retry blindly**. If the approval audit was already
+   committed, any retry MUST use the same `operatorId` and exact digests.
+   A different operator cannot take over this old store: the deliberate
+   `RESUME_FENCE_AUDIT_CONFLICT` refuses even a new trusted approval.
+   If the recorded operator cannot complete it, preserve the pending audit,
+   archive the old store/ledger/anchors and start a **new session with a fresh
+   store** after manual reconciliation. Do not modify or delete the existing
+   operator record. Completing this prepare is not
    full production crash-resume: the existing ledger still cannot safely
    reopen for append and existing runtime receipts are not generation-fenced.
 
@@ -177,8 +193,11 @@ authorization**. The host must authenticate and authorize the operator
 before constructing `PreparedFenceReconciliation`. The immutable audit is
 checksum-validated and durable but is not tamper-proof against the trusted
 same-UID filesystem owner, who can delete files. It is stored outside the
-closed ledger because that ledger has no safe append/reopen API. An unknown,
-missing or conflicting audit must never be silently overwritten.
+closed ledger because that ledger has no safe append/reopen API. Published
+audit, anchor and fence filenames are created through atomic no-replace hard
+links, not `exists` plus `ATOMIC_MOVE`; missing/deleted audit evidence is
+still not independently detectable. An unknown, missing or conflicting audit
+must never be silently overwritten.
 Never expose
 this method to model-authored commands or unauthenticated host services.
 A different prepared hash, invalid operator ID or unapproved recovery
@@ -190,6 +209,11 @@ ledger inspection** and rechecks it for fenced publications so replacing the
 inode at the same path invalidates the lease. File keys can be recycled by a
 filesystem after deletion/recreation; protection against a malicious same-UID
 writer remains out of scope.
+
+The `admitWithFault` and `reconcilePreparedWithFault` entry points are
+`internal` deterministic integration-test seams compiled in production
+sources. They are **not supported application APIs** and must not be wired
+to external callers, model tools, or operator endpoints.
 
 **If recovery cannot reproduce the prepared fence digest** because Git,
 frozen inputs, policy facts, read-tool grants, checkpoint contents or ledger
@@ -213,6 +237,10 @@ Tests under the integration tier cover pre-execution admission, fenced/unfenced
 save, stale callbacks, generation CAS, changes to HEAD/policy/frozen inputs,
 unsafe execution boundaries, corrupt fence files, independent process lock
 races, external anchor rollback, interrupted prepared-anchor reconciliation,
-anchor-directory security, pre/post-inspection inode checks, durable audit
-and idempotent retry after audit fsync, conflicting operator rejection, stale
-live-writer callbacks, orphan cleanup and OS lease release after force-kill. All tests run offline.
+anchor-directory security, a ledger inode swap in the after-anchor admission
+seam (pre/post-inspection identity checks are also in code, but that earlier
+race has no dedicated fault-injection test), atomic no-replace hard links,
+valid-checksum but mismatched audit, audit beyond the current fence head,
+durable approval/pending status and idempotent retry after audit fsync,
+conflicting operator rejection, stale live-writer callbacks, orphan cleanup
+and OS lease release after force-kill. All tests run offline.

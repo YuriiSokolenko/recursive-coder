@@ -8,7 +8,6 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
-import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.BasicFileAttributes
 import java.util.Locale
@@ -154,10 +153,8 @@ internal object ResumeFenceStorage {
                 }
                 channel.force(true)
             }
-            if (Files.exists(destination, LinkOption.NOFOLLOW_LINKS))
-                fail("RESUME_FENCE_CAS_FAILED")
-            Files.move(temporary, destination, StandardCopyOption.ATOMIC_MOVE)
-            FileChannel.open(directory, StandardOpenOption.READ).use { it.force(true) }
+            ResumeImmutablePublication.linkAndSync(directory, temporary, destination,
+                "RESUME_FENCE_CAS_FAILED", "RESUME_FENCE_PUBLISH_UNCONFIRMED")
             return decode(destination)
         } catch (error: Exception) {
             if (error is SessionResumeUnconfirmed) throw error
@@ -435,9 +432,11 @@ object SessionResumeAdmission {
                                 anchor, operator)
                         }
                     }
+                    afterAnchorCommitted()
+                    // This must follow the test seam too, to cover an inode swap
+                    // after a durable anchor/audit but before fence publication.
                     if (ledgerFileKey(ledgerPath) != ledgerKey)
                         fail("RESUME_LEDGER_PATH_CHANGED")
-                    afterAnchorCommitted()
                 }
                 val anchor = preparedAnchor ?: fail("RESUME_FENCE_ANCHOR_UNCONFIRMED")
                 SessionResumeLease(next.generation, next.checkpointSha256,

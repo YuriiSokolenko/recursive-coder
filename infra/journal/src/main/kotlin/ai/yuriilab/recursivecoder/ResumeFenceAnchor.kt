@@ -4,9 +4,9 @@ import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
+import java.nio.file.FileAlreadyExistsException
 import java.nio.file.LinkOption
 import java.nio.file.Path
-import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.PosixFilePermission
 import java.nio.file.attribute.PosixFilePermissions
@@ -20,6 +20,27 @@ import java.util.UUID
  * Publish anchor first: a crash before fence publication requires reconciliation.
  * Both directories rolled back by a trusted same-UID owner remain outside scope.
  */
+/**
+ * Same-directory publication by hard link rather than rename. CREATE_NEW
+ * checks and advisory locks alone do not prevent rename-replacement races.
+ * Callers have already fsynced the temporary content before linking.
+ */
+internal object ResumeImmutablePublication {
+    fun linkAndSync(directory: Path, temporary: Path, destination: Path,
+                    conflictCode: String, unavailableCode: String) {
+        try {
+            Files.createLink(destination, temporary)
+            FileChannel.open(directory, StandardOpenOption.READ).use { it.force(true) }
+        } catch (e: FileAlreadyExistsException) {
+            throw SessionResumeUnconfirmed(conflictCode, e)
+        } catch (e: SessionResumeUnconfirmed) {
+            throw e
+        } catch (e: Exception) {
+            throw SessionResumeUnconfirmed(unavailableCode, e)
+        }
+    }
+}
+
 internal data class ResumeFenceAnchorRecord(
     val generation: Long,
     val fenceSha256: String,
@@ -186,10 +207,8 @@ internal object ResumeFenceAnchor {
                 }
                 channel.force(true)
             }
-            if (Files.exists(target, LinkOption.NOFOLLOW_LINKS))
-                fail("RESUME_FENCE_AUDIT_CONFLICT")
-            Files.move(temporary, target, StandardCopyOption.ATOMIC_MOVE)
-            FileChannel.open(directory, StandardOpenOption.READ).use { it.force(true) }
+            ResumeImmutablePublication.linkAndSync(directory, temporary, target,
+                "RESUME_FENCE_AUDIT_CONFLICT", "RESUME_FENCE_AUDIT_UNCONFIRMED")
             return requireSame(readAudit(target))
         } catch (e: SessionResumeUnconfirmed) {
             throw e
@@ -327,10 +346,8 @@ internal object ResumeFenceAnchor {
                 }
                 channel.force(true)
             }
-            if (Files.exists(destination, LinkOption.NOFOLLOW_LINKS))
-                fail("RESUME_FENCE_CAS_FAILED")
-            Files.move(temporary, destination, StandardCopyOption.ATOMIC_MOVE)
-            FileChannel.open(directory, StandardOpenOption.READ).use { it.force(true) }
+            ResumeImmutablePublication.linkAndSync(directory, temporary, destination,
+                "RESUME_FENCE_CAS_FAILED", "RESUME_FENCE_ANCHOR_UNCONFIRMED")
             if (read(destination) != value) fail("RESUME_FENCE_ANCHOR_UNCONFIRMED")
             return value
         } catch (e: Exception) {
