@@ -381,7 +381,8 @@ object SessionResumeAdmission {
         attestation: ResumeHostAttestation, operator: PreparedFenceReconciliation,
         afterAuditCommitted: () -> Unit
     ): SessionResumeLease =
-        admitChecked(directory, context, ledgerPath, attestation, operator, afterAuditCommitted)
+        admitChecked(directory, context, ledgerPath, attestation, operator,
+            afterAnchorCommitted = afterAuditCommitted)
 
     private fun admitChecked(
         directory: Path, context: CheckpointHostContext, ledgerPath: Path,
