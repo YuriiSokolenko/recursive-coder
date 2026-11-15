@@ -676,6 +676,7 @@ class SessionCheckpointStoreIntegrationTest {
             store(), context(), ledger(), resumeAttestation())
         assertEquals(1L, retired.generation)
         retired.assertCurrent()
+        assertEquals("published", retired.publishIfCurrent { "published" })
         assertEquals(1L, SessionResumeAdmission.currentGeneration(store(), context(), ledger()))
 
         val secondSnapshot = first.snapshot.copy(sequence = 2L, previousSha256 = first.sha256)
@@ -688,6 +689,12 @@ class SessionCheckpointStoreIntegrationTest {
         assertEquals(2L, saved.snapshot.sequence)
 
         retired.close()
+        var staleCallbackPublished = false
+        assertEquals("RESUME_FENCE_STALE_WRITER",
+            assertFailsWith<SessionResumeUnconfirmed> {
+                retired.publishIfCurrent { staleCallbackPublished = true }
+            }.code)
+        assertFalse(staleCallbackPublished)
         assertEquals("RESUME_FENCE_STALE_WRITER",
             assertFailsWith<SessionResumeUnconfirmed> { retired.assertCurrent() }.code)
         assertEquals("RESUME_FENCE_STALE_WRITER",
