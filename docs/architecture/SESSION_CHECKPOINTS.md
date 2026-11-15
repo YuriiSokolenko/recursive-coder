@@ -45,6 +45,14 @@ record: it remains pending until independently reconciled. Terminal
 session phases are exactly `SessionPhase` wire values, and terminal success
 cannot coexist with pending effects or unknown consumption.
 
+`SessionPhaseVocabulary` is the intentionally supported, read-only public
+adapter surface for the **currently emitted** v1 session phase wire spellings:
+`wires` and `terminalWires`. Both sets derive from the internal `SessionPhase`
+enum and cannot be mutated by consumers. Any spelling or membership change
+requires a compatibility review and an explicit update to drift-guard tests.
+The internal enum, transition policy, and future checkpoint/resume phases are
+**not** part of this adapter contract; no new protocol states are implied.
+
 Each immutable file is named with a 12-digit checkpoint sequence and the
 suffix .rcp. Its binary frame is:
 
@@ -67,9 +75,13 @@ still open, the host can instead call saveFromOpenLedger: it verifies the durabl
 prefix under the writer's synchronized append/flush monitor and holds that
 monitor until the checkpoint is published. **All appends/flushes stall during
 this operation**, including replay, validation and file/directory fsync. To
-limit growth, a live-ledger checkpoint refuses a prefix larger than 4 MiB and
-a store refuses more than 256 published generations; fsync latency has no
-strict real-time bound. Any pending or poisoned ledger append is refused.
+limit growth, the ledger checks a single 4 MiB live-checkpoint limit
+**before replay**, under the append monitor. A larger prefix is refused as
+`CHECKPOINT_LIVE_LEDGER_TOO_LARGE` (ledger cause
+`LEDGER_CHECKPOINT_SIZE_EXCEEDED`) without publishing a generation or
+poisoning the writer. This limit is distinct from the ledger's normal 32 MiB
+capacity. A store refuses more than 256 published generations; fsync latency
+has no strict real-time bound. Any pending or poisoned ledger append is refused.
 External read-only inspect still requires the writer to close.
 
 The writer takes a persistent adjacent directory lock (process-local reservation
@@ -96,9 +108,16 @@ permitted. resumeAllowed is always false; requireResumeAdmission always denies.
 An unconfirmed ledger tail or an unacknowledged tool result is **not** promoted
 to accepted history. These APIs are not wired into a production resume command.
 
-The checkpoint directory must be POSIX, owned by the JVM's process user and
-mode `0700` (owner read/write/execute only); otherwise save and inspect
-refuse with `CHECKPOINT_UNSAFE_DIRECTORY`. This is a fail-closed deployment
+The checkpoint directory must be Linux/POSIX, with numeric `unix:uid`
+matching the JVM **effective UID** (the second Uid field of Linux
+`/proc/self/status`), and mode `0700` (owner read/write/execute only).
+The mutable `user.name` JVM property and the real UID under `sudo`/`su`
+are not authorization inputs. The effective UID is the checkpoint owner's
+required policy identity; Linux actually performs filesystem access checks
+using the filesystem UID (fourth procfs field), normally the same but potentially
+different after `setfsuid`. If procfs or Unix owner attributes are unavailable,
+ambiguous or malformed, save and inspect fail closed with
+`CHECKPOINT_UNSAFE_DIRECTORY`. This is a fail-closed deployment
 precondition, not an attempt to chmod or repair unsafe storage.
 An exclusive advisory lock and NOFOLLOW checks protect against
 cooperating processes and accidental path substitution, not a complete defense
@@ -112,6 +131,10 @@ SessionCheckpointCodecUnitTest (@Tag("unit")) exercises strict canonical
 codec, redaction, digest/graph/usage policy. SessionCheckpointStoreIntegrationTest
 (@Tag("integration")) uses a real ledger and filesystem to exercise durable
 reopen, simulated interruptions after temp sync and after rename, stale
-generations, corruption, baseline and journal drift, hostile paths and
-graph/correlation/artifact mismatch. Full Gradle/CI, including the Linux sandbox
-and Session Protocol compatibility jobs, must pass before merge.
+generations, corruption, baseline and journal drift, hostile paths,
+effective-UID impersonation via closed/live save and read-only inspect, exact
+live-ledger size boundaries (4 MiB - 1, 4 MiB and above), verified post-refusal
+ledger replay, and graph/correlation/artifact mismatch. The integration suite is
+Linux/procfs-only and skips on unsupported developer platforms. Full Gradle/CI,
+including the Linux sandbox and Session Protocol compatibility jobs, must pass
+before merge.
