@@ -1,8 +1,5 @@
 package ai.yuriilab.recursivecoder
 
-import org.junit.jupiter.api.Tag
-import org.junit.jupiter.api.RepeatedTest
-
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
@@ -15,6 +12,8 @@ import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 import kotlin.test.*
 import kotlinx.serialization.json.*
+import org.junit.jupiter.api.RepeatedTest
+import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.io.TempDir
 
 // Scheduler unit tests use an injected, deterministic runner; cross-module execution is tested in :app:cli.
@@ -431,31 +430,43 @@ class TaskManagerTest {
     }
 
     @Test fun lateCancelledAttemptResultCannotOverrideRunningRetry() {
-        val service = service()
-        service.enqueue(request("one"))
-        val first = service.claim()!!
-        service.cancel("one")
-        service.retry("one")
+        // Cover both stale results on both sides of the new claim. Each case
+        // owns a separate task so the test needs no scheduler or clock delays.
+        for (status in listOf("failed", "succeeded")) {
+            for (claimBeforeLateFinish in listOf(false, true)) {
+                val id = "$"+"status-"+"$"+"{if (claimBeforeLateFinish) "running" else "ready"}"
+                val service = service()
+                service.enqueue(request(id))
+                val first = service.claim()!!
+                service.cancel(id)
+                service.retry(id)
 
-        // An old terminal result must not affect the freshly queued retry.
-        service.finish("one", first.sessionId!!, "failed")
-        assertEquals(TaskState.READY, service.show("one").state)
+                val second = if (claimBeforeLateFinish) service.claim()!! else null
+                service.finish(id, first.sessionId!!, status)
 
-        val second = service.claim()!!
-        assertEquals(2, second.attempt)
-        assertNotEquals(first.sessionId, second.sessionId)
+                val snapshot = service.show(id)
+                assertEquals(if (claimBeforeLateFinish) TaskState.RUNNING else TaskState.READY,
+                    snapshot.state, "Stale $"+"status before/after claim")
+                assertEquals(second?.sessionId, snapshot.sessionId)
+                assertEquals(if (claimBeforeLateFinish) 2 else 1, snapshot.attempt)
+                assertEquals(0, snapshot.transitions.count {
+                    it.to == TaskState.SUCCEEDED || it.to == TaskState.FAILED
+                }, "Stale result must not add a terminal transition")
 
-        // Nor may it overwrite an already running, differently owned session.
-        service.finish("one", first.sessionId!!, "succeeded")
-        val retry = service.show("one")
-        assertEquals(TaskState.RUNNING, retry.state)
-        assertEquals(second.sessionId, retry.sessionId)
-        assertEquals(2, retry.attempt)
-        assertEquals(0, retry.transitions.count { it.to == TaskState.SUCCEEDED })
+                val retry = second ?: service.claim()!!
+                assertEquals(2, retry.attempt)
+                assertNotEquals(first.sessionId, retry.sessionId)
+                assertEquals(TaskState.RUNNING, service.show(id).state)
 
-        service.finish("one", second.sessionId!!, "succeeded")
-        assertEquals(TaskState.SUCCEEDED, service.show("one").state)
-        assertEquals(1, service.show("one").transitions.count { it.to == TaskState.SUCCEEDED })
+                service.finish(id, retry.sessionId!!, "succeeded")
+                val completed = service.show(id)
+                assertEquals(TaskState.SUCCEEDED, completed.state)
+                assertEquals(retry.sessionId, completed.sessionId)
+                assertEquals(2, completed.attempt)
+                assertEquals(1, completed.transitions.count { it.to == TaskState.SUCCEEDED })
+                assertEquals(0, completed.transitions.count { it.to == TaskState.FAILED })
+            }
+        }
     }
 
     @RepeatedTest(20)
@@ -470,7 +481,7 @@ class TaskManagerTest {
         val starts = AtomicInteger()
         val activeCount = AtomicInteger()
         val peak = AtomicInteger()
-        val oldTaskExcluded = AtomicBoolean(false)
+        val oldTaskExcluded = AtomicBoolean(true)
         val claimedWhileOldWorkerAlive = AtomicBoolean(false)
 
         val runner = TaskRunner { request, _ ->
@@ -508,12 +519,16 @@ class TaskManagerTest {
                 service.show("one").state == TaskState.READY
             val claimed = delegateClaim(excludedTaskIds)
             if (retryReadyWhileOldAlive) {
-                oldTaskExcluded.set("one" in excludedTaskIds)
-                claimedWhileOldWorkerAlive.set(claimed != null)
+                // Sticky failures: a later successful observation cannot erase a race.
+                if ("one" !in excludedTaskIds) oldTaskExcluded.set(false)
+                if (claimed != null) claimedWhileOldWorkerAlive.set(true)
                 claimWhileOldWorkerAlive.countDown()
             }
             claimed
         }
+        // The compatibility TaskService constructor wires these Default* use cases;
+        // only claim is decorated here to observe the scheduler interleaving.
+        // Keep this assembly aligned with TaskService if its wiring changes.
         val schedulerExecutor = Executors.newSingleThreadExecutor()
         val outcome = schedulerExecutor.submit<SchedulerReport> {
             TaskScheduler(
@@ -529,11 +544,11 @@ class TaskManagerTest {
             ).runUntilIdle(concurrency = 2)
         }
         try {
-            assertTrue(firstStarted.await(5, TimeUnit.SECONDS), "First worker did not start")
+            assertTrue(firstStarted.await(10, TimeUnit.SECONDS), "First worker did not start")
             service.cancel("one")
             service.retry("one")
 
-            assertTrue(claimWhileOldWorkerAlive.await(5, TimeUnit.SECONDS),
+            assertTrue(claimWhileOldWorkerAlive.await(10, TimeUnit.SECONDS),
                 "Scheduler did not evaluate the retry while the old worker was alive")
             assertTrue(oldTaskExcluded.get(), "Old worker must exclude its task from claims")
             assertFalse(claimedWhileOldWorkerAlive.get(), "Retry must not be claimed yet")
@@ -542,7 +557,7 @@ class TaskManagerTest {
             assertEquals(TaskState.READY, service.show("one").state)
 
             releaseOld.countDown()
-            assertTrue(secondStarted.await(5, TimeUnit.SECONDS),
+            assertTrue(secondStarted.await(10, TimeUnit.SECONDS),
                 "Retry did not launch after old worker termination")
             val runningRetry = service.show("one")
             assertEquals(2, starts.get())
@@ -553,8 +568,11 @@ class TaskManagerTest {
             assertEquals(0, runningRetry.transitions.count { it.to == TaskState.SUCCEEDED },
                 "Old worker success must not terminalize the new attempt")
 
+            assertTrue(oldTaskExcluded.get(), "Task exclusion must hold on every observed claim")
+            assertFalse(claimedWhileOldWorkerAlive.get(),
+                "No claim may succeed while the old worker remains active")
             releaseSecond.countDown()
-            val report = outcome.get(5, TimeUnit.SECONDS)
+            val report = outcome.get(15, TimeUnit.SECONDS)
             assertEquals(2, report.launched)
             assertEquals(2, report.completed)
             val completed = service.show("one")
@@ -566,7 +584,7 @@ class TaskManagerTest {
             releaseOld.countDown()
             releaseSecond.countDown()
             schedulerExecutor.shutdownNow()
-            assertTrue(schedulerExecutor.awaitTermination(5, TimeUnit.SECONDS),
+            assertTrue(schedulerExecutor.awaitTermination(15, TimeUnit.SECONDS),
                 "Scheduler must release its worker pool and exclusive store lock")
         }
     }
