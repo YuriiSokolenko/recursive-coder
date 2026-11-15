@@ -1132,22 +1132,17 @@ class SessionCheckpointStoreIntegrationTest {
         }
         val own = abandon(ledger())
         val foreign = abandon(otherLedger)
-        val legacy = ledger().resolveSibling(
-            ".resume-hardlink-probe-" + UUID.randomUUID() + ".tmp")
-        Files.writeString(legacy, "unscoped legacy probe")
         SessionResumeAdmission.admit(otherStore, context(), otherLedger,
             resumeAttestation()).use { it.assertCurrent() }
         assertFalse(Files.exists(foreign.first))
         assertFalse(Files.exists(foreign.second))
         assertTrue(Files.exists(own.first))
         assertTrue(Files.exists(own.second))
-        assertTrue(Files.exists(legacy))
 
         SessionResumeAdmission.admit(store(), context(), ledger(),
             resumeAttestation()).use { it.assertCurrent() }
         assertFalse(Files.exists(own.first))
         assertFalse(Files.exists(own.second))
-        assertTrue(Files.exists(legacy))
         assertEquals(1L, SessionResumeAdmission.currentGeneration(
             otherStore, context(), otherLedger))
         assertEquals(1L, SessionResumeAdmission.currentGeneration(

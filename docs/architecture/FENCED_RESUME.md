@@ -70,19 +70,17 @@ including "known" usage, are not independent usage/accounting receipts.
    share a filesystem. Unsupported links abort with
    `RESUME_FENCE_HARD_LINK_UNAVAILABLE` before changing the generation.
    This is an availability preflight, not a guarantee against later I/O errors.
-    If the process crashes mid-probe, checkpoint probe filenames matching
-    `.resume-hardlink-probe-<UUID>.tmp/.link` are tolerated by read-only
-    inspection. Ledger-parent probes instead use
-    `.resume-hardlink-probe-ledger-<SHA256(ledger basename)>-<UUID>.tmp/.link`.
-    Probe files are not committed evidence; inspection never deletes them.
-    A subsequent admission removes checkpoint probes and **only its own
-    ledger's** orphan probes in the shared parent, fsyncing changed directories.
-    Unscoped legacy probes in the ledger parent cannot be assigned to an owner
-    and are left untouched (they do not block admission). Nonmatching
-    checkpoint files and unsafe probe types refuse. Hard-link publication is
-    limited to Linux filesystems supporting same-directory hard links.
-    Unsupported filesystems fail closed. Temp names are cleaned without
-    unlinking committed data.
+   If the process crashes mid-probe, checkpoint probe filenames matching
+   `.resume-hardlink-probe-<UUID>.tmp/.link` are tolerated by read-only
+   inspection. Ledger-parent probes instead use
+   `.resume-hardlink-probe-ledger-<SHA256(ledger basename)>-<UUID>.tmp/.link`.
+   Probe files are not committed evidence; inspection never deletes them.
+   A subsequent admission removes checkpoint probes and **only its own
+   ledger's** orphan probes in the shared parent, fsyncing changed directories.
+   checkpoint files and unsafe probe types refuse. Hard-link publication is
+   limited to Linux filesystems supporting same-directory hard links.
+   Unsupported filesystems fail closed. Temp names are cleaned without
+   unlinking committed data.
    All published fences and their chain are verified on every checkpoint read.
    Before fence publication, an immutable SHA-256 chained
    `<ledger-name>.resume-anchor-NNNNNNNNNNNN.rca` is published and fsynced in
@@ -306,7 +304,7 @@ The Linux integration tier tests these failure boundaries offline:
   injected ledger-side refusal before durable prepare, and scoped cleanup of
   orphan probe files without writes during inspection
 - Two ledger stores sharing a parent: each admission removes only its own
-  SHA-256-scoped probes and leaves foreign and legacy unscoped files
+  SHA-256-scoped probes and leaves foreign probe files untouched
 - Ledger inode replacement both before inspection and after anchor publication
 - Corrupt or semantically mismatched audits with valid checksums, plus audit
   records beyond the current fence head
