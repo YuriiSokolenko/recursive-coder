@@ -61,10 +61,14 @@ including "known" usage, are not independent usage/accounting receipts.
    exists, the legacy unfenced save APIs fail closed with
    `RESUME_FENCE_REQUIRED`. A closed/stale lease fails with
    `RESUME_FENCE_STALE_WRITER`.
-5. The host must call `lease.assertCurrent()` before trusted callback or
-   receipt publication and keep the OS lease until all authorized publication
-   is complete. `close()` invalidates the token. Closing without completing
-   terminal publication is not a successful commit.
+5. The host must wrap each short trusted state/receipt commit in
+   `lease.publishIfCurrent { ... }`, which serializes validation and the
+   publication with lease retirement, preventing a check-to-commit race.
+   `lease.assertCurrent()` is a non-publishing status guard, **not** an
+   atomic commit guard. Do not run model requests or blocking network/tool
+   operations inside the publication callback. Keep the OS lease until all
+   authorized publication is complete. `close()` invalidates the token.
+   Closing without completing terminal publication is not a successful commit.
 
 The locking order for admission is resume.lock -> checkpoint.lock ->
 closed-ledger inspect (its independent tryLock). The live-ledger checkpoint
