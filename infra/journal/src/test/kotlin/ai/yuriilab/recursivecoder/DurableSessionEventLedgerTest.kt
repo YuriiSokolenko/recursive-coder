@@ -1,13 +1,20 @@
 package ai.yuriilab.recursivecoder
 
+import java.nio.ByteBuffer
 import java.nio.file.Files
 import java.nio.file.Path
+import java.security.MessageDigest
+import java.util.concurrent.TimeUnit
 import java.time.Clock
 import java.time.Instant
 import java.time.ZoneOffset
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.jupiter.api.Tag
@@ -39,7 +46,10 @@ class DurableSessionEventLedgerTest {
         if (sequence == 1) put("causationId", JsonNull)
         else put("causationId", "evt-sess-one-" + (sequence - 1))
         put("actor", buildJsonObject { put("agentId", "agent-sess-one") })
-        put("redaction", buildJsonObject { put("mode", "metadata-only") })
+        put("redaction", buildJsonObject {
+            put("mode", "metadata-only")
+            put("removedFields", JsonArray(emptyList()))
+        })
         extra?.let { put("metadata", it) }
     }
 
@@ -66,8 +76,8 @@ class DurableSessionEventLedgerTest {
         val replay = DurableSessionEventLedger.inspect(path)
         assertEquals(2, replay.lastSequence)
         assertEquals(2, replay.events.size)
-        assertEquals("evt-sess-one-1", replay.events[0]["eventId"]!!.toString().trim('"'))
-        assertEquals("evt-sess-one-1", replay.events[1]["causationId"]!!.toString().trim('"'))
+        assertEquals("evt-sess-one-1", replay.events[0]["eventId"]!!.jsonPrimitive.content)
+        assertEquals("evt-sess-one-1", replay.events[1]["causationId"]!!.jsonPrimitive.content)
         assertEquals(verifiedDigest, replay.fileSha256)
         assertEquals(64, replay.headSha256.length)
         assertEquals(64, replay.fileSha256.length)
@@ -187,6 +197,124 @@ class DurableSessionEventLedgerTest {
             }.code)
     }
 
+
+    /** Rewrite record two with a fresh valid chain hash: replay must inspect policy. */
+    private fun rewriteSecond(path: Path, replacement: JsonObject) {
+        val bytes = Files.readAllBytes(path)
+        val magic = 7
+        val firstSize = ByteBuffer.wrap(bytes, magic, 4).int
+        val secondOffset = magic + 4 + 32 + firstSize
+        val firstDigest = bytes.copyOfRange(magic + 4, magic + 4 + 32)
+        val payload = replacement.toString().toByteArray(Charsets.UTF_8)
+        val newDigest = MessageDigest.getInstance("SHA-256").digest(firstDigest + payload)
+        val frame = ByteBuffer.allocate(4 + 32 + payload.size).putInt(payload.size)
+            .put(newDigest).put(payload).array()
+        Files.write(path, bytes.copyOfRange(0, secondOffset) + frame)
+    }
+
+    @Test fun validHashCannotHideReplaySequenceCausationOrIdentityDrift() {
+        val cases = listOf(
+            "sequence" to JsonObject(event(2) + ("sequence" to JsonPrimitive(3))),
+            "causation" to JsonObject(event(2) + ("causationId" to JsonPrimitive("evt-forged-1"))),
+            "identity" to JsonObject(event(2) + mapOf(
+                "sessionId" to JsonPrimitive("foreign"),
+                "eventId" to JsonPrimitive("evt-foreign-2"),
+                "traceId" to JsonPrimitive("other-trace")
+            ))
+        )
+        for ((case, replacement) in cases) {
+            val path = temp.resolve(case + ".ledger")
+            DurableSessionEventLedger.create(path, workspace()).use { writer ->
+                writer.append(event(1)); writer.flush()
+                writer.append(event(2)); writer.flush()
+            }
+            rewriteSecond(path, replacement)
+            val expected = when (case) {
+                "sequence" -> "LEDGER_EVENT_VERSION_OR_SEQUENCE"
+                "causation" -> "LEDGER_EVENT_CHAIN_INVALID"
+                else -> "LEDGER_IDENTITY_CHANGED"
+            }
+            assertEquals(expected,
+                assertFailsWith<SessionLedgerUnconfirmed> {
+                    DurableSessionEventLedger.inspect(path)
+                }.code, case)
+        }
+    }
+
+    private fun probeExclusiveLease(lockFile: Path): String {
+        val javaSource = temp.resolve("LeaseProbe.java")
+        Files.writeString(javaSource, """
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+public class LeaseProbe {
+    public static void main(String[] args) throws Exception {
+        try (FileChannel channel = FileChannel.open(Path.of(args[0]), StandardOpenOption.WRITE)) {
+            try (FileLock lock = channel.tryLock()) {
+                System.out.println(lock == null ? "HELD" : "AVAILABLE");
+            }
+        }
+    }
+}
+""".trimIndent())
+        val java = Path.of(System.getProperty("java.home"), "bin", "java").toString()
+        val process = ProcessBuilder(java, javaSource.toString(), lockFile.toString())
+            .redirectErrorStream(true).start()
+        try {
+            assertTrue(process.waitFor(15, TimeUnit.SECONDS), "Lease probe did not exit")
+            val output = process.inputStream.bufferedReader().readText().trim()
+            assertEquals(0, process.exitValue(), output)
+            return output
+        } finally {
+            process.destroyForcibly()
+        }
+    }
+
+    @Test fun failedSameJvmLeaseAttemptDoesNotReleaseOsLockForAnotherProcess() {
+        val path = file()
+        val writer = DurableSessionEventLedger.create(path, workspace())
+        val lockFile = temp.resolve("events.ledger.lock")
+        try {
+            assertEquals("LEDGER_LEASE_HELD",
+                assertFailsWith<SessionLedgerUnconfirmed> {
+                    DurableSessionEventLedger.inspect(path)
+                }.code)
+            assertEquals("LEDGER_LEASE_HELD",
+                assertFailsWith<SessionLedgerUnconfirmed> {
+                    DurableSessionEventLedger.create(path, workspace())
+                }.code)
+            assertEquals("HELD", probeExclusiveLease(lockFile),
+                "A rejected in-process channel must never drop the writer's OS lock")
+        } finally {
+            writer.close()
+        }
+        assertEquals("AVAILABLE", probeExclusiveLease(lockFile))
+    }
+
+    @Test fun ledgerRejectsSymlinkedLockFileWithStableCode() {
+        val target = temp.resolve("other.lock")
+        Files.writeString(target, "")
+        Files.createSymbolicLink(temp.resolve("events.ledger.lock"), target)
+        assertEquals("UNSAFE_LEDGER_LOCK",
+            assertFailsWith<SessionLedgerUnconfirmed> {
+                DurableSessionEventLedger.create(file(), workspace())
+            }.code)
+    }
+
+    @Test fun doubleCloseAndChangedAfterCloseAreDetected() {
+        val path = file()
+        val writer = DurableSessionEventLedger.create(path, workspace())
+        writer.append(event(1)); writer.flush()
+        writer.close()
+        writer.close()
+        val digest = writer.sha256()
+        assertEquals(64, digest.length)
+        val bytes = Files.readAllBytes(path)
+        Files.write(path, bytes + byteArrayOf(1))
+        assertFailsWith<SessionLedgerUnconfirmed> { writer.sha256() }
+    }
+
     @Test fun unflushedAppendCannotPublishChecksum() {
         val path = file()
         val writer = DurableSessionEventLedger.create(path, workspace())
@@ -207,9 +335,10 @@ class DurableSessionEventLedgerTest {
         Files.writeString(real, "private")
         val symlink = temp.resolve("link.ledger")
         Files.createSymbolicLink(symlink, real)
-        assertFailsWith<java.nio.file.FileAlreadyExistsException> {
-            DurableSessionEventLedger.create(symlink, root)
-        }
+        assertEquals("LEDGER_ALREADY_EXISTS",
+            assertFailsWith<SessionLedgerUnconfirmed> {
+                DurableSessionEventLedger.create(symlink, root)
+            }.code)
         assertEquals("private", Files.readString(real))
     }
 }
