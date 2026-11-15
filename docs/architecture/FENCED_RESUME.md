@@ -1,0 +1,103 @@
+# Exclusive, generation-fenced resume admission (issue #104)
+
+This is an opt-in host-only API in `:infra:journal`. It does **not** wire
+automatic restart into the CLI, enable replay of tool/model calls, or grant
+permissions by trusting a checkpoint. Issue #105 must reconcile uncertain
+external operations before broader resume boundaries become available.
+
+## Boundary and trusted inputs
+
+`SessionResumeAdmission.admit(directory, context, ledgerPath, attestation)`
+requires the same private, Linux/POSIX, effective-UID-owned 0700 checkpoint
+directory and out-of-workspace durable event ledger as issue #103. The host,
+not an LLM, supplies a current `CheckpointHostContext` from a fresh Git,
+frozen-input and policy inspection. Admission replays and verifies the complete
+checkpoint chain, ledger sequence/head/full-file hash/offset, artifact receipts
+and graph before changing anything. If another live durable-ledger writer
+exists, read-only verified replay is refused.
+
+`ResumeHostAttestation` supplies (1) the caller's expected generation for CAS,
+(2) a digest of the independently inspected effective tool authority, (3) the
+expected/pinned digest of that authority, and (4) trusted booleans confirming
+authority and external-action reconciliation. This is an explicit **host
+attestation**, not cryptographic evidence that the capability policy was
+evaluated or external effects completed. Supplying two identical fabricated
+digests is not authorization. The caller must source and independently verify
+these facts from its authority/reconciliation subsystem. A changed authority
+hash relative to an existing fence refuses admission.
+
+Only a **pre-execution** snapshot is supported: phase created/accepted,
+task state created/ready, task attempt zero, no non-ready children,
+no accepted artifacts, no pending effects, no unknown or nonzero
+host-asserted consumption, and no agent/model/tool/event types other than
+session transitions and checkpoint.saved. These are deliberately narrower
+than the currently emitted "running" checkpoints. Any later state or uncertain
+effect returns `RESUME_UNSAFE_BOUNDARY` and needs operator reconciliation;
+there is no opportunistic retry or optimistic tool replay. Prior bytes,
+including "known" usage, are not independent usage/accounting receipts.
+
+## Lock order, generations and publication
+
+1. Acquire `resume.lock` exclusively, reserving its canonical path in the
+   JVM **before** opening another file channel to the same lock inode. This OS
+   lock remains held across inspection, admission, resumed execution and
+   terminal publication. A concurrent process gets `RESUME_LEASE_HELD`.
+2. Acquire `checkpoint.lock` briefly to inspect the immutable chain and
+   closed verified ledger, compare the caller's `expectedFenceGeneration`
+   with the latest published generation, and atomically publish the new fence.
+   Only the successful publisher gets a `SessionResumeLease`.
+3. The fence is an immutable `resume-NNNNNNNNNNNN.rcf` file, with a
+   `RCFEN1` header, monotonic generation, preceding fence digest, exact
+   admitted checkpoint digest, session/trace identity, policy digest, and
+   tool-authority digest, plus a SHA-256 payload checksum. The write uses
+   CREATE_NEW temp, file force(true), ATOMIC_MOVE, parent directory force(true).
+   All published fences and their chain are verified on every checkpoint read.
+   Interrupted temps are non-authoritative; an uncertain rename/fsync
+   requires a fresh inspection. There are at most 256 generations per store.
+4. Release the short checkpoint lock after admission, **not** the long
+   `resume.lock`. During execution, only `SessionCheckpointStore.saveFenced`
+   or `saveFromOpenLedgerFenced` can publish checkpoints. They validate the
+   live lease and current fence under the checkpoint lock. Once the first fence
+   exists, the legacy unfenced save APIs fail closed with
+   `RESUME_FENCE_REQUIRED`. A closed/stale lease fails with
+   `RESUME_FENCE_STALE_WRITER`.
+5. The host must call `lease.assertCurrent()` before trusted callback or
+   receipt publication and keep the OS lease until all authorized publication
+   is complete. `close()` invalidates the token. Closing without completing
+   terminal publication is not a successful commit.
+
+The locking order for admission is resume.lock -> checkpoint.lock ->
+closed-ledger inspect (its independent tryLock). The live-ledger checkpoint
+path uses its existing writer monitor -> checkpoint.lock; it never takes
+resume.lock. Admission never blocks waiting for an active ledger writer.
+The checkpoint lock is **not** held over model requests, long tool runs,
+or future host filesystem operations. Within the checkpoint lock, bounded
+verification/serialization and fsync still have no real-time latency guarantee.
+
+Only cooperating processes using these APIs are fenced. The private
+directory and current OS effective UID must be trusted: advisory OS locks
+and hash chains cannot prevent a malicious same-UID owner from rewriting
+records. Generation state is independent of the checkpoint sequence; a
+generation is never reset to zero after a completed restart. A crash releases
+the OS lease but not its durable generation, so the next process must provide
+the observed current generation as its CAS precondition.
+
+## Refusals and limits
+
+Typed `SessionResumeUnconfirmed` codes distinguish live lease, invalid
+authority, uncertain external effects, unsupported safe boundary, forced CAS
+failure, changed context, stale writer and corrupt/unsupported fence versions.
+Existing `CheckpointUnconfirmed` codes still report baseline/policy, journal,
+snapshot and path failures. Neither class is a successful resume token.
+
+This implementation cannot fence **unrelated existing** workspace writes,
+receipts or model/tool operations that do not accept `SessionResumeLease`.
+Those host integration points must explicitly guard their own commits before
+claiming end-to-end generation fencing. The checkpoint API alone guarantees
+fenced checkpoint publication and prevents a stale checkpoint writer from
+overwriting a newer generation. No default CLI behavior changes.
+
+Tests under the integration tier cover pre-execution admission, fenced/unfenced
+save, stale callbacks, generation CAS, changes to HEAD/policy/frozen inputs,
+unsafe execution boundaries, corrupt fence files, independent process lock
+races and OS lease release after force-kill. All tests run offline.
