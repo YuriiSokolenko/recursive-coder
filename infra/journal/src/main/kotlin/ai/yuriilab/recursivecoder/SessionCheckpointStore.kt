@@ -512,7 +512,10 @@ object SessionCheckpointStore {
         }
         if (snapshots.size > MAX_GENERATIONS) refuse("CHECKPOINT_SIZE_INVALID")
         // Every published fence is verified on read, even outside resume admission.
-        ResumeFenceStorage.latest(directory)
+        try { ResumeFenceStorage.latest(directory) }
+        catch (e: SessionResumeUnconfirmed) {
+            throw CheckpointUnconfirmed("CHECKPOINT_RESUME_FENCE_UNCONFIRMED", e)
+        }
         val sorted = snapshots.sortedBy { it.fileName.toString() }
         val result = ArrayList<VerifiedSessionCheckpoint>()
         for ((index, path) in sorted.withIndex()) {
@@ -648,6 +651,8 @@ object SessionCheckpointStore {
              snapshot: SessionCheckpoint, expectedPreviousSha256: String?,
              effectiveUid: () -> Long?): VerifiedSessionCheckpoint =
         persist(directory, context, snapshot, expectedPreviousSha256, {}, effectiveUid) {
+            ResumeFenceAnchor.verify(ledgerPath,
+                ResumeFenceStorage.latest(directory.toAbsolutePath().normalize()))
             inspectLedger(ledgerPath, context.workspaceRoot)
         }
 
@@ -660,6 +665,8 @@ object SessionCheckpointStore {
              afterPhase: (String) -> Unit): VerifiedSessionCheckpoint =
         persist(directory, context, snapshot, expectedPreviousSha256, afterPhase,
             LinuxCheckpointOwner::effectiveUid) {
+            ResumeFenceAnchor.verify(ledgerPath,
+                ResumeFenceStorage.latest(directory.toAbsolutePath().normalize()))
             inspectLedger(ledgerPath, context.workspaceRoot)
         }
 
@@ -682,7 +689,11 @@ object SessionCheckpointStore {
             assertLedgerOutsideWorkspace(ledger.checkpointStoragePath, context.workspaceRoot)
             ledger.withCommittedCheckpointAnchor { anchor ->
                 persist(directory, context, snapshot, expectedPreviousSha256, {},
-                    effectiveUid) { anchor }
+                    effectiveUid) {
+                    ResumeFenceAnchor.verify(ledger.checkpointStoragePath,
+                        ResumeFenceStorage.latest(directory.toAbsolutePath().normalize()))
+                    anchor
+                }
             }
         } catch (e: SessionLedgerUnconfirmed) {
             val code = if (e.code == DurableSessionEventLedger.LIVE_CHECKPOINT_SIZE_EXCEEDED_CODE)
@@ -726,7 +737,11 @@ object SessionCheckpointStore {
              ledgerEvidence: () -> VerifiedSessionEventLedger): VerifiedSessionCheckpoint {
         val dir = checkedDirectory(directory, context.workspaceRoot, effectiveUid)
         return withLease(dir, create = true) {
-            ResumeFenceStorage.requireCurrentForSave(dir, fence, snapshot)
+            try { ResumeFenceStorage.requireCurrentForSave(dir, fence, snapshot) }
+            catch (e: SessionResumeUnconfirmed) {
+                if (fence == null) throw CheckpointUnconfirmed(e.code, e)
+                throw e
+            }
             val existing = readAll(dir)
             val previous = existing.lastOrNull()
             if (expectedPreviousSha256 != previous?.sha256 ||
@@ -819,6 +834,10 @@ object SessionCheckpointStore {
         return withLease(dir, create = false) {
             val latest = readAll(dir).lastOrNull() ?: refuse("CHECKPOINT_MISSING")
             verify(latest.snapshot, context, inspectLedger(ledgerPath, context.workspaceRoot))
+            try { ResumeFenceAnchor.verify(ledgerPath, ResumeFenceStorage.latest(dir)) }
+            catch (e: SessionResumeUnconfirmed) {
+                throw CheckpointUnconfirmed("CHECKPOINT_RESUME_ANCHOR_UNCONFIRMED", e)
+            }
             latest
         }
     }
