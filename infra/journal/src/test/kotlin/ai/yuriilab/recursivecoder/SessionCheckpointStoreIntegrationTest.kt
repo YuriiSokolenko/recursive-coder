@@ -845,6 +845,14 @@ class SessionCheckpointStoreIntegrationTest {
                     SessionCheckpointStore.saveFromOpenLedger(
                         store(), context(), writer, next, current.sha256)
                 }.code)
+            SessionResumeAdmission.admit(store(), context(), ledger(),
+                resumeAttestation(1)).use { currentLease ->
+                assertEquals("RESUME_LEDGER_PATH_CHANGED",
+                    assertFailsWith<SessionResumeUnconfirmed> {
+                        SessionCheckpointStore.saveFromOpenLedgerFenced(
+                            currentLease, store(), context(), writer, next, current.sha256)
+                    }.code)
+            }
         }
     }
 

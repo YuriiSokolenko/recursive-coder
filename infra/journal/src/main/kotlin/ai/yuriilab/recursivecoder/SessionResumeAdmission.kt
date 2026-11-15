@@ -238,6 +238,12 @@ class SessionResumeLease internal constructor(
             throw SessionResumeUnconfirmed("RESUME_FENCE_STALE_WRITER")
     }
 
+    /** A lease cannot be used to publish evidence from a different ledger inode/path. */
+    @Synchronized internal fun requireLedgerPath(candidate: Path) {
+        if (closed || candidate.toAbsolutePath().normalize() != ledgerPath.toAbsolutePath().normalize())
+            throw SessionResumeUnconfirmed("RESUME_LEDGER_PATH_CHANGED")
+    }
+
     /** Required before callbacks or trusted receipt publication. */
     @Synchronized fun assertCurrent() {
         if (closed || !lock.isValid)

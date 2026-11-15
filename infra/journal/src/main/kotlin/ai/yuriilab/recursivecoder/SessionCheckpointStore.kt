@@ -706,6 +706,7 @@ object SessionCheckpointStore {
                    context: CheckpointHostContext, ledgerPath: Path,
                    snapshot: SessionCheckpoint, expectedPreviousSha256: String?): VerifiedSessionCheckpoint =
         lease.publishIfCurrent {
+            lease.requireLedgerPath(ledgerPath)
             persist(directory, context, snapshot, expectedPreviousSha256, {},
                 LinuxCheckpointOwner::effectiveUid, lease) {
                 inspectLedger(ledgerPath, context.workspaceRoot)
@@ -716,6 +717,7 @@ object SessionCheckpointStore {
                    context: CheckpointHostContext, ledger: DurableSessionEventLedger,
                    snapshot: SessionCheckpoint, expectedPreviousSha256: String?): VerifiedSessionCheckpoint =
         lease.publishIfCurrent {
+            lease.requireLedgerPath(ledger.checkpointStoragePath)
             try {
                 assertLedgerOutsideWorkspace(ledger.checkpointStoragePath, context.workspaceRoot)
                 ledger.withCommittedCheckpointAnchor { anchor ->
