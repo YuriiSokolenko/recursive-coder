@@ -112,7 +112,10 @@ The checkpoint directory must be Linux/POSIX, with numeric `unix:uid`
 matching the JVM **effective UID** (the second Uid field of Linux
 `/proc/self/status`), and mode `0700` (owner read/write/execute only).
 The mutable `user.name` JVM property and the real UID under `sudo`/`su`
-are not authorization inputs. If procfs or Unix owner attributes are unavailable,
+are not authorization inputs. The effective UID is the checkpoint owner's
+required policy identity; Linux actually performs filesystem access checks
+using the filesystem UID (fourth procfs field), normally the same but potentially
+different after `setfsuid`. If procfs or Unix owner attributes are unavailable,
 ambiguous or malformed, save and inspect fail closed with
 `CHECKPOINT_UNSAFE_DIRECTORY`. This is a fail-closed deployment
 precondition, not an attempt to chmod or repair unsafe storage.
@@ -129,6 +132,9 @@ codec, redaction, digest/graph/usage policy. SessionCheckpointStoreIntegrationTe
 (@Tag("integration")) uses a real ledger and filesystem to exercise durable
 reopen, simulated interruptions after temp sync and after rename, stale
 generations, corruption, baseline and journal drift, hostile paths,
-effective-UID impersonation, exact live-ledger size boundaries (4 MiB - 1,
-4 MiB and above), and graph/correlation/artifact mismatch. Full Gradle/CI, including the Linux sandbox
-and Session Protocol compatibility jobs, must pass before merge.
+effective-UID impersonation via closed/live save and read-only inspect, exact
+live-ledger size boundaries (4 MiB - 1, 4 MiB and above), verified post-refusal
+ledger replay, and graph/correlation/artifact mismatch. The integration suite is
+Linux/procfs-only and skips on unsupported developer platforms. Full Gradle/CI,
+including the Linux sandbox and Session Protocol compatibility jobs, must pass
+before merge.

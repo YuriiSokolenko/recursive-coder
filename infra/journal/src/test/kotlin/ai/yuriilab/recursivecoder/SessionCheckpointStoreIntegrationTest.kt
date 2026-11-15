@@ -3,6 +3,9 @@ package ai.yuriilab.recursivecoder
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.nio.file.FileSystems
+import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Assumptions.assumeTrue
 import java.nio.file.attribute.PosixFilePermission
 import java.nio.charset.StandardCharsets
 import java.util.UUID
@@ -15,6 +18,13 @@ import kotlin.test.*
 @Tag("integration")
 class SessionCheckpointStoreIntegrationTest {
     @TempDir lateinit var temp: Path
+
+    @BeforeEach fun requiresLinuxCheckpointFilesystem() {
+        assumeTrue(System.getProperty("os.name") == "Linux" &&
+            FileSystems.getDefault().supportedFileAttributeViews().contains("unix") &&
+            LinuxCheckpointOwner.effectiveUid() != null,
+            "Checkpoint ownership requires Linux procfs and unix file attributes")
+    }
     private val artifactDigest = "f".repeat(64)
 
     private fun workspace(): Path = temp.resolve("workspace").also { Files.createDirectories(it) }
@@ -97,7 +107,6 @@ class SessionCheckpointStoreIntegrationTest {
         SessionCheckpointStore.save(store(), context(), ledger(), s, previous)
 
     private fun inspect() = SessionCheckpointStore.inspect(store(), context(), ledger())
-
 
     // Dense but protocol-valid metadata keeps the real 4 MiB boundary tests
     // to roughly a thousand fsynced records rather than tens of thousands.
@@ -200,6 +209,71 @@ class SessionCheckpointStoreIntegrationTest {
             }.code)
     }
 
+    @Test fun ownerMismatchAndMissingUidRefuseSaveAndInspectWithoutWriting() {
+        createLedger()
+        val dir = store()
+        val actualUid = (Files.getAttribute(dir, "unix:uid",
+            LinkOption.NOFOLLOW_LINKS) as Number).toLong()
+        val baseline = snapshot()
+        for (pretended in listOf<Long?>(actualUid + 1, null)) {
+            val denied = assertFailsWith<CheckpointUnconfirmed> {
+                SessionCheckpointStore.save(dir, context(), ledger(), baseline, null) {
+                    pretended
+                }
+            }
+            assertEquals("CHECKPOINT_UNSAFE_DIRECTORY", denied.code)
+            assertFalse(Files.exists(dir.resolve("checkpoint.lock")))
+            assertFalse(Files.exists(dir.resolve("000000000001.rcp")))
+        }
+        val saved = save(baseline)
+        val entries = Files.list(dir).use { stream ->
+            stream.map { it.fileName.toString() }.sorted().toList()
+        }
+        for (pretended in listOf<Long?>(actualUid + 1, null)) {
+            assertEquals("CHECKPOINT_UNSAFE_DIRECTORY",
+                assertFailsWith<CheckpointUnconfirmed> {
+                    SessionCheckpointStore.inspect(dir, context(), ledger()) { pretended }
+                }.code)
+            assertEquals(entries, Files.list(dir).use { stream ->
+                stream.map { it.fileName.toString() }.sorted().toList()
+            })
+        }
+        assertEquals(saved, inspect())
+    }
+
+    @Test fun liveSaveRefusesForeignOrUnknownUidWithoutCreatingFiles() {
+        DurableSessionEventLedger.create(ledger(), workspace()).use { writer ->
+            writer.append(event(1, "req-one", "started", buildJsonObject {
+                put("graphId", "graph-root")
+            }))
+            writer.flush()
+            writer.append(event(2, "req-two", "completed", buildJsonObject {
+                put("graphId", "graph-root")
+                put("childGraphId", "graph-child")
+                put("artifactId", "artifact-one")
+                put("artifactSha256", artifactDigest)
+            }))
+            writer.flush()
+            val anchor = writer.withCommittedCheckpointAnchor { it }
+            val dir = store()
+            val actualUid = (Files.getAttribute(dir, "unix:uid",
+                LinkOption.NOFOLLOW_LINKS) as Number).toLong()
+            val baseline = snapshot(providedAnchor = anchor)
+            for (pretended in listOf<Long?>(actualUid + 1, null)) {
+                assertEquals("CHECKPOINT_UNSAFE_DIRECTORY",
+                    assertFailsWith<CheckpointUnconfirmed> {
+                        SessionCheckpointStore.saveFromOpenLedger(
+                            dir, context(), writer, baseline, null) { pretended }
+                    }.code)
+                assertFalse(Files.exists(dir.resolve("checkpoint.lock")))
+                assertFalse(Files.exists(dir.resolve("000000000001.rcp")))
+            }
+            val saved = SessionCheckpointStore.saveFromOpenLedger(
+                dir, context(), writer, baseline, null)
+            assertEquals(1, saved.snapshot.sequence)
+        }
+    }
+
     @Test fun liveCheckpointAcceptsLedgerJustBelowSizeLimit() {
         val limit = DurableSessionEventLedger.MAX_LIVE_CHECKPOINT_LEDGER_BYTES
         DurableSessionEventLedger.create(ledger(), workspace()).use { writer ->
@@ -214,7 +288,7 @@ class SessionCheckpointStoreIntegrationTest {
 
     @Test fun exactLiveLimitSucceedsAndOversizeRefusesBeforeReplayWithoutPoisoningWriter() {
         val limit = DurableSessionEventLedger.MAX_LIVE_CHECKPOINT_LEDGER_BYTES
-        DurableSessionEventLedger.create(ledger(), workspace()).use { writer ->
+        val finalSequence = DurableSessionEventLedger.create(ledger(), workspace()).use { writer ->
             val next = fillLiveLedgerTo(writer, limit)
             val anchor = writer.withCommittedCheckpointAnchor { it }
             val first = SessionCheckpointStore.saveFromOpenLedger(store(), context(),
@@ -231,16 +305,25 @@ class SessionCheckpointStoreIntegrationTest {
                         providedAnchor = anchor), first.sha256)
             }
             assertEquals("CHECKPOINT_LIVE_LEDGER_TOO_LARGE", failed.code)
-            assertEquals("LEDGER_CHECKPOINT_SIZE_EXCEEDED",
+            assertEquals(DurableSessionEventLedger.LIVE_CHECKPOINT_SIZE_EXCEEDED_CODE,
                 (failed.cause as SessionLedgerUnconfirmed).code)
             assertFalse(Files.exists(store().resolve("000000000002.rcp")))
-            // The live writer must still be able to durably append after refusal.
+            // Verify a subsequent fsynced append actually grows the ledger.
+            val before = Files.size(ledger())
             writer.append(event(next + 1, "req-after-refusal", "started",
                 buildJsonObject {}, "agent.started"))
             writer.flush()
+            assertTrue(Files.size(ledger()) > before)
             assertFalse(Files.exists(store().resolve("000000000002.rcp")))
             assertTrue(Files.exists(store().resolve("000000000001.rcp")))
+            next + 1
         }
+        // Closing and replaying the full ledger proves the writer was not poisoned.
+        val verified = DurableSessionEventLedger.inspect(ledger())
+        assertEquals(finalSequence, verified.lastSequence)
+        assertEquals(Files.size(ledger()), verified.lastTrustedOffset)
+        assertEquals("evt-sess-one-" + finalSequence,
+            verified.events.last()["eventId"]!!.jsonPrimitive.content)
     }
 
     @Test fun openLedgerCheckpointRequiresAcknowledgedPrefixAndBlocksConcurrentInspection() {

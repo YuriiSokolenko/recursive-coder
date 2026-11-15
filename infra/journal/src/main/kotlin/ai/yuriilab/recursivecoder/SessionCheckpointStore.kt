@@ -331,17 +331,10 @@ object SessionCheckpointCodec {
 }
 
 /**
- * Immutable checkpoint files in a dedicated host-owned directory, outside
- * the workspace. All published files are self-checksummed and chained. A torn
- * temp is ignored; a damaged published generation is never silently skipped.
- *
- * An advisory lock excludes cooperating processes. Malicious same-UID file
- * substitution is out of scope; the enclosing directory MUST be private.
- */
-/**
  * Linux procfs Uid fields: real, effective, saved and filesystem UID.
- * The second field is the identity used for filesystem authorization even
- * when sudo/su changes the effective UID without changing the real UID.
+ * The second field is the process's effective identity even when sudo/su
+ * changes it without changing the real UID. Linux filesystem access checks
+ * use the fourth (filesystem UID), which can differ after setfsuid.
  * Unavailable or malformed procfs evidence is a refusal, never a fallback
  * to mutable JVM properties or an external executable.
  */
@@ -368,6 +361,14 @@ internal object LinuxCheckpointOwner {
     }
 }
 
+/**
+ * Immutable checkpoint files in a dedicated host-owned directory, outside
+ * the workspace. All published files are self-checksummed and chained. A torn
+ * temp is ignored; a damaged published generation is never silently skipped.
+ *
+ * An advisory lock excludes cooperating processes. Malicious same-UID file
+ * substitution is out of scope; the enclosing directory MUST be private.
+ */
 object SessionCheckpointStore {
     private val MAGIC = "RCCHK1\n".toByteArray(StandardCharsets.US_ASCII)
     private val NAMES = Regex("[0-9]{12}\\.rcp")
@@ -377,7 +378,8 @@ object SessionCheckpointStore {
 
     private fun refuse(code: String): Nothing = throw CheckpointUnconfirmed(code)
 
-    private fun checkedDirectory(directory: Path, workspace: Path): Path {
+    private fun checkedDirectory(directory: Path, workspace: Path,
+                                 effectiveUid: () -> Long?): Path {
         val dir = directory.toAbsolutePath().normalize()
         val root = try { workspace.toRealPath() }
             catch (e: Exception) { throw CheckpointUnconfirmed("CHECKPOINT_WORKSPACE_INVALID", e) }
@@ -393,7 +395,7 @@ object SessionCheckpointStore {
                 PosixFilePermission.OWNER_WRITE, PosixFilePermission.OWNER_EXECUTE)
             LinuxCheckpointOwner.requireMatchingUid(
                 Files.getAttribute(dir, "unix:uid", LinkOption.NOFOLLOW_LINKS),
-                LinuxCheckpointOwner.effectiveUid())
+                effectiveUid())
             if (attributes.permissions() != ownerOnly)
                 refuse("CHECKPOINT_UNSAFE_DIRECTORY")
         } catch (e: CheckpointUnconfirmed) {
@@ -629,6 +631,14 @@ object SessionCheckpointStore {
              snapshot: SessionCheckpoint, expectedPreviousSha256: String?): VerifiedSessionCheckpoint =
         saveWithFault(directory, context, ledgerPath, snapshot, expectedPreviousSha256) { }
 
+    /** Internal per-invocation identity seam; never mutate global authorization state. */
+    internal fun save(directory: Path, context: CheckpointHostContext, ledgerPath: Path,
+             snapshot: SessionCheckpoint, expectedPreviousSha256: String?,
+             effectiveUid: () -> Long?): VerifiedSessionCheckpoint =
+        persist(directory, context, snapshot, expectedPreviousSha256, {}, effectiveUid) {
+            inspectLedger(ledgerPath, context.workspaceRoot)
+        }
+
     /**
      * Deterministic interruption seams for the integration tier. Faults are injected
      * only by tests, after durable temp sync or after published atomic rename.
@@ -636,7 +646,8 @@ object SessionCheckpointStore {
     internal fun saveWithFault(directory: Path, context: CheckpointHostContext, ledgerPath: Path,
              snapshot: SessionCheckpoint, expectedPreviousSha256: String?,
              afterPhase: (String) -> Unit): VerifiedSessionCheckpoint =
-        persist(directory, context, snapshot, expectedPreviousSha256, afterPhase) {
+        persist(directory, context, snapshot, expectedPreviousSha256, afterPhase,
+            LinuxCheckpointOwner::effectiveUid) {
             inspectLedger(ledgerPath, context.workspaceRoot)
         }
 
@@ -647,13 +658,22 @@ object SessionCheckpointStore {
     fun saveFromOpenLedger(directory: Path, context: CheckpointHostContext,
              ledger: DurableSessionEventLedger, snapshot: SessionCheckpoint,
              expectedPreviousSha256: String?): VerifiedSessionCheckpoint =
+        saveFromOpenLedger(directory, context, ledger, snapshot, expectedPreviousSha256,
+            LinuxCheckpointOwner::effectiveUid)
+
+    /** Internal per-invocation identity seam for the live-writer path. */
+    internal fun saveFromOpenLedger(directory: Path, context: CheckpointHostContext,
+             ledger: DurableSessionEventLedger, snapshot: SessionCheckpoint,
+             expectedPreviousSha256: String?,
+             effectiveUid: () -> Long?): VerifiedSessionCheckpoint =
         try {
             assertLedgerOutsideWorkspace(ledger.checkpointStoragePath, context.workspaceRoot)
             ledger.withCommittedCheckpointAnchor { anchor ->
-                persist(directory, context, snapshot, expectedPreviousSha256, {}) { anchor }
+                persist(directory, context, snapshot, expectedPreviousSha256, {},
+                    effectiveUid) { anchor }
             }
         } catch (e: SessionLedgerUnconfirmed) {
-            val code = if (e.code == "LEDGER_CHECKPOINT_SIZE_EXCEEDED")
+            val code = if (e.code == DurableSessionEventLedger.LIVE_CHECKPOINT_SIZE_EXCEEDED_CODE)
                 "CHECKPOINT_LIVE_LEDGER_TOO_LARGE" else "CHECKPOINT_JOURNAL_UNCONFIRMED"
             throw CheckpointUnconfirmed(code, e)
         }
@@ -661,8 +681,9 @@ object SessionCheckpointStore {
     private fun persist(directory: Path, context: CheckpointHostContext,
              snapshot: SessionCheckpoint, expectedPreviousSha256: String?,
              afterPhase: (String) -> Unit,
+             effectiveUid: () -> Long?,
              ledgerEvidence: () -> VerifiedSessionEventLedger): VerifiedSessionCheckpoint {
-        val dir = checkedDirectory(directory, context.workspaceRoot)
+        val dir = checkedDirectory(directory, context.workspaceRoot, effectiveUid)
         return withLease(dir, create = true) {
             val existing = readAll(dir)
             val previous = existing.lastOrNull()
@@ -728,8 +749,13 @@ object SessionCheckpointStore {
 
     /** Read-only inspection creates no files and verifies every published generation. */
     fun inspect(directory: Path, context: CheckpointHostContext,
-                ledgerPath: Path): VerifiedSessionCheckpoint {
-        val dir = checkedDirectory(directory, context.workspaceRoot)
+                ledgerPath: Path): VerifiedSessionCheckpoint =
+        inspect(directory, context, ledgerPath, LinuxCheckpointOwner::effectiveUid)
+
+    /** Internal per-invocation identity seam; inspect remains strictly read-only. */
+    internal fun inspect(directory: Path, context: CheckpointHostContext,
+                ledgerPath: Path, effectiveUid: () -> Long?): VerifiedSessionCheckpoint {
+        val dir = checkedDirectory(directory, context.workspaceRoot, effectiveUid)
         return withLease(dir, create = false) {
             val latest = readAll(dir).lastOrNull() ?: refuse("CHECKPOINT_MISSING")
             verify(latest.snapshot, context, inspectLedger(ledgerPath, context.workspaceRoot))

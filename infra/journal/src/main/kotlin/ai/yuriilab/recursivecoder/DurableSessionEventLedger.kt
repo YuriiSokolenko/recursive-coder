@@ -73,6 +73,8 @@ class DurableSessionEventLedger private constructor(
         // Single host-only live checkpoint limit, enforced under the append monitor
         // before replay. The normal closed-ledger capacity is separate.
         internal const val MAX_LIVE_CHECKPOINT_LEDGER_BYTES = 4L * 1024 * 1024
+        internal const val LIVE_CHECKPOINT_SIZE_EXCEEDED_CODE =
+            "LEDGER_CHECKPOINT_SIZE_EXCEEDED"
         private const val MAX_EVENTS = 100_000
         private val ROOT_FIELDS = SessionEventJournal.emittedFields
         private val heldLockPaths = ConcurrentHashMap.newKeySet<Path>()
@@ -428,7 +430,7 @@ class DurableSessionEventLedger private constructor(
         // Refuse before replay so checkpointing cannot hold the append monitor
         // across a larger ledger than the opt-in bounded persistence contract.
         if (channel.size() > MAX_LIVE_CHECKPOINT_LEDGER_BYTES)
-            throw SessionLedgerUnconfirmed("LEDGER_CHECKPOINT_SIZE_EXCEEDED")
+            throw SessionLedgerUnconfirmed(LIVE_CHECKPOINT_SIZE_EXCEEDED_CODE)
         val verified = replayUnlocked(path)
         if (verified.lastSequence != committedSequence ||
             verified.headSha256 != hex(lastDigest) ||
