@@ -221,21 +221,36 @@ scheduler node to charge; do **not** misread this as an actual scheduler
 spent record. Instead, the operator-provisioned grant is conservatively
 accounted as fully consumed for that failed attempt, with **no refund, no
 automatic retry, and no parent success**. When a SessionEventJournal is
-configured, `childResourceAudit=FAILED_RESERVED` records
-`observedTokens/observedToolCalls` separately from
-`accountedTokens/accountedToolCalls`, the original grant and
-`usageUncertain`. A failure **after** physical child production
-(including scheduler deadline, missing receipt, usage-denial, cancellation
-or cross-origin integration conflict) also records a terminal audit for
-each checkout that executed. Audits are emitted once per origin, regardless
-of whether the scheduler is present or later stops. The audit carries a
-`schedulerChargeRecorded` boolean: if true, a successful measured
-scheduler charge already occurred before the later failure; **do not
-add the reservation audit to that scheduler charge**. An audit is
-conservative evidence for operator reconciliation, not an additional
-ledger debit or proof of provider-side billing. Live support remains
-blocked until provider usage is trustworthy and failure-path accounting
-is proven end-to-end.
+configured, a **terminal resource audit** records observed tokens/tool
+invocations separately from the accounted numbers, the admitted grant,
+`usageUncertain`, `physicalCompleted`, and `schedulerChargeRecorded`.
+The `childResourceAudit` field distinguishes three mutually exclusive
+cases:
+
+- `FAILED_RESERVED`: physical child did not complete; the full grant is
+  conservatively accounted because actual billed usage is unconfirmed.
+- `UNINTEGRATED_RESERVED`: physical child completed but has **no**
+  successful scheduler charge (for example, an earlier successful SDD
+  checkout when Developer later fails during `produce`). The full grant
+  remains reserved but is **not** reported as a measured scheduler debit.
+- `UNINTEGRATED_AFTER_CHARGE`: physical child completed and the scheduler
+  already recorded its measured usage; `accountedTokens` and
+  `accountedToolCalls` equal that measured observation, **not** the full
+  reserved grant. This event describes failed integration, **not** a second
+  debit. Consumers must never sum it with scheduler charges.
+
+A failure **after** physical child production (including scheduler deadline,
+missing receipt, usage-denial, cancellation or cross-origin integration
+conflict) emits one terminal audit per attempted origin. If Developer
+fails earlier inside `produce`, the already-completed SDD checkout is
+also audited as `UNINTEGRATED_RESERVED`, while the incomplete Developer
+attempt is `FAILED_RESERVED`. Audits are once-only and do not authorize
+retry, rollback or parent success. Cancellation preserves the dirty-state
+flag **before** propagating the cancellation; a scheduler exception is
+recorded as an unconfirmed stop rather than a clean denial. These audits
+are operator-reconciliation evidence, not proof of provider-side billing.
+Live support remains blocked until provider usage is trustworthy and
+failure-path accounting is proven end-to-end.
 
 **Provenance:** the admission comes from host projection of a live parent
 stage, `RecursiveGraphPolicy.admit`, and the validated operator plan.
