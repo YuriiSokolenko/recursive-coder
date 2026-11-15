@@ -816,6 +816,13 @@ class SessionCheckpointStoreIntegrationTest {
             }.code)
         assertEquals("CHECKPOINT_RESUME_ANCHOR_UNCONFIRMED",
             assertFailsWith<CheckpointUnconfirmed> { inspect() }.code)
+        // The legacy writer must not escape its CheckpointUnconfirmed contract.
+        val source = Files.readAllBytes(store().resolve("000000000001.rcp"))
+        assertTrue(source.isNotEmpty())
+        assertEquals("CHECKPOINT_RESUME_ANCHOR_UNCONFIRMED",
+            assertFailsWith<CheckpointUnconfirmed> {
+                save(snapshot().copy(sequence = 2L, previousSha256 = "0".repeat(64)), "0".repeat(64))
+            }.code)
     }
 
     @Test fun liveLedgerSavePathRejectsStaleLeaseAndUnfencedWriter() {

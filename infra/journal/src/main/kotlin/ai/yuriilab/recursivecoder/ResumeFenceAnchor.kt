@@ -67,6 +67,7 @@ internal object ResumeFenceAnchor {
     }
 
     fun verify(ledger: Path, head: ResumeFenceRecord?): ResumeFenceAnchorRecord? {
+        try {
         val directory = parent(ledger)
         val names = Files.newDirectoryStream(directory).use { stream ->
             stream.filter { it.fileName.toString().startsWith(prefix(ledger)) &&
@@ -86,6 +87,11 @@ internal object ResumeFenceAnchor {
         if (previous?.fenceSha256 != head?.sha256)
             fail("RESUME_FENCE_ANCHOR_MISMATCH")
         return previous
+        } catch (e: SessionResumeUnconfirmed) {
+            throw e
+        } catch (e: Exception) {
+            throw SessionResumeUnconfirmed("RESUME_FENCE_ANCHOR_UNCONFIRMED", e)
+        }
     }
 
     /** Durable PREPARE before immutable fence publication. */
@@ -131,6 +137,7 @@ internal object ResumeFenceAnchor {
 
     /** Read only the admitted anchor head for bounded callback guards. */
     fun requireHead(ledger: Path, generation: Long, fenceSha: String, anchorSha: String) {
+        try {
         val directory = parent(ledger)
         val actual = read(directory.resolve(name(ledger, generation)))
         if (actual.generation != generation || actual.fenceSha256 != fenceSha ||
@@ -138,5 +145,10 @@ internal object ResumeFenceAnchor {
             Files.exists(directory.resolve(name(ledger, generation + 1L)),
                 LinkOption.NOFOLLOW_LINKS))
             fail("RESUME_FENCE_STALE_WRITER")
+        } catch (e: SessionResumeUnconfirmed) {
+            throw e
+        } catch (e: Exception) {
+            throw SessionResumeUnconfirmed("RESUME_FENCE_ANCHOR_UNCONFIRMED", e)
+        }
     }
 }

@@ -750,7 +750,12 @@ object SessionCheckpointStore {
                 snapshot.sequence != (previous?.snapshot?.sequence ?: 0L) + 1L ||
                 snapshot.previousSha256 != previous?.sha256)
                 refuse("CHECKPOINT_STALE_GENERATION")
-            val ledger = ledgerEvidence()
+            val ledger = try { ledgerEvidence() }
+            catch (e: SessionResumeUnconfirmed) {
+                if (fence == null)
+                    throw CheckpointUnconfirmed("CHECKPOINT_RESUME_ANCHOR_UNCONFIRMED", e)
+                throw e
+            }
             SessionCheckpointCodec.validate(snapshot)
             verify(snapshot, context, ledger)
             if (previous != null &&
