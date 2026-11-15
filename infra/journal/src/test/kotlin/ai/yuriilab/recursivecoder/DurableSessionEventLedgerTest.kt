@@ -315,6 +315,69 @@ public class LeaseProbe {
         assertFailsWith<SessionLedgerUnconfirmed> { writer.sha256() }
     }
 
+
+    @Test fun replayRejectsZeroOrOversizedFrameLength() {
+        val path = committedLedger()
+        val original = Files.readAllBytes(path)
+        for (invalidLength in listOf(0, 16_385)) {
+            val bytes = original.copyOf()
+            ByteBuffer.wrap(bytes, 7, 4).putInt(invalidLength)
+            Files.write(path, bytes)
+            assertEquals("LEDGER_RECORD_SIZE_INVALID",
+                assertFailsWith<SessionLedgerUnconfirmed> {
+                    DurableSessionEventLedger.inspect(path)
+                }.code)
+        }
+    }
+
+    @Test fun nonMetadataFieldsAlsoFailClosedOnUntrustedContent() {
+        val path = file()
+        DurableSessionEventLedger.create(path, workspace()).use { writer ->
+            val badActor = JsonObject(event(1) + ("actor" to buildJsonObject {
+                put("agentId", "agent-sess-one")
+                put("rawOutput", "leaked tool data")
+            }))
+            assertEquals("LEDGER_SENSITIVE_ACTOR",
+                assertFailsWith<SessionLedgerUnconfirmed> { writer.append(badActor) }.code)
+
+            val badTransition = JsonObject(event(1) + ("transition" to buildJsonObject {
+                put("from", "running")
+                put("to", "succeeded")
+                put("privateData", "leaked")
+            }))
+            assertEquals("LEDGER_SENSITIVE_TRANSITION",
+                assertFailsWith<SessionLedgerUnconfirmed> { writer.append(badTransition) }.code)
+
+            val badTiming = JsonObject(event(1) + ("timing" to buildJsonObject {
+                put("startedAt", "2026-11-15T00:00:00Z")
+                put("durationMs", 10)
+                put("extra", "secret")
+            }))
+            assertEquals("LEDGER_SENSITIVE_TIMING",
+                assertFailsWith<SessionLedgerUnconfirmed> { writer.append(badTiming) }.code)
+
+            val badRedaction = JsonObject(event(1) + ("redaction" to buildJsonObject {
+                put("mode", "metadata-only")
+                put("removedFields", JsonArray(listOf(JsonPrimitive("customCredentials"))))
+            }))
+            assertEquals("LEDGER_REDACTION_REQUIRED",
+                assertFailsWith<SessionLedgerUnconfirmed> { writer.append(badRedaction) }.code)
+
+            writer.append(event(1))
+            writer.flush()
+        }
+        assertEquals(1, DurableSessionEventLedger.inspect(path).lastSequence)
+    }
+
+    @Test fun workspaceBoundFactoryDoesNotNeedCallerToProvideWorkspaceRoot() {
+        val factory = DurableSessionEventLedger.factory(workspace())
+        factory.open(file()).use { sink ->
+            sink.append(event(1))
+            sink.flush()
+        }
+        assertEquals(1, DurableSessionEventLedger.inspect(file()).lastSequence)
+    }
+
     @Test fun unflushedAppendCannotPublishChecksum() {
         val path = file()
         val writer = DurableSessionEventLedger.create(path, workspace())
