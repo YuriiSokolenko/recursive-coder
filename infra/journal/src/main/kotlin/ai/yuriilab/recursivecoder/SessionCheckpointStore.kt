@@ -505,6 +505,12 @@ object SessionCheckpointStore {
                 }
                 ResumeFenceStorage.NAME.matches(name) -> { /* Validated below. */ }
                 ResumeFenceStorage.TEMP.matches(name) -> { /* Unpublished fence temp. */ }
+                ResumeImmutablePublication.PROBE_NAME.matches(name) -> {
+                    // A killed preflight may leave a regular file/hard link.
+                    // Read-only inspect ignores it; only admission deletes it.
+                    if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS))
+                        refuse("CHECKPOINT_UNRECOGNIZED_ENTRY")
+                }
                 NAMES.matches(name) -> snapshots.add(file)
                 TEMP_NAMES.matches(name) -> { /* Interrupted write; never a committed snapshot. */ }
                 else -> refuse("CHECKPOINT_UNRECOGNIZED_ENTRY")

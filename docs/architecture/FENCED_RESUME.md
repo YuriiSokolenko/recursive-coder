@@ -64,12 +64,19 @@ including "known" usage, are not independent usage/accounting receipts.
    tool-authority digest, plus a SHA-256 payload checksum. The write uses
    CREATE_NEW temp, file force(true), atomic hard-link publication
    (`Files.createLink`) that fails if the destination already exists, and
-   parent directory force(true). **Before** any anchor is committed, admission
-   probes hard-link creation and directory fsync separately in both the
-   checkpoint directory and the ledger parent, without requiring the directories
-   to share a filesystem. Unsupported links abort with
+   parent directory force(true). **Before** any anchor is committed,
+   admission probes hard-link creation and directory fsync separately in both
+   the checkpoint directory and the ledger parent. The directories need not
+   share a filesystem. Unsupported links abort with
    `RESUME_FENCE_HARD_LINK_UNAVAILABLE` before changing the generation.
-   This is an availability preflight, not a guarantee against later I/O errors. Hard-link publication is limited to Linux
+   This is an availability preflight, not a guarantee against later I/O errors.
+   If the process crashes mid-probe, only filenames matching the exact
+   `.resume-hardlink-probe-<UUID>.tmp/.link` format are tolerated by
+   read-only checkpoint inspection. They are not evidence of a committed
+   fence, and inspection never deletes them. A subsequent exclusive admission
+   verifies that they are ordinary files (not symlinks), removes orphaned
+   probes in **both** directories and fsyncs the parent directories before
+   creating new probes. Nonmatching files and unsafe probe types refuse. Hard-link publication is limited to Linux
    filesystems that support same-directory hard links; unsupported filesystems
    fail closed. Temp names are later removed without unlinking committed data.
    All published fences and their chain are verified on every checkpoint read.
@@ -165,19 +172,37 @@ its audit. The result is informational, not authorization:
 It reports the generation, prepared/published fence SHA-256, and recorded
 operator ID where available. Inconsistent evidence refuses; it never repairs,
 cleans temps, opens the ledger for append, or grants a session lease.
-It is not a substitute for a fresh trusted attestation and external-effect
-reconciliation. A missing audit removed by the trusted same-UID owner remains
+**Never automatically copy the digest returned here into
+`PreparedFenceReconciliation.expectedPreparedFenceSha256`.** The trusted
+operator must compare it against **independently obtained** host/incident
+evidence before approval; otherwise the approval is circular.
+
+This is not a liveness indicator: it does **not** acquire or test
+`resume.lock`. Even `PREPARED_UNAPPROVED` can represent an in-flight
+admission. Stop prior processes and independently confirm no writer holds
+either lock before making an operator decision. `COMPLETED` describes only
+the latest generation; it disappears from this accessor after a later normal
+admission. The accessor deliberately refuses on checkpoint/policy drift or
+inconsistent audit digests (`RESUME_FENCE_AUDIT_UNCONFIRMED` or a baseline
+verification failure) rather than treating different host context as verified
+recovery. Consult archived audit/ledger evidence manually if this blocks
+diagnostics; never turn the diagnostic refusal into permission to resume.
+A missing audit removed by the trusted same-UID owner remains
 outside the threat model.
 
 ### Interrupted anchor prepare — operator procedure
 
 1. Stop the prior process and verify no one holds `resume.lock` or
-   `checkpoint.lock`. Confirm that the closed event ledger replays successfully,
-   inspect the previous verified fence/anchor generations, the current policy,
-   Git baseline, frozen inputs and all uncertain external effects.
+   `checkpoint.lock`. Use the [read-only recovery diagnostics](#read-only-recovery-diagnostics)
+   above to identify a validated prepared head and any committed operator
+   approval; the accessor does not verify liveness. Confirm that the closed
+   event ledger replays successfully, inspect the previous verified fence/anchor
+   generations, the current policy, Git baseline, frozen inputs and all
+   uncertain external effects.
 2. Confirm that **exactly one** anchor at generation N+1 is committed and its
    matching fence is absent; no later generations are present. Independently
-   record the expected prepared fence SHA-256, generation and operator identity.
+   record the expected prepared fence SHA-256, generation and operator identity
+   using independent trusted evidence, not a copied diagnostics field.
    If effects, authority, ledger identity or external facts are uncertain,
    **do not approve**. Archive evidence and create a new session with a new
    ledger/store after full operator reconciliation; never delete an anchor.
@@ -237,8 +262,9 @@ inode at the same path invalidates the lease. File keys can be recycled by a
 filesystem after deletion/recreation; protection against a malicious same-UID
 writer remains out of scope.
 
-The `admitWithFault` (including its `beforeInspection` callback) and
-`reconcilePreparedWithFault` entry points are `internal` deterministic
+The `admitWithFault` (including its `beforeInspection` and
+`hardLinkProbe` callbacks) and `reconcilePreparedWithFault` entry points
+are `internal` deterministic
 integration-test seams compiled in production sources. They are **not
 supported application APIs** and must not be wired to external callers,
 model tools, or operator endpoints.
@@ -271,9 +297,10 @@ The Linux integration tier tests these failure boundaries offline:
 - Anchor rollback, interrupted prepares, audit/fsync recovery and idempotent
   operator retries, including conflicting operator rejection
 - `reconciliationStatus` transitions from unaudited prepare to approved
-  pending to completed without publishing or cleaning evidence
-- Hard-link publication without overwrite, both-directory preflight, injected
-  unsupported hard-link failure, and scoped temp cleanup
+  pending to latest completed, plus malformed/stray and mismatched audit cases
+- Hard-link publication without overwrite, wired two-directory preflight,
+  injected ledger-side refusal before durable prepare, and scoped cleanup of
+  orphan probe files without writes during inspection
 - Ledger inode replacement both before inspection and after anchor publication
 - Corrupt or semantically mismatched audits with valid checksums, plus audit
   records beyond the current fence head

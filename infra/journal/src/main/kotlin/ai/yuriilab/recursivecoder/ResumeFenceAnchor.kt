@@ -20,6 +20,34 @@ import java.util.UUID
  * Callers have already fsynced the temporary content before linking.
  */
 internal object ResumeImmutablePublication {
+    // Only actual probe filenames from UUID.toString(), not arbitrary siblings.
+    val PROBE_NAME = Regex(
+        "\\.resume-hardlink-probe-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-" +
+            "[0-9a-f]{4}-[0-9a-f]{12}\\.(?:tmp|link)")
+
+    /** Admission-only cleanup of crash leftovers in a single checked directory. */
+    fun cleanOrphanedProbes(directory: Path) {
+        var removed = false
+        try {
+            Files.newDirectoryStream(directory).use { entries ->
+                entries.filter { PROBE_NAME.matches(it.fileName.toString()) }.forEach { file ->
+                    if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS))
+                        throw SessionResumeUnconfirmed(
+                            "RESUME_FENCE_HARD_LINK_PROBE_CLEANUP_UNCONFIRMED")
+                    Files.delete(file)
+                    removed = true
+                }
+            }
+            if (removed)
+                FileChannel.open(directory, StandardOpenOption.READ).use { it.force(true) }
+        } catch (e: SessionResumeUnconfirmed) {
+            throw e
+        } catch (e: Exception) {
+            throw SessionResumeUnconfirmed(
+                "RESUME_FENCE_HARD_LINK_PROBE_CLEANUP_UNCONFIRMED", e)
+        }
+    }
+
     fun linkAndSync(directory: Path, temporary: Path, destination: Path,
                     conflictCode: String, unavailableCode: String,
                     createHardLink: (Path, Path) -> Path = Files::createLink) {
@@ -136,8 +164,16 @@ internal object ResumeFenceAnchor {
     }
 
     /** Validate the external anchor filesystem before any new anchor is written. */
-    fun requirePublicationSupport(ledger: Path) {
-        ResumeImmutablePublication.requireHardLinks(parent(ledger))
+    fun requirePublicationSupport(ledger: Path,
+                                  probe: (Path) -> Unit = {
+                                      ResumeImmutablePublication.requireHardLinks(it)
+                                  }) {
+        probe(parent(ledger))
+    }
+
+    /** Admission-only cleanup, also safe for the separate ledger mount. */
+    fun cleanOrphanedProbes(ledger: Path) {
+        ResumeImmutablePublication.cleanOrphanedProbes(parent(ledger))
     }
 
     private fun prefix(ledger: Path) =

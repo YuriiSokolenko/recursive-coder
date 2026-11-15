@@ -370,10 +370,14 @@ object SessionResumeAdmission {
         directory: Path, context: CheckpointHostContext, ledgerPath: Path,
         attestation: ResumeHostAttestation,
         beforeInspection: () -> Unit = {},
+        hardLinkProbe: (Path) -> Unit = {
+            ResumeImmutablePublication.requireHardLinks(it)
+        },
         afterAnchorCommitted: () -> Unit
     ): SessionResumeLease =
         admitChecked(directory, context, ledgerPath, attestation, null,
-            beforeInspection, afterAnchorCommitted)
+            beforeInspection = beforeInspection, hardLinkProbe = hardLinkProbe,
+            afterAnchorCommitted = afterAnchorCommitted)
 
     /** Integration-test-only fault seam for a crash after durable operator audit. */
     internal fun reconcilePreparedWithFault(
@@ -388,6 +392,9 @@ object SessionResumeAdmission {
         directory: Path, context: CheckpointHostContext, ledgerPath: Path,
         attestation: ResumeHostAttestation, operator: PreparedFenceReconciliation?,
         beforeInspection: () -> Unit = {},
+        hardLinkProbe: (Path) -> Unit = {
+            ResumeImmutablePublication.requireHardLinks(it)
+        },
         afterAnchorCommitted: () -> Unit
     ): SessionResumeLease {
         if (attestation.expectedFenceGeneration < 0)
@@ -452,10 +459,15 @@ object SessionResumeAdmission {
                 val ledgerKey = ledgerFileKey(ledgerPath)
                 if (ledgerKey != ledgerKeyBeforeInspect)
                     fail("RESUME_LEDGER_PATH_CHANGED")
-                // Probe both mounts before the first irreversible anchor/audit.
-                // The two directories need not share a filesystem.
-                ResumeImmutablePublication.requireHardLinks(checkedDir)
-                ResumeFenceAnchor.requirePublicationSupport(ledgerPath)
+                // Ignore probe crash leftovers during read-only inspection;
+                // remove them only during admission under both OS locks.
+                ResumeImmutablePublication.cleanOrphanedProbes(checkedDir)
+                ResumeFenceAnchor.cleanOrphanedProbes(ledgerPath)
+                // Test both mounts before the first irreversible anchor/audit.
+                // Different filesystems are supported; the test seam must
+                // not be exposed as a production injection point.
+                hardLinkProbe(checkedDir)
+                ResumeFenceAnchor.requirePublicationSupport(ledgerPath, hardLinkProbe)
                 ResumeFenceStorage.cleanOrphanedTemps(checkedDir)
                 ResumeFenceAnchor.cleanOrphanedTemps(ledgerPath)
                 var preparedAnchor: ResumeFenceAnchorRecord? = null

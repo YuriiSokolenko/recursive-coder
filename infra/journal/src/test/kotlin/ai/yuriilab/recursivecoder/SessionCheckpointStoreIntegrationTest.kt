@@ -1013,7 +1013,12 @@ class SessionCheckpointStoreIntegrationTest {
         assertNull(prepared.operatorId)
         val unchanged = Files.readAllBytes(ledger().resolveSibling(
             "events.ledger.resume-anchor-000000000001.rca"))
-        val approval = PreparedFenceReconciliation(1L, prepared.fenceSha256,
+        // Test fixture reads independently; a production operator must
+        // validate this digest against independently obtained host evidence.
+        val onDiskPrepared = Files.readString(ledger().resolveSibling(
+            "events.ledger.resume-anchor-000000000001.rca")).split("\n")[2]
+        assertEquals(prepared.fenceSha256, onDiskPrepared)
+        val approval = PreparedFenceReconciliation(1L, onDiskPrepared,
             "status-operator", true)
         assertEquals("RESUME_ADMISSION_UNCONFIRMED",
             assertFailsWith<SessionResumeUnconfirmed> {
@@ -1041,6 +1046,10 @@ class SessionCheckpointStoreIntegrationTest {
         assertEquals(1L, completed.generation)
         // Read-only accessor never adds a generation.
         assertEquals(1L, SessionResumeAdmission.currentGeneration(store(), context(), ledger()))
+        SessionResumeAdmission.admit(store(), context(), ledger(),
+            resumeAttestation(1)).use { assertEquals(2L, it.generation) }
+        // COMPLETED refers only to the latest generation, not history.
+        assertNull(SessionResumeAdmission.reconciliationStatus(store(), context(), ledger()))
     }
 
     @Test fun admissionRefusesInodeSwapBeforeLedgerInspection() {
@@ -1057,6 +1066,149 @@ class SessionCheckpointStoreIntegrationTest {
         assertFalse(Files.exists(store().resolve("resume-000000000001.rcf")))
         assertFalse(Files.exists(ledger().resolveSibling(
             "events.ledger.resume-anchor-000000000001.rca")))
+    }
+
+    @Test fun crashedProbeFilesDoNotBrickStoreAndAreCleanedOnlyByAdmission() {
+        createPreExecutionCheckpoint()
+        val checkpoint = store()
+        val ledgerParent = ledger().parent
+        val checkpointProbe = ".resume-hardlink-probe-" + UUID.randomUUID()
+        val ledgerProbe = ".resume-hardlink-probe-" + UUID.randomUUID()
+        fun abandoned(directory: Path, basename: String): Pair<Path, Path> {
+            val tempFile = directory.resolve(basename + ".tmp")
+            val linked = directory.resolve(basename + ".link")
+            Files.writeString(tempFile, "interrupted capability probe")
+            Files.createLink(linked, tempFile)
+            return tempFile to linked
+        }
+        val checkpointFiles = abandoned(checkpoint, checkpointProbe)
+        val ledgerFiles = abandoned(ledgerParent, ledgerProbe)
+        // All read-only access must ignore but never clean exact probe names.
+        assertEquals(1L, inspect().snapshot.sequence)
+        assertNull(SessionResumeAdmission.reconciliationStatus(
+            store(), context(), ledger()))
+        for (file in listOf(checkpointFiles.first, checkpointFiles.second,
+                ledgerFiles.first, ledgerFiles.second)) assertTrue(Files.exists(file))
+        SessionResumeAdmission.admit(store(), context(), ledger(),
+            resumeAttestation()).use { it.assertCurrent() }
+        for (file in listOf(checkpointFiles.first, checkpointFiles.second,
+                ledgerFiles.first, ledgerFiles.second)) assertFalse(Files.exists(file))
+        assertEquals(1L, SessionResumeAdmission.currentGeneration(
+            store(), context(), ledger()))
+    }
+
+    @Test fun probeFilenameMustBeCanonicalAndRegularNoFollow() {
+        createPreExecutionCheckpoint()
+        val wrongName = store().resolve(".resume-hardlink-probe-not-a-uuid.tmp")
+        Files.writeString(wrongName, "not a generated probe")
+        assertEquals("CHECKPOINT_UNRECOGNIZED_ENTRY",
+            assertFailsWith<CheckpointUnconfirmed> { inspect() }.code)
+        Files.delete(wrongName)
+        val symlinkProbe = store().resolve(
+            ".resume-hardlink-probe-" + UUID.randomUUID() + ".tmp")
+        Files.createSymbolicLink(symlinkProbe, ledger())
+        assertEquals("CHECKPOINT_UNRECOGNIZED_ENTRY",
+            assertFailsWith<CheckpointUnconfirmed> { inspect() }.code)
+        assertEquals("RESUME_FENCE_HARD_LINK_PROBE_CLEANUP_UNCONFIRMED",
+            assertFailsWith<SessionResumeUnconfirmed> {
+                ResumeImmutablePublication.cleanOrphanedProbes(store())
+            }.code)
+        assertTrue(Files.isSymbolicLink(symlinkProbe))
+        Files.delete(symlinkProbe)
+    }
+
+    @Test fun injectedLedgerMountPreflightRefusalHasNoAnchorAuditOrFence() {
+        createPreExecutionCheckpoint()
+        val checkedStore = store()
+        val ledgerParent = ledger().parent
+        val calls = mutableListOf<Path>()
+        val denied = assertFailsWith<SessionResumeUnconfirmed> {
+            SessionResumeAdmission.admitWithFault(store(), context(), ledger(),
+                resumeAttestation(),
+                hardLinkProbe = { directory ->
+                    calls.add(directory)
+                    if (directory == ledgerParent)
+                        throw SessionResumeUnconfirmed("RESUME_FENCE_HARD_LINK_UNAVAILABLE")
+                    ResumeImmutablePublication.requireHardLinks(directory)
+                },
+                afterAnchorCommitted = {})
+        }
+        assertEquals("RESUME_FENCE_HARD_LINK_UNAVAILABLE", denied.code)
+        assertEquals(listOf(checkedStore, ledgerParent), calls)
+        assertFalse(Files.exists(ledger().resolveSibling(
+            "events.ledger.resume-anchor-000000000001.rca")))
+        assertFalse(Files.exists(ledger().resolveSibling(
+            "events.ledger.resume-audit-000000000001.rcaudit")))
+        assertFalse(Files.exists(store().resolve("resume-000000000001.rcf")))
+    }
+
+    @Test fun statusRefusesStrayFutureRecordsAndMissingPreparedAnchor() {
+        createPreExecutionCheckpoint()
+        val futureAnchor = ledger().resolveSibling(
+            "events.ledger.resume-anchor-000000000002.rca")
+        Files.writeString(futureAnchor, "future")
+        assertEquals("RESUME_FENCE_ANCHOR_MISMATCH",
+            assertFailsWith<SessionResumeUnconfirmed> {
+                SessionResumeAdmission.reconciliationStatus(
+                    store(), context(), ledger())
+            }.code)
+        Files.delete(futureAnchor)
+        val futureAudit = ledger().resolveSibling(
+            "events.ledger.resume-audit-000000000002.rcaudit")
+        Files.writeString(futureAudit, "future")
+        assertEquals("RESUME_FENCE_ANCHOR_MISMATCH",
+            assertFailsWith<SessionResumeUnconfirmed> {
+                SessionResumeAdmission.reconciliationStatus(
+                    store(), context(), ledger())
+            }.code)
+        Files.delete(futureAudit)
+        val orphanAudit = ledger().resolveSibling(
+            "events.ledger.resume-audit-000000000001.rcaudit")
+        Files.writeString(orphanAudit, "missing anchor")
+        assertEquals("RESUME_FENCE_AUDIT_UNCONFIRMED",
+            assertFailsWith<SessionResumeUnconfirmed> {
+                SessionResumeAdmission.reconciliationStatus(
+                    store(), context(), ledger())
+            }.code)
+    }
+
+    @Test fun statusRefusesPendingAuditWithWrongCheckpointOrPolicy() {
+        createPreExecutionCheckpoint()
+        assertEquals("RESUME_ADMISSION_UNCONFIRMED",
+            assertFailsWith<SessionResumeUnconfirmed> {
+                SessionResumeAdmission.admitWithFault(store(), context(), ledger(),
+                    resumeAttestation()) { throw IllegalStateException("crash after anchor") }
+            }.code)
+        val preparedFile = ledger().resolveSibling(
+            "events.ledger.resume-anchor-000000000001.rca")
+        val fenceHash = Files.readString(preparedFile).split("\n")[2]
+        val approval = PreparedFenceReconciliation(1L, fenceHash, "operator-one", true)
+        assertEquals("RESUME_ADMISSION_UNCONFIRMED",
+            assertFailsWith<SessionResumeUnconfirmed> {
+                SessionResumeAdmission.reconcilePreparedWithFault(
+                    store(), context(), ledger(), resumeAttestation(), approval) {
+                    throw IllegalStateException("crash after audit")
+                }
+            }.code)
+        val audit = ledger().resolveSibling("events.ledger.resume-audit-000000000001.rcaudit")
+        val original = Files.readString(audit)
+        for (field in listOf(4, 5)) {
+            val entries = original.split("\n")
+            val header = entries.take(9).toMutableList().also {
+                it[field] = if (it[field] == "0".repeat(64)) "1".repeat(64)
+                    else "0".repeat(64)
+            }.joinToString("\n", postfix = "\n")
+            val checksum = SessionCheckpointCodec.sha256(
+                header.toByteArray(StandardCharsets.UTF_8))
+            Files.writeString(audit, header + checksum + "\n")
+            assertEquals("RESUME_FENCE_AUDIT_UNCONFIRMED",
+                assertFailsWith<SessionResumeUnconfirmed> {
+                    SessionResumeAdmission.reconciliationStatus(store(), context(), ledger())
+                }.code)
+        }
+        Files.writeString(audit, original)
+        assertEquals(ResumeReconciliationState.APPROVED_PENDING,
+            SessionResumeAdmission.reconciliationStatus(store(), context(), ledger())?.state)
     }
 
     @Test fun hardLinkPublicationNeverReplacesAnExistingName() {
