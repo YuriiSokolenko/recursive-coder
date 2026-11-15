@@ -7,6 +7,7 @@ import java.time.Instant
 import java.time.ZoneOffset
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.jupiter.api.Tag
@@ -151,6 +152,39 @@ class DurableSessionEventLedgerTest {
             writer.close()
         }
         assertEquals(1, DurableSessionEventLedger.inspect(path).lastSequence)
+    }
+
+    @Test fun mixedSessionIdentityIsRejectedEvenWithCorrectCausation() {
+        val path = file()
+        val writer = DurableSessionEventLedger.create(path, workspace())
+        try {
+            writer.append(event(1))
+            writer.flush()
+            val foreign = JsonObject(event(2) + mapOf(
+                "sessionId" to JsonPrimitive("foreign"),
+                "eventId" to JsonPrimitive("evt-foreign-2")
+            ))
+            assertEquals("LEDGER_IDENTITY_CHANGED",
+                assertFailsWith<SessionLedgerUnconfirmed> {
+                    writer.append(foreign)
+                }.code)
+            writer.append(event(2))
+            writer.flush()
+        } finally {
+            writer.close()
+        }
+        assertEquals(2, DurableSessionEventLedger.inspect(path).lastSequence)
+    }
+
+    @Test fun incompatibleLedgerVersionDoesNotReplay() {
+        val path = committedLedger()
+        val bytes = Files.readAllBytes(path)
+        bytes[0] = (bytes[0].toInt() xor 1).toByte()
+        Files.write(path, bytes)
+        assertEquals("LEDGER_VERSION_UNSUPPORTED",
+            assertFailsWith<SessionLedgerUnconfirmed> {
+                DurableSessionEventLedger.inspect(path)
+            }.code)
     }
 
     @Test fun unflushedAppendCannotPublishChecksum() {
