@@ -298,6 +298,26 @@ public class LeaseProbe {
         assertEquals("AVAILABLE", probeExclusiveLease(lockFile))
     }
 
+    @Test fun inspectCannotCreateMissingLockFile() {
+        val path = committedLedger()
+        val lockPath = path.resolveSibling(path.fileName.toString() + ".lock")
+        Files.delete(lockPath)
+
+        assertEquals("LEDGER_LOCK_MISSING",
+            assertFailsWith<SessionLedgerUnconfirmed> {
+                DurableSessionEventLedger.inspect(path)
+            }.code)
+        assertFalse(Files.exists(lockPath), "Read-only inspection must not recreate the lock")
+        assertTrue(Files.isRegularFile(path), "Ledger bytes remain in place")
+
+        val missingLedger = temp.resolve("never-created.ledger")
+        assertEquals("INVALID_LEDGER_PATH",
+            assertFailsWith<SessionLedgerUnconfirmed> {
+                DurableSessionEventLedger.inspect(missingLedger)
+            }.code)
+        assertFalse(Files.exists(missingLedger.resolveSibling("never-created.ledger.lock")))
+    }
+
     @Test fun ledgerRejectsSymlinkedLockFileWithStableCode() {
         val target = temp.resolve("other.lock")
         Files.writeString(target, "")
