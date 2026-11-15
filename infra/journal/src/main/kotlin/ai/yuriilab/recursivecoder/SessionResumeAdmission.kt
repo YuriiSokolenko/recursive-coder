@@ -22,14 +22,24 @@ import kotlinx.serialization.json.jsonPrimitive
  */
 data class ResumeHostAttestation(
     val expectedFenceGeneration: Long,
-    val toolAuthoritySha256: String,
-    val expectedToolAuthoritySha256: String,
-    val toolAuthorityReconciled: Boolean,
+    val readPolicyFacts: ReadPolicyFacts,
     val externalActionsReconciled: Boolean
 )
 
 class SessionResumeUnconfirmed(val code: String, cause: Throwable? = null) :
     IllegalStateException(code, cause)
+
+/** Read-only authority is evaluated and canonically hashed from host policy facts. */
+internal object ResumeReadAuthority {
+    fun fingerprint(context: CheckpointHostContext, facts: ReadPolicyFacts): String {
+        if (ToolAuthorizationPolicy.admitReadOnlyPolicy(facts) != ToolAuthorizationDecision.Permit)
+            throw SessionResumeUnconfirmed("RESUME_TOOL_AUTHORITY_UNCONFIRMED")
+        val canonical = listOf("RCREAD1", context.policySha256, facts.mode,
+            facts.allowedTools.sorted().joinToString(","), facts.writablePathsPresent.toString(),
+            facts.immutableInputsPresent.toString()).joinToString("\n", postfix = "\n")
+        return SessionCheckpointCodec.sha256(canonical.toByteArray(StandardCharsets.UTF_8))
+    }
+}
 
 internal data class ResumeFenceRecord(
     val generation: Long,
@@ -109,7 +119,8 @@ internal object ResumeFenceStorage {
     }
 
     fun publish(directory: Path, previous: ResumeFenceRecord?,
-                checkpoint: VerifiedSessionCheckpoint, authority: String): ResumeFenceRecord {
+                checkpoint: VerifiedSessionCheckpoint, authority: String,
+                beforePublish: (ResumeFenceRecord) -> Unit): ResumeFenceRecord {
         val generation = (previous?.generation ?: 0L) + 1L
         if (generation > MAX_FENCES) fail("RESUME_FENCE_LIMIT")
         val snapshot = checkpoint.snapshot
@@ -118,6 +129,10 @@ internal object ResumeFenceStorage {
         val checksum = digest(header.toByteArray(StandardCharsets.UTF_8))
         val bytes = (header + checksum + "\n").toByteArray(StandardCharsets.UTF_8)
         val destination = directory.resolve(name(generation))
+        // The independent durable anchor must precede this fence's publication.
+        beforePublish(ResumeFenceRecord(generation, previous?.sha256, checkpoint.sha256,
+            authority, snapshot.sessionId, snapshot.traceId, snapshot.binding.policySha256,
+            checksum))
         if (Files.exists(destination, LinkOption.NOFOLLOW_LINKS))
             fail("RESUME_FENCE_CAS_FAILED")
         val temporary = directory.resolve(".resume-pending-" + UUID.randomUUID() + ".tmp")
@@ -142,6 +157,37 @@ internal object ResumeFenceStorage {
             // A renamed generation is authoritative even when parent fsync fails.
             // Never delete or overwrite it during cleanup.
             try { Files.deleteIfExists(temporary) } catch (_: Exception) { /* unconfirmed */ }
+        }
+    }
+
+    /** Bounded single-head check; the entire chain was verified at admission. */
+    fun requireHead(directory: Path, generation: Long, sha256: String) {
+        val record = decode(directory.resolve(name(generation)))
+        if (record.generation != generation || record.sha256 != sha256 ||
+            Files.exists(directory.resolve(name(generation + 1L)), LinkOption.NOFOLLOW_LINKS))
+            fail("RESUME_FENCE_STALE_WRITER")
+    }
+
+    /** Clean abandoned uncommitted fence temp files only under both OS locks. */
+    fun cleanOrphanedTemps(directory: Path) {
+        var removed = false
+        Files.newDirectoryStream(directory).use { entries ->
+            entries.filter { TEMP.matches(it.fileName.toString()) }.forEach { file ->
+                if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS))
+                    fail("RESUME_FENCE_CORRUPT")
+                try {
+                    Files.delete(file)
+                    removed = true
+                } catch (e: Exception) {
+                    throw SessionResumeUnconfirmed("RESUME_FENCE_CLEANUP_UNCONFIRMED", e)
+                }
+            }
+        }
+        if (removed) {
+            try { FileChannel.open(directory, StandardOpenOption.READ).use { it.force(true) } }
+            catch (e: Exception) {
+                throw SessionResumeUnconfirmed("RESUME_FENCE_CLEANUP_UNCONFIRMED", e)
+            }
         }
     }
 
@@ -173,6 +219,9 @@ class SessionResumeLease internal constructor(
     val admittedCheckpointSha256: String,
     val toolAuthoritySha256: String,
     private val directory: Path,
+    private val ledgerPath: Path,
+    private val admittedFenceSha256: String,
+    private val admittedAnchorSha256: String,
     private val lockPath: Path,
     private val owner: FileChannel,
     private val lock: FileLock,
@@ -193,8 +242,9 @@ class SessionResumeLease internal constructor(
     @Synchronized fun assertCurrent() {
         if (closed || !lock.isValid)
             throw SessionResumeUnconfirmed("RESUME_FENCE_STALE_WRITER")
-        requireCurrent(ResumeFenceStorage.latest(directory)
-            ?: throw SessionResumeUnconfirmed("RESUME_FENCE_STALE_WRITER"), directory)
+        ResumeFenceStorage.requireHead(directory, generation, admittedFenceSha256)
+        ResumeFenceAnchor.requireHead(ledgerPath, generation, admittedFenceSha256,
+            admittedAnchorSha256)
     }
 
     /**
@@ -228,23 +278,26 @@ class SessionResumeLease internal constructor(
  */
 object SessionResumeAdmission {
     private val heldLocks = ConcurrentHashMap.newKeySet<Path>()
-    private val SHA = Regex("[0-9a-f]{64}")
     private fun fail(code: String): Nothing = throw SessionResumeUnconfirmed(code)
 
     fun currentGeneration(directory: Path, context: CheckpointHostContext,
-                          ledgerPath: Path): Long =
+                          ledgerPath: Path): Long = try {
         SessionCheckpointStore.withAdmissionEvidence(directory, context, ledgerPath) { dir, _, _ ->
-            ResumeFenceStorage.latest(dir)?.generation ?: 0L
+            val head = ResumeFenceStorage.latest(dir)
+            ResumeFenceAnchor.verify(ledgerPath, head)
+            head?.generation ?: 0L
         }
+    } catch (e: CheckpointUnconfirmed) {
+        val cause = e.cause as? SessionResumeUnconfirmed
+        if (cause != null) throw cause
+        throw e
+    }
 
     fun admit(directory: Path, context: CheckpointHostContext, ledgerPath: Path,
               attestation: ResumeHostAttestation): SessionResumeLease {
-        if (attestation.expectedFenceGeneration < 0 ||
-            !SHA.matches(attestation.toolAuthoritySha256) ||
-            !SHA.matches(attestation.expectedToolAuthoritySha256) ||
-            attestation.toolAuthoritySha256 != attestation.expectedToolAuthoritySha256 ||
-            !attestation.toolAuthorityReconciled)
-            fail("RESUME_TOOL_AUTHORITY_UNCONFIRMED")
+        if (attestation.expectedFenceGeneration < 0)
+            fail("RESUME_FENCE_CAS_FAILED")
+        val authoritySha256 = ResumeReadAuthority.fingerprint(context, attestation.readPolicyFacts)
         if (!attestation.externalActionsReconciled)
             fail("RESUME_EXTERNAL_EFFECTS_UNCONFIRMED")
         val dir = SessionCheckpointStore.checkedAdmissionDirectory(directory, context)
@@ -283,17 +336,24 @@ object SessionResumeAdmission {
                             setOf("session.transition", "checkpoint.saved")
                     }) fail("RESUME_UNSAFE_BOUNDARY")
                 val prior = ResumeFenceStorage.latest(checkedDir)
+                val priorAnchor = ResumeFenceAnchor.verify(ledgerPath, prior)
                 if ((prior?.generation ?: 0L) != attestation.expectedFenceGeneration)
                     fail("RESUME_FENCE_CAS_FAILED")
                 if (prior != null && (prior.sessionId != s.sessionId ||
                     prior.traceId != s.traceId ||
                     prior.policySha256 != s.binding.policySha256 ||
-                    prior.toolAuthoritySha256 != attestation.toolAuthoritySha256))
+                    prior.toolAuthoritySha256 != authoritySha256))
                     fail("RESUME_FENCE_CONTEXT_CHANGED")
+                ResumeFenceStorage.cleanOrphanedTemps(checkedDir)
+                var preparedAnchor: ResumeFenceAnchorRecord? = null
                 val next = ResumeFenceStorage.publish(checkedDir, prior, verified,
-                    attestation.toolAuthoritySha256)
+                    authoritySha256) { prepared ->
+                    preparedAnchor = ResumeFenceAnchor.publish(ledgerPath, prepared, priorAnchor)
+                }
+                val anchor = preparedAnchor ?: fail("RESUME_FENCE_ANCHOR_UNCONFIRMED")
                 SessionResumeLease(next.generation, next.checkpointSha256,
-                    next.toolAuthoritySha256, checkedDir, lockPath, acquiredOwner,
+                    next.toolAuthoritySha256, checkedDir, ledgerPath, next.sha256,
+                    anchor.sha256, lockPath, acquiredOwner,
                     acquiredLock) { heldLocks.remove(it) }
             }
             transferred = true
