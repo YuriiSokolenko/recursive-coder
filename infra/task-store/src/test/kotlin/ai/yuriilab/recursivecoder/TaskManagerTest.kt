@@ -1,6 +1,7 @@
 package ai.yuriilab.recursivecoder
 
 import org.junit.jupiter.api.Tag
+import org.junit.jupiter.api.RepeatedTest
 
 import java.nio.file.Files
 import java.nio.file.Path
@@ -9,6 +10,7 @@ import java.time.Instant
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 import kotlin.test.*
@@ -428,51 +430,145 @@ class TaskManagerTest {
         assertEquals(TaskState.BLOCKED, service.show("child").state)
     }
 
-    @Test fun cancelledAttemptCannotBeOverwrittenByImmediateRetryWhileWorkerIsAlive() {
+    @Test fun lateCancelledAttemptResultCannotOverrideRunningRetry() {
+        val service = service()
+        service.enqueue(request("one"))
+        val first = service.claim()!!
+        service.cancel("one")
+        service.retry("one")
+
+        // An old terminal result must not affect the freshly queued retry.
+        service.finish("one", first.sessionId!!, "failed")
+        assertEquals(TaskState.READY, service.show("one").state)
+
+        val second = service.claim()!!
+        assertEquals(2, second.attempt)
+        assertNotEquals(first.sessionId, second.sessionId)
+
+        // Nor may it overwrite an already running, differently owned session.
+        service.finish("one", first.sessionId!!, "succeeded")
+        val retry = service.show("one")
+        assertEquals(TaskState.RUNNING, retry.state)
+        assertEquals(second.sessionId, retry.sessionId)
+        assertEquals(2, retry.attempt)
+        assertEquals(0, retry.transitions.count { it.to == TaskState.SUCCEEDED })
+
+        service.finish("one", second.sessionId!!, "succeeded")
+        assertEquals(TaskState.SUCCEEDED, service.show("one").state)
+        assertEquals(1, service.show("one").transitions.count { it.to == TaskState.SUCCEEDED })
+    }
+
+    @RepeatedTest(20)
+    fun cancelledAttemptCannotBeOverwrittenByImmediateRetryWhileWorkerIsAlive() {
         val service = service()
         service.enqueue(request("one"), priority = 50)
         val firstStarted = CountDownLatch(1)
+        val claimWhileOldWorkerAlive = CountDownLatch(1)
+        val secondStarted = CountDownLatch(1)
         val releaseOld = CountDownLatch(1)
+        val releaseSecond = CountDownLatch(1)
         val starts = AtomicInteger()
         val activeCount = AtomicInteger()
         val peak = AtomicInteger()
-        val scheduler = thread {
-            TaskScheduler(service, TaskRunner { request, _ ->
-                starts.incrementAndGet()
-                val current = activeCount.incrementAndGet()
-                peak.accumulateAndGet(current, ::maxOf)
-                try {
-                    if (request.invocation.getValue("attempt").jsonPrimitive.int == 1) {
+        val oldTaskExcluded = AtomicBoolean(false)
+        val claimedWhileOldWorkerAlive = AtomicBoolean(false)
+
+        val runner = TaskRunner { request, _ ->
+            val attempt = request.invocation.getValue("attempt").jsonPrimitive.int
+            starts.incrementAndGet()
+            val current = activeCount.incrementAndGet()
+            peak.accumulateAndGet(current, ::maxOf)
+            try {
+                when (attempt) {
+                    1 -> {
                         firstStarted.countDown()
-                        // Deliberately ignore interruption to exercise a slow provider shutdown.
+                        // Model a provider that ignores cancellation until explicitly released.
                         while (releaseOld.count > 0) {
-                            try { releaseOld.await(25, TimeUnit.MILLISECONDS) }
+                            try { releaseOld.await() }
                             catch (_: InterruptedException) { }
                         }
                     }
-                    "succeeded"
-                } finally {
-                    activeCount.decrementAndGet()
+                    2 -> {
+                        secondStarted.countDown()
+                        releaseSecond.await()
+                    }
+                    else -> error("Unexpected attempt: $attempt")
                 }
-            }, pollMillis = 10).runUntilIdle(concurrency = 2)
+                "succeeded"
+            } finally {
+                activeCount.decrementAndGet()
+            }
+        }
+
+        // Observe a real scheduler claim after retry, while the first worker is
+        // provably alive. This replaces a scheduler-timing-dependent sleep.
+        val delegateClaim = DefaultClaimNextTaskUseCase(service.store)
+        val observedClaim = ClaimNextTaskUseCase { excludedTaskIds ->
+            val retryReadyWhileOldAlive = activeCount.get() == 1 &&
+                service.show("one").state == TaskState.READY
+            val claimed = delegateClaim(excludedTaskIds)
+            if (retryReadyWhileOldAlive) {
+                oldTaskExcluded.set("one" in excludedTaskIds)
+                claimedWhileOldWorkerAlive.set(claimed != null)
+                claimWhileOldWorkerAlive.countDown()
+            }
+            claimed
+        }
+        val schedulerExecutor = Executors.newSingleThreadExecutor()
+        val outcome = schedulerExecutor.submit<SchedulerReport> {
+            TaskScheduler(
+                repository = service.store,
+                queries = DefaultTaskQueriesUseCase(service.store),
+                claim = observedClaim,
+                complete = DefaultCompleteTaskAttemptUseCase(service.store),
+                interrupt = DefaultInterruptTaskAttemptUseCase(service.store),
+                recover = DefaultRecoverInterruptedAttemptsUseCase(service.store),
+                prepare = DefaultPrepareTaskAttemptUseCase(service.store),
+                runner = runner,
+                pollMillis = 10
+            ).runUntilIdle(concurrency = 2)
         }
         try {
-            assertTrue(firstStarted.await(5, TimeUnit.SECONDS))
+            assertTrue(firstStarted.await(5, TimeUnit.SECONDS), "First worker did not start")
             service.cancel("one")
             service.retry("one")
-            Thread.sleep(150)
-            assertEquals(1, starts.get(), "The second attempt must wait for the old worker")
+
+            assertTrue(claimWhileOldWorkerAlive.await(5, TimeUnit.SECONDS),
+                "Scheduler did not evaluate the retry while the old worker was alive")
+            assertTrue(oldTaskExcluded.get(), "Old worker must exclude its task from claims")
+            assertFalse(claimedWhileOldWorkerAlive.get(), "Retry must not be claimed yet")
+            assertEquals(1, starts.get())
             assertEquals(1, peak.get())
+            assertEquals(TaskState.READY, service.show("one").state)
+
+            releaseOld.countDown()
+            assertTrue(secondStarted.await(5, TimeUnit.SECONDS),
+                "Retry did not launch after old worker termination")
+            val runningRetry = service.show("one")
+            assertEquals(2, starts.get())
+            assertEquals(1, peak.get(), "Old and retried workers must never overlap")
+            assertEquals(TaskState.RUNNING, runningRetry.state)
+            assertEquals(2, runningRetry.attempt)
+            assertEquals("session-one-2", runningRetry.sessionId)
+            assertEquals(0, runningRetry.transitions.count { it.to == TaskState.SUCCEEDED },
+                "Old worker success must not terminalize the new attempt")
+
+            releaseSecond.countDown()
+            val report = outcome.get(5, TimeUnit.SECONDS)
+            assertEquals(2, report.launched)
+            assertEquals(2, report.completed)
+            val completed = service.show("one")
+            assertEquals(TaskState.SUCCEEDED, completed.state)
+            assertEquals(2, completed.attempt)
+            assertEquals("session-one-2", completed.sessionId)
+            assertEquals(1, completed.transitions.count { it.to == TaskState.SUCCEEDED })
         } finally {
             releaseOld.countDown()
-            scheduler.join(5000)
+            releaseSecond.countDown()
+            schedulerExecutor.shutdownNow()
+            assertTrue(schedulerExecutor.awaitTermination(5, TimeUnit.SECONDS),
+                "Scheduler must release its worker pool and exclusive store lock")
         }
-        assertFalse(scheduler.isAlive)
-        assertEquals(2, starts.get())
-        assertEquals(1, peak.get())
-        assertEquals(2, service.show("one").attempt)
-        assertEquals(TaskState.SUCCEEDED, service.show("one").state)
-        assertEquals("session-one-2", service.show("one").sessionId)
     }
 
     @Test fun schedulerStopMarksInterruptedTaskNeedsAttentionNotCancelled() {
