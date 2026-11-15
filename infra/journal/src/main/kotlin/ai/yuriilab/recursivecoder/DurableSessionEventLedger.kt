@@ -14,12 +14,7 @@ import java.nio.file.StandardOpenOption
 import java.security.MessageDigest
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonNull
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.intOrNull
-import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.*
 
 /**
  * A verified on-disk prefix, not permission to replay any model/tool operation.
@@ -224,26 +219,71 @@ class DurableSessionEventLedger private constructor(
             return buffer.array()
         }
 
+        private fun identifier(value: JsonElement?): Boolean =
+            value is JsonPrimitive && value.isString && value.content.length <= 160 &&
+                ToolAuthorizationPolicy.validHostIdentifier(value.content)
+
         private fun metadataSafe(event: JsonObject) {
             if (!event.keys.all { it in ROOT_FIELDS })
                 throw SessionLedgerUnconfirmed("LEDGER_UNSUPPORTED_FIELDS")
             val redaction = event["redaction"] as? JsonObject
-            if ((redaction?.get("mode") as? JsonPrimitive)?.content != "metadata-only")
+                ?: throw SessionLedgerUnconfirmed("LEDGER_REDACTION_REQUIRED")
+            if (redaction.keys != setOf("mode", "removedFields") ||
+                (redaction["mode"] as? JsonPrimitive)?.content != "metadata-only" ||
+                redaction["removedFields"] !is JsonArray ||
+                (redaction["removedFields"] as JsonArray).any {
+                    it !is JsonPrimitive || !it.isString || it.content !in REMOVED_FIELDS
+                })
                 throw SessionLedgerUnconfirmed("LEDGER_REDACTION_REQUIRED")
+
+            val actor = event["actor"] as? JsonObject
+                ?: throw SessionLedgerUnconfirmed("LEDGER_EVENT_INVALID")
+            if ("agentId" !in actor || actor.keys.any { it !in setOf("agentId",
+                    "parentAgentId", "childAgentId", "toolExecutionId", "childSessionId") } ||
+                !identifier(actor["agentId"]) ||
+                actor.any { (key, value) -> key != "agentId" && value != JsonNull &&
+                    !identifier(value) })
+                throw SessionLedgerUnconfirmed("LEDGER_SENSITIVE_ACTOR")
+
+            event["transition"]?.let {
+                val transition = it as? JsonObject
+                    ?: throw SessionLedgerUnconfirmed("LEDGER_SENSITIVE_TRANSITION")
+                if (transition.keys != setOf("from", "to") ||
+                    transition.values.any { value ->
+                        value !is JsonPrimitive || !value.isString || value.content !in PHASES
+                    })
+                    throw SessionLedgerUnconfirmed("LEDGER_SENSITIVE_TRANSITION")
+            }
+            event["timing"]?.let {
+                val timing = it as? JsonObject
+                    ?: throw SessionLedgerUnconfirmed("LEDGER_SENSITIVE_TIMING")
+                val started = timing["startedAt"] as? JsonPrimitive
+                val duration = timing["durationMs"] as? JsonPrimitive
+                if (timing.keys != setOf("startedAt", "durationMs") ||
+                    started == null || !started.isString ||
+                    runCatching { Instant.parse(started.content) }.isFailure ||
+                    duration?.longOrNull == null || duration.longOrNull!! < 0 ||
+                    duration.isString)
+                    throw SessionLedgerUnconfirmed("LEDGER_SENSITIVE_TIMING")
+            }
             val metadata = event["metadata"] ?: return
             val obj = metadata as? JsonObject
                 ?: throw SessionLedgerUnconfirmed("LEDGER_UNSUPPORTED_METADATA")
             for ((key, value) in obj) {
-                val normalized = key.lowercase().replace("-", "").replace("_", "")
-                if (!Regex("[A-Za-z][A-Za-z0-9_-]{0,63}").matches(key) ||
-                    listOf("prompt", "raw", "secret", "password", "apikey",
-                        "credential", "authorization", "privatekey", "sourcecode",
-                        "tooloutput", "requestbody", "responsebody", "filecontents",
-                        "inputtext", "outputtext").any { it in normalized }) {
+                if (!SAFE_KEY.matches(key) ||
+                    key !in (NUMBER_KEYS + BOOLEAN_KEYS + SHA_KEYS + ID_KEYS + TEXT_KEYS))
                     throw SessionLedgerUnconfirmed("LEDGER_SENSITIVE_METADATA")
+                val scalar = value as? JsonPrimitive
+                    ?: throw SessionLedgerUnconfirmed("LEDGER_UNSUPPORTED_METADATA")
+                val valid = when (key) {
+                    in NUMBER_KEYS -> !scalar.isString && scalar.longOrNull?.let { it >= 0 } == true
+                    in BOOLEAN_KEYS -> !scalar.isString && scalar.content in setOf("true", "false")
+                    in SHA_KEYS -> scalar.isString && scalar.content.matches(Regex("[0-9a-f]{64}"))
+                    in ID_KEYS -> value == JsonNull || identifier(value)
+                    in TEXT_KEYS -> scalar.isString && SAFE_VALUE.matches(scalar.content)
+                    else -> false
                 }
-                if (value !is JsonPrimitive || value.content.length > 512)
-                    throw SessionLedgerUnconfirmed("LEDGER_UNSUPPORTED_METADATA")
+                if (!valid) throw SessionLedgerUnconfirmed("LEDGER_UNSUPPORTED_METADATA")
             }
         }
 
@@ -260,10 +300,15 @@ class DurableSessionEventLedger private constructor(
                 (previousId == null && event["causationId"] != JsonNull) ||
                 (previousId != null && (event["causationId"] as? JsonPrimitive)?.content != previousId))
                 throw SessionLedgerUnconfirmed("LEDGER_EVENT_CHAIN_INVALID")
-            if (event["actor"] !is JsonObject ||
-                event["traceId"] !is JsonPrimitive ||
+            if (!identifier(event["sessionId"]) ||
+                !identifier(event["traceId"]) ||
+                !identifier(event["correlationId"]) ||
                 event["timestamp"] !is JsonPrimitive ||
-                event["type"] !is JsonPrimitive || event["status"] !is JsonPrimitive)
+                runCatching {
+                    Instant.parse((event["timestamp"] as JsonPrimitive).content)
+                }.isFailure ||
+                (event["type"] as? JsonPrimitive)?.content !in SAFE_EVENT_TYPES ||
+                (event["status"] as? JsonPrimitive)?.content !in SAFE_STATUSES)
                 throw SessionLedgerUnconfirmed("LEDGER_EVENT_INVALID")
         }
 
@@ -341,15 +386,15 @@ class DurableSessionEventLedger private constructor(
     @Synchronized override fun append(event: JsonObject) {
         check(!closed && !poisoned && pending == null) { "Ledger not ready for append" }
         val next = committedSequence + 1
+        val payload = event.toString().toByteArray(StandardCharsets.UTF_8)
+        if (payload.size !in 1..MAX_EVENT_BYTES ||
+            channel.position() + 4L + 32 + payload.size > MAX_LEDGER_BYTES)
+            throw SessionLedgerUnconfirmed("LEDGER_RECORD_SIZE_INVALID")
         validate(event, next, lastEventId)
         val identity = (event["sessionId"] as JsonPrimitive).content to
             (event["traceId"] as JsonPrimitive).content
         if (committedIdentity != null && committedIdentity != identity)
             throw SessionLedgerUnconfirmed("LEDGER_IDENTITY_CHANGED")
-        val payload = event.toString().toByteArray(StandardCharsets.UTF_8)
-        if (payload.size !in 1..MAX_EVENT_BYTES ||
-            channel.position() + 4L + 32 + payload.size > MAX_LEDGER_BYTES)
-            throw SessionLedgerUnconfirmed("LEDGER_RECORD_SIZE_INVALID")
         val hash = chain(lastDigest, payload)
         val frame = ByteBuffer.allocate(4 + 32 + payload.size)
             .putInt(payload.size).put(hash).put(payload).array()
