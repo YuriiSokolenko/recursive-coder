@@ -670,7 +670,7 @@ class SessionCheckpointStoreIntegrationTest {
 
     @Test fun generationLeaseFencesUnqualifiedCheckpointWritersAndOldCallbacks() {
         val first = createPreExecutionCheckpoint()
-        val initial = assertEquals(0L,
+        assertEquals(0L,
             SessionResumeAdmission.currentGeneration(store(), context(), ledger()))
         val retired = SessionResumeAdmission.admit(
             store(), context(), ledger(), resumeAttestation())
@@ -810,8 +810,8 @@ class SessionCheckpointStoreIntegrationTest {
                 }
             }
         """.trimIndent())
-        val java = Path.of(System.getProperty("java.home"), "bin", "java").toString()
-        val child = ProcessBuilder(java, source.toString(),
+        val javaBin = Path.of(System.getProperty("java.home"), "bin", "java").toString()
+        val child = ProcessBuilder(javaBin, source.toString(),
             store().resolve("resume.lock").toString()).redirectErrorStream(true).start()
         try {
             assertEquals("ACQUIRED", child.inputStream.bufferedReader().readLine())
