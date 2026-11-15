@@ -182,6 +182,26 @@ internal fun requireInstalledRecursiveFakeModel(model: ModelConfig) {
     }
 }
 
+/**
+ * Runs the real integration callback without hiding cancellation or claiming
+ * success after an exception. The injected boundary is deterministic in tests.
+ */
+internal suspend fun runInstalledOriginIntegration(
+    markUncertain: () -> Unit,
+    audit: (String) -> Unit,
+    execute: suspend () -> TwoOriginRecursiveOutcome
+): TwoOriginRecursiveOutcome = try {
+    execute()
+} catch (cancelled: CancellationException) {
+    markUncertain()
+    audit("ORIGIN_CANCELLED")
+    throw cancelled
+} catch (_: Exception) {
+    markUncertain()
+    audit("ORIGIN_EXECUTION_UNCONFIRMED")
+    TwoOriginRecursiveOutcome.Stopped(null, "ORIGIN_EXECUTION_UNCONFIRMED")
+}
+
 internal class InstalledRecursiveWorkflow(
     private val sessionId: String,
     private val parent: LinuxFiveRoleWorkflowHost,
@@ -220,30 +240,38 @@ internal class InstalledRecursiveWorkflow(
     }
 
     private data class Attempt(val admitted: RecursiveNode,
-        val meter: InstalledChildRuntimeMeter, var schedulerCharged: Boolean = false)
+        val meter: InstalledChildRuntimeMeter,
+        var physicalCompleted: Boolean = false,
+        var schedulerCharged: Boolean = false)
     private val attempts = linkedMapOf<StageKind, Attempt>()
     private val auditedAttempts = mutableSetOf<StageKind>()
     private val origins = linkedMapOf<StageKind, Origin>()
 
     /**
-     * A physical child executes before the two-origin scheduler is constructed.
-     * An aborted physical attempt is therefore not a scheduler usage charge:
-     * preserve observed usage and account its full, non-refundable host grant.
-     * The installed workflow cannot retry and never promotes such an attempt.
+     * One terminal resource record per physical origin. A failed physical run
+     * consumes its full reservation; a completed but unintegrated physical run
+     * is explicitly distinguished from a prior successful scheduler charge.
+     * No terminal audit is itself an additional scheduler charge.
      */
-    private fun auditFailedAttempt(kind: StageKind, code: String) {
+    private fun auditTerminalAttempt(kind: StageKind, code: String) {
         val attempt = attempts[kind] ?: return
         // At most one terminal audit for each physical checkout. These are
         // local reservation observations, not additional scheduler charges.
         if (!auditedAttempts.add(kind)) return
         val observed = attempt.meter.observed()
         val reserved = attempt.admitted.granted
-        val accounted = attempt.meter.accounted(failed = true)
+        val auditType = when {
+            attempt.schedulerCharged -> "UNINTEGRATED_AFTER_CHARGE"
+            attempt.physicalCompleted -> "UNINTEGRATED_RESERVED"
+            else -> "FAILED_RESERVED"
+        }
+        val accounted = if (attempt.schedulerCharged) observed
+            else attempt.meter.accounted(failed = true)
         try {
             journal?.append("session.error", "failed",
                 correlationId = attempt.admitted.requestId,
                 extra = buildJsonObject {
-                    put("childResourceAudit", "FAILED_RESERVED")
+                    put("childResourceAudit", auditType)
                     put("origin", kind.name)
                     put("code", code)
                     put("observedTokens", observed.tokens)
@@ -253,6 +281,7 @@ internal class InstalledRecursiveWorkflow(
                     put("accountedTokens", accounted.tokens)
                     put("accountedToolCalls", accounted.toolCalls)
                     put("usageUncertain", attempt.meter.hasUncertainUsage())
+                    put("physicalCompleted", attempt.physicalCompleted)
                     // True means a successful measured scheduler charge was
                     // already recorded before a later integration failure.
                     // Never sum this audit as another charge.
@@ -266,9 +295,9 @@ internal class InstalledRecursiveWorkflow(
         }
     }
 
-    /** Physical work was already performed before recursive scheduling. */
+    /** Includes earlier successful SDD even when Developer fails in produce(). */
     private fun auditUnintegratedAttempts(code: String) {
-        attempts.keys.toList().forEach { kind -> auditFailedAttempt(kind, code) }
+        attempts.keys.toList().forEach { kind -> auditTerminalAttempt(kind, code) }
     }
 
     private var integrated: TwoOriginRecursiveOutcome.Completed? = null
@@ -479,6 +508,7 @@ internal class InstalledRecursiveWorkflow(
                 uncertainChildExecution = true
             return "AUTHENTICATED_CHILD_RECEIPT_MISSING"
         }
+        attempts.getValue(kind).physicalCompleted = true
         origins[kind] = Origin(kind, grant, host, childStageId, config,
             admitted, meter)
         return null
@@ -574,33 +604,31 @@ internal class InstalledRecursiveWorkflow(
         val produced = try {
             produce(kind, grant, admitted)
         } catch (cancelled: CancellationException) {
+            // A child may already have committed changes, even if the caller
+            // cancelled before the physical workflow returned.
+            uncertainChildExecution = true
+            auditUnintegratedAttempts("CHILD_EXECUTION_CANCELLED")
             throw cancelled
         } catch (_: Exception) {
             // A child may have written or committed before the exception.
             // Never label its host state as an ordinary safe denial.
             uncertainChildExecution = true
-            auditFailedAttempt(kind, "CHILD_EXECUTION_UNCONFIRMED")
+            auditUnintegratedAttempts("CHILD_EXECUTION_UNCONFIRMED")
             return "CHILD_EXECUTION_UNCONFIRMED"
         }
         if (produced != null) {
-            auditFailedAttempt(kind, produced)
+            auditUnintegratedAttempts(produced)
             return produced
         }
         if (kind == StageKind.DEVELOP) {
             val first = origins[StageKind.SDD] ?: return "MISSING_SDD_CHILD_ORIGIN"
             val second = origins.getValue(StageKind.DEVELOP)
-            val result = try {
+            val result = runInstalledOriginIntegration(
+                markUncertain = { uncertainChildExecution = true },
+                audit = ::auditUnintegratedAttempts
+            ) {
                 RunTwoOriginRecursiveChildrenUseCase(events = recursiveEvents)
                     .execute(source(first), source(second))
-            } catch (cancelled: CancellationException) {
-                auditUnintegratedAttempts("ORIGIN_CANCELLED")
-                throw cancelled
-            } catch (_: Exception) {
-                // Both checkouts may have committed. Preserve the original
-                // classification even if the best-effort audit fails.
-                uncertainChildExecution = true
-                auditUnintegratedAttempts("ORIGIN_EXECUTION_UNCONFIRMED")
-                return "CHILD_EXECUTION_UNCONFIRMED"
             }
             integrated = result as? TwoOriginRecursiveOutcome.Completed
             if (integrated == null) {
