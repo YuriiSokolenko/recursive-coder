@@ -11,7 +11,7 @@
 | `:infra:model` | Offline FakeModel and optional OpenAI-compatible HTTP adapter | `:core:contracts` |
 | `:infra:workspace` | Workspace Manager, restricted Git, trusted write/check runtime, LinuxStageToolSessionOpener and host-only LinuxStageGitBaselineReconciler (not a production receipt authority) | `:core:contracts` |
 | `:infra:task-store` | Durable tasks.json snapshot, file locks and atomic replacement | `:core:tasks`, `:core:contracts` |
-| `:infra:journal` | JSONL sink, opt-in fsynced event ledger and immutable journal-bound checkpoint snapshots; read-only inspect, no resume authority | `:core:session`, `:core:contracts` |
+| `:infra:journal` | JSONL sink, opt-in fsynced event ledger, immutable journal-bound checkpoints and [pre-execution fenced admission](FENCED_RESUME.md); no CLI resume | `:core:session`, `:core:contracts` |
 | `:app:cli` | Clikt CLI/Koin composition plus opt-in `LinuxFiveRoleWorkflowHost`: trusted receipt authority, reviewer CAS and Git handoffs (selected only by explicit fake-only `workflow --enable-stage-writes`) | all eight libraries |
 
 ```text
@@ -26,7 +26,7 @@
 :infra:journal   -> :core:session, :core:contracts
 ```
 
-Production dependencies point from the composition root and adapters toward the core contracts; no core module depends on the CLI, Koog, or the HTTP model implementation. The concrete workspace opener, model provider and JSONL EventSink are injected by `:app:cli` using Koin factories and constructor injection; the opt-in durable ledger and [atomic checkpoint store](SESSION_CHECKPOINTS.md) are not wired into the default CLI; see also [durable event ledger](DURABLE_EVENT_LEDGER.md). Koin is not present in any core module. The scheduler accepts a `TaskRunner` instead of constructing a model adapter. Session Protocol JSON Schema and fixtures remain at the repository root under `contracts/v1/` and continue to be validated independently by Node/Python CI.
+Production dependencies point from the composition root and adapters toward the core contracts; no core module depends on the CLI, Koog, or the HTTP model implementation. The concrete workspace opener, model provider and JSONL EventSink are injected by `:app:cli` using Koin factories and constructor injection; the opt-in durable ledger, [atomic checkpoint store](SESSION_CHECKPOINTS.md) and [fenced admission](FENCED_RESUME.md) are not wired into the default CLI; see also [durable event ledger](DURABLE_EVENT_LEDGER.md). Koin is not present in any core module. The scheduler accepts a `TaskRunner` instead of constructing a model adapter. Session Protocol JSON Schema and fixtures remain at the repository root under `contracts/v1/` and continue to be validated independently by Node/Python CI.
 
 
 ## Use Case contracts and Koin composition (issues #58 and #59)

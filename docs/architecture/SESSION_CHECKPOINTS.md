@@ -108,7 +108,7 @@ unconfirmed/pending side effects, even though inspecting those records is
 permitted. resumeAllowed is always false; the legacy requireResumeAdmission
 still denies. The separate SessionResumeAdmission API from #104 acquires an
 OS lease and increments an immutable fence only for a verified pre-execution
-boundary. Once fenced, checkpoint publication requires the current lease.
+boundary. Once fenced, checkpoint publication requires the current lease, with a [separately anchored fence head](FENCED_RESUME.md) beside the ledger. Legacy checkpoint API refusals retain the typed `CheckpointUnconfirmed` contract.
 An unconfirmed ledger tail or an unacknowledged tool result is **not** promoted
 to accepted history. These APIs are not wired into a production resume command.
 
