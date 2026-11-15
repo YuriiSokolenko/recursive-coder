@@ -55,6 +55,18 @@ class SessionEventJournal(
     private val clock: Clock,
     private val sink: EventSink
 ) : AutoCloseable {
+    companion object {
+        /** Exact root field set written by this emitter; not the entire Protocol v1 schema. */
+        val emittedFields: Set<String> = setOf(
+            "kind", "version", "sessionId", "traceId", "eventId", "sequence",
+            "timestamp", "type", "status", "correlationId", "causationId",
+            "actor", "transition", "timing", "redaction", "metadata"
+        )
+
+        fun eventId(sessionId: String, sequence: Int): String =
+            "evt-" + sessionId + "-" + sequence
+    }
+
     @Volatile var sequence: Int = 0
         private set
     private var previous: String? = null
@@ -68,7 +80,7 @@ class SessionEventJournal(
         writeFailure?.let { throw it }
         require(correlationId == null || ToolAuthorizationPolicy.validHostIdentifier(correlationId))
         val next = Math.addExact(sequence, 1)
-        val eventId = "evt-" + sessionId + "-" + next
+        val eventId = eventId(sessionId, next)
         val now = clock.instant()
         val event = buildJsonObject {
             put("kind", "session-event"); put("version", SessionProtocol.VERSION)
