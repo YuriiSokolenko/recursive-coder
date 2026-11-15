@@ -2,7 +2,7 @@
 
 **Recursive Coder** is an in-development, standalone open-source software engineering agent built with **Kotlin/JVM**. **JetBrains Koog** is integrated as an opt-in, fake-model-only single-role adapter; recursive production orchestration remains planned.
 
-> **Implementation snapshot (2026-11-13, PR #90 / issue #79):** The CLI has native task scheduling, a read-only session engine, FakeModel, an optional strict OpenAI-compatible Model Gateway and a trusted workspace. A Linux-only trusted write/check runtime has an **opt-in host-controlled stage port (#74)**, but remains disabled for CLI sessions and Koog. A minimal isolated Koog stage runner is implemented in `:agent:runtime` but is **not selected by CLI sessions**. An **in-process, five-role workflow coordinator** and bounded recursive child-result integration are implemented separately; they are **not wired into the installed CLI**. A host-only Linux Git baseline reconciliation helper is implemented in draft PR #91, but **authenticated production stage-to-stage integration is not implemented**. Recursive five-role CLI execution, checkpoints and crash-resume remain unimplemented.
+> **Implementation snapshot (2026-11-13, PR #90 / issue #79):** The CLI has native task scheduling, a read-only session engine, FakeModel, an optional strict OpenAI-compatible Model Gateway and a trusted workspace. A Linux-only trusted write/check runtime has an **opt-in host-controlled stage port (#74)**, but remains disabled for CLI sessions and Koog. A minimal isolated Koog stage runner is implemented in `:agent:runtime` but is **not selected by CLI sessions**. An **in-process, five-role workflow coordinator** and bounded recursive child-result integration are implemented separately; they are **not wired into the installed CLI**. A host-only Linux Git baseline reconciliation helper is implemented in draft PR #91, but **authenticated production stage-to-stage integration is not implemented**. Recursive five-role CLI execution and crash-resume remain separate milestones. The opt-in host-only event ledger and atomic checkpoint storage (#102–#103) provide verified persistence, **not** runnable resume.
 
 ## What we are building
 
@@ -23,7 +23,7 @@ Each stage runs in a separately authorized agent role. Any stage can recursively
 - **Agent Graph:** recursive orchestration of SDD, ATDD, TDD, Developer, and Reviewer roles.
 - **Trusted Tool Runtime:** enforced authorization, workspace isolation, read/write/check tools, and verifiable results.
 - **Model Gateway:** configurable local or remote compatible LLM endpoints with explicit protocol capability negotiation.
-- **Event Journal / Checkpoints:** correlated events, diagnostics, safe recovery, and controlled handling of uncertain side effects.
+- **Event Journal / Checkpoints:** correlated events and diagnostics, an optional fsynced durable event ledger, and [host-owned atomic checkpoint snapshots](docs/architecture/SESSION_CHECKPOINTS.md) with read-only verification; crash-resume and uncertain side-effect reconciliation are not yet enabled.
 - **Interfaces:** CLI first, followed by optional API and integrations.
 
 Recursive Coder itself owns its tasks and sessions. Git can manage source workspaces; a particular git host is neither a required runtime component nor a privileged controller.
