@@ -8,6 +8,7 @@ import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.LinkOption
+import java.nio.file.NoSuchFileException
 import java.nio.file.OpenOption
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
@@ -136,7 +137,7 @@ class DurableSessionEventLedger private constructor(
          * second channel to the same inode can drop the live owner's lock.
          * Reserve the canonical lock path BEFORE opening another channel.
          */
-        private fun acquire(path: Path): Pair<FileChannel, FileLock> {
+        private fun acquire(path: Path, createLock: Boolean): Pair<FileChannel, FileLock> {
             val target = leasePath(path)
             if (!heldLockPaths.add(target))
                 throw SessionLedgerUnconfirmed("LEDGER_LEASE_HELD")
@@ -144,8 +145,14 @@ class DurableSessionEventLedger private constructor(
             try {
                 if (Files.isSymbolicLink(target))
                     throw SessionLedgerUnconfirmed("UNSAFE_LEDGER_LOCK")
-                owner = FileChannel.open(target, StandardOpenOption.CREATE,
-                    StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)
+                // Inspection must never create or replace a missing lock file.
+                // An existing ledger without its lock cannot be authenticated safely.
+                owner = if (createLock)
+                    FileChannel.open(target, StandardOpenOption.CREATE,
+                        StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)
+                else
+                    FileChannel.open(target, StandardOpenOption.WRITE,
+                        LinkOption.NOFOLLOW_LINKS)
                 val lock = try { owner.tryLock() }
                     catch (_: OverlappingFileLockException) { null }
                 return owner to (lock ?: throw SessionLedgerUnconfirmed("LEDGER_LEASE_HELD"))
@@ -153,6 +160,8 @@ class DurableSessionEventLedger private constructor(
                 try { owner?.close() } catch (cleanup: Exception) { error.addSuppressed(cleanup) }
                 heldLockPaths.remove(target)
                 if (error is SessionLedgerUnconfirmed) throw error
+                if (error is NoSuchFileException && !createLock)
+                    throw SessionLedgerUnconfirmed("LEDGER_LOCK_MISSING", error)
                 throw SessionLedgerUnconfirmed("LEDGER_LEASE_UNAVAILABLE", error)
             }
         }
@@ -182,7 +191,7 @@ class DurableSessionEventLedger private constructor(
                 throw SessionLedgerUnconfirmed("LEDGER_LEASE_HELD")
             if (Files.exists(file, LinkOption.NOFOLLOW_LINKS))
                 throw SessionLedgerUnconfirmed("LEDGER_ALREADY_EXISTS")
-            val (owner, lock) = acquire(file)
+            val (owner, lock) = acquire(file, createLock = true)
             var channel: FileChannel? = null
             try {
                 channel = FileChannel.open(file, StandardOpenOption.CREATE_NEW,
@@ -326,7 +335,8 @@ class DurableSessionEventLedger private constructor(
             val file = guardedPath(path)
             if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS))
                 throw SessionLedgerUnconfirmed("INVALID_LEDGER_PATH")
-            val (owner, lock) = acquire(file)
+            val (owner, lock) = acquire(file, createLock = false)
+            var inspectionFailure: Throwable? = null
             try {
                 FileChannel.open(file, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS).use { reader ->
                     val size = reader.size()
@@ -373,8 +383,17 @@ class DurableSessionEventLedger private constructor(
                     return VerifiedSessionEventLedger(events, sequence,
                         hex(previousHash), hex(whole.digest()))
                 }
+            } catch (failure: Throwable) {
+                inspectionFailure = failure
+                throw failure
             } finally {
-                release(file, owner, lock)
+                try {
+                    release(file, owner, lock)
+                } catch (cleanup: Exception) {
+                    // Never replace the corruption/verification refusal with cleanup.
+                    if (inspectionFailure != null) inspectionFailure.addSuppressed(cleanup)
+                    else throw cleanup
+                }
             }
         }
 
