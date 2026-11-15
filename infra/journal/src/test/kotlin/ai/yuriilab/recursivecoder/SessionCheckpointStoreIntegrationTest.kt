@@ -1,6 +1,7 @@
 package ai.yuriilab.recursivecoder
 
 import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.attribute.PosixFilePermission
 import java.nio.charset.StandardCharsets
@@ -45,7 +46,8 @@ class SessionCheckpointStoreIntegrationTest {
         put("type", kind)
         put("status", status)
         put("correlationId", correlation)
-        put("causationId", if (sequence == 1) JsonNull else JsonPrimitive("evt-sess-one-1"))
+        put("causationId", if (sequence == 1) JsonNull else
+            JsonPrimitive("evt-sess-one-" + (sequence - 1)))
         put("actor", buildJsonObject { put("agentId", "agent-sess-one") })
         put("redaction", buildJsonObject {
             put("mode", "metadata-only")
@@ -95,6 +97,151 @@ class SessionCheckpointStoreIntegrationTest {
         SessionCheckpointStore.save(store(), context(), ledger(), s, previous)
 
     private fun inspect() = SessionCheckpointStore.inspect(store(), context(), ledger())
+
+
+    // Dense but protocol-valid metadata keeps the real 4 MiB boundary tests
+    // to roughly a thousand fsynced records rather than tens of thousands.
+    private val paddingKeys = listOf("tool", "provider", "features", "deniedCode",
+        "recursiveEvent", "roleEvent", "origin", "role", "kind", "stageState",
+        "approval", "verdict", "reasonCode", "scope", "code", "childResourceAudit",
+        "recursiveStopCode")
+
+    private fun frameBytes(value: JsonObject): Int =
+        36 + value.toString().toByteArray(StandardCharsets.UTF_8).size
+
+    private fun maximumPaddingEvent(sequence: Int): JsonObject =
+        event(sequence, "req-padding", "started", buildJsonObject {
+            paddingKeys.forEach { put(it, "x".repeat(256)) }
+        }, "agent.started")
+
+    private fun preciselySizedEvent(sequence: Int, frameSize: Int): JsonObject {
+        for (count in 1..paddingKeys.size) {
+            val selected = paddingKeys.take(count)
+            val minimum = frameBytes(event(sequence, "req-padding", "started",
+                buildJsonObject { selected.forEach { put(it, "x") } }, "agent.started"))
+            val spare = frameSize - minimum
+            if (spare !in 0..(255 * count)) continue
+            var remaining = spare
+            val payload = buildJsonObject {
+                for (key in selected) {
+                    val extra = minOf(255, remaining)
+                    put(key, "x".repeat(1 + extra))
+                    remaining -= extra
+                }
+            }
+            val result = event(sequence, "req-padding", "started", payload, "agent.started")
+            assertEquals(frameSize, frameBytes(result))
+            return result
+        }
+        error("Cannot produce valid event frame with length " + frameSize)
+    }
+
+    private fun fillLiveLedgerTo(writer: DurableSessionEventLedger, targetBytes: Long): Int {
+        writer.append(event(1, "req-one", "started", buildJsonObject {
+            put("graphId", "graph-root")
+        }))
+        writer.flush()
+        writer.append(event(2, "req-two", "completed", buildJsonObject {
+            put("graphId", "graph-root")
+            put("childGraphId", "graph-child")
+            put("artifactId", "artifact-one")
+            put("artifactSha256", artifactDigest)
+        }))
+        writer.flush()
+        var next = 3
+        while (true) {
+            val full = maximumPaddingEvent(next)
+            val nextFull = maximumPaddingEvent(next + 1)
+            if (targetBytes - Files.size(ledger()) <
+                frameBytes(full).toLong() + frameBytes(nextFull)) break
+            writer.append(full)
+            writer.flush()
+            next++
+        }
+        val missing = (targetBytes - Files.size(ledger())).toInt()
+        val first = preciselySizedEvent(next, missing / 2)
+        writer.append(first)
+        writer.flush()
+        val second = preciselySizedEvent(next + 1, missing - missing / 2)
+        writer.append(second)
+        writer.flush()
+        assertEquals(targetBytes, Files.size(ledger()))
+        return next + 2
+    }
+
+    @Test fun directoryOwnerUsesEffectiveUidNotMutableUserName() {
+        assertEquals(0L, LinuxCheckpointOwner.parseEffectiveUid(
+            "Name:\tjava\nUid:\t1000\t0\t0\t0\n"))
+        assertEquals(1000L, LinuxCheckpointOwner.parseEffectiveUid(
+            "Uid:\t0\t1000\t0\t0\n"))
+        assertNull(LinuxCheckpointOwner.parseEffectiveUid("Uid:\t1000\t0\t0\n"))
+        assertNull(LinuxCheckpointOwner.parseEffectiveUid(
+            "Uid:\t1000\t0\t0\t0\nUid:\t1000\t1000\t1000\t1000\n"))
+        createLedger()
+        val ownerUid = (Files.getAttribute(store(), "unix:uid",
+            LinkOption.NOFOLLOW_LINKS) as Number).toLong()
+        assertEquals(ownerUid, LinuxCheckpointOwner.effectiveUid())
+        val original = System.getProperty("user.name")
+        try {
+            System.setProperty("user.name", "forged-checkpoint-owner")
+            val saved = save(snapshot())
+            assertEquals(saved, inspect())
+        } finally {
+            if (original == null) System.clearProperty("user.name")
+            else System.setProperty("user.name", original)
+        }
+        assertEquals("CHECKPOINT_UNSAFE_DIRECTORY",
+            assertFailsWith<CheckpointUnconfirmed> {
+                LinuxCheckpointOwner.requireMatchingUid(ownerUid, ownerUid + 1)
+            }.code)
+        assertEquals("CHECKPOINT_UNSAFE_DIRECTORY",
+            assertFailsWith<CheckpointUnconfirmed> {
+                LinuxCheckpointOwner.requireMatchingUid(ownerUid, null)
+            }.code)
+    }
+
+    @Test fun liveCheckpointAcceptsLedgerJustBelowSizeLimit() {
+        val limit = DurableSessionEventLedger.MAX_LIVE_CHECKPOINT_LEDGER_BYTES
+        DurableSessionEventLedger.create(ledger(), workspace()).use { writer ->
+            fillLiveLedgerTo(writer, limit - 1)
+            val anchor = writer.withCommittedCheckpointAnchor { it }
+            val saved = SessionCheckpointStore.saveFromOpenLedger(store(), context(),
+                writer, snapshot(providedAnchor = anchor), null)
+            assertEquals(limit - 1, saved.snapshot.lastTrustedJournalOffset)
+            assertTrue(Files.exists(store().resolve("000000000001.rcp")))
+        }
+    }
+
+    @Test fun exactLiveLimitSucceedsAndOversizeRefusesBeforeReplayWithoutPoisoningWriter() {
+        val limit = DurableSessionEventLedger.MAX_LIVE_CHECKPOINT_LEDGER_BYTES
+        DurableSessionEventLedger.create(ledger(), workspace()).use { writer ->
+            val next = fillLiveLedgerTo(writer, limit)
+            val anchor = writer.withCommittedCheckpointAnchor { it }
+            val first = SessionCheckpointStore.saveFromOpenLedger(store(), context(),
+                writer, snapshot(providedAnchor = anchor), null)
+            assertEquals(limit, first.snapshot.lastTrustedJournalOffset)
+
+            writer.append(event(next, "req-after-limit", "started",
+                buildJsonObject {}, "agent.started"))
+            writer.flush()
+            assertTrue(Files.size(ledger()) > limit)
+            val failed = assertFailsWith<CheckpointUnconfirmed> {
+                SessionCheckpointStore.saveFromOpenLedger(store(), context(), writer,
+                    snapshot(sequence = 2, previous = first.sha256,
+                        providedAnchor = anchor), first.sha256)
+            }
+            assertEquals("CHECKPOINT_LIVE_LEDGER_TOO_LARGE", failed.code)
+            assertEquals("LEDGER_CHECKPOINT_SIZE_EXCEEDED",
+                (failed.cause as SessionLedgerUnconfirmed).code)
+            assertFalse(Files.exists(store().resolve("000000000002.rcp")))
+            // The live writer must still be able to durably append after refusal.
+            writer.append(event(next + 1, "req-after-refusal", "started",
+                buildJsonObject {}, "agent.started"))
+            writer.flush()
+            assertFalse(Files.exists(store().resolve("000000000002.rcp")))
+            assertTrue(Files.exists(store().resolve("000000000001.rcp")))
+        }
+    }
 
     @Test fun openLedgerCheckpointRequiresAcknowledgedPrefixAndBlocksConcurrentInspection() {
         val writer = DurableSessionEventLedger.create(ledger(), workspace())

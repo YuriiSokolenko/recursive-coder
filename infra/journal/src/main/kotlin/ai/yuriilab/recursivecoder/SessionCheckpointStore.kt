@@ -338,13 +338,42 @@ object SessionCheckpointCodec {
  * An advisory lock excludes cooperating processes. Malicious same-UID file
  * substitution is out of scope; the enclosing directory MUST be private.
  */
+/**
+ * Linux procfs Uid fields: real, effective, saved and filesystem UID.
+ * The second field is the identity used for filesystem authorization even
+ * when sudo/su changes the effective UID without changing the real UID.
+ * Unavailable or malformed procfs evidence is a refusal, never a fallback
+ * to mutable JVM properties or an external executable.
+ */
+internal object LinuxCheckpointOwner {
+    private val UID_LINE = Regex("""Uid:\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)\s*""")
+
+    fun parseEffectiveUid(status: String): Long? {
+        val line = status.lineSequence().filter { it.startsWith("Uid:") }.singleOrNull()
+            ?: return null
+        return UID_LINE.matchEntire(line)?.groupValues?.get(2)?.toLongOrNull()
+    }
+
+    fun effectiveUid(): Long? = try {
+        parseEffectiveUid(Files.readString(Path.of("/proc/self/status"),
+            StandardCharsets.US_ASCII))
+    } catch (_: Exception) {
+        null
+    }
+
+    fun requireMatchingUid(directoryUid: Any?, effectiveUid: Long?) {
+        if (directoryUid !is Number || effectiveUid == null || effectiveUid < 0 ||
+            directoryUid.toLong() != effectiveUid)
+            throw CheckpointUnconfirmed("CHECKPOINT_UNSAFE_DIRECTORY")
+    }
+}
+
 object SessionCheckpointStore {
     private val MAGIC = "RCCHK1\n".toByteArray(StandardCharsets.US_ASCII)
     private val NAMES = Regex("[0-9]{12}\\.rcp")
     private val TEMP_NAMES = Regex("\\.pending-[a-f0-9-]{36}\\.tmp")
     private val heldLocks = ConcurrentHashMap.newKeySet<Path>()
     private const val MAX_GENERATIONS = 256
-    private const val MAX_LIVE_LEDGER_BYTES = 4L * 1024 * 1024
 
     private fun refuse(code: String): Nothing = throw CheckpointUnconfirmed(code)
 
@@ -356,14 +385,16 @@ object SessionCheckpointStore {
             if (!Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS) ||
                 dir.toRealPath() != dir || dir.startsWith(root) || root.startsWith(dir))
                 refuse("CHECKPOINT_UNSAFE_DIRECTORY")
-            // POSIX-only durable store. Must be owned by the process and private;
-            // unsupported ACL semantics fail closed rather than weakening this gate.
+            // Linux POSIX store: compare numeric owner with the effective UID,
+            // never user.name or the real UID. Unknown identities fail closed.
             val attributes = Files.readAttributes(dir, PosixFileAttributes::class.java,
                 LinkOption.NOFOLLOW_LINKS)
             val ownerOnly = setOf(PosixFilePermission.OWNER_READ,
                 PosixFilePermission.OWNER_WRITE, PosixFilePermission.OWNER_EXECUTE)
-            if (attributes.owner().name != System.getProperty("user.name") ||
-                attributes.permissions() != ownerOnly)
+            LinuxCheckpointOwner.requireMatchingUid(
+                Files.getAttribute(dir, "unix:uid", LinkOption.NOFOLLOW_LINKS),
+                LinuxCheckpointOwner.effectiveUid())
+            if (attributes.permissions() != ownerOnly)
                 refuse("CHECKPOINT_UNSAFE_DIRECTORY")
         } catch (e: CheckpointUnconfirmed) {
             throw e
@@ -619,12 +650,12 @@ object SessionCheckpointStore {
         try {
             assertLedgerOutsideWorkspace(ledger.checkpointStoragePath, context.workspaceRoot)
             ledger.withCommittedCheckpointAnchor { anchor ->
-                if (anchor.lastTrustedOffset > MAX_LIVE_LEDGER_BYTES)
-                    refuse("CHECKPOINT_LIVE_LEDGER_TOO_LARGE")
                 persist(directory, context, snapshot, expectedPreviousSha256, {}) { anchor }
             }
         } catch (e: SessionLedgerUnconfirmed) {
-            throw CheckpointUnconfirmed("CHECKPOINT_JOURNAL_UNCONFIRMED", e)
+            val code = if (e.code == "LEDGER_CHECKPOINT_SIZE_EXCEEDED")
+                "CHECKPOINT_LIVE_LEDGER_TOO_LARGE" else "CHECKPOINT_JOURNAL_UNCONFIRMED"
+            throw CheckpointUnconfirmed(code, e)
         }
 
     private fun persist(directory: Path, context: CheckpointHostContext,

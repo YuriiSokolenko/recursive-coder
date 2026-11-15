@@ -70,6 +70,9 @@ class DurableSessionEventLedger private constructor(
         private val MAGIC = "RCLDG1\n".toByteArray(StandardCharsets.US_ASCII)
         private const val MAX_EVENT_BYTES = 16 * 1024
         private const val MAX_LEDGER_BYTES = 32L * 1024 * 1024
+        // Single host-only live checkpoint limit, enforced under the append monitor
+        // before replay. The normal closed-ledger capacity is separate.
+        internal const val MAX_LIVE_CHECKPOINT_LEDGER_BYTES = 4L * 1024 * 1024
         private const val MAX_EVENTS = 100_000
         private val ROOT_FIELDS = SessionEventJournal.emittedFields
         private val heldLockPaths = ConcurrentHashMap.newKeySet<Path>()
@@ -418,14 +421,13 @@ class DurableSessionEventLedger private constructor(
      * with the journal anchor. The lock-file inode is never reopened.
      */
     @Synchronized internal fun <T> withCommittedCheckpointAnchor(
-        maxBytes: Long = 4L * 1024 * 1024,
         block: (VerifiedSessionEventLedger) -> T
     ): T {
         if (closed || poisoned || pending != null)
             throw SessionLedgerUnconfirmed("LEDGER_UNACKNOWLEDGED_APPEND")
         // Refuse before replay so checkpointing cannot hold the append monitor
         // across a larger ledger than the opt-in bounded persistence contract.
-        if (channel.size() > maxBytes)
+        if (channel.size() > MAX_LIVE_CHECKPOINT_LEDGER_BYTES)
             throw SessionLedgerUnconfirmed("LEDGER_CHECKPOINT_SIZE_EXCEEDED")
         val verified = replayUnlocked(path)
         if (verified.lastSequence != committedSequence ||

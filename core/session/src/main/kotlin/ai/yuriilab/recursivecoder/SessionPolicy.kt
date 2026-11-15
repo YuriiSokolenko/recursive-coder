@@ -1,6 +1,7 @@
 package ai.yuriilab.recursivecoder
 
 import java.time.Instant
+import java.util.Collections
 
 /** Pure lifecycle decisions. Wire strings are only used when serializing protocol v1. */
 internal enum class SessionPhase(val wire: String, val terminal: Boolean = false) {
@@ -13,13 +14,18 @@ internal enum class SessionPhase(val wire: String, val terminal: Boolean = false
     FAILED("failed", true)
 }
 
-/** The only supported Session Protocol lifecycle wire vocabulary.
- * Kept adjacent to SessionPhase so adapters cannot invent recovery-only phases.
+/**
+ * Supported, immutable adapter API for emitted Session Protocol v1 lifecycle
+ * phase wire values. Derived from the internal runtime enum; any vocabulary
+ * change requires a compatibility review and an explicit drift-guard update.
+ * This is not a public state machine, resume API, or a list of planned phases.
  */
 object SessionPhaseVocabulary {
-    val wires: Set<String> = SessionPhase.entries.mapTo(linkedSetOf()) { it.wire }
-    val terminalWires: Set<String> = SessionPhase.entries.filter { it.terminal }
-        .mapTo(linkedSetOf()) { it.wire }
+    val wires: Set<String> = Collections.unmodifiableSet(
+        SessionPhase.entries.mapTo(linkedSetOf()) { it.wire })
+    val terminalWires: Set<String> = Collections.unmodifiableSet(
+        SessionPhase.entries.filter { it.terminal }
+            .mapTo(linkedSetOf()) { it.wire })
 }
 
 internal enum class SessionEndReason { SUCCESS, REFUSAL, CANCELLATION, TIMEOUT, FAILURE }
