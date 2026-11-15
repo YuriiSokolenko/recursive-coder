@@ -644,4 +644,188 @@ class SessionCheckpointStoreIntegrationTest {
         assertFalse(Files.exists(lock))
         assertTrue(Files.exists(store().resolve("000000000001.rcp")))
     }
+
+    private fun createPreExecutionCheckpoint(): VerifiedSessionCheckpoint {
+        DurableSessionEventLedger.create(ledger(), workspace()).use { writer ->
+            writer.append(event(1, "req-one", "completed", buildJsonObject {
+                put("graphId", "graph-root")
+            }, "session.transition"))
+            writer.flush()
+        }
+        val early = snapshot().copy(
+            phase = "created",
+            taskAttempt = 0,
+            taskState = "created",
+            children = listOf(CheckpointChild("graph-child", "graph-root", "ready")),
+            acceptedArtifacts = emptyList(),
+            hostAssertedUsage = emptyList(),
+            pendingEffects = emptyList()
+        )
+        return save(early)
+    }
+
+    private fun resumeAttestation(expected: Long = 0L, authority: String = "e".repeat(64)) =
+        ResumeHostAttestation(expected, authority, authority,
+            toolAuthorityReconciled = true, externalActionsReconciled = true)
+
+    @Test fun generationLeaseFencesUnqualifiedCheckpointWritersAndOldCallbacks() {
+        val first = createPreExecutionCheckpoint()
+        val initial = assertEquals(0L,
+            SessionResumeAdmission.currentGeneration(store(), context(), ledger()))
+        val retired = SessionResumeAdmission.admit(
+            store(), context(), ledger(), resumeAttestation())
+        assertEquals(1L, retired.generation)
+        retired.assertCurrent()
+        assertEquals(1L, SessionResumeAdmission.currentGeneration(store(), context(), ledger()))
+
+        val secondSnapshot = first.snapshot.copy(sequence = 2L, previousSha256 = first.sha256)
+        val unqualified = assertFailsWith<SessionResumeUnconfirmed> {
+            save(secondSnapshot, first.sha256)
+        }
+        assertEquals("RESUME_FENCE_REQUIRED", unqualified.code)
+        val saved = SessionCheckpointStore.saveFenced(retired, store(), context(),
+            ledger(), secondSnapshot, first.sha256)
+        assertEquals(2L, saved.snapshot.sequence)
+
+        retired.close()
+        assertEquals("RESUME_FENCE_STALE_WRITER",
+            assertFailsWith<SessionResumeUnconfirmed> { retired.assertCurrent() }.code)
+        assertEquals("RESUME_FENCE_STALE_WRITER",
+            assertFailsWith<SessionResumeUnconfirmed> {
+                SessionCheckpointStore.saveFenced(retired, store(), context(),
+                    ledger(), saved.snapshot.copy(sequence = 3L, previousSha256 = saved.sha256),
+                    saved.sha256)
+            }.code)
+
+        assertEquals("RESUME_FENCE_CAS_FAILED",
+            assertFailsWith<SessionResumeUnconfirmed> {
+                SessionResumeAdmission.admit(store(), context(), ledger(), resumeAttestation(0))
+            }.code)
+
+        SessionResumeAdmission.admit(store(), context(), ledger(), resumeAttestation(1)).use { newer ->
+            assertEquals(2L, newer.generation)
+            newer.assertCurrent()
+            val third = SessionCheckpointStore.saveFenced(newer, store(), context(), ledger(),
+                saved.snapshot.copy(sequence = 3L, previousSha256 = saved.sha256), saved.sha256)
+            assertEquals(3L, third.snapshot.sequence)
+        }
+        assertEquals(2L, SessionResumeAdmission.currentGeneration(store(), context(), ledger()))
+    }
+
+    @Test fun liveLeaseAndHostEvidenceFailuresDenyWithoutAdvancingFence() {
+        createPreExecutionCheckpoint()
+        val holder = SessionResumeAdmission.admit(store(), context(), ledger(), resumeAttestation())
+        try {
+            assertEquals("RESUME_LEASE_HELD",
+                assertFailsWith<SessionResumeUnconfirmed> {
+                    SessionResumeAdmission.admit(store(), context(), ledger(), resumeAttestation(1))
+                }.code)
+        } finally {
+            holder.close()
+        }
+        assertEquals("RESUME_TOOL_AUTHORITY_UNCONFIRMED",
+            assertFailsWith<SessionResumeUnconfirmed> {
+                SessionResumeAdmission.admit(store(), context(), ledger(),
+                    resumeAttestation(1).copy(toolAuthorityReconciled = false))
+            }.code)
+        assertEquals("RESUME_TOOL_AUTHORITY_UNCONFIRMED",
+            assertFailsWith<SessionResumeUnconfirmed> {
+                SessionResumeAdmission.admit(store(), context(), ledger(),
+                    resumeAttestation(1).copy(expectedToolAuthoritySha256 = "a".repeat(64)))
+            }.code)
+        assertEquals("RESUME_EXTERNAL_EFFECTS_UNCONFIRMED",
+            assertFailsWith<SessionResumeUnconfirmed> {
+                SessionResumeAdmission.admit(store(), context(), ledger(),
+                    resumeAttestation(1).copy(externalActionsReconciled = false))
+            }.code)
+        assertEquals("RESUME_FENCE_CONTEXT_CHANGED",
+            assertFailsWith<SessionResumeUnconfirmed> {
+                SessionResumeAdmission.admit(store(), context(), ledger(),
+                    resumeAttestation(1, "a".repeat(64)))
+            }.code)
+        assertEquals(1L, SessionResumeAdmission.currentGeneration(store(), context(), ledger()))
+    }
+
+    @Test fun changedHeadPolicyFrozenInputsAndUnsafeBoundaryRequireReconciliation() {
+        val checkpoint = createPreExecutionCheckpoint()
+        val changed = listOf(
+            context().copy(gitHead = "f".repeat(40)),
+            context().copy(policySha256 = "f".repeat(64)),
+            context().copy(frozenInputsSha256 = "f".repeat(64)),
+            context().copy(gitBaselineSha256 = "f".repeat(64))
+        )
+        for (changedContext in changed) {
+            assertEquals("CHECKPOINT_BASELINE_CHANGED",
+                assertFailsWith<CheckpointUnconfirmed> {
+                    SessionResumeAdmission.admit(store(), changedContext, ledger(),
+                        resumeAttestation())
+                }.code)
+        }
+        // A valid checkpoint at a non-restartable point never becomes authority.
+        val running = checkpoint.snapshot.copy(sequence = 2L, previousSha256 = checkpoint.sha256,
+            phase = "running", taskAttempt = 1, taskState = "running")
+        save(running, checkpoint.sha256)
+        assertEquals("RESUME_UNSAFE_BOUNDARY",
+            assertFailsWith<SessionResumeUnconfirmed> {
+                SessionResumeAdmission.admit(store(), context(), ledger(), resumeAttestation())
+            }.code)
+        assertEquals(0L, SessionResumeAdmission.currentGeneration(store(), context(), ledger()))
+    }
+
+    @Test fun damagedPublishedFenceOrUnknownFilesNeverResetTheGeneration() {
+        createPreExecutionCheckpoint()
+        SessionResumeAdmission.admit(store(), context(), ledger(), resumeAttestation()).close()
+        val fence = store().resolve("resume-000000000001.rcf")
+        val original = Files.readAllBytes(fence)
+        Files.write(fence, original.copyOf(original.size - 1))
+        assertEquals("RESUME_FENCE_VERSION_UNSUPPORTED",
+            assertFailsWith<SessionResumeUnconfirmed> {
+                SessionResumeAdmission.currentGeneration(store(), context(), ledger())
+            }.code)
+        Files.write(fence, original)
+        Files.writeString(store().resolve("resume-000000000003.rcf"),
+            Files.readString(fence))
+        assertEquals("RESUME_FENCE_CHAIN_MISMATCH",
+            assertFailsWith<SessionResumeUnconfirmed> {
+                SessionResumeAdmission.currentGeneration(store(), context(), ledger())
+            }.code)
+    }
+
+    @Test fun independentOsLockProcessBlocksAdmissionAndReleasesOnKill() {
+        createPreExecutionCheckpoint()
+        SessionResumeAdmission.admit(store(), context(), ledger(), resumeAttestation()).close()
+        val source = temp.resolve("ResumeLockHolder.java")
+        Files.writeString(source, """
+            import java.nio.file.*;
+            import java.nio.channels.*;
+            class ResumeLockHolder {
+                public static void main(String[] args) throws Exception {
+                    try (FileChannel channel = FileChannel.open(Path.of(args[0]), StandardOpenOption.WRITE)) {
+                        try (FileLock lock = channel.tryLock()) {
+                            System.out.println(lock == null ? "HELD" : "ACQUIRED");
+                            System.out.flush();
+                            if (lock != null) Thread.sleep(60000);
+                        }
+                    }
+                }
+            }
+        """.trimIndent())
+        val java = Path.of(System.getProperty("java.home"), "bin", "java").toString()
+        val child = ProcessBuilder(java, source.toString(),
+            store().resolve("resume.lock").toString()).redirectErrorStream(true).start()
+        try {
+            assertEquals("ACQUIRED", child.inputStream.bufferedReader().readLine())
+            assertEquals("RESUME_LEASE_HELD",
+                assertFailsWith<SessionResumeUnconfirmed> {
+                    SessionResumeAdmission.admit(store(), context(), ledger(),
+                        resumeAttestation(1))
+                }.code)
+        } finally {
+            child.destroyForcibly()
+            assertTrue(child.waitFor(15, java.util.concurrent.TimeUnit.SECONDS))
+        }
+        SessionResumeAdmission.admit(store(), context(), ledger(), resumeAttestation(1)).use {
+            assertEquals(2L, it.generation)
+        }
+    }
 }
