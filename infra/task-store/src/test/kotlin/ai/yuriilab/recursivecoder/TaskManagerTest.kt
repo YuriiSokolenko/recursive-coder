@@ -434,7 +434,7 @@ class TaskManagerTest {
         // owns a separate task so the test needs no scheduler or clock delays.
         for (status in listOf("failed", "succeeded")) {
             for (claimBeforeLateFinish in listOf(false, true)) {
-                val id = "$"+"status-"+"$"+"{if (claimBeforeLateFinish) "running" else "ready"}"
+                val id = status + "-" + (if (claimBeforeLateFinish) "running" else "ready")
                 val service = service()
                 service.enqueue(request(id))
                 val first = service.claim()!!
@@ -446,7 +446,7 @@ class TaskManagerTest {
 
                 val snapshot = service.show(id)
                 assertEquals(if (claimBeforeLateFinish) TaskState.RUNNING else TaskState.READY,
-                    snapshot.state, "Stale $"+"status before/after claim")
+                    snapshot.state, "Stale " + status + " before/after claim")
                 assertEquals(second?.sessionId, snapshot.sessionId)
                 assertEquals(if (claimBeforeLateFinish) 2 else 1, snapshot.attempt)
                 assertEquals(0, snapshot.transitions.count {
