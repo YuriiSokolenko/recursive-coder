@@ -12,6 +12,8 @@ import java.nio.file.OpenOption
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
 import java.security.MessageDigest
+import java.time.Instant
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -68,9 +70,48 @@ class DurableSessionEventLedger private constructor(
         private const val MAX_EVENT_BYTES = 16 * 1024
         private const val MAX_LEDGER_BYTES = 32L * 1024 * 1024
         private const val MAX_EVENTS = 100_000
-        private val ROOT_FIELDS = setOf("kind", "version", "sessionId", "traceId",
-            "eventId", "sequence", "timestamp", "type", "status", "correlationId",
-            "causationId", "actor", "transition", "timing", "redaction", "metadata")
+        private val ROOT_FIELDS = SessionEventJournal.emittedFields
+        private val heldLockPaths = ConcurrentHashMap.newKeySet<Path>()
+        private val SAFE_KEY = Regex("[A-Za-z][A-Za-z0-9_-]{0,63}")
+        private val SAFE_VALUE = Regex("[A-Za-z0-9][A-Za-z0-9_.:/,+ -]{0,255}")
+        // Explicitly enumerated metadata emitted by the existing host journal adapters.
+        // Anything new requires a deliberate schema/policy review before durability.
+        private val NUMBER_KEYS = setOf(
+            "bytes", "inputTokens", "outputTokens", "contextTokens",
+            "maxOutputTokens", "attempts", "turn", "httpStatus", "modelRequests",
+            "evidenceCount", "grantTokens", "grantToolCalls", "spentTokens",
+            "spentToolCalls", "delegatedTokens", "delegatedToolCalls",
+            "observedTokens", "observedToolCalls", "accountedTokens", "accountedToolCalls"
+        )
+        private val BOOLEAN_KEYS = setOf(
+            "physicalCompleted", "usageUncertain", "requiresReconciliation",
+            "schedulerChargeRecorded"
+        )
+        private val SHA_KEYS = setOf("sha256", "artifactSha256", "reviewedSha256")
+        private val ID_KEYS = setOf(
+            "receiptId", "graphId", "parentGraphId", "childGraphId",
+            "stageRunId", "requestId", "artifactId", "budgetScopeGraphId"
+        )
+        private val TEXT_KEYS = setOf(
+            "tool", "provider", "features", "deniedCode", "recursiveEvent",
+            "roleEvent", "origin", "role", "kind", "stageState",
+            "approval", "verdict", "reasonCode", "scope", "code",
+            "childResourceAudit", "recursiveStopCode"
+        )
+        private val SAFE_EVENT_TYPES = setOf(
+            "session.transition", "session.resumed", "agent.started",
+            "agent.completed", "llm.capabilities", "llm.request", "llm.response",
+            "tool.started", "tool.completed", "checkpoint.saved", "policy.denied",
+            "session.error", "redaction.applied"
+        )
+        private val SAFE_STATUSES = setOf(
+            "started", "completed", "failed", "denied", "cancelled", "timed_out"
+        )
+        private val PHASES = setOf("created", "accepted", "running",
+            "checkpointing", "resuming", "paused", "succeeded", "failed",
+            "cancelled", "timed_out", "rejected")
+        private val REMOVED_FIELDS = setOf("rawPrompt", "rawResponse",
+            "rawToolOutput", "credentialRef", "authorizationHeader")
 
         private fun sha(bytes: ByteArray): ByteArray =
             MessageDigest.getInstance("SHA-256").digest(bytes)
@@ -94,30 +135,42 @@ class DurableSessionEventLedger private constructor(
         private fun leasePath(path: Path): Path =
             path.resolveSibling(path.fileName.toString() + ".lock")
 
-        private fun acquire(path: Path, create: Boolean): Pair<FileChannel, FileLock> {
+
+        /**
+         * FileChannel/POSIX locks are process-scoped on Linux. Closing ANY
+         * second channel to the same inode can drop the live owner's lock.
+         * Reserve the canonical lock path BEFORE opening another channel.
+         */
+        private fun acquire(path: Path): Pair<FileChannel, FileLock> {
             val target = leasePath(path)
-            if (Files.isSymbolicLink(target))
-                throw SessionLedgerUnconfirmed("UNSAFE_LEDGER_LOCK")
-            val options: Array<OpenOption> = if (create)
-                arrayOf<OpenOption>(StandardOpenOption.CREATE, StandardOpenOption.WRITE,
-                    LinkOption.NOFOLLOW_LINKS)
-            else arrayOf<OpenOption>(StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)
-            val owner = try {
-                FileChannel.open(target, *options)
-            } catch (e: Exception) {
-                throw SessionLedgerUnconfirmed("LEDGER_LEASE_UNAVAILABLE", e)
-            }
+            if (!heldLockPaths.add(target))
+                throw SessionLedgerUnconfirmed("LEDGER_LEASE_HELD")
+            var owner: FileChannel? = null
             try {
-                val lock = try {
-                    owner.tryLock()
-                } catch (_: OverlappingFileLockException) {
-                    null
-                }
+                if (Files.isSymbolicLink(target))
+                    throw SessionLedgerUnconfirmed("UNSAFE_LEDGER_LOCK")
+                owner = FileChannel.open(target, StandardOpenOption.CREATE,
+                    StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)
+                val lock = try { owner.tryLock() }
+                    catch (_: OverlappingFileLockException) { null }
                 return owner to (lock ?: throw SessionLedgerUnconfirmed("LEDGER_LEASE_HELD"))
-            } catch (e: Exception) {
-                owner.close()
-                throw e
+            } catch (error: Exception) {
+                try { owner?.close() } catch (cleanup: Exception) { error.addSuppressed(cleanup) }
+                heldLockPaths.remove(target)
+                if (error is SessionLedgerUnconfirmed) throw error
+                throw SessionLedgerUnconfirmed("LEDGER_LEASE_UNAVAILABLE", error)
             }
+        }
+
+        /** Drop the in-JVM reservation only after the OS owner has closed. */
+        private fun release(path: Path, owner: FileChannel, lock: FileLock) {
+            var error: Exception? = null
+            try { lock.release() } catch (e: Exception) { error = e }
+            try { owner.close() } catch (e: Exception) {
+                if (error == null) error = e else error.addSuppressed(e)
+            }
+            if (error != null) throw SessionLedgerUnconfirmed("LEDGER_LEASE_RELEASE_UNCONFIRMED", error)
+            heldLockPaths.remove(leasePath(path))
         }
 
         /**
@@ -130,7 +183,11 @@ class DurableSessionEventLedger private constructor(
             val workspace = workspaceRoot.toRealPath()
             if (file.startsWith(workspace))
                 throw SessionLedgerUnconfirmed("LEDGER_INSIDE_WORKSPACE")
-            val (owner, lock) = acquire(file, create = true)
+            if (heldLockPaths.contains(leasePath(file)))
+                throw SessionLedgerUnconfirmed("LEDGER_LEASE_HELD")
+            if (Files.exists(file, LinkOption.NOFOLLOW_LINKS))
+                throw SessionLedgerUnconfirmed("LEDGER_ALREADY_EXISTS")
+            val (owner, lock) = acquire(file)
             var channel: FileChannel? = null
             try {
                 channel = FileChannel.open(file, StandardOpenOption.CREATE_NEW,
@@ -141,9 +198,11 @@ class DurableSessionEventLedger private constructor(
                 FileChannel.open(file.parent, StandardOpenOption.READ).use { it.force(true) }
                 return DurableSessionEventLedger(file, channel, owner, lock)
             } catch (e: Exception) {
-                channel?.close()
-                lock.release()
-                owner.close()
+                try { channel?.close() } catch (cleanup: Exception) { e.addSuppressed(cleanup) }
+                try { release(file, owner, lock) }
+                catch (cleanup: Exception) { e.addSuppressed(cleanup) }
+                if (e is java.nio.file.FileAlreadyExistsException)
+                    throw SessionLedgerUnconfirmed("LEDGER_ALREADY_EXISTS", e)
                 throw e
             }
         }
@@ -197,7 +256,7 @@ class DurableSessionEventLedger private constructor(
             val session = (event["sessionId"] as? JsonPrimitive)?.content
                 ?: throw SessionLedgerUnconfirmed("LEDGER_IDENTITY_MISSING")
             val id = (event["eventId"] as? JsonPrimitive)?.content
-            if (id != "evt-" + session + "-" + expectedSequence ||
+            if (id != SessionEventJournal.eventId(session, expectedSequence) ||
                 (previousId == null && event["causationId"] != JsonNull) ||
                 (previousId != null && (event["causationId"] as? JsonPrimitive)?.content != previousId))
                 throw SessionLedgerUnconfirmed("LEDGER_EVENT_CHAIN_INVALID")
@@ -222,7 +281,7 @@ class DurableSessionEventLedger private constructor(
             val file = guardedPath(path)
             if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS))
                 throw SessionLedgerUnconfirmed("INVALID_LEDGER_PATH")
-            val (owner, lock) = acquire(file, create = false)
+            val (owner, lock) = acquire(file)
             try {
                 FileChannel.open(file, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS).use { reader ->
                     val size = reader.size()
@@ -270,10 +329,13 @@ class DurableSessionEventLedger private constructor(
                         hex(previousHash), hex(whole.digest()))
                 }
             } finally {
-                lock.release()
-                owner.close()
+                release(file, owner, lock)
             }
         }
+
+        /** Adapts the workspace-aware creation contract to the existing EventSinkFactory port. */
+        fun factory(workspaceRoot: Path): EventSinkFactory =
+            EventSinkFactory { file -> create(file, workspaceRoot) }
     }
 
     @Synchronized override fun append(event: JsonObject) {
@@ -327,15 +389,16 @@ class DurableSessionEventLedger private constructor(
         try {
             if (!unconfirmed) channel.force(true)
             channel.close()
-            lease.release()
-            leaseChannel.close()
+            release(path, leaseChannel, lease)
             if (unconfirmed) throw SessionLedgerUnconfirmed("LEDGER_UNACKNOWLEDGED_APPEND")
             closeVerified = true
         } catch (e: Exception) {
             poisoned = true
             try { channel.close() } catch (cleanup: Exception) { e.addSuppressed(cleanup) }
-            try { lease.release() } catch (cleanup: Exception) { e.addSuppressed(cleanup) }
-            try { leaseChannel.close() } catch (cleanup: Exception) { e.addSuppressed(cleanup) }
+            if (heldLockPaths.contains(leasePath(path))) {
+                try { release(path, leaseChannel, lease) }
+                catch (cleanup: Exception) { e.addSuppressed(cleanup) }
+            }
             throw e
         }
     }
