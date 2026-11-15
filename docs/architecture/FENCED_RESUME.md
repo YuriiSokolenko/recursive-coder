@@ -57,9 +57,18 @@ including "known" usage, are not independent usage/accounting receipts.
    `<ledger-name>.resume-anchor-NNNNNNNNNNNN.rca` is published and fsynced in
    the ledger's separate directory. A shortened fence chain with a surviving
    external anchor fails closed; if a crash leaves an anchor without its fence,
-   no admission occurs before operator reconciliation. This detects partial
+   normal admission refuses. The explicit host/operator-approved
+   `reconcilePreparedAdmission` can complete exactly one verified prepared
+   fence under both OS locks, without deleting an anchor or rolling back the
+   generation. This is never automatic. This detects partial
    checkpoint-directory rollback, not a same-UID rollback of BOTH directories.
-   Orphan `.resume-pending-*.tmp` files are deleted under both admission locks.
+   Orphan `.resume-pending-*.tmp` fence temps and
+   `.resume-anchor-pending-*.tmp` ledger-sibling temps are cleaned during
+   admission under both OS locks. The ledger's parent must also be
+   effective-UID-owned and mode 0700 for anchored operation. Unfenced legacy
+   checkpoint operations check only the exact first anchor filename without
+   scanning the ledger directory; anchored reads verify bounded exact
+   generation filenames, ignoring unrelated sibling files.
    There are at most 256 generations per store.
 4. Release the short checkpoint lock after admission, **not** the long
    `resume.lock`. During execution, only `SessionCheckpointStore.saveFenced`
@@ -115,7 +124,43 @@ fenced ledger-reopen path and production runtime/receipt integrations.
 Legacy `inspect`/save paths adapt fence storage errors to the existing
 `CheckpointUnconfirmed` contract. A live stale callback remains a typed
 `SessionResumeUnconfirmed`. A crash after publishing a sidecar anchor but
-before its fence is deliberately unrecoverable without operator action.
+before its fence requires explicit operator reconciliation.
+
+### Interrupted anchor prepare — operator procedure
+
+1. Stop the prior process and verify no one holds `resume.lock` or
+   `checkpoint.lock`. Confirm that the closed event ledger replays successfully,
+   inspect the previous verified fence/anchor generations, the current policy,
+   Git baseline, frozen inputs and all uncertain external effects.
+2. Confirm that **exactly one** anchor at generation N+1 is committed and its
+   matching fence is absent; no later generations are present. Independently
+   record the expected prepared fence SHA-256, generation and operator identity.
+   If effects, authority, ledger identity or external facts are uncertain,
+   **do not approve**. Archive evidence and create a new session with a new
+   ledger/store after full operator reconciliation; never delete an anchor.
+3. Call `SessionResumeAdmission.reconcilePreparedAdmission` with a fresh
+   trusted `ResumeHostAttestation` (expectedFenceGeneration=N) and
+   `PreparedFenceReconciliation(N+1, preparedFenceSha256, operatorId, true)`.
+   The implementation acquires the exclusive OS lease, validates the complete
+   checkpoint/ledger and pre-execution boundary, recomputes the proposed fence,
+   verifies its SHA-256 against exactly one authenticated trailing anchor,
+   then durably completes that fence without replaying any model/tool action.
+   The returned lease owns N+1, not a silently new generation.
+4. Validate the returned lease and inspect the full fence/anchor chains.
+   If publication remains uncertain or operator approval is denied, stop;
+   **do not truncate or retry blindly**. Completing this prepare is not
+   full production crash-resume: the existing ledger still cannot safely
+   reopen for append and existing runtime receipts are not generation-fenced.
+
+The operator receipt is a trusted host assertion, **not** cryptographic
+proof that a person independently reviewed the situation. Never expose
+this method to model-authored commands or unauthenticated host services.
+A different prepared hash, invalid operator ID or unapproved recovery
+fails closed with `RESUME_FENCE_RECONCILIATION_UNCONFIRMED`.
+A negative expected generation has its own
+`RESUME_FENCE_EXPECTED_GENERATION_INVALID` denial. An admitted lease
+also pins the ledger's Linux file key so replacing the inode at the same
+path invalidates fenced checkpoint writes.
 
 This implementation cannot fence **unrelated existing** workspace writes,
 receipts or model/tool operations that do not accept `SessionResumeLease`.
@@ -127,5 +172,6 @@ overwriting a newer generation. No default CLI behavior changes.
 Tests under the integration tier cover pre-execution admission, fenced/unfenced
 save, stale callbacks, generation CAS, changes to HEAD/policy/frozen inputs,
 unsafe execution boundaries, corrupt fence files, independent process lock
-races, external anchor rollback, stale live-writer callbacks, orphan cleanup
-and OS lease release after force-kill. All tests run offline.
+races, external anchor rollback, interrupted prepared-anchor reconciliation,
+anchor-directory security, inode changes, stale live-writer callbacks,
+orphan cleanup and OS lease release after force-kill. All tests run offline.
