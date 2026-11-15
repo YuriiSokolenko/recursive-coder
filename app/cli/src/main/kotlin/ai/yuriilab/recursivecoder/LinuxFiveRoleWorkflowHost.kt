@@ -36,6 +36,14 @@ data class AuthenticatedAcceptedStageReceipt(
     val usage: StageRoleUsage
 )
 
+/**
+ * Deterministic host-only test observation points. They are not model-visible
+ * and the production path never registers a callback.
+ */
+internal enum class DeveloperRecoveryTestCheckpoint {
+    BEFORE_RECONCILE_IO, BEFORE_RETRY_IO
+}
+
 /** Distinct call-local denial codes without changing the nullable integration port. */
 enum class ChildReceiptDenialCode {
     MISSING_PARENT_IDENTITY,
@@ -92,10 +100,14 @@ class LinuxFiveRoleWorkflowHost(
     // In-memory only: a crash must never reconstruct a rollback authority from
     // unauthenticated model data or a guessed Git diff (tracked by issue #10).
     private var failedDeveloperWrite: StageGitFailedWriteRequest? = null
-    // Independently captured from the actual terminal writer lease, not from
-    // recovery evidence: a stale/replayed generation cannot authorize rollback.
+    // Recorded separately at terminalization from the same writer lease as
+    // the attempt. Detects stale/corrupted in-memory recovery records, but does
+    // not constitute an independent external CAS authority.
     private var terminalFailedDeveloperLeaseGeneration: String? = null
     private var reconcilingFailedDeveloper: StageGitFailedWriteRequest? = null
+    private var retryingDeveloperId: StageRunId? = null
+    @Volatile internal var developerRecoveryTestHook:
+        ((DeveloperRecoveryTestCheckpoint) -> Unit)? = null
     private var reconciledDeveloperId: StageRunId? = null
     private var recoveryAudit: StageGitFailedWriteResult.Recovered? = null
     private var writer: Writer? = null
@@ -103,6 +115,13 @@ class LinuxFiveRoleWorkflowHost(
     private var reviewHandoff: ReviewerDeveloperHandoff? = null
     private var finalReview: ReviewerDecisionRecord? = null
     private val completed = mutableMapOf<StageRunId, AcceptedEvidence>()
+
+    private data class DeveloperRetryIntent(
+        val previousGraph: StageGraph,
+        val previousAccepted: Set<ArtifactId>,
+        val previousHead: String,
+        val candidate: StageGraph
+    )
 
     private data class Changed(val path: String, val before: String?, val after: String)
     private data class AttestedWrite(
@@ -605,7 +624,7 @@ class LinuxFiveRoleWorkflowHost(
             if (writer != null || reviewing != null)
                 return StageGitFailedWriteResult.NeedsHuman(
                     "AUTHORITATIVE_ACCEPTANCE_UNCONFIRMED")
-            if (reconcilingFailedDeveloper != null)
+            if (reconcilingFailedDeveloper != null || retryingDeveloperId != null)
                 return StageGitFailedWriteResult.NeedsHuman("RECOVERY_IN_PROGRESS")
             val pending = failedDeveloperWrite
                 ?: return StageGitFailedWriteResult.NeedsHuman(
@@ -631,31 +650,43 @@ class LinuxFiveRoleWorkflowHost(
             reconcilingFailedDeveloper = pending
             pending
         }
-        val result = try {
-            reconciler.recoverFailedDeveloper(attempt)
-        } catch (_: Exception) {
-            StageGitFailedWriteResult.ReconciliationRequired("RECOVERY_UNCONFIRMED")
-        }
-        return synchronized(this) {
-            if (reconcilingFailedDeveloper !== attempt ||
-                failedDeveloperWrite !== attempt ||
-                terminalFailedDeveloperLeaseGeneration != attempt.leaseGeneration ||
-                !quarantined || writer != null || reviewing != null) {
+        try {
+            val result = try {
+                developerRecoveryTestHook?.invoke(
+                    DeveloperRecoveryTestCheckpoint.BEFORE_RECONCILE_IO)
+                reconciler.recoverFailedDeveloper(attempt)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                StageGitFailedWriteResult.ReconciliationRequired("RECOVERY_INTERRUPTED")
+            } catch (_: Exception) {
+                StageGitFailedWriteResult.ReconciliationRequired("RECOVERY_UNCONFIRMED")
+            }
+            return synchronized(this) {
+                if (reconcilingFailedDeveloper !== attempt ||
+                    failedDeveloperWrite !== attempt ||
+                    terminalFailedDeveloperLeaseGeneration != attempt.leaseGeneration ||
+                    !quarantined || writer != null || reviewing != null) {
+                    StageGitFailedWriteResult.ReconciliationRequired(
+                        "RECOVERY_STATE_CHANGED")
+                } else {
+                    if (result is StageGitFailedWriteResult.Recovered) {
+                        // Keep quarantine until the replacement Developer node
+                        // passes its graph and clean-baseline retry checks.
+                        failedDeveloperWrite = null
+                        terminalFailedDeveloperLeaseGeneration = null
+                        reconciledDeveloperId = stageRunId
+                        recoveryAudit = result
+                    }
+                    result
+                }
+            }
+        } finally {
+            // Exceptions and fatal Errors are not acceptance evidence. Always
+            // release this in-process activity fence, but NEVER clear quarantine.
+            synchronized(this) {
                 if (reconcilingFailedDeveloper === attempt)
                     reconcilingFailedDeveloper = null
-                return@synchronized StageGitFailedWriteResult.ReconciliationRequired(
-                    "RECOVERY_STATE_CHANGED")
             }
-            reconcilingFailedDeveloper = null
-            if (result is StageGitFailedWriteResult.Recovered) {
-                // Keep the checkout quarantined until the replacement Developer
-                // node passes graph, baseline, frozen and new-lease checks.
-                failedDeveloperWrite = null
-                terminalFailedDeveloperLeaseGeneration = null
-                reconciledDeveloperId = stageRunId
-                recoveryAudit = result
-            }
-            result
         }
     }
 
@@ -667,40 +698,69 @@ class LinuxFiveRoleWorkflowHost(
      * A recovered failed Developer may be superseded by a fresh stage attempt.
      * No repeat of the original run ID, agent identity, or stale write lease.
      */
-    @Synchronized
     fun retryReconciledDeveloper(
         failedId: StageRunId,
         nextCorrelation: StageCorrelation,
         nextAgent: AgentId
     ): PreparationStageSnapshot? {
-        if (!quarantined || writer != null || reviewing != null ||
-            reconcilingFailedDeveloper != null || failedDeveloperWrite != null ||
-            reconciledDeveloperId != failedId ||
-            graph.state != StageGraphState.RUNNING ||
-            nextCorrelation.sessionId != graph.correlation.sessionId ||
-            nextCorrelation.graphId != graph.correlation.graphId ||
-            graph.stages.any { it.correlation.stageRunId == nextCorrelation.stageRunId } ||
-            graph.stages.any { it.agentId == nextAgent } ||
-            graph.stages.count { it.kind == StageKind.DEVELOP } > 32 ||
-            !clean() || !frozenIntact()) return null
-        val failed = graph.stages.singleOrNull {
-            it.correlation.stageRunId == failedId && it.kind == StageKind.DEVELOP &&
-                it.supersededBy == null &&
-                it.state in setOf(StageState.FAILED, StageState.CANCELLED) &&
-                it.outputArtifacts.isEmpty()
-        } ?: return null
-        val next = failed.copy(correlation = nextCorrelation, state = StageState.CREATED,
-            agentId = nextAgent, supersededBy = null)
-        val candidate = graph.copy(stages = graph.stages.map {
-            if (it.correlation.stageRunId == failedId)
-                it.copy(supersededBy = nextCorrelation.stageRunId) else it
-        } + next)
-        if (StageGraphPolicy.validate(candidate) != StageGateDecision.Permit ||
-            !clean() || !frozenIntact()) return null
-        graph = candidate
-        quarantined = false
-        reconciledDeveloperId = null
-        return PreparationStageSnapshot(graph, accepted.toSet())
+        val intent = synchronized(this) {
+            if (!quarantined || writer != null || reviewing != null ||
+                reconcilingFailedDeveloper != null || retryingDeveloperId != null ||
+                failedDeveloperWrite != null || reconciledDeveloperId != failedId ||
+                graph.state != StageGraphState.RUNNING ||
+                nextCorrelation.sessionId != graph.correlation.sessionId ||
+                nextCorrelation.graphId != graph.correlation.graphId ||
+                graph.stages.any { it.correlation.stageRunId == nextCorrelation.stageRunId } ||
+                graph.stages.any { it.agentId == nextAgent } ||
+                graph.stages.count { it.kind == StageKind.DEVELOP } > 32)
+                return null
+            val failed = graph.stages.singleOrNull {
+                it.correlation.stageRunId == failedId && it.kind == StageKind.DEVELOP &&
+                    it.supersededBy == null &&
+                    it.state in setOf(StageState.FAILED, StageState.CANCELLED) &&
+                    it.outputArtifacts.isEmpty()
+            } ?: return null
+            val next = failed.copy(correlation = nextCorrelation, state = StageState.CREATED,
+                agentId = nextAgent, supersededBy = null)
+            val candidate = graph.copy(stages = graph.stages.map {
+                if (it.correlation.stageRunId == failedId)
+                    it.copy(supersededBy = nextCorrelation.stageRunId) else it
+            } + next)
+            if (StageGraphPolicy.validate(candidate) != StageGateDecision.Permit)
+                return null
+            val snapshot = DeveloperRetryIntent(graph, accepted.toSet(), head, candidate)
+            retryingDeveloperId = failedId
+            snapshot
+        }
+        try {
+            developerRecoveryTestHook?.invoke(DeveloperRecoveryTestCheckpoint.BEFORE_RETRY_IO)
+            // Both baseline checks and frozen SHA-256 reads run outside the
+            // monitor. Quarantine prevents host-owned mutation throughout.
+            if (!clean() || !frozenIntact() || !clean() || !frozenIntact())
+                return null
+            return synchronized(this) {
+                if (retryingDeveloperId != failedId || !quarantined ||
+                    writer != null || reviewing != null ||
+                    reconcilingFailedDeveloper != null || failedDeveloperWrite != null ||
+                    reconciledDeveloperId != failedId ||
+                    graph !== intent.previousGraph || accepted != intent.previousAccepted ||
+                    head != intent.previousHead) {
+                    null
+                } else {
+                    graph = intent.candidate
+                    reconciledDeveloperId = null
+                    quarantined = false
+                    PreparationStageSnapshot(graph, accepted.toSet())
+                }
+            }
+        } finally {
+            // A failed, interrupted or fatal preflight must not strand the
+            // activity fence; it must leave quarantine and graph intact.
+            synchronized(this) {
+                if (retryingDeveloperId == failedId)
+                    retryingDeveloperId = null
+            }
+        }
     }
 
     /**

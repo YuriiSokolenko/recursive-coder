@@ -98,8 +98,11 @@ Issue #85 adds an explicit, host-owned Linux recovery operation for
 **confirmed failed/aborted Developer writes**. Before entering the trusted write
 port, `LinuxFiveRoleWorkflowHost` retains bounded original bytes, intended
 postimage digests, the lease generation and frozen artifact hashes in memory.
-On terminal failure it independently records the actual writer lease generation;
-recovery requires an exact match, not merely a syntactically valid identifier.
+On terminal failure it records the actual writer lease generation separately
+from the failed-write record; recovery requires a matching value, not merely
+a syntactically valid identifier. Both values originate from the same in-process
+writer lease: the comparison detects stale or corrupted evidence, not an
+independent external CAS authority.
 Preimage capture failures return precise known denial codes and do not consume
 the one-shot write session because no physical write has begun.
 After a terminal **non-accepted** graph/CAS outcome, the host quarantines the
@@ -121,6 +124,11 @@ and contains no source text. Recovery runs Git/file I/O outside the host monitor
 an in-progress fence plus continued quarantine block concurrent lease admission.
 Quarantine remains in force even after successful restoration, until the
 replacement Developer stage has passed the graph/clean-baseline/frozen checks.
+The retry path also fences concurrent retry attempts, performs its Git checks
+outside the host monitor, then rechecks the original graph/head/accepted
+snapshot before publishing. Fatal errors release the in-process recovery/retry
+activity fence in `finally` without lifting quarantine; a fatal exception
+never constitutes proof of successful recovery.
 The terminal stage is **not** resumed: the host must call
 `retryReconciledDeveloper(failedId, newCorrelation, newAgent)` to supersede it
 with a fresh identity, then pass the ordinary clean-baseline, frozen input,

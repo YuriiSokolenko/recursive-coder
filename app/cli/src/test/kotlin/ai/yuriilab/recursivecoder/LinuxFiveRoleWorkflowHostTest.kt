@@ -1037,4 +1037,103 @@ class LinuxFiveRoleWorkflowHostTest {
         assertEquals(oldSource, Files.readString(repo.resolve("src/main/FeatureFull.kt")))
     }
 
+    @Test @Tag("e2e")
+    fun fatalRecoveryAndConcurrentRetryCannotStrandFenceOrBlockHostMonitor() =
+        runBlocking {
+        val (host, repo) = newHost(checkoutName = "developer-retry-fences")
+        val preparer = RunPreparationStageUseCase(OfflineFiveRoleModel(), host, host)
+        var snapshot = host.snapshot()
+        for ((kind, next) in listOf(
+            StageKind.SDD to StageKind.ATDD,
+            StageKind.ATDD to StageKind.TDD,
+            StageKind.TDD to StageKind.DEVELOP
+        )) {
+            val stage = snapshot.graph.stages.last()
+            val target = targets.getValue(kind)
+            assertIs<PreparationStageOutcome.Accepted>(
+                preparer.execute(PreparationStageCommand(
+                    snapshot.graph, snapshot.acceptedIds,
+                    stage.correlation.stageRunId, target.id, target.path,
+                    "Prepare", model, Instant.now().plusSeconds(90),
+                    Cancellation()), noopRole, noopStage).outcome)
+            snapshot = assertNotNull(host.advance(host.snapshot(), next))
+        }
+        val stage = snapshot.graph.stages.last()
+        val failedId = stage.correlation.stageRunId
+        val lease = assertNotNull(host.beginStage(snapshot.graph, failedId, snapshot.acceptedIds))
+        val tool = assertIs<StageToolOpenResult.Granted>(host.open(lease.authority)).session
+        try {
+            val write = tool.write(listOf(
+                StageWrite.Edit("src/main/FeatureFull.kt", sha(oldSource), newSource),
+                StageWrite.Create(targets.getValue(StageKind.DEVELOP).path, "unaccepted\n")))
+            assertTrue(write.permitted, write.deniedCode)
+        } finally { tool.close() }
+        assertNotNull(host.abortStage(lease, StageState.FAILED))
+
+        // A fatal Error after acquiring the in-progress fence must not leave
+        // later recovery calls permanently at RECOVERY_IN_PROGRESS.
+        host.developerRecoveryTestHook = { checkpoint ->
+            if (checkpoint == DeveloperRecoveryTestCheckpoint.BEFORE_RECONCILE_IO)
+                throw AssertionError("injected fatal recovery")
+        }
+        assertFailsWith<AssertionError> { host.reconcileFailedDeveloper(failedId) }
+        assertFailsWith<IllegalStateException> { host.snapshot() }
+        assertEquals(newSource, Files.readString(repo.resolve("src/main/FeatureFull.kt")))
+        host.developerRecoveryTestHook = null
+        assertIs<StageGitFailedWriteResult.Recovered>(
+            host.reconcileFailedDeveloper(failedId))
+        assertFailsWith<IllegalStateException> { host.snapshot() }
+
+        val entered = CountDownLatch(1)
+        val proceed = CountDownLatch(1)
+        host.developerRecoveryTestHook = { checkpoint ->
+            if (checkpoint == DeveloperRecoveryTestCheckpoint.BEFORE_RETRY_IO) {
+                entered.countDown()
+                check(proceed.await(10, TimeUnit.SECONDS))
+            }
+        }
+        val nextId = StageRunId("developer-retry-fenced")
+        val correlation = stage.correlation.copy(
+            stageRunId = nextId, requestId = "developer-retry-fenced-request",
+            correlationId = "developer-retry-fenced-correlation")
+        val actor = AgentId("developer-retry-fenced-actor")
+        val result = AtomicReference<PreparationStageSnapshot?>()
+        val error = AtomicReference<Throwable?>()
+        val worker = thread(name = "host-retry-preflight") {
+            try {
+                result.set(host.retryReconciledDeveloper(failedId, correlation, actor))
+            } catch (failure: Throwable) {
+                error.set(failure)
+            }
+        }
+        val probe = Executors.newSingleThreadExecutor()
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            // This call needs the host monitor. It must complete even while
+            // the retry's disk work is paused; a duplicate retry is rejected.
+            val observed = probe.submit<String?> {
+                try {
+                    host.snapshot()
+                    "UNEXPECTED_SUCCESS"
+                } catch (failure: IllegalStateException) {
+                    failure.message
+                }
+            }
+            assertEquals("WORKSPACE_RECONCILIATION_REQUIRED",
+                observed.get(2, TimeUnit.SECONDS))
+            assertNull(host.retryReconciledDeveloper(failedId, correlation, actor))
+        } finally {
+            proceed.countDown()
+            worker.join(10_000)
+            probe.shutdownNow()
+            host.developerRecoveryTestHook = null
+        }
+        assertFalse(worker.isAlive)
+        assertNull(error.get())
+        val replaced = assertNotNull(result.get())
+        assertEquals(nextId, replaced.graph.stages.last().correlation.stageRunId)
+        assertEquals(nextId, host.snapshot().graph.stages.last().correlation.stageRunId)
+        assertEquals(oldSource, Files.readString(repo.resolve("src/main/FeatureFull.kt")))
+    }
+
 }
