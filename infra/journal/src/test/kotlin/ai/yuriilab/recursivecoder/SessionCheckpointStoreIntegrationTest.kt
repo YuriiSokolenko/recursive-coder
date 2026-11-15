@@ -20,10 +20,17 @@ class SessionCheckpointStoreIntegrationTest {
     @TempDir lateinit var temp: Path
 
     @BeforeEach fun requiresLinuxCheckpointFilesystem() {
-        assumeTrue(System.getProperty("os.name") == "Linux" &&
+        val supported = System.getProperty("os.name") == "Linux" &&
             FileSystems.getDefault().supportedFileAttributeViews().contains("unix") &&
-            LinuxCheckpointOwner.effectiveUid() != null,
-            "Checkpoint ownership requires Linux procfs and unix file attributes")
+            LinuxCheckpointOwner.effectiveUid() != null
+        val reason = "Checkpoint ownership requires Linux procfs and unix file attributes"
+        // Unsupported developer platforms may skip; CI must fail rather than
+        // report a green build after silently skipping the whole suite.
+        if (System.getenv("CI") != null) {
+            assertTrue(supported, reason)
+        } else {
+            assumeTrue(supported, reason)
+        }
     }
     private val artifactDigest = "f".repeat(64)
 
