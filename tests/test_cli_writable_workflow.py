@@ -432,6 +432,25 @@ class InstalledWritableWorkflowTest(unittest.TestCase):
         self.assertFalse((child / "src/main/FeatureFullManifest.xml").exists())
         self.assertEqual((self.repo / "src/main/FeatureFull.kt").read_text(), OLD)
         self.assertFalse((self.repo / "src/main/FeatureFullManifest.xml").exists())
+        # SDD physically completed before Developer failed during bootstrap.
+        # Both must have one terminal audit, without claiming SDD failed.
+        audits = [m for m in self.recursive_metadata()
+                  if m.get("childResourceAudit") in
+                  ("FAILED_RESERVED", "UNINTEGRATED_RESERVED",
+                   "UNINTEGRATED_AFTER_CHARGE")]
+        self.assertEqual(
+            {m["origin"]: m["childResourceAudit"] for m in audits},
+            {"SDD": "UNINTEGRATED_RESERVED", "DEVELOP": "FAILED_RESERVED"})
+        self.assertEqual(len(audits), 2, audits)
+        for audit in audits:
+            self.assertEqual(audit["accountedTokens"], audit["grantTokens"])
+            self.assertEqual(audit["accountedToolCalls"],
+                             audit["grantToolCalls"])
+            self.assertFalse(audit["schedulerChargeRecorded"])
+        self.assertTrue(next(m for m in audits if m["origin"] == "SDD")
+                        ["physicalCompleted"])
+        self.assertFalse(next(m for m in audits if m["origin"] == "DEVELOP")
+                         ["physicalCompleted"])
 
     def test_installed_recursive_cross_origin_artifact_id_conflict(self):
         self.recursive_fixture(integration_conflict=True)
@@ -447,24 +466,28 @@ class InstalledWritableWorkflowTest(unittest.TestCase):
         self.assertIn("CROSS_ORIGIN_ARTIFACT_CONFLICT",
                       [m.get("recursiveStopCode")
                        for m in self.recursive_metadata()])
-        # The physical child runs finished before cross-origin integration
-        # detected the conflict. Both attempts must still have a terminal audit.
+        # Both physical children completed and their measured scheduler
+        # charges were recorded. This is an unintegrated-after-charge audit,
+        # not a second reservation debit.
         records = [json.loads(line) for line in
                    (self.base / "recursive-events.jsonl").read_text().splitlines()]
         audits = [record for record in records if
                   record.get("metadata", {}).get("childResourceAudit") ==
-                  "FAILED_RESERVED"]
+                  "UNINTEGRATED_AFTER_CHARGE"]
         self.assertEqual({r["metadata"]["origin"] for r in audits},
                          {"SDD", "DEVELOP"})
         self.assertEqual(len(audits), 2)
         self.assertTrue(all(r["metadata"]["schedulerChargeRecorded"]
                             for r in audits))
+        self.assertTrue(all(r["metadata"]["physicalCompleted"] for r in audits))
         for audit in audits:
             metadata = audit["metadata"]
             self.assertEqual(metadata["accountedTokens"],
-                             metadata["grantTokens"])
+                             metadata["observedTokens"])
             self.assertEqual(metadata["accountedToolCalls"],
-                             metadata["grantToolCalls"])
+                             metadata["observedToolCalls"])
+            self.assertLessEqual(metadata["accountedTokens"],
+                                 metadata["grantTokens"])
         stops = [record for record in records if
                  record.get("metadata", {}).get("recursiveStopCode") ==
                  "CROSS_ORIGIN_ARTIFACT_CONFLICT"]
