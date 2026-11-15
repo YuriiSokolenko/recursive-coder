@@ -59,6 +59,9 @@ class InstalledChildCheckoutScopesTest {
         assertFalse(safe(event = root.resolve("events.jsonl")))
         assertFalse(safe(event = locks.resolve("events.jsonl")))
         assertFalse(safe(workdir = root.resolve("working")))
+        assertFalse(safe(workdir = locks))
+        assertFalse(safe(workdir = locks.resolve("nested")))
+        assertFalse(safe(childLocks = cwd.resolve("nested-locks")))
         assertTrue(safe(event = null))
     }
 }

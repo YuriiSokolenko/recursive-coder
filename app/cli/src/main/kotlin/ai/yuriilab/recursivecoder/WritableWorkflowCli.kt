@@ -33,7 +33,8 @@ internal fun installedChildCheckoutScopesDisjoint(
         !a.startsWith(b) && !b.startsWith(a)
     if (!separate(root, locks) || !separate(root, parent) ||
         !separate(root, parentLocks) || !separate(locks, parent) ||
-        !separate(locks, parentLocks) || cwd.startsWith(root)) return false
+        !separate(locks, parentLocks) || cwd.startsWith(root) ||
+        !separate(cwd, locks)) return false
     if (earlierRoots.any { !separate(root, it) || !separate(locks, it) } ||
         earlierLocks.any { !separate(root, it) || !separate(locks, it) })
         return false
@@ -77,9 +78,24 @@ internal object WritableWorkflowCli {
     private fun stringAt(value: JsonObject, name: String): String =
         (value.getValue(name) as? JsonPrimitive)?.takeIf { it.isString }?.content
             ?: error("Invalid $name")
+    private val wholeUnsigned = Regex("0|[1-9][0-9]*")
+    private fun strictLong(raw: JsonElement?, name: String): Long {
+        val value = raw as? JsonPrimitive ?: error("Invalid $name")
+        require(!value.isString && wholeUnsigned.matches(value.content)) {
+            "Invalid $name"
+        }
+        return value.content.toLongOrNull() ?: error("Invalid $name")
+    }
     private fun longAt(value: JsonObject, name: String): Long =
-        (value.getValue(name) as? JsonPrimitive)?.longOrNull
-            ?: error("Invalid $name")
+        strictLong(value[name], name)
+
+    private fun optionalLong(value: JsonObject, name: String, default: Long): Long =
+        if (name in value) strictLong(value[name], name) else default
+    private fun optionalInt(value: JsonObject, name: String, default: Int): Int =
+        if (name in value) strictLong(value[name], name).let {
+            require(it <= Int.MAX_VALUE) { "Invalid $name" }
+            it.toInt()
+        } else default
     private fun only(value: JsonObject, names: Set<String>,
         optional: Set<String> = emptySet()) {
         require(value.keys.containsAll(names) && (value.keys - names).all { it in optional }) {
@@ -255,8 +271,9 @@ internal object WritableWorkflowCli {
                 only(entry, setOf("rootPath", "headSha", "branch",
                     "lockDirectory", "requestId"),
                     if (kind == StageKind.DEVELOP)
-                        setOf("dependsOnSelf", "outputArtifactId", "maxTokens")
-                    else setOf("dependsOnSelf", "maxTokens"))
+                        setOf("dependsOnSelf", "outputArtifactId",
+                            "maxTokens", "maxToolCalls")
+                    else setOf("dependsOnSelf", "maxTokens", "maxToolCalls"))
                 val childPath = Path.of(stringAt(entry, "rootPath"))
                 val childLockPath = Path.of(stringAt(entry, "lockDirectory"))
                 val childHead = stringAt(entry, "headSha")
@@ -298,20 +315,25 @@ internal object WritableWorkflowCli {
                     ArtifactId((it as? JsonPrimitive)?.takeIf { p -> p.isString }
                         ?.content ?: error("Invalid child artifact ID"))
                 }
-                val childTokenOverride = entry["maxTokens"]?.let {
-                    (it as? JsonPrimitive)?.longOrNull
-                        ?: error("Invalid child token grant")
-                }
+                // dependsOnSelf and outputArtifactId are offline-only
+                // adversarial fixture knobs, never live-provider features.
+                val childTokenOverride = if ("maxTokens" in entry)
+                    strictLong(entry["maxTokens"], "child maxTokens") else null
+                val childToolOverride = if ("maxToolCalls" in entry)
+                    strictLong(entry["maxToolCalls"], "child maxToolCalls") else null
                 require(childTokenOverride == null ||
                     childTokenOverride in 1..1000000)
+                require(childToolOverride == null || childToolOverride in 0..128)
                 InstalledChildCheckout(childRoot, childHead, childBranch,
-                    childLocks, requestId, self, overrideId, childTokenOverride)
+                    childLocks, requestId, self, overrideId,
+                    childTokenOverride, childToolOverride)
             }
         }
-        val maxDepth = (limits["maxDepth"] as? JsonPrimitive)?.intOrNull ?: 1
-        val maxChildren = (limits["maxChildren"] as? JsonPrimitive)?.intOrNull ?: 1
-        val maxToolCalls = (limits["maxToolCalls"] as? JsonPrimitive)?.longOrNull ?: 6L
-        val childTokens = (limits["childTokens"] as? JsonPrimitive)?.longOrNull ?: 500L
+        val maxDepth = optionalInt(limits, "maxDepth", 1)
+        val maxChildren = optionalInt(limits, "maxChildren", 1)
+        // Each Developer child runs four independent trusted write/check cycles.
+        val maxToolCalls = optionalLong(limits, "maxToolCalls", 16L)
+        val childTokens = optionalLong(limits, "childTokens", 1000L)
         require(maxDepth in 0..8 && maxChildren in 0..8 &&
             maxToolCalls in 0..128 && childTokens in 1..1000000)
         require(recursiveConfig != null || limits.keys ==
@@ -325,6 +347,8 @@ internal object WritableWorkflowCli {
         val graph = StageGraph(correlation, StageGraphState.RUNNING, listOf(first),
             emptyList(), StageBudget(tokens, duration, 0, 0))
         require(StageGraphPolicy.validate(graph) == StageGateDecision.Permit)
+        // Hard live-model feature gate: the installed writable surface only
+        // constructs FakeModel and never accepts a provider from input JSON.
         val model = ModelConfig("fake", "fake-v1", "http://localhost/unused",
             "env:FAKE_UNUSED", 8192, 512, setOf("tool_calls"), null, 1000, 1000)
         val host = LinuxFiveRoleWorkflowHost(checkout, graph, expectedHead, branch,
