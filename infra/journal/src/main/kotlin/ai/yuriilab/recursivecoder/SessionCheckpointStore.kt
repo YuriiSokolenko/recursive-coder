@@ -406,6 +406,10 @@ object SessionCheckpointStore {
         return dir
     }
 
+    /** The resume OS lease is separate from the short checkpoint lock. */
+    internal fun checkedAdmissionDirectory(directory: Path, context: CheckpointHostContext): Path =
+        checkedDirectory(directory, context.workspaceRoot, LinuxCheckpointOwner::effectiveUid)
+
     private fun <T> withLease(directory: Path, create: Boolean, block: () -> T): T {
         val lockPath = directory.resolve("checkpoint.lock")
         if (!heldLocks.add(lockPath)) refuse("CHECKPOINT_LEASE_HELD")
@@ -495,12 +499,20 @@ object SessionCheckpointStore {
                     if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS))
                         refuse("CHECKPOINT_UNSAFE_LOCK")
                 }
+                name == "resume.lock" -> {
+                    if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS))
+                        refuse("CHECKPOINT_UNSAFE_LOCK")
+                }
+                ResumeFenceStorage.NAME.matches(name) -> { /* Validated below. */ }
+                ResumeFenceStorage.TEMP.matches(name) -> { /* Unpublished fence temp. */ }
                 NAMES.matches(name) -> snapshots.add(file)
                 TEMP_NAMES.matches(name) -> { /* Interrupted write; never a committed snapshot. */ }
                 else -> refuse("CHECKPOINT_UNRECOGNIZED_ENTRY")
             }
         }
         if (snapshots.size > MAX_GENERATIONS) refuse("CHECKPOINT_SIZE_INVALID")
+        // Every published fence is verified on read, even outside resume admission.
+        ResumeFenceStorage.latest(directory)
         val sorted = snapshots.sortedBy { it.fileName.toString() }
         val result = ArrayList<VerifiedSessionCheckpoint>()
         for ((index, path) in sorted.withIndex()) {
@@ -678,13 +690,39 @@ object SessionCheckpointStore {
             throw CheckpointUnconfirmed(code, e)
         }
 
+    /** An old or unfenced callback cannot publish after the first resume fence. */
+    fun saveFenced(lease: SessionResumeLease, directory: Path,
+                   context: CheckpointHostContext, ledgerPath: Path,
+                   snapshot: SessionCheckpoint, expectedPreviousSha256: String?): VerifiedSessionCheckpoint =
+        persist(directory, context, snapshot, expectedPreviousSha256, {},
+            LinuxCheckpointOwner::effectiveUid, lease) {
+            inspectLedger(ledgerPath, context.workspaceRoot)
+        }
+
+    fun saveFromOpenLedgerFenced(lease: SessionResumeLease, directory: Path,
+                   context: CheckpointHostContext, ledger: DurableSessionEventLedger,
+                   snapshot: SessionCheckpoint, expectedPreviousSha256: String?): VerifiedSessionCheckpoint =
+        try {
+            assertLedgerOutsideWorkspace(ledger.checkpointStoragePath, context.workspaceRoot)
+            ledger.withCommittedCheckpointAnchor { anchor ->
+                persist(directory, context, snapshot, expectedPreviousSha256, {},
+                    LinuxCheckpointOwner::effectiveUid, lease) { anchor }
+            }
+        } catch (e: SessionLedgerUnconfirmed) {
+            val code = if (e.code == DurableSessionEventLedger.LIVE_CHECKPOINT_SIZE_EXCEEDED_CODE)
+                "CHECKPOINT_LIVE_LEDGER_TOO_LARGE" else "CHECKPOINT_JOURNAL_UNCONFIRMED"
+            throw CheckpointUnconfirmed(code, e)
+        }
+
     private fun persist(directory: Path, context: CheckpointHostContext,
              snapshot: SessionCheckpoint, expectedPreviousSha256: String?,
              afterPhase: (String) -> Unit,
              effectiveUid: () -> Long?,
+             fence: SessionResumeLease? = null,
              ledgerEvidence: () -> VerifiedSessionEventLedger): VerifiedSessionCheckpoint {
         val dir = checkedDirectory(directory, context.workspaceRoot, effectiveUid)
         return withLease(dir, create = true) {
+            ResumeFenceStorage.requireCurrentForSave(dir, fence, snapshot)
             val existing = readAll(dir)
             val previous = existing.lastOrNull()
             if (expectedPreviousSha256 != previous?.sha256 ||
@@ -744,6 +782,24 @@ object SessionCheckpointStore {
             if (readback.snapshot != snapshot)
                 refuse("CHECKPOINT_WRITE_UNCONFIRMED")
             readback
+        }
+    }
+
+    /**
+     * Hold the short checkpoint lock over checkpoint/journal verification and
+     * fence CAS. No host locks are retained across subsequent model or tool work.
+     * resume.lock is acquired first by SessionResumeAdmission and stays held.
+     */
+    internal fun <T> withAdmissionEvidence(
+        directory: Path, context: CheckpointHostContext, ledgerPath: Path,
+        block: (Path, VerifiedSessionCheckpoint, VerifiedSessionEventLedger) -> T
+    ): T {
+        val dir = checkedAdmissionDirectory(directory, context)
+        return withLease(dir, create = false) {
+            val latest = readAll(dir).lastOrNull() ?: refuse("CHECKPOINT_MISSING")
+            val ledger = inspectLedger(ledgerPath, context.workspaceRoot)
+            verify(latest.snapshot, context, ledger)
+            block(dir, latest, ledger)
         }
     }
 
