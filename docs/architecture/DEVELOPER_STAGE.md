@@ -94,8 +94,51 @@ have left unapproved dirty workspace bytes. Failures and uncertain CAS
 outcomes carry a conservative `workspaceMayBeDirty` flag set before a write
 attempt, so the host must inspect and safely reconcile the workspace before
 reusing it. Uncertain successes are never reported as definite denials.
-Rollback and cleanup are tracked separately from Developer handoff and must
-not be delegated to the model (see [issue #85](https://github.com/YuriiSokolenko/recursive-coder/issues/85)).
+Issue #85 adds an explicit, host-owned Linux recovery operation for
+**confirmed failed/aborted Developer writes**. Before entering the trusted write
+port, `LinuxFiveRoleWorkflowHost` retains bounded original bytes, intended
+postimage digests, the lease generation and frozen artifact hashes in memory.
+On terminal failure it records the actual writer lease generation separately
+from the failed-write record; recovery requires a matching value, not merely
+a syntactically valid identifier. Both values originate from the same in-process
+writer lease: the comparison detects stale or corrupted evidence, not an
+independent external CAS authority.
+Preimage capture failures return precise known denial codes and do not consume
+the one-shot write session because no physical write has begun.
+After a terminal **non-accepted** graph/CAS outcome, the host quarantines the
+workspace. An operator may call `reconcileFailedDeveloper(stageRunId)`:
+`LinuxStageGitBaselineReconciler.recoverFailedDeveloper` obtains the same
+workspace file lease as the trusted writer, verifies the pinned Git HEAD,
+branch, Git configuration/index, all frozen hashes, exact trusted before-images,
+regular nofollow paths and intended after-image digests, and restores only
+unaccepted bytes. It verifies restored bytes again with descriptor-relative
+SHA-256 reads, independent of Git's stat/cache status checks. Unexpected/staged/ignored/foreign edits, mode changes,
+symlinks, submodule entries or ref drift return typed `NeedsHuman` without
+performing restoration; any uncertainty after physical mutation retains
+quarantine as `ReconciliationRequired`. No `git reset`, arbitrary cleanup
+or model-driven rollback is allowed.
+
+A `Recovered(restoredPaths, auditSha256)` result is bounded, has a
+versioned `recursive-coder/developer-failed-write-recovery/v1` SHA-256 domain,
+and contains no source text. Recovery runs Git/file I/O outside the host monitor;
+an in-progress fence plus continued quarantine block concurrent lease admission.
+Quarantine remains in force even after successful restoration, until the
+replacement Developer stage has passed the graph/clean-baseline/frozen checks.
+The retry path also fences concurrent retry attempts, performs its Git checks
+outside the host monitor, then rechecks the original graph/head/accepted
+snapshot before publishing. Fatal errors release the in-process recovery/retry
+activity fence in `finally` without lifting quarantine; a fatal exception
+never constitutes proof of successful recovery.
+The terminal stage is **not** resumed: the host must call
+`retryReconciledDeveloper(failedId, newCorrelation, newAgent)` to supersede it
+with a fresh identity, then pass the ordinary clean-baseline, frozen input,
+policy and trusted-write lease gates again. A failed or unconfirmed finish CAS,
+live writer, accepted manifest or missing in-memory evidence cannot authorize
+rollback. This is limited to the existing in-process Linux host, and requires
+an exclusively owned checkout: an external same-UID writer can race advisory
+locks. Crash/restart durability, recovery of accepted/unconfirmed commits and
+durable audit persistence still belong to issue #10. The default read-only CLI
+and Session Protocol v1 remain unchanged.
 
 ## Typed reviewer handoff and verification
 

@@ -95,6 +95,7 @@ class LinuxFiveRoleWorkflowHostTest {
         sessionId: String = "host-session",
         checkoutName: String = "checkout",
         preauthorizedStages: Map<StageKind, Pair<StageRunId, String>> = emptyMap(),
+        smoke: StageIsolatedCheck = StageIsolatedCheck(Path.of("/usr/bin/true")),
         gateway: (StageArtifactManifest, StageValidationEvidence, StageRoleUsage) ->
             PreparationApproval = { _, _, _ -> PreparationApproval.ACCEPT }
     ): Pair<LinuxFiveRoleWorkflowHost, Path> {
@@ -125,7 +126,7 @@ class LinuxFiveRoleWorkflowHostTest {
         // The host itself validates the graph; negative constructor fixtures
         // intentionally supply invalid parent correlations.
         val host = LinuxFiveRoleWorkflowHost(repo, graph, git(repo, "rev-parse", "HEAD"),
-            "dev", mapOf("smoke" to StageIsolatedCheck(Path.of("/usr/bin/true"))),
+            "dev", mapOf("smoke" to smoke),
             setOf("git_diff_check", "smoke"),
             gateway, temp.resolve("locks-" + checkoutName), preauthorizedStages)
         return host to repo
@@ -870,6 +871,269 @@ class LinuxFiveRoleWorkflowHostTest {
         assertFalse(Files.exists(repo.resolve(".env")))
         assertNotNull(host.abortStage(lease, StageState.FAILED))
         assertFailsWith<IllegalStateException> { host.snapshot() }
+    }
+
+
+    /**
+     * Exact physical sandbox/receipts + graph supersession: the failed source
+     * postimage must be removed before a fresh Developer identity gets a lease.
+     */
+    @Test @Tag("e2e")
+    fun failedDeveloperCanBeReconciledAndRetriedThroughRealLinuxHost() = runBlocking {
+        val sandbox = Path.of("/usr/bin/bwrap")
+        val ci = System.getenv("CI").equals("true", true) ||
+            System.getenv("GITHUB_ACTIONS").equals("true", true)
+        if (ci) assertTrue(Files.isExecutable(sandbox))
+        else assumeTrue(Files.isExecutable(sandbox))
+        // SDD/ATDD/TDD see the original "1", and pass. The first Developer
+        // proposal writes "2" and fails the actual networkless grep check.
+        // The fresh run writes "13" and passes the same immutable check policy.
+        val (host, repo) = newHost(checkoutName = "developer-recovery-e2e",
+            smoke = StageIsolatedCheck(Path.of("/usr/bin/grep"),
+                listOf("-q", "1", "/workspace/src/main/FeatureFull.kt")))
+        val original = OfflineFiveRoleModel()
+        var developerCalls = 0
+        val roles = object : StageRoleExecutor {
+            override suspend fun execute(request: StageRoleRequest,
+                events: StageRoleEventSink): StageRoleResult {
+                if (request.expectedRole != EngineeringRole.DEVELOPER)
+                    return original.execute(request, events)
+                developerCalls++
+                val stage = request.graph.stages.single {
+                    it.correlation.stageRunId == request.stageRunId
+                }
+                val value = if (developerCalls == 1) "2" else "13"
+                val response = """{"files":[{"path":"src/main/FeatureFull.kt","content":"fun featureFull() = """ +
+                    value + """\n"}]}"""
+                return StageRoleResult(stage.correlation, EngineeringRole.DEVELOPER,
+                    stage.agentId, StageRoleOutcome.Proposed(response),
+                    StageRoleUsage(1, 100, 30))
+            }
+        }
+        val preparer = RunPreparationStageUseCase(roles, host, host)
+        val developer = RunDeveloperStageUseCase(roles, host, host)
+        var snapshot = host.snapshot()
+        for ((kind, next) in listOf(
+            StageKind.SDD to StageKind.ATDD,
+            StageKind.ATDD to StageKind.TDD,
+            StageKind.TDD to StageKind.DEVELOP
+        )) {
+            val stage = snapshot.graph.stages.single {
+                it.kind == kind && it.supersededBy == null
+            }
+            val target = targets.getValue(kind)
+            val done = preparer.execute(PreparationStageCommand(
+                snapshot.graph, snapshot.acceptedIds,
+                stage.correlation.stageRunId, target.id, target.path,
+                "Prepare " + kind, model, Instant.now().plusSeconds(90),
+                Cancellation()), noopRole, noopStage)
+            assertIs<PreparationStageOutcome.Accepted>(done.outcome,
+                done.outcome.toString())
+            snapshot = assertNotNull(host.advance(host.snapshot(), next))
+        }
+        val initial = snapshot.graph.stages.single {
+            it.kind == StageKind.DEVELOP && it.supersededBy == null
+        }
+        suspend fun attempt(s: PreparationStageSnapshot, id: StageRunId):
+            DeveloperStageResult = developer.execute(DeveloperStageCommand(
+                s.graph, s.acceptedIds, id, targets.getValue(StageKind.DEVELOP).id,
+                targets.getValue(StageKind.DEVELOP).path,
+                listOf(DeveloperFileTarget("src/main/FeatureFull.kt", sha(oldSource))),
+                "Implement host verification", model, Instant.now().plusSeconds(90),
+                Cancellation()), noopRole, noopStage)
+
+        val first = attempt(snapshot, initial.correlation.stageRunId)
+        val failure = assertIs<DeveloperStageOutcome.Failed>(first.outcome,
+            first.outcome.toString())
+        assertEquals("CHECK_FAILED_OR_SANDBOX_UNAVAILABLE", failure.code)
+        assertTrue(failure.workspaceMayBeDirty)
+        assertEquals(newSource, Files.readString(repo.resolve("src/main/FeatureFull.kt")))
+        assertFailsWith<IllegalStateException> { host.snapshot() }
+        val recovered = assertIs<StageGitFailedWriteResult.Recovered>(
+            host.reconcileFailedDeveloper(initial.correlation.stageRunId))
+        assertEquals(2, recovered.restoredPaths)
+        assertEquals(recovered, host.lastDeveloperRecoveryAudit())
+        assertFailsWith<IllegalStateException> { host.snapshot() }
+        assertEquals(oldSource, Files.readString(repo.resolve("src/main/FeatureFull.kt")))
+        assertFalse(Files.exists(repo.resolve(
+            targets.getValue(StageKind.DEVELOP).path)))
+        val retryId = StageRunId("host-developer-retry")
+        val next = assertNotNull(host.retryReconciledDeveloper(
+            initial.correlation.stageRunId,
+            initial.correlation.copy(stageRunId = retryId,
+                requestId = "host-developer-retry-request",
+                correlationId = "host-developer-retry-correlation"),
+            AgentId("host-developer-retry-actor")))
+        assertEquals(retryId, next.graph.stages.last().correlation.stageRunId)
+        assertEquals(retryId, next.graph.stages.first {
+            it.correlation.stageRunId == initial.correlation.stageRunId
+        }.supersededBy)
+        assertNull(host.retryReconciledDeveloper(initial.correlation.stageRunId,
+            initial.correlation.copy(stageRunId = StageRunId("another-retry")),
+            AgentId("another-retry-actor")))
+        val second = attempt(next, retryId)
+        assertIs<DeveloperStageOutcome.Accepted>(second.outcome, second.outcome.toString())
+        assertEquals("fun featureFull() = 13\n",
+            Files.readString(repo.resolve("src/main/FeatureFull.kt")))
+        assertEquals(2, developerCalls)
+        assertEquals(StageState.ACCEPTED, host.snapshot().graph.stages.last().state)
+    }
+
+    @Test @Tag("e2e")
+    fun uncertainDeveloperLeaseCannotTriggerRollbackUntilAuthoritativeAbort() = runBlocking {
+        val (host, repo) = newHost(checkoutName = "developer-uncertain-e2e")
+        val preparer = RunPreparationStageUseCase(OfflineFiveRoleModel(), host, host)
+        var snapshot = host.snapshot()
+        for ((kind, next) in listOf(
+            StageKind.SDD to StageKind.ATDD,
+            StageKind.ATDD to StageKind.TDD,
+            StageKind.TDD to StageKind.DEVELOP
+        )) {
+            val stage = snapshot.graph.stages.last()
+            val target = targets.getValue(kind)
+            assertIs<PreparationStageOutcome.Accepted>(
+                preparer.execute(PreparationStageCommand(
+                    snapshot.graph, snapshot.acceptedIds,
+                    stage.correlation.stageRunId, target.id, target.path,
+                    "Prepare", model, Instant.now().plusSeconds(90),
+                    Cancellation()), noopRole, noopStage).outcome)
+            snapshot = assertNotNull(host.advance(host.snapshot(), next))
+        }
+        val stage = snapshot.graph.stages.last()
+        val id = stage.correlation.stageRunId
+        val lease = assertNotNull(host.beginStage(snapshot.graph, id, snapshot.acceptedIds))
+        val session = assertIs<StageToolOpenResult.Granted>(
+            host.open(lease.authority)).session
+        val output = targets.getValue(StageKind.DEVELOP)
+        try {
+            // A denied preimage is precise and does not consume the write session.
+            val preimageDenial = session.write(listOf(
+                StageWrite.Create("src/main/FeatureFull.kt", "unexpected\n")))
+            assertEquals("CREATE_PREIMAGE_EXISTS", preimageDenial.deniedCode)
+            val written = session.write(listOf(
+                StageWrite.Edit("src/main/FeatureFull.kt", sha(oldSource), newSource),
+                StageWrite.Create(output.path, "unaccepted\n")))
+            assertTrue(written.permitted, written.deniedCode)
+        } finally { session.close() }
+        // A rejected/uncertain finish does not prove the host failed to accept.
+        assertFalse(host.finishStage(lease, lease.graph, lease.acceptedIds))
+        assertEquals("AUTHORITATIVE_ACCEPTANCE_UNCONFIRMED",
+            assertIs<StageGitFailedWriteResult.NeedsHuman>(
+                host.reconcileFailedDeveloper(id)).code)
+        assertEquals(newSource, Files.readString(repo.resolve("src/main/FeatureFull.kt")))
+        assertNotNull(host.abortStage(lease, StageState.FAILED))
+        // Simulate corrupted/replayed terminal generation. The actual terminal
+        // lease, not the request's generation string, authorizes recovery.
+        val generation = host.javaClass.getDeclaredField(
+            "terminalFailedDeveloperLeaseGeneration")
+        generation.isAccessible = true
+        generation.set(host, "stale-lease-generation")
+        assertEquals("STALE_DEVELOPER_LEASE_GENERATION",
+            assertIs<StageGitFailedWriteResult.NeedsHuman>(
+                host.reconcileFailedDeveloper(id)).code)
+        assertEquals(newSource, Files.readString(repo.resolve("src/main/FeatureFull.kt")))
+        generation.set(host, lease.generation)
+        assertIs<StageGitFailedWriteResult.Recovered>(host.reconcileFailedDeveloper(id))
+        assertEquals(oldSource, Files.readString(repo.resolve("src/main/FeatureFull.kt")))
+    }
+
+    @Test @Tag("e2e")
+    fun fatalRecoveryAndConcurrentRetryCannotStrandFenceOrBlockHostMonitor() =
+        runBlocking {
+        val (host, repo) = newHost(checkoutName = "developer-retry-fences")
+        val preparer = RunPreparationStageUseCase(OfflineFiveRoleModel(), host, host)
+        var snapshot = host.snapshot()
+        for ((kind, next) in listOf(
+            StageKind.SDD to StageKind.ATDD,
+            StageKind.ATDD to StageKind.TDD,
+            StageKind.TDD to StageKind.DEVELOP
+        )) {
+            val stage = snapshot.graph.stages.last()
+            val target = targets.getValue(kind)
+            assertIs<PreparationStageOutcome.Accepted>(
+                preparer.execute(PreparationStageCommand(
+                    snapshot.graph, snapshot.acceptedIds,
+                    stage.correlation.stageRunId, target.id, target.path,
+                    "Prepare", model, Instant.now().plusSeconds(90),
+                    Cancellation()), noopRole, noopStage).outcome)
+            snapshot = assertNotNull(host.advance(host.snapshot(), next))
+        }
+        val stage = snapshot.graph.stages.last()
+        val failedId = stage.correlation.stageRunId
+        val lease = assertNotNull(host.beginStage(snapshot.graph, failedId, snapshot.acceptedIds))
+        val tool = assertIs<StageToolOpenResult.Granted>(host.open(lease.authority)).session
+        try {
+            val write = tool.write(listOf(
+                StageWrite.Edit("src/main/FeatureFull.kt", sha(oldSource), newSource),
+                StageWrite.Create(targets.getValue(StageKind.DEVELOP).path, "unaccepted\n")))
+            assertTrue(write.permitted, write.deniedCode)
+        } finally { tool.close() }
+        assertNotNull(host.abortStage(lease, StageState.FAILED))
+
+        // A fatal Error after acquiring the in-progress fence must not leave
+        // later recovery calls permanently at RECOVERY_IN_PROGRESS.
+        host.developerRecoveryTestHook = { checkpoint ->
+            if (checkpoint == DeveloperRecoveryTestCheckpoint.BEFORE_RECONCILE_IO)
+                throw AssertionError("injected fatal recovery")
+        }
+        assertFailsWith<AssertionError> { host.reconcileFailedDeveloper(failedId) }
+        assertFailsWith<IllegalStateException> { host.snapshot() }
+        assertEquals(newSource, Files.readString(repo.resolve("src/main/FeatureFull.kt")))
+        host.developerRecoveryTestHook = null
+        assertIs<StageGitFailedWriteResult.Recovered>(
+            host.reconcileFailedDeveloper(failedId))
+        assertFailsWith<IllegalStateException> { host.snapshot() }
+
+        val entered = CountDownLatch(1)
+        val proceed = CountDownLatch(1)
+        host.developerRecoveryTestHook = { checkpoint ->
+            if (checkpoint == DeveloperRecoveryTestCheckpoint.BEFORE_RETRY_IO) {
+                entered.countDown()
+                check(proceed.await(10, TimeUnit.SECONDS))
+            }
+        }
+        val nextId = StageRunId("developer-retry-fenced")
+        val correlation = stage.correlation.copy(
+            stageRunId = nextId, requestId = "developer-retry-fenced-request",
+            correlationId = "developer-retry-fenced-correlation")
+        val actor = AgentId("developer-retry-fenced-actor")
+        val result = AtomicReference<PreparationStageSnapshot?>()
+        val error = AtomicReference<Throwable?>()
+        val worker = thread(name = "host-retry-preflight") {
+            try {
+                result.set(host.retryReconciledDeveloper(failedId, correlation, actor))
+            } catch (failure: Throwable) {
+                error.set(failure)
+            }
+        }
+        val probe = Executors.newSingleThreadExecutor()
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            // This call needs the host monitor. It must complete even while
+            // the retry's disk work is paused; a duplicate retry is rejected.
+            val observed = probe.submit<String?> {
+                try {
+                    host.snapshot()
+                    "UNEXPECTED_SUCCESS"
+                } catch (failure: IllegalStateException) {
+                    failure.message
+                }
+            }
+            assertEquals("WORKSPACE_RECONCILIATION_REQUIRED",
+                observed.get(2, TimeUnit.SECONDS))
+            assertNull(host.retryReconciledDeveloper(failedId, correlation, actor))
+        } finally {
+            proceed.countDown()
+            worker.join(10_000)
+            probe.shutdownNow()
+            host.developerRecoveryTestHook = null
+        }
+        assertFalse(worker.isAlive)
+        assertNull(error.get())
+        val replaced = assertNotNull(result.get())
+        assertEquals(nextId, replaced.graph.stages.last().correlation.stageRunId)
+        assertEquals(nextId, host.snapshot().graph.stages.last().correlation.stageRunId)
+        assertEquals(oldSource, Files.readString(repo.resolve("src/main/FeatureFull.kt")))
     }
 
 }
