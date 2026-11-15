@@ -809,6 +809,7 @@ class SessionCheckpointStoreIntegrationTest {
         Files.writeString(orphan, "orphan")
         SessionResumeAdmission.admit(store(), context(), ledger(), resumeAttestation()).close()
         assertFalse(Files.exists(orphan))
+        val previous = inspect()
         Files.delete(store().resolve("resume-000000000001.rcf"))
         assertEquals("RESUME_FENCE_ANCHOR_MISMATCH",
             assertFailsWith<SessionResumeUnconfirmed> {
@@ -817,11 +818,10 @@ class SessionCheckpointStoreIntegrationTest {
         assertEquals("CHECKPOINT_RESUME_ANCHOR_UNCONFIRMED",
             assertFailsWith<CheckpointUnconfirmed> { inspect() }.code)
         // The legacy writer must not escape its CheckpointUnconfirmed contract.
-        val source = Files.readAllBytes(store().resolve("000000000001.rcp"))
-        assertTrue(source.isNotEmpty())
         assertEquals("CHECKPOINT_RESUME_ANCHOR_UNCONFIRMED",
             assertFailsWith<CheckpointUnconfirmed> {
-                save(snapshot().copy(sequence = 2L, previousSha256 = "0".repeat(64)), "0".repeat(64))
+                save(previous.snapshot.copy(sequence = 2L, previousSha256 = previous.sha256),
+                    previous.sha256)
             }.code)
     }
 
