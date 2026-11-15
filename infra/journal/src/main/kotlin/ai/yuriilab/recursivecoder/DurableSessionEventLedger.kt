@@ -8,6 +8,7 @@ import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.LinkOption
+import java.nio.file.OpenOption
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
 import java.security.MessageDigest
@@ -57,6 +58,8 @@ class DurableSessionEventLedger private constructor(
     private var poisoned = false
     private var committedSequence = 0
     private var lastEventId: String? = null
+    private var committedIdentity: Pair<String, String>? = null
+    private var pendingIdentity: Pair<String, String>? = null
     private var lastDigest = ByteArray(32)
     private var pending: Pair<String, ByteArray>? = null
 
@@ -95,9 +98,10 @@ class DurableSessionEventLedger private constructor(
             val target = leasePath(path)
             if (Files.isSymbolicLink(target))
                 throw SessionLedgerUnconfirmed("UNSAFE_LEDGER_LOCK")
-            val options = if (create)
-                arrayOf(StandardOpenOption.CREATE, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)
-            else arrayOf(StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)
+            val options: Array<OpenOption> = if (create)
+                arrayOf<OpenOption>(StandardOpenOption.CREATE, StandardOpenOption.WRITE,
+                    LinkOption.NOFOLLOW_LINKS)
+            else arrayOf<OpenOption>(StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)
             val owner = try {
                 FileChannel.open(target, *options)
             } catch (e: Exception) {
@@ -179,8 +183,7 @@ class DurableSessionEventLedger private constructor(
                         "inputtext", "outputtext").any { it in normalized }) {
                     throw SessionLedgerUnconfirmed("LEDGER_SENSITIVE_METADATA")
                 }
-                if (value !is JsonPrimitive ||
-                    (value is JsonPrimitive && value.content.length > 512))
+                if (value !is JsonPrimitive || value.content.length > 512)
                     throw SessionLedgerUnconfirmed("LEDGER_UNSUPPORTED_METADATA")
             }
         }
@@ -233,6 +236,7 @@ class DurableSessionEventLedger private constructor(
                     val events = ArrayList<JsonObject>()
                     var previousHash = ByteArray(32)
                     var previousId: String? = null
+                    var identity: Pair<String, String>? = null
                     var sequence = 0
                     while (reader.position() < size) {
                         if (++sequence > MAX_EVENTS || size - reader.position() < 4)
@@ -253,6 +257,11 @@ class DurableSessionEventLedger private constructor(
                             throw SessionLedgerUnconfirmed("LEDGER_HASH_MISMATCH")
                         val event = decode(payload)
                         validate(event, sequence, previousId)
+                        val observedIdentity = (event["sessionId"] as JsonPrimitive).content to
+                            (event["traceId"] as JsonPrimitive).content
+                        if (identity != null && identity != observedIdentity)
+                            throw SessionLedgerUnconfirmed("LEDGER_IDENTITY_CHANGED")
+                        identity = observedIdentity
                         previousId = (event["eventId"] as JsonPrimitive).content
                         previousHash = digest
                         events.add(event)
@@ -271,6 +280,10 @@ class DurableSessionEventLedger private constructor(
         check(!closed && !poisoned && pending == null) { "Ledger not ready for append" }
         val next = committedSequence + 1
         validate(event, next, lastEventId)
+        val identity = (event["sessionId"] as JsonPrimitive).content to
+            (event["traceId"] as JsonPrimitive).content
+        if (committedIdentity != null && committedIdentity != identity)
+            throw SessionLedgerUnconfirmed("LEDGER_IDENTITY_CHANGED")
         val payload = event.toString().toByteArray(StandardCharsets.UTF_8)
         if (payload.size !in 1..MAX_EVENT_BYTES ||
             channel.position() + 4L + 32 + payload.size > MAX_LEDGER_BYTES)
@@ -281,6 +294,7 @@ class DurableSessionEventLedger private constructor(
         try {
             writeFully(channel, frame)
             pending = (event["eventId"] as JsonPrimitive).content to hash
+            pendingIdentity = identity
         } catch (e: Exception) {
             poisoned = true
             throw SessionLedgerUnconfirmed("LEDGER_WRITE_UNCONFIRMED", e)
@@ -296,6 +310,8 @@ class DurableSessionEventLedger private constructor(
                 committedSequence++
                 lastEventId = eventId
                 lastDigest = digest
+                committedIdentity = pendingIdentity
+                pendingIdentity = null
                 pending = null
             }
         } catch (e: Exception) {
