@@ -370,8 +370,8 @@ object SessionResumeAdmission {
         directory: Path, context: CheckpointHostContext, ledgerPath: Path,
         attestation: ResumeHostAttestation,
         beforeInspection: () -> Unit = {},
-        hardLinkProbe: (Path) -> Unit = {
-            ResumeImmutablePublication.requireHardLinks(it)
+        hardLinkProbe: (Path, String?) -> Unit = { directory, scope ->
+            ResumeImmutablePublication.requireHardLinks(directory, scope)
         },
         afterAnchorCommitted: () -> Unit
     ): SessionResumeLease =
@@ -392,8 +392,8 @@ object SessionResumeAdmission {
         directory: Path, context: CheckpointHostContext, ledgerPath: Path,
         attestation: ResumeHostAttestation, operator: PreparedFenceReconciliation?,
         beforeInspection: () -> Unit = {},
-        hardLinkProbe: (Path) -> Unit = {
-            ResumeImmutablePublication.requireHardLinks(it)
+        hardLinkProbe: (Path, String?) -> Unit = { directory, scope ->
+            ResumeImmutablePublication.requireHardLinks(directory, scope)
         },
         afterAnchorCommitted: () -> Unit
     ): SessionResumeLease {
@@ -466,7 +466,7 @@ object SessionResumeAdmission {
                 // Test both mounts before the first irreversible anchor/audit.
                 // Different filesystems are supported; the test seam must
                 // not be exposed as a production injection point.
-                hardLinkProbe(checkedDir)
+                hardLinkProbe(checkedDir, null)
                 ResumeFenceAnchor.requirePublicationSupport(ledgerPath, hardLinkProbe)
                 ResumeFenceStorage.cleanOrphanedTemps(checkedDir)
                 ResumeFenceAnchor.cleanOrphanedTemps(ledgerPath)

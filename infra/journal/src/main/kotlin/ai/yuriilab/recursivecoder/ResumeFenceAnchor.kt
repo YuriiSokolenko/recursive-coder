@@ -20,22 +20,36 @@ import java.util.UUID
  * Callers have already fsynced the temporary content before linking.
  */
 internal object ResumeImmutablePublication {
-    // Only actual probe filenames from UUID.toString(), not arbitrary siblings.
-    val PROBE_NAME = Regex(
-        "\\.resume-hardlink-probe-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-" +
+    // The ledger parent may host multiple independent ledgers. Its probe
+    // filenames include a stable digest of the ledger basename.
+    private const val PROBE_PREFIX = ".resume-hardlink-probe-"
+    private val PROBE_SUFFIX = Regex(
+        "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-" +
             "[0-9a-f]{4}-[0-9a-f]{12}\\.(?:tmp|link)")
+    val PROBE_NAME = Regex("\\.resume-hardlink-probe-" + PROBE_SUFFIX.pattern)
 
-    /** Admission-only cleanup of crash leftovers in a single checked directory. */
-    fun cleanOrphanedProbes(directory: Path) {
+    fun ledgerProbeScope(ledger: Path): String =
+        SessionCheckpointCodec.sha256(ledger.toAbsolutePath().normalize().fileName
+            .toString().toByteArray(StandardCharsets.UTF_8))
+
+    private fun probePrefix(scope: String?): String =
+        if (scope == null) PROBE_PREFIX else PROBE_PREFIX + "ledger-" + scope + "-"
+
+    private fun matchesProbe(name: String, scope: String?): Boolean =
+        if (scope == null) PROBE_NAME.matches(name)
+        else name.startsWith(probePrefix(scope)) &&
+            PROBE_SUFFIX.matches(name.removePrefix(probePrefix(scope)))
+
+    /** Admission-only cleanup. Scope ensures other ledgers stay untouched. */
+    fun cleanOrphanedProbes(directory: Path, scope: String? = null) {
         var removed = false
         try {
             Files.newDirectoryStream(directory).use { entries ->
-                entries.filter { PROBE_NAME.matches(it.fileName.toString()) }.forEach { file ->
+                entries.filter { matchesProbe(it.fileName.toString(), scope) }.forEach { file ->
                     if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS))
                         throw SessionResumeUnconfirmed(
                             "RESUME_FENCE_HARD_LINK_PROBE_CLEANUP_UNCONFIRMED")
-                    Files.delete(file)
-                    removed = true
+                    if (Files.deleteIfExists(file)) removed = true
                 }
             }
             if (removed)
@@ -69,11 +83,11 @@ internal object ResumeImmutablePublication {
      * the checkpoint and ledger directories may be on different mounts.
      * This does not guarantee that a later device error cannot still occur.
      */
-    fun requireHardLinks(directory: Path,
+    fun requireHardLinks(directory: Path, scope: String? = null,
                          createHardLink: (Path, Path) -> Path = Files::createLink) {
         val id = UUID.randomUUID().toString()
-        val source = directory.resolve(".resume-hardlink-probe-" + id + ".tmp")
-        val link = directory.resolve(".resume-hardlink-probe-" + id + ".link")
+        val source = directory.resolve(probePrefix(scope) + id + ".tmp")
+        val link = directory.resolve(probePrefix(scope) + id + ".link")
         var error: SessionResumeUnconfirmed? = null
         try {
             Files.createFile(source, PosixFilePermissions.asFileAttribute(setOf(
@@ -165,15 +179,16 @@ internal object ResumeFenceAnchor {
 
     /** Validate the external anchor filesystem before any new anchor is written. */
     fun requirePublicationSupport(ledger: Path,
-                                  probe: (Path) -> Unit = {
-                                      ResumeImmutablePublication.requireHardLinks(it)
+                                  probe: (Path, String?) -> Unit = { directory, scope ->
+                                      ResumeImmutablePublication.requireHardLinks(directory, scope)
                                   }) {
-        probe(parent(ledger))
+        probe(parent(ledger), ResumeImmutablePublication.ledgerProbeScope(ledger))
     }
 
-    /** Admission-only cleanup, also safe for the separate ledger mount. */
+    /** Admission-only cleanup for this ledger in a potentially shared parent. */
     fun cleanOrphanedProbes(ledger: Path) {
-        ResumeImmutablePublication.cleanOrphanedProbes(parent(ledger))
+        ResumeImmutablePublication.cleanOrphanedProbes(parent(ledger),
+            ResumeImmutablePublication.ledgerProbeScope(ledger))
     }
 
     private fun prefix(ledger: Path) =

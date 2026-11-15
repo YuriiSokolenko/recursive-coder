@@ -1073,7 +1073,8 @@ class SessionCheckpointStoreIntegrationTest {
         val checkpoint = store()
         val ledgerParent = ledger().parent
         val checkpointProbe = ".resume-hardlink-probe-" + UUID.randomUUID()
-        val ledgerProbe = ".resume-hardlink-probe-" + UUID.randomUUID()
+        val ledgerProbe = ".resume-hardlink-probe-ledger-" +
+            ResumeImmutablePublication.ledgerProbeScope(ledger()) + "-" + UUID.randomUUID()
         fun abandoned(directory: Path, basename: String): Pair<Path, Path> {
             val tempFile = directory.resolve(basename + ".tmp")
             val linked = directory.resolve(basename + ".link")
@@ -1093,6 +1094,62 @@ class SessionCheckpointStoreIntegrationTest {
             resumeAttestation()).use { it.assertCurrent() }
         for (file in listOf(checkpointFiles.first, checkpointFiles.second,
                 ledgerFiles.first, ledgerFiles.second)) assertFalse(Files.exists(file))
+        assertEquals(1L, SessionResumeAdmission.currentGeneration(
+            store(), context(), ledger()))
+    }
+
+    @Test fun admissionPreservesOtherLedgerProbesInSharedParent() {
+        createPreExecutionCheckpoint()
+        val otherLedger = temp.resolve("other-events.ledger")
+        val otherStore = temp.resolve("other-checkpoints")
+        Files.createDirectory(otherStore)
+        Files.setPosixFilePermissions(otherStore, setOf(
+            PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE,
+            PosixFilePermission.OWNER_EXECUTE))
+        DurableSessionEventLedger.create(otherLedger, workspace()).use { writer ->
+            writer.append(event(1, "req-one", "completed", buildJsonObject {
+                put("graphId", "graph-root")
+            }, "session.transition"))
+            writer.flush()
+        }
+        val verifiedOther = DurableSessionEventLedger.inspect(otherLedger)
+        val preExecution = snapshot(providedAnchor = verifiedOther).copy(
+            phase = "created", taskAttempt = 0, taskState = "created",
+            children = listOf(CheckpointChild("graph-child", "graph-root", "ready")),
+            acceptedArtifacts = emptyList(), hostAssertedUsage = emptyList(),
+            pendingEffects = emptyList())
+        SessionCheckpointStore.save(otherStore, context(), otherLedger, preExecution, null)
+
+        fun abandon(ledgerPath: Path): Pair<Path, Path> {
+            val base = ".resume-hardlink-probe-ledger-" +
+                ResumeImmutablePublication.ledgerProbeScope(ledgerPath) +
+                "-" + UUID.randomUUID()
+            val source = ledgerPath.resolveSibling(base + ".tmp")
+            val link = ledgerPath.resolveSibling(base + ".link")
+            Files.writeString(source, "abandoned scoped probe")
+            Files.createLink(link, source)
+            return source to link
+        }
+        val own = abandon(ledger())
+        val foreign = abandon(otherLedger)
+        val legacy = ledger().resolveSibling(
+            ".resume-hardlink-probe-" + UUID.randomUUID() + ".tmp")
+        Files.writeString(legacy, "unscoped legacy probe")
+        SessionResumeAdmission.admit(otherStore, context(), otherLedger,
+            resumeAttestation()).use { it.assertCurrent() }
+        assertFalse(Files.exists(foreign.first))
+        assertFalse(Files.exists(foreign.second))
+        assertTrue(Files.exists(own.first))
+        assertTrue(Files.exists(own.second))
+        assertTrue(Files.exists(legacy))
+
+        SessionResumeAdmission.admit(store(), context(), ledger(),
+            resumeAttestation()).use { it.assertCurrent() }
+        assertFalse(Files.exists(own.first))
+        assertFalse(Files.exists(own.second))
+        assertTrue(Files.exists(legacy))
+        assertEquals(1L, SessionResumeAdmission.currentGeneration(
+            otherStore, context(), otherLedger))
         assertEquals(1L, SessionResumeAdmission.currentGeneration(
             store(), context(), ledger()))
     }
@@ -1121,20 +1178,21 @@ class SessionCheckpointStoreIntegrationTest {
         createPreExecutionCheckpoint()
         val checkedStore = store()
         val ledgerParent = ledger().parent
-        val calls = mutableListOf<Path>()
+        val calls = mutableListOf<Pair<Path, String?>>()
         val denied = assertFailsWith<SessionResumeUnconfirmed> {
             SessionResumeAdmission.admitWithFault(store(), context(), ledger(),
                 resumeAttestation(),
-                hardLinkProbe = { directory ->
-                    calls.add(directory)
+                hardLinkProbe = { directory, scope ->
+                    calls.add(directory to scope)
                     if (directory == ledgerParent)
                         throw SessionResumeUnconfirmed("RESUME_FENCE_HARD_LINK_UNAVAILABLE")
-                    ResumeImmutablePublication.requireHardLinks(directory)
+                    ResumeImmutablePublication.requireHardLinks(directory, scope)
                 },
                 afterAnchorCommitted = {})
         }
         assertEquals("RESUME_FENCE_HARD_LINK_UNAVAILABLE", denied.code)
-        assertEquals(listOf(checkedStore, ledgerParent), calls)
+        assertEquals(listOf(checkedStore to null,
+            ledgerParent to ResumeImmutablePublication.ledgerProbeScope(ledger())), calls)
         assertFalse(Files.exists(ledger().resolveSibling(
             "events.ledger.resume-anchor-000000000001.rca")))
         assertFalse(Files.exists(ledger().resolveSibling(
