@@ -29,14 +29,27 @@ internal data class ResumeFenceAnchorRecord(
 internal object ResumeFenceAnchor {
     private const val MAX = 256
     private val SHA = Regex("[0-9a-f]{64}")
+    private val TEMP = Regex("\\.resume-anchor-pending-[a-f0-9-]{36}\\.tmp")
     private fun fail(code: String): Nothing = throw SessionResumeUnconfirmed(code)
     private fun parent(ledger: Path): Path {
         val absolute = ledger.toAbsolutePath().normalize()
         val directory = absolute.parent ?: fail("RESUME_FENCE_ANCHOR_UNCONFIRMED")
-        if (!Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS) ||
-            directory.toRealPath() != directory)
-            fail("RESUME_FENCE_ANCHOR_UNCONFIRMED")
-        return directory
+        try {
+            if (!Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS) ||
+                directory.toRealPath() != directory ||
+                Files.getPosixFilePermissions(directory, LinkOption.NOFOLLOW_LINKS) != setOf(
+                    PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE,
+                    PosixFilePermission.OWNER_EXECUTE))
+                fail("RESUME_FENCE_ANCHOR_UNSAFE_DIRECTORY")
+            LinuxCheckpointOwner.requireMatchingUid(
+                Files.getAttribute(directory, "unix:uid", LinkOption.NOFOLLOW_LINKS),
+                LinuxCheckpointOwner.effectiveUid())
+            return directory
+        } catch (e: SessionResumeUnconfirmed) {
+            throw e
+        } catch (e: Exception) {
+            throw SessionResumeUnconfirmed("RESUME_FENCE_ANCHOR_UNSAFE_DIRECTORY", e)
+        }
     }
 
     private fun prefix(ledger: Path) =
@@ -66,31 +79,88 @@ internal object ResumeFenceAnchor {
         return ResumeFenceAnchorRecord(gen, parts[2], previous, parts[4])
     }
 
+    /**
+     * No directory enumeration for unfenced legacy checkpoints. A prepared
+     * generation one is still found by its exact filename and refused.
+     */
     fun verify(ledger: Path, head: ResumeFenceRecord?): ResumeFenceAnchorRecord? {
         try {
-        val directory = parent(ledger)
-        val names = Files.newDirectoryStream(directory).use { stream ->
-            stream.filter { it.fileName.toString().startsWith(prefix(ledger)) &&
-                it.fileName.toString().endsWith(".rca") }.toList()
-        }
-        if (names.size > MAX || names.size.toLong() != (head?.generation ?: 0L))
-            fail("RESUME_FENCE_ANCHOR_MISMATCH")
-        var previous: ResumeFenceAnchorRecord? = null
-        for ((index, file) in names.sortedBy { it.fileName.toString() }.withIndex()) {
-            val record = read(file)
-            if (file.fileName.toString() != name(ledger, index.toLong() + 1L) ||
-                record.generation != index.toLong() + 1L ||
-                record.previousSha256 != previous?.sha256)
+            val count = head?.generation ?: 0L
+            val first = ledger.toAbsolutePath().normalize().resolveSibling(name(ledger, 1L))
+            if (count == 0L && !Files.exists(first, LinkOption.NOFOLLOW_LINKS))
+                return null
+            val directory = parent(ledger)
+            var previous: ResumeFenceAnchorRecord? = null
+            for (gen in 1L..count) {
+                val record = read(directory.resolve(name(ledger, gen)))
+                if (record.generation != gen || record.previousSha256 != previous?.sha256)
+                    fail("RESUME_FENCE_ANCHOR_MISMATCH")
+                previous = record
+            }
+            if (previous?.fenceSha256 != head?.sha256 ||
+                Files.exists(directory.resolve(name(ledger, count + 1L)),
+                    LinkOption.NOFOLLOW_LINKS))
                 fail("RESUME_FENCE_ANCHOR_MISMATCH")
-            previous = record
-        }
-        if (previous?.fenceSha256 != head?.sha256)
-            fail("RESUME_FENCE_ANCHOR_MISMATCH")
-        return previous
+            return previous
         } catch (e: SessionResumeUnconfirmed) {
             throw e
         } catch (e: Exception) {
             throw SessionResumeUnconfirmed("RESUME_FENCE_ANCHOR_UNCONFIRMED", e)
+        }
+    }
+
+    /** The only allowed repair: exactly one validated prepared head. */
+    fun verifyPrepared(ledger: Path, head: ResumeFenceRecord?,
+                       proposed: ResumeFenceRecord): ResumeFenceAnchorRecord {
+        try {
+            val directory = parent(ledger)
+            val priorCount = head?.generation ?: 0L
+            if (proposed.generation != priorCount + 1L ||
+                proposed.generation !in 1L..MAX.toLong())
+                fail("RESUME_FENCE_RECONCILIATION_UNCONFIRMED")
+            var previous: ResumeFenceAnchorRecord? = null
+            for (gen in 1L..priorCount) {
+                val record = read(directory.resolve(name(ledger, gen)))
+                if (record.generation != gen || record.previousSha256 != previous?.sha256)
+                    fail("RESUME_FENCE_RECONCILIATION_UNCONFIRMED")
+                previous = record
+            }
+            if (previous?.fenceSha256 != head?.sha256)
+                fail("RESUME_FENCE_RECONCILIATION_UNCONFIRMED")
+            val prepared = read(directory.resolve(name(ledger, proposed.generation)))
+            if (prepared.generation != proposed.generation ||
+                prepared.previousSha256 != previous?.sha256 ||
+                prepared.fenceSha256 != proposed.sha256 ||
+                Files.exists(directory.resolve(name(ledger, proposed.generation + 1L)),
+                    LinkOption.NOFOLLOW_LINKS))
+                fail("RESUME_FENCE_RECONCILIATION_UNCONFIRMED")
+            return prepared
+        } catch (e: SessionResumeUnconfirmed) {
+            throw e
+        } catch (e: Exception) {
+            throw SessionResumeUnconfirmed("RESUME_FENCE_RECONCILIATION_UNCONFIRMED", e)
+        }
+    }
+
+    /** Admission-only cleanup, never invoked by read-only legacy inspection. */
+    fun cleanOrphanedTemps(ledger: Path) {
+        val directory = parent(ledger)
+        var removed = false
+        try {
+            Files.newDirectoryStream(directory).use { entries ->
+                entries.filter { TEMP.matches(it.fileName.toString()) }.forEach { file ->
+                    if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS))
+                        fail("RESUME_FENCE_ANCHOR_UNCONFIRMED")
+                    Files.delete(file)
+                    removed = true
+                }
+            }
+            if (removed)
+                FileChannel.open(directory, StandardOpenOption.READ).use { it.force(true) }
+        } catch (e: SessionResumeUnconfirmed) {
+            throw e
+        } catch (e: Exception) {
+            throw SessionResumeUnconfirmed("RESUME_FENCE_ANCHOR_CLEANUP_UNCONFIRMED", e)
         }
     }
 
