@@ -197,6 +197,16 @@ class SessionResumeLease internal constructor(
             ?: throw SessionResumeUnconfirmed("RESUME_FENCE_STALE_WRITER"), directory)
     }
 
+    /**
+     * Serialize short host-owned state/receipt publications with close(), so
+     * a callback cannot pass a check, lose its lease and commit afterward.
+     * Never run model calls, external tools or blocking network I/O here.
+     */
+    @Synchronized fun <T> publishIfCurrent(publication: () -> T): T {
+        assertCurrent()
+        return publication()
+    }
+
     @Synchronized override fun close() {
         if (closed) return
         closed = true
@@ -205,8 +215,9 @@ class SessionResumeLease internal constructor(
         try { owner.close() } catch (e: Exception) {
             if (failure == null) failure = e else failure.addSuppressed(e)
         }
-        onClosed(lockPath)
+        // An uncertain OS release leaves the JVM reservation in place.
         if (failure != null) throw SessionResumeUnconfirmed("RESUME_LEASE_RELEASE_UNCONFIRMED", failure)
+        onClosed(lockPath)
     }
 }
 
