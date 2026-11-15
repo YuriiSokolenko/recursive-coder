@@ -863,6 +863,102 @@ class SessionCheckpointStoreIntegrationTest {
         }
     }
 
+    @Test fun interruptedAnchorPrepareNeedsExplicitOperatorReconciliation() {
+        createPreExecutionCheckpoint()
+        val interrupted = assertFailsWith<SessionResumeUnconfirmed> {
+            SessionResumeAdmission.admitWithFault(store(), context(), ledger(),
+                resumeAttestation()) {
+                throw IllegalStateException("simulated kill after durable anchor, before fence")
+            }
+        }
+        assertEquals("RESUME_ADMISSION_UNCONFIRMED", interrupted.code)
+        assertFalse(Files.exists(store().resolve("resume-000000000001.rcf")))
+        val preparedFile = ledger().resolveSibling("events.ledger.resume-anchor-000000000001.rca")
+        assertTrue(Files.exists(preparedFile))
+        val confirmedHash = Files.readString(preparedFile).split("\n")[2]
+        assertEquals("RESUME_FENCE_ANCHOR_MISMATCH",
+            assertFailsWith<SessionResumeUnconfirmed> {
+                SessionResumeAdmission.admit(store(), context(), ledger(),
+                    resumeAttestation())
+            }.code)
+        assertEquals("CHECKPOINT_RESUME_ANCHOR_UNCONFIRMED",
+            assertFailsWith<CheckpointUnconfirmed> { inspect() }.code)
+        val approved = PreparedFenceReconciliation(1L, confirmedHash, "operator-one", true)
+        assertEquals("RESUME_FENCE_RECONCILIATION_UNCONFIRMED",
+            assertFailsWith<SessionResumeUnconfirmed> {
+                SessionResumeAdmission.reconcilePreparedAdmission(
+                    store(), context(), ledger(), resumeAttestation(),
+                    approved.copy(expectedPreparedFenceSha256 = "0".repeat(64)))
+            }.code)
+        assertEquals("RESUME_FENCE_RECONCILIATION_UNCONFIRMED",
+            assertFailsWith<SessionResumeUnconfirmed> {
+                SessionResumeAdmission.reconcilePreparedAdmission(
+                    store(), context(), ledger(), resumeAttestation(),
+                    approved.copy(operatorApproved = false))
+            }.code)
+        val orphanTemp = ledger().resolveSibling(".resume-anchor-pending-" + UUID.randomUUID() + ".tmp")
+        Files.writeString(orphanTemp, "orphaned")
+        SessionResumeAdmission.reconcilePreparedAdmission(
+            store(), context(), ledger(), resumeAttestation(), approved).use { repaired ->
+            assertEquals(1L, repaired.generation)
+            repaired.assertCurrent()
+        }
+        assertFalse(Files.exists(orphanTemp))
+        assertEquals(1L, SessionResumeAdmission.currentGeneration(store(), context(), ledger()))
+        SessionResumeAdmission.admit(store(), context(), ledger(), resumeAttestation(1)).use {
+            assertEquals(2L, it.generation)
+        }
+    }
+
+    @Test fun anchorParentRequiresPrivateOwnerModeAndIgnoresUnrelatedSiblings() {
+        createPreExecutionCheckpoint()
+        val unrelated = ledger().resolveSibling("events.ledger.resume-anchor-not-a-generation.rca")
+        Files.writeString(unrelated, "unrelated")
+        val originalMode = Files.getPosixFilePermissions(ledger().parent)
+        try {
+            Files.setPosixFilePermissions(ledger().parent, originalMode +
+                PosixFilePermission.GROUP_READ)
+            assertEquals("RESUME_FENCE_ANCHOR_UNSAFE_DIRECTORY",
+                assertFailsWith<SessionResumeUnconfirmed> {
+                    SessionResumeAdmission.admit(store(), context(), ledger(),
+                        resumeAttestation())
+                }.code)
+        } finally {
+            Files.setPosixFilePermissions(ledger().parent, originalMode)
+        }
+        SessionResumeAdmission.admit(store(), context(), ledger(), resumeAttestation()).use {
+            it.assertCurrent()
+        }
+        assertEquals(1L, SessionResumeAdmission.currentGeneration(store(), context(), ledger()))
+    }
+
+    @Test fun fencedLeaseRejectsReplacedLedgerAtSamePath() {
+        createPreExecutionCheckpoint()
+        val admitted = SessionResumeAdmission.admit(store(), context(), ledger(),
+            resumeAttestation())
+        try {
+            admitted.requireLedgerPath(ledger())
+            val prior = temp.resolve("moved-old-events.ledger")
+            Files.move(ledger(), prior)
+            Files.copy(prior, ledger())
+            assertEquals("RESUME_LEDGER_PATH_CHANGED",
+                assertFailsWith<SessionResumeUnconfirmed> {
+                    admitted.requireLedgerPath(ledger())
+                }.code)
+        } finally {
+            admitted.close()
+        }
+    }
+
+    @Test fun negativeFenceGenerationHasDedicatedDenial() {
+        createPreExecutionCheckpoint()
+        assertEquals("RESUME_FENCE_EXPECTED_GENERATION_INVALID",
+            assertFailsWith<SessionResumeUnconfirmed> {
+                SessionResumeAdmission.admit(store(), context(), ledger(),
+                    resumeAttestation(-1))
+            }.code)
+    }
+
     @Test fun independentOsLockProcessBlocksAdmissionAndReleasesOnKill() {
         createPreExecutionCheckpoint()
         SessionResumeAdmission.admit(store(), context(), ledger(), resumeAttestation()).close()
