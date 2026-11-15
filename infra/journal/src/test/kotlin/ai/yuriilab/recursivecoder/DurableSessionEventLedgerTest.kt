@@ -142,10 +142,16 @@ class DurableSessionEventLedgerTest {
                 assertFailsWith<SessionLedgerUnconfirmed> {
                     writer.append(event(2))
                 }.code)
-            assertEquals("LEDGER_UNSUPPORTED_METADATA",
+            assertEquals("LEDGER_SENSITIVE_METADATA",
                 assertFailsWith<SessionLedgerUnconfirmed> {
                     writer.append(event(1, buildJsonObject {
                         put("someMetadata", "x".repeat(513))
+                    }))
+                }.code)
+            assertEquals("LEDGER_UNSUPPORTED_METADATA",
+                assertFailsWith<SessionLedgerUnconfirmed> {
+                    writer.append(event(1, buildJsonObject {
+                        put("inputTokens", "not-a-number")
                     }))
                 }.code)
             assertEquals("LEDGER_RECORD_SIZE_INVALID",
