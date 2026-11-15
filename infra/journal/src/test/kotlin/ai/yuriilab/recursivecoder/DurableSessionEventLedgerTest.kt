@@ -80,9 +80,10 @@ class DurableSessionEventLedgerTest {
                 DurableSessionEventLedger.inspect(path)
             }
             assertEquals("LEDGER_LEASE_HELD", exception.code)
-            assertFailsWith<java.nio.file.FileAlreadyExistsException> {
-                DurableSessionEventLedger.create(path, workspace())
-            }
+            assertEquals("LEDGER_LEASE_HELD",
+                assertFailsWith<SessionLedgerUnconfirmed> {
+                    DurableSessionEventLedger.create(path, workspace())
+                }.code)
         } finally {
             writer.close()
         }
@@ -130,14 +131,18 @@ class DurableSessionEventLedgerTest {
                 assertFailsWith<SessionLedgerUnconfirmed> {
                     writer.append(event(2))
                 }.code)
+            assertEquals("LEDGER_UNSUPPORTED_METADATA",
+                assertFailsWith<SessionLedgerUnconfirmed> {
+                    writer.append(event(1, buildJsonObject {
+                        put("someMetadata", "x".repeat(513))
+                    }))
+                }.code)
             assertEquals("LEDGER_RECORD_SIZE_INVALID",
                 assertFailsWith<SessionLedgerUnconfirmed> {
                     writer.append(event(1, buildJsonObject {
-                        // Fail on the bounded ledger record even without trusted files.
-                        put("someMetadata", "x".repeat(20_000))
+                        repeat(40) { put("safeValue" + it, "x".repeat(500)) }
                     }))
-                }.code.takeIf { it == "LEDGER_RECORD_SIZE_INVALID" }
-                    ?: "LEDGER_UNSUPPORTED_METADATA")
+                }.code)
             writer.append(event(1))
             writer.flush()
             assertEquals("LEDGER_EVENT_VERSION_OR_SEQUENCE",
