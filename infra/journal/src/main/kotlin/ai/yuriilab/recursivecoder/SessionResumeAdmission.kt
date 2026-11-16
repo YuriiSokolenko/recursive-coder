@@ -29,7 +29,17 @@ data class ResumeHostAttestation(
 class SessionResumeUnconfirmed(val code: String, cause: Throwable? = null) :
     IllegalStateException(code, cause)
 
+/** Compile-time acknowledgement required at trusted operator recovery call sites. */
+@RequiresOptIn(
+    message = "Explicit trusted-host authorization is required for resume operator reconciliation.",
+    level = RequiresOptIn.Level.ERROR
+)
+@Retention(AnnotationRetention.BINARY)
+@Target(AnnotationTarget.CLASS, AnnotationTarget.FUNCTION)
+annotation class ResumeOperatorOnlyApi
+
 /** Explicit host/operator acknowledgement of one exact interrupted prepare. */
+@ResumeOperatorOnlyApi
 data class PreparedFenceReconciliation(
     val expectedPreparedGeneration: Long,
     val expectedPreparedFenceSha256: String,
@@ -119,6 +129,10 @@ internal object ResumeFenceStorage {
             fields[5], fields[6], fields[7], fields[8])
     }
 
+    /** Read an exact committed generation; callers first validate the full chain. */
+    fun atGeneration(directory: Path, generation: Long): ResumeFenceRecord =
+        decode(directory.resolve(name(generation)))
+
     fun latest(directory: Path): ResumeFenceRecord? {
         val files = Files.newDirectoryStream(directory).use { entries ->
             entries.filter { NAME.matches(it.fileName.toString()) }.toList()
@@ -181,11 +195,12 @@ internal object ResumeFenceStorage {
     }
 
     /** Bounded single-head check; the entire chain was verified at admission. */
-    fun requireHead(directory: Path, generation: Long, sha256: String) {
+    fun requireHead(directory: Path, generation: Long, sha256: String): ResumeFenceRecord {
         val record = decode(directory.resolve(name(generation)))
         if (record.generation != generation || record.sha256 != sha256 ||
             Files.exists(directory.resolve(name(generation + 1L)), LinkOption.NOFOLLOW_LINKS))
             fail("RESUME_FENCE_STALE_WRITER")
+        return record
     }
 
     /** Clean abandoned uncommitted fence temp files only under both OS locks. */
@@ -271,9 +286,8 @@ class SessionResumeLease internal constructor(
         if (closed || !lock.isValid)
             throw SessionResumeUnconfirmed("RESUME_FENCE_STALE_WRITER")
         requireLedgerPath(ledgerPath)
-        ResumeFenceStorage.requireHead(directory, generation, admittedFenceSha256)
-        ResumeFenceAnchor.requireHead(ledgerPath, generation, admittedFenceSha256,
-            admittedAnchorSha256)
+        val fence = ResumeFenceStorage.requireHead(directory, generation, admittedFenceSha256)
+        ResumeFenceAnchor.requireHead(ledgerPath, fence, admittedAnchorSha256)
     }
 
     /**
@@ -329,7 +343,7 @@ object SessionResumeAdmission {
                           ledgerPath: Path): Long = try {
         SessionCheckpointStore.withAdmissionEvidence(directory, context, ledgerPath) { dir, _, _ ->
             val head = ResumeFenceStorage.latest(dir)
-            ResumeFenceAnchor.verify(ledgerPath, head)
+            ResumeFenceAnchor.verify(ledgerPath, head, dir)
             head?.generation ?: 0L
         }
     } catch (e: CheckpointUnconfirmed) {
@@ -348,7 +362,7 @@ object SessionResumeAdmission {
         SessionCheckpointStore.withAdmissionEvidence(directory, context, ledgerPath) {
                 checkedDir, verified, _ ->
             val head = ResumeFenceStorage.latest(checkedDir)
-            ResumeFenceAnchor.recoveryStatus(ledgerPath, head, verified.sha256,
+            ResumeFenceAnchor.recoveryStatus(ledgerPath, head, checkedDir, verified.sha256,
                 verified.snapshot.binding.policySha256)
         }
 
@@ -357,6 +371,7 @@ object SessionResumeAdmission {
         admitChecked(directory, context, ledgerPath, attestation, null) { }
 
     /** Explicit operator path: never selected by normal session admission. */
+    @ResumeOperatorOnlyApi
     fun reconcilePreparedAdmission(
         directory: Path, context: CheckpointHostContext, ledgerPath: Path,
         attestation: ResumeHostAttestation, operator: PreparedFenceReconciliation
@@ -366,6 +381,7 @@ object SessionResumeAdmission {
     /** Integration-test-only fault seam, not an application API or service port.
      * Compiled in production only to support deterministic crash-boundary tests.
      */
+    @ResumeOperatorOnlyApi
     internal fun admitWithFault(
         directory: Path, context: CheckpointHostContext, ledgerPath: Path,
         attestation: ResumeHostAttestation,
@@ -380,6 +396,7 @@ object SessionResumeAdmission {
             afterAnchorCommitted = afterAnchorCommitted)
 
     /** Integration-test-only fault seam for a crash after durable operator audit. */
+    @ResumeOperatorOnlyApi
     internal fun reconcilePreparedWithFault(
         directory: Path, context: CheckpointHostContext, ledgerPath: Path,
         attestation: ResumeHostAttestation, operator: PreparedFenceReconciliation,
@@ -388,6 +405,7 @@ object SessionResumeAdmission {
         admitChecked(directory, context, ledgerPath, attestation, operator,
             afterAnchorCommitted = afterAuditCommitted)
 
+    @OptIn(ResumeOperatorOnlyApi::class)
     private fun admitChecked(
         directory: Path, context: CheckpointHostContext, ledgerPath: Path,
         attestation: ResumeHostAttestation, operator: PreparedFenceReconciliation?,
@@ -448,7 +466,7 @@ object SessionResumeAdmission {
                     }) fail("RESUME_UNSAFE_BOUNDARY")
                 val prior = ResumeFenceStorage.latest(checkedDir)
                 val priorAnchor = if (operator == null)
-                    ResumeFenceAnchor.verify(ledgerPath, prior) else null
+                    ResumeFenceAnchor.verify(ledgerPath, prior, checkedDir) else null
                 if ((prior?.generation ?: 0L) != attestation.expectedFenceGeneration)
                     fail("RESUME_FENCE_CAS_FAILED")
                 if (prior != null && (prior.sessionId != s.sessionId ||
@@ -479,7 +497,7 @@ object SessionResumeAdmission {
                         if (operator.expectedPreparedGeneration != prepared.generation ||
                             operator.expectedPreparedFenceSha256 != prepared.sha256)
                             fail("RESUME_FENCE_RECONCILIATION_UNCONFIRMED")
-                        ResumeFenceAnchor.verifyPrepared(ledgerPath, prior, prepared).also { anchor ->
+                        ResumeFenceAnchor.verifyPrepared(ledgerPath, prior, prepared, checkedDir).also { anchor ->
                             ResumeFenceAnchor.recordOperatorApproval(ledgerPath, prepared,
                                 anchor, operator)
                         }
