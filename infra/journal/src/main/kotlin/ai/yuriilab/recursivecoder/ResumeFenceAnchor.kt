@@ -455,6 +455,11 @@ internal object ResumeFenceAnchor {
                 fail("RESUME_FENCE_RECONCILIATION_UNCONFIRMED")
             return prepared
         } catch (e: SessionResumeUnconfirmed) {
+            // Historical anchor/fence mismatches during operator repair have
+            // the same outward contract as other reconciliation refusals.
+            // Preserve the original typed reason for operator diagnostics.
+            if (e.code == "RESUME_FENCE_ANCHOR_MISMATCH")
+                throw SessionResumeUnconfirmed("RESUME_FENCE_RECONCILIATION_UNCONFIRMED", e)
             throw e
         } catch (e: Exception) {
             throw SessionResumeUnconfirmed("RESUME_FENCE_RECONCILIATION_UNCONFIRMED", e)
