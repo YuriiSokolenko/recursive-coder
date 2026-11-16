@@ -18,6 +18,12 @@ the ordinary non-fencing checkpoint interface can continue to operate
 without creating anchors. All operators and reconciliation callers must
 use the same trusted host identity and current Git/policy inspection.
 
+**Local Linux filesystem only:** keep both directories on local filesystems
+with reliable advisory locks, hard links, stable inode/file keys and directory
+fsync. NFS, SMB, FUSE and other network or userspace-backed mounts are
+unsupported even when the hard-link capability preflight succeeds. That
+preflight does not validate lock reliability or inode stability.
+
 `SessionResumeAdmission.admit(directory, context, ledgerPath, attestation)`
 requires the same private, Linux/POSIX, effective-UID-owned 0700 checkpoint
 directory and out-of-workspace durable event ledger as issue #103. The host,
@@ -114,10 +120,16 @@ including "known" usage, are not independent usage/accounting receipts.
    `lease.assertCurrent()` is a non-publishing status guard, **not** an
    atomic commit guard. Callback checks re-read only the fence and anchor head
    files; admission and snapshot inspection still verify the complete chain.
+   Every committed operator audit is also checked against its own published
+   fence's checkpoint and policy SHA-256, not just its anchor and fence hash.
    Do not run model requests or blocking network/tool
    operations inside the publication callback. Keep the OS lease until all
    authorized publication is complete. `close()` invalidates the token.
    Closing without completing terminal publication is not a successful commit.
+
+Do not open another channel to `resume.lock` within the JVM while its lease
+is held. Some JVM/OS combinations may drop process-level advisory locks when
+any channel to the same file is closed; the lease is the only channel owner.
 
 The locking order for admission is resume.lock -> checkpoint.lock ->
 closed-ledger inspect (its independent tryLock). The live-ledger checkpoint
@@ -212,6 +224,10 @@ outside the threat model.
 3. Call `SessionResumeAdmission.reconcilePreparedAdmission` with a fresh
    trusted `ResumeHostAttestation` (expectedFenceGeneration=N) and
    `PreparedFenceReconciliation(N+1, preparedFenceSha256, operatorId, true)`.
+   The operator-only function and `PreparedFenceReconciliation` require an
+   explicit Kotlin `@OptIn(ResumeOperatorOnlyApi::class)` at trusted host
+   call sites. This only acknowledges the safety boundary at compile time;
+   the host must still authenticate and authorize the operator.
    The implementation acquires the exclusive OS lease, validates the complete
    checkpoint/ledger and pre-execution boundary, recomputes the proposed fence,
    verifies its SHA-256 against exactly one authenticated trailing anchor,
@@ -307,7 +323,8 @@ The Linux integration tier tests these failure boundaries offline:
 - Two ledger stores sharing a parent: each admission removes only its own
   SHA-256-scoped probes and leaves foreign probe files untouched
 - Ledger inode replacement both before inspection and after anchor publication
-- Corrupt or semantically mismatched audits with valid checksums, plus audit
+- Corrupt or semantically mismatched audits with valid checksums, including
+  committed audit checkpoint/policy mismatches against their own fence, plus audit
   records beyond the current fence head
 
 These tests run offline. They verify cooperating-process behavior, not
