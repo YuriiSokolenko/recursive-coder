@@ -250,17 +250,23 @@ internal object ResumeFenceAnchor {
         }
     }
 
-    private fun verifyAuditIfPresent(ledger: Path, anchor: ResumeFenceAnchorRecord) {
+    private fun verifyAuditIfPresent(ledger: Path, anchor: ResumeFenceAnchorRecord,
+                                     fence: ResumeFenceRecord) {
+        if (anchor.generation != fence.generation || anchor.fenceSha256 != fence.sha256)
+            fail("RESUME_FENCE_ANCHOR_MISMATCH")
         val file = parent(ledger).resolve(auditName(ledger, anchor.generation))
         if (!Files.exists(file, LinkOption.NOFOLLOW_LINKS)) return
         val record = readAudit(file)
         if (record.generation != anchor.generation ||
             record.anchorSha256 != anchor.sha256 ||
-            record.fenceSha256 != anchor.fenceSha256)
+            record.fenceSha256 != anchor.fenceSha256 ||
+            record.checkpointSha256 != fence.checkpointSha256 ||
+            record.policySha256 != fence.policySha256)
             fail("RESUME_FENCE_AUDIT_UNCONFIRMED")
     }
 
     /** Write-once audited operator approval, fsynced before the missing fence. */
+    @OptIn(ResumeOperatorOnlyApi::class)
     fun recordOperatorApproval(ledger: Path, fence: ResumeFenceRecord,
                                anchor: ResumeFenceAnchorRecord,
                                operator: PreparedFenceReconciliation): ResumeReconciliationAudit {
@@ -317,7 +323,8 @@ internal object ResumeFenceAnchor {
      * No directory enumeration for unfenced legacy checkpoints. A prepared
      * generation one is still found by its exact filename and refused.
      */
-    fun verify(ledger: Path, head: ResumeFenceRecord?): ResumeFenceAnchorRecord? {
+    fun verify(ledger: Path, head: ResumeFenceRecord?,
+               fenceDirectory: Path): ResumeFenceAnchorRecord? {
         try {
             val count = head?.generation ?: 0L
             val first = ledger.toAbsolutePath().normalize().resolveSibling(name(ledger, 1L))
@@ -333,7 +340,8 @@ internal object ResumeFenceAnchor {
                 val record = read(directory.resolve(name(ledger, gen)))
                 if (record.generation != gen || record.previousSha256 != previous?.sha256)
                     fail("RESUME_FENCE_ANCHOR_MISMATCH")
-                verifyAuditIfPresent(ledger, record)
+                verifyAuditIfPresent(ledger, record,
+                    ResumeFenceStorage.atGeneration(fenceDirectory, gen))
                 previous = record
             }
             if (previous?.fenceSha256 != head?.sha256 ||
@@ -355,7 +363,7 @@ internal object ResumeFenceAnchor {
      * then inspects at most one prepared generation. Does not grant admission,
      * authenticate an operator, or publish/clean any files.
      */
-    fun recoveryStatus(ledger: Path, head: ResumeFenceRecord?,
+    fun recoveryStatus(ledger: Path, head: ResumeFenceRecord?, fenceDirectory: Path,
                        checkpointSha: String, policySha: String): ResumeReconciliationStatus? {
         try {
             val dir = parent(ledger)
@@ -365,7 +373,8 @@ internal object ResumeFenceAnchor {
                 val anchor = read(dir.resolve(name(ledger, gen)))
                 if (anchor.generation != gen || anchor.previousSha256 != previous?.sha256)
                     fail("RESUME_FENCE_ANCHOR_MISMATCH")
-                verifyAuditIfPresent(ledger, anchor)
+                verifyAuditIfPresent(ledger, anchor,
+                    ResumeFenceStorage.atGeneration(fenceDirectory, gen))
                 previous = anchor
             }
             if (previous?.fenceSha256 != head?.sha256)
@@ -419,7 +428,7 @@ internal object ResumeFenceAnchor {
 
     /** The only allowed repair: exactly one validated prepared head. */
     fun verifyPrepared(ledger: Path, head: ResumeFenceRecord?,
-                       proposed: ResumeFenceRecord): ResumeFenceAnchorRecord {
+                       proposed: ResumeFenceRecord, fenceDirectory: Path): ResumeFenceAnchorRecord {
         try {
             val directory = parent(ledger)
             val priorCount = head?.generation ?: 0L
@@ -431,7 +440,8 @@ internal object ResumeFenceAnchor {
                 val record = read(directory.resolve(name(ledger, gen)))
                 if (record.generation != gen || record.previousSha256 != previous?.sha256)
                     fail("RESUME_FENCE_RECONCILIATION_UNCONFIRMED")
-                verifyAuditIfPresent(ledger, record)
+                verifyAuditIfPresent(ledger, record,
+                    ResumeFenceStorage.atGeneration(fenceDirectory, gen))
                 previous = record
             }
             if (previous?.fenceSha256 != head?.sha256)
@@ -520,16 +530,16 @@ internal object ResumeFenceAnchor {
     }
 
     /** Read only the admitted anchor head for bounded callback guards. */
-    fun requireHead(ledger: Path, generation: Long, fenceSha: String, anchorSha: String) {
+    fun requireHead(ledger: Path, fence: ResumeFenceRecord, anchorSha: String) {
         try {
         val directory = parent(ledger)
-        val actual = read(directory.resolve(name(ledger, generation)))
-        if (actual.generation != generation || actual.fenceSha256 != fenceSha ||
+        val actual = read(directory.resolve(name(ledger, fence.generation)))
+        if (actual.generation != fence.generation || actual.fenceSha256 != fence.sha256 ||
             actual.sha256 != anchorSha ||
-            Files.exists(directory.resolve(name(ledger, generation + 1L)),
+            Files.exists(directory.resolve(name(ledger, fence.generation + 1L)),
                 LinkOption.NOFOLLOW_LINKS))
             fail("RESUME_FENCE_STALE_WRITER")
-        verifyAuditIfPresent(ledger, actual)
+        verifyAuditIfPresent(ledger, actual, fence)
         } catch (e: SessionResumeUnconfirmed) {
             throw e
         } catch (e: Exception) {
