@@ -326,11 +326,13 @@ The Linux integration tier tests these failure boundaries offline:
 - Two ledger stores sharing a parent: each admission removes only its own
   SHA-256-scoped probes and leaves foreign probe files untouched
 - Ledger inode replacement both before inspection and after anchor publication
-- Corrupt or semantically mismatched audits with valid checksums, including
-  committed audit checkpoint/policy mismatches against their own fence, plus audit
-  and anchor tampering in generation 1 when generation 2 is committed;
-  operator recovery keeps the originating anchor mismatch as a typed cause
+- Corrupt or semantically mismatched audits with valid checksums, and audit
   records beyond the current fence head
+- Historical two-generation regression: checksum-valid checkpoint/policy drift
+  in the first audit, plus a self-consistent forged chain of both anchors and
+  the first audit that differs from the published first-generation fence
+- Operator recovery rejects historical anchor/fence divergence with a typed
+  reconciliation error and retains the original anchor mismatch as its cause
 
 These tests run offline. They verify cooperating-process behavior, not
 protection from a malicious same-UID filesystem owner.
