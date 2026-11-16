@@ -366,6 +366,7 @@ object SessionResumeAdmission {
                 verified.snapshot.binding.policySha256)
         }
 
+    @OptIn(ResumeOperatorOnlyApi::class)
     fun admit(directory: Path, context: CheckpointHostContext, ledgerPath: Path,
               attestation: ResumeHostAttestation): SessionResumeLease =
         admitChecked(directory, context, ledgerPath, attestation, null) { }
