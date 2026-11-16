@@ -156,6 +156,9 @@ the observed current generation as its CAS precondition.
 Typed `SessionResumeUnconfirmed` codes distinguish live lease, invalid
 authority, uncertain external effects, unsupported safe boundary, forced CAS
 failure, changed context, stale writer and corrupt/unsupported fence versions.
+On the operator repair path, a mismatch between an existing anchor and
+its published fence is reported as `RESUME_FENCE_RECONCILIATION_UNCONFIRMED`
+with the original `RESUME_FENCE_ANCHOR_MISMATCH` retained as its cause.
 Existing `CheckpointUnconfirmed` codes still report baseline/policy, journal,
 snapshot and path failures. Neither class is a successful resume token.
 
@@ -325,6 +328,8 @@ The Linux integration tier tests these failure boundaries offline:
 - Ledger inode replacement both before inspection and after anchor publication
 - Corrupt or semantically mismatched audits with valid checksums, including
   committed audit checkpoint/policy mismatches against their own fence, plus audit
+  and anchor tampering in generation 1 when generation 2 is committed;
+  operator recovery keeps the originating anchor mismatch as a typed cause
   records beyond the current fence head
 
 These tests run offline. They verify cooperating-process behavior, not
