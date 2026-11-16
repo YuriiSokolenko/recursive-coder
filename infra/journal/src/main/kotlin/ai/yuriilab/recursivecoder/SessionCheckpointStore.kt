@@ -658,7 +658,8 @@ object SessionCheckpointStore {
              effectiveUid: () -> Long?): VerifiedSessionCheckpoint =
         persist(directory, context, snapshot, expectedPreviousSha256, {}, effectiveUid) {
             ResumeFenceAnchor.verify(ledgerPath,
-                ResumeFenceStorage.latest(directory.toAbsolutePath().normalize()))
+                ResumeFenceStorage.latest(directory.toAbsolutePath().normalize()),
+                directory.toAbsolutePath().normalize())
             inspectLedger(ledgerPath, context.workspaceRoot)
         }
 
@@ -672,7 +673,8 @@ object SessionCheckpointStore {
         persist(directory, context, snapshot, expectedPreviousSha256, afterPhase,
             LinuxCheckpointOwner::effectiveUid) {
             ResumeFenceAnchor.verify(ledgerPath,
-                ResumeFenceStorage.latest(directory.toAbsolutePath().normalize()))
+                ResumeFenceStorage.latest(directory.toAbsolutePath().normalize()),
+                directory.toAbsolutePath().normalize())
             inspectLedger(ledgerPath, context.workspaceRoot)
         }
 
@@ -697,7 +699,8 @@ object SessionCheckpointStore {
                 persist(directory, context, snapshot, expectedPreviousSha256, {},
                     effectiveUid) {
                     ResumeFenceAnchor.verify(ledger.checkpointStoragePath,
-                        ResumeFenceStorage.latest(directory.toAbsolutePath().normalize()))
+                        ResumeFenceStorage.latest(directory.toAbsolutePath().normalize()),
+                        directory.toAbsolutePath().normalize())
                     anchor
                 }
             }
@@ -847,7 +850,7 @@ object SessionCheckpointStore {
         return withLease(dir, create = false) {
             val latest = readAll(dir).lastOrNull() ?: refuse("CHECKPOINT_MISSING")
             verify(latest.snapshot, context, inspectLedger(ledgerPath, context.workspaceRoot))
-            try { ResumeFenceAnchor.verify(ledgerPath, ResumeFenceStorage.latest(dir)) }
+            try { ResumeFenceAnchor.verify(ledgerPath, ResumeFenceStorage.latest(dir), dir) }
             catch (e: SessionResumeUnconfirmed) {
                 throw CheckpointUnconfirmed("CHECKPOINT_RESUME_ANCHOR_UNCONFIRMED", e)
             }
