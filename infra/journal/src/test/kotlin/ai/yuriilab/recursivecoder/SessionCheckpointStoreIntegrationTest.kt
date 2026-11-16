@@ -16,6 +16,7 @@ import org.junit.jupiter.api.io.TempDir
 import kotlin.test.*
 
 @Tag("integration")
+@OptIn(ResumeOperatorOnlyApi::class)
 class SessionCheckpointStoreIntegrationTest {
     @TempDir lateinit var temp: Path
 
@@ -1330,6 +1331,48 @@ class SessionCheckpointStoreIntegrationTest {
             assertFailsWith<SessionResumeUnconfirmed> {
                 SessionResumeAdmission.currentGeneration(store(), context(), ledger())
             }.code)
+    }
+
+    @Test fun committedAuditMustMatchItsPublishedFenceCheckpointAndPolicy() {
+        createPreExecutionCheckpoint()
+        assertEquals("RESUME_ADMISSION_UNCONFIRMED",
+            assertFailsWith<SessionResumeUnconfirmed> {
+                SessionResumeAdmission.admitWithFault(store(), context(), ledger(),
+                    resumeAttestation()) { throw IllegalStateException("crash after anchor") }
+            }.code)
+        val prepared = ledger().resolveSibling("events.ledger.resume-anchor-000000000001.rca")
+        val fenceSha = Files.readString(prepared).split("\n")[2]
+        val lease = SessionResumeAdmission.reconcilePreparedAdmission(
+            store(), context(), ledger(), resumeAttestation(),
+            PreparedFenceReconciliation(1L, fenceSha, "operator-one", true))
+        val audit = ledger().resolveSibling("events.ledger.resume-audit-000000000001.rcaudit")
+        val original = Files.readString(audit)
+        try {
+            // A self-consistent checksum must not permit a false checkpoint/policy claim.
+            for (field in listOf(4, 5)) {
+                val fields = original.split("\n")
+                val header = fields.take(9).toMutableList().also {
+                    it[field] = if (it[field] == "0".repeat(64)) "1".repeat(64)
+                        else "0".repeat(64)
+                }.joinToString("\n", postfix = "\n")
+                val checksum = SessionCheckpointCodec.sha256(
+                    header.toByteArray(StandardCharsets.UTF_8))
+                Files.writeString(audit, header + checksum + "\n")
+                assertEquals("RESUME_FENCE_AUDIT_UNCONFIRMED",
+                    assertFailsWith<SessionResumeUnconfirmed> {
+                        SessionResumeAdmission.currentGeneration(store(), context(), ledger())
+                    }.code)
+                assertEquals("RESUME_FENCE_AUDIT_UNCONFIRMED",
+                    assertFailsWith<SessionResumeUnconfirmed> { lease.assertCurrent() }.code)
+                assertEquals("CHECKPOINT_RESUME_ANCHOR_UNCONFIRMED",
+                    assertFailsWith<CheckpointUnconfirmed> { inspect() }.code)
+                Files.writeString(audit, original)
+                lease.assertCurrent()
+            }
+        } finally {
+            Files.writeString(audit, original)
+            lease.close()
+        }
     }
 
     @Test fun unanchoredAuditPastHeadIsRejectedAtZeroAndOne() {
