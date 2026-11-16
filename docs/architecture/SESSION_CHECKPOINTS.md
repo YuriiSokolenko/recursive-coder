@@ -1,10 +1,11 @@
 # Host-owned atomic session checkpoints (issue #103)
 
-This is a metadata-only, opt-in persistence adapter in :infra:journal. It is **not**
-a mechanism for resuming execution. A verified snapshot cannot authorize a model
-request, tool invocation, write, retry or replay. Fenced resume and reconciliation
-remain separate work (#104–#105). The default CLI and Session Protocol v1 do not
-consume or produce these files.
+This is a metadata-only, opt-in persistence adapter in :infra:journal.
+A verified snapshot alone cannot authorize a model request, tool invocation,
+write, retry or replay. Issue #104 adds a separate pre-execution,
+generation-fenced admission API (see [FENCED_RESUME.md](FENCED_RESUME.md)),
+but automatic restart and external-effect reconciliation remain out of scope
+(#105). The default CLI and Session Protocol v1 do not consume these files.
 
 ## Trusted inputs and snapshot format
 
@@ -104,7 +105,10 @@ be detected only if it crosses the independently persisted snapshot anchor.
 
 VerifiedSessionCheckpoint.reconciliationRequired reports unknown usage or
 unconfirmed/pending side effects, even though inspecting those records is
-permitted. resumeAllowed is always false; requireResumeAdmission always denies.
+permitted. resumeAllowed is always false; the legacy requireResumeAdmission
+still denies. The separate SessionResumeAdmission API from #104 acquires an
+OS lease and increments an immutable fence only for a verified pre-execution
+boundary. Once fenced, checkpoint publication requires the current lease, with a [separately anchored fence head](FENCED_RESUME.md) beside the ledger. Legacy checkpoint API refusals retain the typed `CheckpointUnconfirmed` contract.
 An unconfirmed ledger tail or an unacknowledged tool result is **not** promoted
 to accepted history. These APIs are not wired into a production resume command.
 
