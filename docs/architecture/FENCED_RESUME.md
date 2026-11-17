@@ -67,6 +67,14 @@ side effects. Any later state or uncertain effect returns
 there is no opportunistic retry or optimistic tool replay. Prior bytes,
 including "known" usage, are not independent usage/accounting receipts.
 
+**Compatibility with merged #113:** `saveFenced` is now narrower: unlike
+the original #113 path-based fenced writer, it refuses a snapshot outside
+the safe pre-execution phase/history policy and refuses any journal prefix
+not already covered by the previous checkpoint (`CHECKPOINT_FENCED_LEDGER_ADVANCED`).
+Applications using #113's broader call shape must switch to the current
+open-writer `saveFromOpenLedgerFenced` protocol or remain stopped; merely
+holding a lease is not authority to confirm additional ledger bytes.
+
 ## Lock order, generations and publication
 
 1. Acquire `resume.lock` exclusively, reserving its canonical path in the
@@ -119,7 +127,10 @@ including "known" usage, are not independent usage/accounting receipts.
    checkpoint operations check only the exact first anchor filename without
    scanning the ledger directory; anchored reads verify bounded exact
    generation filenames, ignoring unrelated sibling files.
-   There are at most 256 generations per store.
+   There are at most 256 generations per store: first admission is
+generation 1 and each subsequent complete reopen/checkpoint cycle requires
+a fresh generation, allowing at most **255** further admissions/reopens.
+Generation 257 refuses `RESUME_FENCE_LIMIT`; there is no automatic rotation.
 4. Release the short checkpoint lock after admission, **not** the long
    `resume.lock`. During execution, only `SessionCheckpointStore.saveFenced`
    or `saveFromOpenLedgerFenced` can publish checkpoints. They validate the
@@ -147,8 +158,22 @@ any channel to the same file is closed; the lease is the only channel owner.
 The locking order for admission is resume.lock -> checkpoint.lock ->
 closed-ledger inspect (its independent tryLock). The live-ledger checkpoint
 path uses its existing writer monitor -> checkpoint.lock; it never takes
-resume.lock. Admission never blocks waiting for an active ledger writer.
-The checkpoint lock is **not** held over model requests, long tool runs,
+resume.lock. Reopen takes the **ledger OS lock**, then re-enters the
+**lease monitor** via `assertCurrent`/`requireLedgerPath`, and finally
+takes a short `checkpoint.lock` to verify the latest head; the full
+save path has lease monitor → writer monitor → checkpoint lock.
+No claim of globally consistent lock order is made: correctness currently
+also relies on nonblocking file-lock acquisition. Admission never blocks
+waiting for an active ledger writer.
+All OS file-lock acquisitions in the current implementation are
+**non-blocking `tryLock`**, so contention yields a fail-closed
+`*_LEASE_HELD` refusal rather than an OS-lock deadlock. Reopen
+reports transient checkpoint lock contention as `LEDGER_REOPEN_BUSY`
+(cause `CHECKPOINT_LEASE_HELD`), not an evidence mismatch. A subsequent
+retry may succeed after the competing short operation finishes. Any future
+change to blocking `lock()` must re-audit monitor ordering; the only
+nested monitor order is lease → writer. The checkpoint lock is **not**
+held over model requests, long tool runs,
 or future host filesystem operations. Within the checkpoint lock, bounded
 verification/serialization and fsync still have no real-time latency guarantee.
 
@@ -175,10 +200,122 @@ with the original `RESUME_FENCE_ANCHOR_MISMATCH` retained as its cause.
 Existing `CheckpointUnconfirmed` codes still report baseline/policy, journal,
 snapshot and path failures. Neither class is a successful resume token.
 
-The existing ledger is CREATE_NEW-only and cannot reopen its closed file for
-append. `saveFromOpenLedgerFenced` currently guards the call but does not
-create a resumed ledger writer. End-to-end recovery requires an explicitly
-fenced ledger-reopen path and production runtime/receipt integrations.
+The opt-in `DurableSessionEventLedger.reopenForAppend(..., lease)` path (#114)
+can reopen an **exactly checkpoint-bound pre-execution ledger** only while
+a current generation lease is held. `appendFenced(event)` atomically wraps
+the append, local fsync and acknowledgement inside `lease.publishIfCurrent`.
+Plain `EventSink.append/flush` refuse for a reopened writer.
+`saveFromOpenLedgerFenced` is for an **already reopened, lease-bound
+writer only**. Passing an ordinary CREATE_NEW writer refuses with
+`CHECKPOINT_WRITER_NOT_FENCED` (cause `LEDGER_NOT_FENCED`);
+use `saveFromOpenLedger` on the ordinary unqualified path, subject to
+the normal resume-fence admission rules.
+
+**No current production `SessionRuntime` journal is admissible under
+#114.** Its workspace admission produces `tool.started` /
+`tool.completed` audit events and `llm.capabilities` **before**
+`created → accepted`; the shared policy deliberately rejects these types.
+The #114 two-generation continuation tests use host-controlled synthetic
+metadata. Production integration needs a separately authorized host-side
+pre-execution producer and durable `accepted` checkpoint handoff in #104,
+or a separately reviewed policy change under #105. Do not attach this
+writer directly to the existing runtime event stream.
+
+The older path-based `saveFenced` now enforces the **same**
+`PreExecutionSnapshotPolicy.safe` and verified phase-history rules.
+It may publish a new checkpoint generation only when the ledger's exact
+sequence, head SHA, full-file SHA and offset are **already covered by the
+previous persisted checkpoint**. It must reject an uncovered tail with
+`CHECKPOINT_FENCED_LEDGER_ADVANCED` and an inadmissible snapshot with
+`CHECKPOINT_RESUME_UNSAFE_BOUNDARY`, before any generation is published.
+`saveFenced` is **not** an escape hatch for a failed
+`LEDGER_REOPEN_CHECKPOINT_REQUIRED` close: even a checksum-valid tail
+may lack confirmed fsync acknowledgement. That state requires explicit
+operator reconciliation outside the automatic #114 API (or a new session).
+Only `saveFromOpenLedgerFenced` while the same writer remains open can
+confirm and cover freshly acknowledged fenced appends.
+`PreExecutionPhasePolicy` is shared with the admission gate: the only
+new phase transition is `created → accepted`, with exact `from` continuity;
+`checkpoint.saved` may not carry a transition. No model/tool execution
+or terminal phase can be emitted through this path. Compared with the
+merged #113 admission gate, **every** historical
+`session.transition` must have a valid explicit `created → accepted`
+edge, and `accepted` must be justified by that edge. The current
+recursive child-reservation and preparation-stage emitters produce
+`session.transition` **without** a phase edge; these are refused.
+A `checkpoint.saved` event is not itself evidence that the checkpoint
+was actually published. Before a fenced checkpoint save, the host must
+supply a snapshot whose phase and full pre-execution shape match the
+verified ledger history and writer's committed phase. A stale
+`created` snapshot after the `created → accepted` event is denied
+**before persistence**, leaving the writer's checkpoint obligation intact.
+
+**The host must publish a matching `saveFromOpenLedgerFenced` checkpoint
+while writer and lease are open, close the writer, then retire the lease.**
+A reopened writer refuses an admitted prefix already over **4 MiB**, or
+any additional fenced frame that would cross that same live-checkpoint
+limit, with `LEDGER_REOPEN_CHECKPOINT_CAPACITY` before writing bytes.
+Normal CREATE_NEW writers retain their separate 32 MiB bound.
+Closing the writer after retiring its lease violates the host contract;
+the writer's `close()` avoids consulting the lease to prevent monitor
+inversion. If writer closure is already revoked or uncertain, its
+original failure remains primary; an outstanding
+`LEDGER_REOPEN_CHECKPOINT_REQUIRED` (or
+`LEDGER_REOPEN_CHECKPOINT_UNCONFIRMED` following an ambiguous publication)
+is retained as a suppressed cause. Following a successfully acknowledged
+fenced append, only
+a **successfully persisted and verified** `saveFromOpenLedgerFenced`
+clears the checkpoint-required state; reading an anchor or a failed
+save never does. If the host closes without the matching checkpoint,
+`close()` releases locks but immediately throws
+`LEDGER_REOPEN_CHECKPOINT_REQUIRED`, while leaving durable bytes
+untouched. An attempted fenced save that throws
+`CHECKPOINT_WRITE_UNCONFIRMED` (for example, after atomic rename but
+before confirmed directory fsync) instead latches an **unknown checkpoint
+publication** state. On close, the writer reports
+`LEDGER_REOPEN_CHECKPOINT_UNCONFIRMED`, not the definitely uncovered
+`LEDGER_REOPEN_CHECKPOINT_REQUIRED`. A readback might find C2 already
+present or still absent; neither outcome independently proves publication
+durability or authorizes retry. Keep the original exception, stop automated
+publication, and have a trusted operator inspect the checkpoint chain,
+fence head, exact journal digest/sequence/offset and durable generation
+before deciding on manual reconciliation or a new session. The live
+writer never clears this flag through read-only inspection. The stale C1
+expected hash must not be retried. Future admission with an uncovered tail
+refuses `CHECKPOINT_JOURNAL_MISMATCH`; a published C2 with the old
+generation lease also demands fresh admission. There is no implicit
+truncation/replay. A successful checkpoint advances
+the latest checkpoint SHA, so a **second reopen with the same lease**
+refuses; a new admission and generation CAS is required. A complete
+supported cycle is generation 1 admission → fenced append with
+`created → accepted` → checkpoint C2 in phase `accepted` → clean
+writer/lease close → generation 2 admission from C2 → another permitted
+pre-execution append → checkpoint C3. It is pinned by an integration test.
+
+**Required trusted-host sequence (not an atomic two-file transaction):**
+obtain admission/lease; reopen the writer; append only authorized
+pre-execution metadata with `appendFenced`; **immediately** publish
+a matching generation through `saveFromOpenLedgerFenced` while writer
+and lease remain open; close the writer; retire the lease. If the process
+dies between acknowledged append and checkpoint publication, a durable
+tail survives without checkpoint coverage. The next admission refuses
+`CHECKPOINT_JOURNAL_MISMATCH`, and the host must halt for explicit
+operator reconciliation (or create a new session). No method in #114
+makes the two physical publications crash-atomic; do not assume recovery
+is available merely because `appendFenced` returned successfully.
+The current operator-reconciliation requirement is intentional rather than
+a claim that policy-valid metadata-only tail adoption can never be designed.
+It remains out of #114 until [#117](https://github.com/YuriiSokolenko/recursive-coder/issues/117)
+proves a safe, generation-fenced adoption protocol. Integrity of the tail
+does not itself attest its fsync acknowledgement or absence of external effects.
+Each local `FileChannel.force(true)` executes while the resume lease
+monitor is held. This has **no guaranteed latency bound**: a slow disk
+can delay `lease.close()`, competing fenced publications and shutdown.
+Host shutdown must not rely on a short deadline or attempt to retire the
+lease while an in-flight fenced fsync is still completing. This feature
+still does **not** enable arbitrary model/tool execution, general
+crash-resume or runtime/receipt publication without the remaining
+production gates.
 
 Legacy `inspect`/save paths adapt fence storage errors to the existing
 `CheckpointUnconfirmed` contract. A live stale callback remains a typed
@@ -271,8 +408,9 @@ outside the threat model.
    archive the old store/ledger/anchors and start a **new session with a fresh
    store** after manual reconciliation. Do not modify or delete the existing
    operator record. Completing this prepare is not
-   full production crash-resume: the existing ledger still cannot safely
-   reopen for append and existing runtime receipts are not generation-fenced.
+   full production crash-resume: #114 offers only fenced **pre-execution**
+   event continuation, while existing runtime receipts and model/tool
+   execution remain outside the generation fence.
 
 The operator ID and `operatorApproved` are **host-supplied assertions, not
 user authentication, proof of a human decision, or independently verified
@@ -280,7 +418,9 @@ authorization**. The host must authenticate and authorize the operator
 before constructing `PreparedFenceReconciliation`. The immutable audit is
 checksum-validated and durable but is not tamper-proof against the trusted
 same-UID filesystem owner, who can delete files. It is stored outside the
-closed ledger because that ledger has no safe append/reopen API. Published
+closed ledger because audit publication must precede the missing fence,
+not depend on reopening the ledger. The restricted #114 append path does
+not modify this operator-audit ordering. Published
 audit, anchor and fence filenames are created through atomic no-replace hard
 links, not `exists` plus `ATOMIC_MOVE`; missing/deleted audit evidence is
 still not independently detectable. An unknown, missing or conflicting audit

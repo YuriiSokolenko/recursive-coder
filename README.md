@@ -2,7 +2,7 @@
 
 **Recursive Coder** is an in-development, standalone open-source software engineering agent built with **Kotlin/JVM**. **JetBrains Koog** is integrated as an opt-in, fake-model-only single-role adapter; recursive production orchestration remains planned.
 
-> **Implementation snapshot (2026-11-13, PR #90 / issue #79):** The CLI has native task scheduling, a read-only session engine, FakeModel, an optional strict OpenAI-compatible Model Gateway and a trusted workspace. A Linux-only trusted write/check runtime has an **opt-in host-controlled stage port (#74)**, but remains disabled for CLI sessions and Koog. A minimal isolated Koog stage runner is implemented in `:agent:runtime` but is **not selected by CLI sessions**. An **in-process, five-role workflow coordinator** and bounded recursive child-result integration are implemented separately; they are **not wired into the installed CLI**. A host-only Linux Git baseline reconciliation helper is implemented in draft PR #91, but **authenticated production stage-to-stage integration is not implemented**. Recursive five-role CLI execution and crash-resume remain separate milestones. The opt-in event ledger and checkpoints (#102–#103), plus [opt-in pre-execution fence admission](docs/architecture/FENCED_RESUME.md) (#104, Draft PR #113), provide verified persistence and a narrow lease, **not** runnable CLI resume.
+> **Implementation snapshot (2026-11-16, issue #79; PR #115 in review):** The CLI has native task scheduling, a read-only session engine, FakeModel, an optional strict OpenAI-compatible Model Gateway and a trusted workspace. A Linux-only trusted write/check runtime has an **opt-in host-controlled stage port (#74)**, but remains disabled for CLI sessions and Koog. A minimal isolated Koog stage runner is implemented in `:agent:runtime` but is **not selected by CLI sessions**. An **in-process, five-role workflow coordinator** and bounded recursive child-result integration are implemented separately; they are **not wired into the installed CLI**. A host-only Linux Git baseline reconciliation helper is implemented in draft PR #91, but **authenticated production stage-to-stage integration is not implemented**. Recursive five-role CLI execution and crash-resume remain separate milestones. The opt-in event ledger and checkpoints (#102–#103), the merged [pre-execution fence admission](docs/architecture/FENCED_RESUME.md) (#104, PR #113), and the proposed [fenced closed-ledger reopen-for-append](docs/architecture/DURABLE_EVENT_LEDGER.md) (issue #114, Draft PR #115) provide verified persistence and a narrow host-held lease for checkpoint-bound **pre-execution metadata only**, **not** runnable CLI or model/tool resume.
 
 ## What we are building
 
@@ -58,6 +58,9 @@ With Gradle 9.8.1 and JDK 21 installed:
 - [Host-approved SDD, ATDD and TDD preparation stages (#75)](docs/architecture/PREPARATION_STAGES.md)
 - [Host-fenced Developer stage and verification (#76)](docs/architecture/DEVELOPER_STAGE.md)
 - [Gradle modules and dependency rules](docs/architecture/MODULES.md)
+- [Durable event ledger and fenced pre-execution reopen (#102 / #114)](docs/architecture/DURABLE_EVENT_LEDGER.md)
+- [Host-owned atomic session checkpoints (#103)](docs/architecture/SESSION_CHECKPOINTS.md)
+- [Fenced admission and recovery boundaries (#104)](docs/architecture/FENCED_RESUME.md)
 - [First executable CLI session](docs/architecture/FIRST_SESSION.md)
 - [Native Task Manager and local scheduling](docs/architecture/TASK_MANAGER.md)
 - [Workspace security and read-only tools](docs/architecture/WORKSPACE.md)
