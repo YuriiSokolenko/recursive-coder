@@ -17,13 +17,29 @@ private object Stage75PathValues {
 
 /** Deterministic stateful host and fake role/tool adapters; no live model or disk access. */
 @Tag("integration")
+@PreparationHostConformance("ai.yuriilab.recursivecoder.RunPreparationStageIntegrationTest\$FakeHost")
 class RunPreparationStageIntegrationTest : PreparationStageHostContract() {
-    override fun fixtureForHostContract(): PreparationHostFixture {
+    override fun createHostFixture(): PreparationHostFixture {
         val graph = initial()
         val host = FakeHost().apply { this.graph = graph }
-        return PreparationHostFixture(host, graph, ids.getValue(StageKind.SDD)) {
-            host.decision = it
+        val path = "specs/host-contract-read.md"
+        val expected = byteArrayOf(0, 1, -1, 42)
+        val read = PreparationReadFixture(path, expected) { state ->
+            if (state == PreparationReadState.ABSENT) {
+                host.files.remove(path)
+                assertFalse(path in host.files)
+            } else {
+                host.files[path] = expected.copyOf()
+                assertContentEquals(expected, host.files.getValue(path))
+            }
+            host.unavailableReadPath = if (state == PreparationReadState.UNAVAILABLE) path else null
+            host.cancelledReadPath = if (state == PreparationReadState.HOST_CANCELLED) path else null
         }
+        return PreparationHostFixture(host, graph, ids.getValue(StageKind.SDD), read,
+            prepareOutput = { lease, output, content ->
+                host.files[output] = bytes(content)
+                fakePreparationEvidence(lease)
+            }, setApproval = { host.decision = it })
     }
 
     private val graphId = GraphId("prep-75")
