@@ -194,6 +194,8 @@ writes and sandbox check receipts for acceptance, not fake evidence.
    depend on `testFixtures(project(":core:contracts"))`.
 2. Extend `PreparationStageHostContract`, tag it `integration` and add
    `@PreparationHostConformance("fully.qualified.BinaryAdapterName")`.
+   The existing Linux host explicitly registers `pending = REFUSED`;
+   the gate rejects that profile for all other adapters.
    Implement `createHostFixture` with fresh authoritative graph/store, real
    adapter-controlled read setup, fault injection, approval and output/check
    evidence. Each inherited test checks the actual runtime host class against

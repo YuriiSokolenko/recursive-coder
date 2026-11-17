@@ -18,7 +18,12 @@ import kotlin.test.assertTrue
 /** Binary JVM class name of the exact concrete host exercised by this suite. */
 @Target(AnnotationTarget.CLASS)
 @Retention(AnnotationRetention.RUNTIME)
-annotation class PreparationHostConformance(val adapter: String)
+annotation class PreparationHostConformance(
+    val adapter: String,
+    val pending: PreparationPendingProfile = PreparationPendingProfile.FULL
+)
+
+enum class PreparationPendingProfile { FULL, REFUSED }
 
 enum class PreparationReadState { PRESENT, ABSENT, UNAVAILABLE, HOST_CANCELLED }
 
@@ -69,10 +74,14 @@ abstract class PreparationStageHostContract {
         return fixture
     }
 
-    // Existing in-process Linux host explicitly refuses pending continuation.
-    // No new adapter (including a durable one) can opt out of the full contract.
-    private fun supportsPending(f: PreparationHostFixture) =
-        f.host.javaClass.name != "ai.yuriilab.recursivecoder.LinuxFiveRoleWorkflowHost"
+    // CI validates that only the existing volatile Linux adapter can
+    // register REFUSED; every other adapter must execute the full round trip.
+    private fun supportsPending(f: PreparationHostFixture): Boolean {
+        val registration = assertNotNull(javaClass.getDeclaredAnnotation(
+            PreparationHostConformance::class.java))
+        assertEquals(registration.adapter, f.host.javaClass.name)
+        return registration.pending == PreparationPendingProfile.FULL
+    }
 
     @Test fun readReturnsExactPresentBytes() {
         val f = fixtureForHostContract()

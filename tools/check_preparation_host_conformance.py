@@ -12,6 +12,8 @@ PACKAGE = "ai/yuriilab/recursivecoder/"
 HOST = PACKAGE + "PreparationStageHost"
 CONTRACT = PACKAGE + "PreparationStageHostContract"
 REGISTRATION = PACKAGE + "PreparationHostConformance"
+PENDING_PROFILE = "L" + PACKAGE + "PreparationPendingProfile;"
+REFUSED_ADAPTER = PACKAGE + "LinuxFiveRoleWorkflowHost"
 TEST = "org/junit/jupiter/api/Test"
 REQUIRED_SUITES = {
     PACKAGE + "RunPreparationStageIntegrationTest":
@@ -87,6 +89,11 @@ def validate(class_dirs, report_dirs, required_suites=REQUIRED_SUITES):
             continue
         if suite in required_suites and required_suites[suite] != adapter:
             problems.append(f"{suite}: expected adapter {required_suites[suite]}, got {adapter}")
+        profile = annotations[0].values.get("pending", (PENDING_PROFILE, "FULL"))
+        expected_profile = "REFUSED" if adapter == REFUSED_ADAPTER else "FULL"
+        if profile != (PENDING_PROFILE, expected_profile):
+            problems.append(f"{suite}: invalid pending conformance profile {profile}; "
+                            f"expected {expected_profile}")
         registered[adapter].append(suite)
         # Do not permit an intermediate class to shadow a shared test method.
         for ancestor in ancestors(info, classes):
@@ -100,7 +107,8 @@ def validate(class_dirs, report_dirs, required_suites=REQUIRED_SUITES):
                         case.find(tag) is not None for case in matched
                         for tag in ("skipped", "failure", "error")):
                     problems.append(f"{module}:{tier}: {suite}#{method} "
-                                    "must execute and pass exactly once (no skips)")
+                                    "must execute and pass exactly once (no skips); "
+                                    "ensure the suite is tagged integration")
 
     for adapter in sorted(adapters):
         if not registered[adapter]:

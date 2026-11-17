@@ -134,6 +134,8 @@ class RunDeveloperStageIntegrationTest : PreparationStageHostContract() {
             files[source] = bytes(oldSource)
         }
         var contractReadFailure: Pair<String, Exception>? = null
+        var readFailureOnApprovalPath: String? = null
+        var approvals = 0
         @Synchronized override fun readBytes(path: String): ByteArray? {
             contractReadFailure?.let { (failedPath, failure) ->
                 if (failedPath == path) throw failure
@@ -230,7 +232,11 @@ class RunDeveloperStageIntegrationTest : PreparationStageHostContract() {
             candidate: StageArtifactManifest, evidence: StageValidationEvidence,
             usage: StageRoleUsage
         ): PreparationApproval {
+            approvals++
             approval = candidate to decision
+            readFailureOnApprovalPath?.let {
+                contractReadFailure = it to java.io.IOException("post-approval read unavailable")
+            }
             mutateOnApproval?.let { files[it] = bytes("tampered after validation") }
             return decision
         }
@@ -459,6 +465,31 @@ class RunDeveloperStageIntegrationTest : PreparationStageHostContract() {
             assertEquals(artifactIds.values.toSet(), host.accepted)
             assertEquals(1, tools.closeCount)
             assertFalse(ArtifactId("implementation-76") in host.accepted)
+        }
+    }
+
+    @Test fun unavailableVerificationBytesFailClosedBeforeAndAfterApproval() = runBlocking {
+        for (afterApproval in listOf(false, true)) {
+            for (path in listOf(source, manifestPath, paths.getValue(StageKind.TDD))) {
+                val host = FakeHost()
+                val tools = FakeTools(host)
+                if (afterApproval) {
+                    host.readFailureOnApprovalPath = path
+                } else {
+                    tools.cancelOnCheck = {
+                        host.contractReadFailure = path to java.io.IOException("read unavailable")
+                    }
+                }
+                val result = execute(host, FakeModel(), tools)
+                assertEquals(DeveloperStageOutcome.Failed("FROZEN_INPUT_OR_OUTPUT_CHANGED", true),
+                    result.outcome, "$path afterApproval=$afterApproval")
+                assertEquals(if (afterApproval) 1 else 0, host.approvals)
+                assertEquals(StageState.FAILED, host.graph.stages.last().state)
+                assertEquals(artifactIds.values.toSet(), host.accepted)
+                assertNull(host.active)
+                assertEquals(1, tools.closeCount)
+                assertNotNull(host.files[path], "The bytes were present, not missing")
+            }
         }
     }
 

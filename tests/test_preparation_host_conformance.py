@@ -107,6 +107,29 @@ class PreparationConformanceGateTest(unittest.TestCase):
         self.assertTrue(any(":test:" in p and "#read" in p for p in problems))
         self.assertTrue(any(":integrationTest:" in p and "#transaction" in p for p in problems))
 
+    def test_cross_module_adapter_registration_is_rejected(self):
+        outputs = [(("foreign" if kind == "test" else module), kind, path)
+                   for module, kind, path in self.outputs]
+        self.assertTrue(any("invalid or nonlocal adapter" in p
+                            for p in validate(outputs, self.reports, required_suites={})))
+
+    def test_required_suite_must_register_expected_adapter(self):
+        problems = validate(self.outputs, self.reports,
+                            required_suites={PACKAGE + "Suite": PACKAGE + "Other"})
+        self.assertTrue(any("expected adapter" in p for p in problems))
+
+    def test_malformed_adapter_registration_is_rejected(self):
+        source = self.root / "source" / "Suite.java"
+        package = PACKAGE.replace("/", ".").rstrip(".")
+        source.write_text(f"package {package}; "
+                          '@PreparationHostConformance(adapter="not/a/host") '
+                          "public class Suite extends PreparationStageHostContract {}",
+                          encoding="utf-8")
+        subprocess.run(["javac", "-cp", str(self.root / "compiled"), "-d",
+                        str(self.test), str(source)],
+                       check=True, capture_output=True, text=True)
+        self.assertTrue(any("invalid or nonlocal adapter" in p for p in self.problems()))
+
     def test_missing_registration_is_rejected(self):
         # Recompile a real concrete subclass without the registration.
         source = self.root / "source" / "Suite.java"

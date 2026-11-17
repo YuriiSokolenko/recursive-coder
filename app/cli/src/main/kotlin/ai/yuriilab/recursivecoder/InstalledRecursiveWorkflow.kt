@@ -66,6 +66,24 @@ internal object InstalledRecursiveEvidencePolicy {
 }
 
 /**
+ * Second receipt check deliberately maps unavailable bytes to a negative
+ * verification result, not a failed reconciliation transaction. The receipts
+ * must already have been authenticated by their respective hosts.
+ */
+internal fun installedParentEvidenceMatches(
+    kind: StageKind, target: FiveRoleArtifactTarget,
+    parent: LinuxFiveRoleWorkflowHost, child: LinuxFiveRoleWorkflowHost,
+    parentReceipt: AuthenticatedAcceptedStageReceipt,
+    childReceipt: AuthenticatedAcceptedStageReceipt,
+    integrated: StageArtifactManifest?
+): Boolean {
+    val childBytes = child.readBytesForVerification(target.path)
+    val parentBytes = parent.readBytesForVerification(target.path)
+    return InstalledRecursiveEvidencePolicy.mismatch(kind, target,
+        parentReceipt, childReceipt, integrated, parentBytes, childBytes) == null
+}
+
+/**
  * Pure origin projection and authenticated-parent identity precheck. A projected
  * grant is never sufficient to begin a trusted Linux child write; the production
  * host and recursive scheduler independently verify their current leases.
@@ -677,12 +695,10 @@ internal class InstalledRecursiveWorkflow(
             parentStage.correlation.stageRunId) ?: return false
         val childReceipt = origin.host.authenticatedAcceptedStage(
             origin.stageId) ?: return false
-        val childBytes = origin.host.readBytes(targets.getValue(kind).path)
-        val parentBytes = parent.readBytes(targets.getValue(kind).path)
         val integratedManifest = integrated?.integrated?.get(kind)
             ?.artifacts?.singleOrNull()?.manifest
-        return InstalledRecursiveEvidencePolicy.mismatch(kind, targets.getValue(kind),
-            parentReceipt, childReceipt, integratedManifest, parentBytes, childBytes) == null
+        return installedParentEvidenceMatches(kind, targets.getValue(kind),
+            parent, origin.host, parentReceipt, childReceipt, integratedManifest)
     }
 
     override fun snapshot(): PreparationStageSnapshot = parent.snapshot()
