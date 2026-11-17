@@ -28,9 +28,13 @@ class PreparationConformanceGateTest(unittest.TestCase):
             "Indirect": "public interface Indirect extends PreparationStageHost {}",
             "Base": "public abstract class Base implements Indirect {}",
             "Adapter": "public class Adapter extends Base {}",
+            "PreparationPendingProfile": "public enum PreparationPendingProfile { FULL, REFUSED }",
             "PreparationHostConformance": """
                 @java.lang.annotation.Retention(java.lang.annotation.RetentionPolicy.RUNTIME)
-                public @interface PreparationHostConformance { String adapter(); }
+                public @interface PreparationHostConformance {
+                    String adapter();
+                    PreparationPendingProfile pending() default PreparationPendingProfile.FULL;
+                }
             """,
             "PreparationStageHostContract": """
                 public abstract class PreparationStageHostContract {
@@ -57,7 +61,8 @@ class PreparationConformanceGateTest(unittest.TestCase):
                        check=True, capture_output=True, text=True)
         for name in sources:
             kind = self.test if name == "Suite" else (
-                self.fixture if name in ("PreparationHostConformance", "PreparationStageHostContract")
+                self.fixture if name in ("PreparationHostConformance", "PreparationStageHostContract",
+                                    "PreparationPendingProfile")
                 else self.main)
             dest = kind / PACKAGE / (name + ".class")
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -144,3 +149,41 @@ class PreparationConformanceGateTest(unittest.TestCase):
         self.assertTrue(any("missing exact adapter registration" in p for p in problems))
         self.assertTrue(any("Concrete production adapter without conformance suite" in p
                             for p in problems))
+
+    def test_refused_profile_cannot_be_registered_by_new_adapter(self):
+        source = self.root / "source" / "Suite.java"
+        package = PACKAGE.replace("/", ".").rstrip(".")
+        source.write_text(f"package {package}; "
+                          f'@PreparationHostConformance(adapter="{package}.Adapter", '
+                          "pending=PreparationPendingProfile.REFUSED) "
+                          "public class Suite extends PreparationStageHostContract {}",
+                          encoding="utf-8")
+        subprocess.run(["javac", "-cp", str(self.root / "compiled"), "-d",
+                        str(self.test), str(source)],
+                       check=True, capture_output=True, text=True)
+        self.assertTrue(any("invalid pending conformance profile" in p
+                            for p in self.problems()))
+
+    def test_intermediate_shadowed_shared_test_is_rejected(self):
+        package = PACKAGE.replace("/", ".").rstrip(".")
+        source = self.root / "source"
+        contract = source / "PreparationStageHostContract.java"
+        contract.write_text(contract.read_text().replace("public final void", "public void"),
+                            encoding="utf-8")
+        middle = source / "Middle.java"
+        middle.write_text(f"package {package}; "
+                          "public abstract class Middle extends PreparationStageHostContract {"
+                          " @Override public void read() {} }", encoding="utf-8")
+        suite = source / "Suite.java"
+        suite.write_text(f"package {package}; "
+                         f'@PreparationHostConformance(adapter="{package}.Adapter") '
+                         "public class Suite extends Middle {}", encoding="utf-8")
+        subprocess.run(["javac", "-cp", str(self.root / "compiled"), "-d",
+                        str(self.root / "compiled"), str(contract), str(middle), str(suite)],
+                       check=True, capture_output=True, text=True)
+        for name, destination in (("PreparationStageHostContract", self.fixture),
+                                  ("Middle", self.test), ("Suite", self.test)):
+            shutil.copyfile(self.root / "compiled" / PACKAGE / (name + ".class"),
+                            destination / PACKAGE / (name + ".class"))
+        self.assertTrue(any("shared contract method shadowed" in p
+                            for p in self.problems()))
