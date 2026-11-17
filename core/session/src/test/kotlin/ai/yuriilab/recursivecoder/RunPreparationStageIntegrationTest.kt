@@ -98,6 +98,7 @@ class RunPreparationStageIntegrationTest : PreparationStageHostContract() {
         var throwAfterFinish = false
         var beforeCurrent: (() -> Unit)? = null
         var beforeRead: (() -> Unit)? = null
+        var beforeReadPath: ((String) -> Unit)? = null
         var unavailableReadPath: String? = null
         var cancelledReadPath: String? = null
         var beforeApprove: (() -> Unit)? = null
@@ -121,8 +122,9 @@ class RunPreparationStageIntegrationTest : PreparationStageHostContract() {
         @Synchronized fun revoke() { leaseGeneration = null }
         override fun readBytes(path: String): ByteArray? {
             beforeRead?.invoke()
+            beforeReadPath?.invoke(path)
             if (path == cancelledReadPath)
-                throw kotlinx.coroutines.CancellationException("cancelled input read")
+                throw kotlinx.coroutines.CancellationException("host read cancelled")
             if (path == unavailableReadPath) throw java.io.IOException("temporary host read failure")
             return files[path]?.clone()
         }
@@ -675,6 +677,9 @@ class RunPreparationStageIntegrationTest : PreparationStageHostContract() {
         assertTrue(events.isEmpty())
         assertEquals(files.keys, host.files.keys)
         files.forEach { (path, bytes) -> assertContentEquals(bytes, host.files[path]) }
+        host.unavailableReadPath = null
+        assertIs<PreparationStageOutcome.Accepted>(
+            run(host, roles, tools, graph, StageKind.ATDD).outcome)
     }
 
     @Test fun frozenInputReadFailureBeforeOrAfterApprovalNeverAcceptsOutput() = runBlocking {
@@ -721,11 +726,73 @@ class RunPreparationStageIntegrationTest : PreparationStageHostContract() {
             // no accepted/frozen manifest or permission to repeat that effect.
             assertTrue(outputPath in host.files)
             assertFalse(artifactIds.getValue(StageKind.ATDD) in host.accepted)
+            host.unavailableReadPath = null
+            host.beforeApprove = null
+            roles.onExecute = null
+            val retry = run(host, roles, tools, persisted, StageKind.ATDD)
+            assertEquals(PreparationStageOutcome.Denied("STAGE_NOT_READY"), retry.outcome)
+            assertEquals(2, roles.calls.size)
+            assertEquals(2, tools.writes.size)
+            assertEquals(persisted, host.graph)
         }
     }
 
-    @Test fun frozenReadCancellationPropagatesAndOnlyActiveAttemptIsCancelled() = runBlocking {
-        for (failureAt in listOf("preflight", "before-approval", "after-approval")) {
+    @Test fun artifactReadCallerCancellationPropagatesAndOnlyActiveAttemptIsCancelled() = runBlocking {
+        for ((readKind, occurrence) in listOf(
+            "input" to 1, "input" to 2, "input" to 3,
+            "output" to 1, "output" to 2
+        )) {
+            val host = FakeHost()
+            val roles = FakeRoles()
+            val tools = FakeTools(host)
+            assertIs<PreparationStageOutcome.Accepted>(
+                run(host, roles, tools, initial(), StageKind.SDD).outcome)
+            host.plan(StageKind.ATDD)
+            val graph = requireNotNull(host.graph)
+            val accepted = host.accepted.toSet()
+            val path = paths.getValue(if (readKind == "input") StageKind.SDD else StageKind.ATDD)
+            val preflight = readKind == "input" && occurrence == 1
+            val at = "$readKind/$occurrence"
+            val entered = java.util.concurrent.CountDownLatch(1)
+            val release = java.util.concurrent.CountDownLatch(1)
+            var reads = 0
+            host.beforeReadPath = { currentPath ->
+                if (path == currentPath && ++reads == occurrence) {
+                    entered.countDown()
+                    check(release.await(10, java.util.concurrent.TimeUnit.SECONDS))
+                }
+            }
+            val job = async(kotlinx.coroutines.Dispatchers.Default) {
+                run(host, roles, tools, graph, StageKind.ATDD)
+            }
+            try {
+                assertTrue(entered.await(10, java.util.concurrent.TimeUnit.SECONDS), at)
+                if (preflight) assertNull(host.activeLease, at)
+                else assertNotNull(host.activeLease, at)
+                job.cancel()
+            } finally {
+                release.countDown()
+            }
+            assertFailsWith<kotlinx.coroutines.CancellationException>(at) { job.await() }
+            assertNull(host.activeLease, at)
+            assertEquals(accepted, host.accepted, at)
+            val persisted = requireNotNull(host.graph)
+            assertEquals(graph.artifacts, persisted.artifacts, at)
+            if (preflight) {
+                assertEquals(graph, persisted, at)
+                assertEquals(1, roles.calls.size)
+                assertEquals(1, tools.writes.size)
+            } else {
+                assertEquals(StageState.CANCELLED, persisted.stages.single {
+                    it.kind == StageKind.ATDD
+                }.state, at)
+                assertEquals(2, tools.closeCount)
+            }
+        }
+    }
+
+    @Test fun hostThrownReadCancellationOnActiveCallerIsInputUnavailable() = runBlocking {
+        for (occurrence in 1..3) {
             val host = FakeHost()
             val roles = FakeRoles()
             val tools = FakeTools(host)
@@ -735,29 +802,96 @@ class RunPreparationStageIntegrationTest : PreparationStageHostContract() {
             val graph = requireNotNull(host.graph)
             val accepted = host.accepted.toSet()
             val path = paths.getValue(StageKind.SDD)
-            when (failureAt) {
-                "preflight" -> host.cancelledReadPath = path
-                "before-approval" -> roles.onExecute = { host.cancelledReadPath = path }
-                else -> host.beforeApprove = { host.cancelledReadPath = path }
+            var reads = 0
+            host.beforeReadPath = { currentPath ->
+                if (path == currentPath && ++reads == occurrence)
+                    host.cancelledReadPath = path
             }
-            assertFailsWith<kotlinx.coroutines.CancellationException>(failureAt) {
-                run(host, roles, tools, graph, StageKind.ATDD)
-            }
-            assertNull(host.activeLease, failureAt)
-            assertEquals(accepted, host.accepted, failureAt)
+            val result = run(host, roles, tools, graph, StageKind.ATDD)
+            assertEquals(if (occurrence == 1)
+                PreparationStageOutcome.Denied("INPUT_READ_UNAVAILABLE")
+            else PreparationStageOutcome.Failed("INPUT_READ_UNAVAILABLE"), result.outcome)
+            assertNull(host.activeLease)
+            assertEquals(accepted, host.accepted)
             val persisted = requireNotNull(host.graph)
-            assertEquals(graph.artifacts, persisted.artifacts, failureAt)
-            if (failureAt == "preflight") {
-                assertEquals(graph, persisted, failureAt)
+            assertEquals(graph.artifacts, persisted.artifacts)
+            if (occurrence == 1) {
+                assertEquals(graph, persisted)
                 assertEquals(1, roles.calls.size)
                 assertEquals(1, tools.writes.size)
             } else {
-                assertEquals(StageState.CANCELLED, persisted.stages.single {
+                assertEquals(StageState.FAILED, persisted.stages.single {
                     it.kind == StageKind.ATDD
-                }.state, failureAt)
+                }.state)
                 assertEquals(2, tools.closeCount)
             }
         }
+    }
+
+    @Test fun outputReadsDistinguishUnavailableFromMissingOrChangedBytes() = runBlocking {
+        for (afterApproval in listOf(false, true)) {
+            for (failure in listOf("io", "host-cancel", "missing", "changed")) {
+                val host = FakeHost()
+                val roles = FakeRoles()
+                val tools = FakeTools(host)
+                val graph = initial()
+                val path = paths.getValue(StageKind.SDD)
+                var reads = 0
+                host.beforeReadPath = { currentPath ->
+                    if (currentPath == path && ++reads == (if (afterApproval) 2 else 1)) {
+                        when (failure) {
+                            "io" -> host.unavailableReadPath = path
+                            "host-cancel" -> host.cancelledReadPath = path
+                            "missing" -> host.files.remove(path)
+                            "changed" -> host.files[path] = bytes("changed")
+                            else -> error("Unknown read scenario")
+                        }
+                    }
+                }
+                val code = when {
+                    failure == "io" || failure == "host-cancel" -> "OUTPUT_READ_UNAVAILABLE"
+                    afterApproval -> "STALE_ARTIFACT_APPROVAL"
+                    failure == "missing" -> "ARTIFACT_MISSING"
+                    else -> "ARTIFACT_DIGEST_MISMATCH"
+                }
+                val at = "$failure/afterApproval=$afterApproval"
+                val events = mutableListOf<PreparationStageEvent>()
+                val result = run(host, roles, tools, graph, StageKind.SDD, events = events)
+                assertEquals(PreparationStageOutcome.Failed(code), result.outcome, at)
+                val persisted = requireNotNull(host.graph)
+                assertEquals(StageState.FAILED, persisted.stages.first().state, at)
+                assertEquals(graph.artifacts, persisted.artifacts, at)
+                assertTrue(host.accepted.isEmpty(), at)
+                assertEquals(host.accepted, result.hostAcceptedArtifactIds, at)
+                assertEquals(persisted, result.graph, at)
+                assertNull(host.activeLease, at)
+                assertEquals(1, roles.calls.size, at)
+                assertEquals(1, tools.writes.size, at)
+                assertEquals(1, tools.closeCount, at)
+                assertEquals(if (afterApproval) 1 else 0, host.approvals.size, at)
+                assertEquals(code, events.last().code, at)
+                assertEquals(StageState.FAILED, events.last().state, at)
+            }
+        }
+    }
+
+    @Test fun outputReadUnavailableDoesNotDowngradeRevokedApprovalAuthority() = runBlocking {
+        val host = FakeHost()
+        val path = paths.getValue(StageKind.SDD)
+        var reads = 0
+        host.beforeReadPath = { currentPath ->
+            if (currentPath == path && ++reads == 2) {
+                host.revoke()
+                host.unavailableReadPath = path
+            }
+        }
+        val result = run(host, FakeRoles(), FakeTools(host), initial(), StageKind.SDD)
+        assertEquals(PreparationStageOutcome.ReconciliationRequired("STALE_STAGE_LEASE"),
+            result.outcome)
+        assertNull(result.graph)
+        assertNull(result.hostAcceptedArtifactIds)
+        assertTrue(host.accepted.isEmpty())
+        assertTrue(requireNotNull(host.graph).artifacts.isEmpty())
     }
 
     @Test fun failedFrozenReadDoesNotMaskUnconfirmedHostFinish() = runBlocking {

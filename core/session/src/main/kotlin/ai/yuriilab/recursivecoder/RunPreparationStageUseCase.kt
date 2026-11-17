@@ -126,12 +126,21 @@ class RunPreparationStageUseCase(
     private suspend fun frozenInputFailure(
         graph: StageGraph, stage: StageNode, changedCode: String
     ): String? =
+        readForExecute { inputsIntact(graph, stage) }.fold(
+            onSuccess = { if (it) null else changedCode },
+            onFailure = { "INPUT_READ_UNAVAILABLE" }
+        )
+
+    // A host can throw java.util.concurrent.CancellationException while the
+    // caller's Job is still active (for example from a cancelled Future).
+    // Classify that as unavailable I/O, not as cancellation of this attempt.
+    // Conversely, never mask actual caller cancellation with a read failure.
+    private suspend fun <T> readForExecute(read: suspend () -> T): Result<T> =
         try {
-            if (inputsIntact(graph, stage)) null else changedCode
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (_: Exception) {
-            "INPUT_READ_UNAVAILABLE"
+            Result.success(read())
+        } catch (failure: Exception) {
+            currentCoroutineContext().ensureActive()
+            Result.failure(failure)
         }
 
     private suspend fun live(lease: PreparationStageLease, snapshot: StageToolHostSnapshot): Boolean =
@@ -231,13 +240,11 @@ class RunPreparationStageUseCase(
 
         val inputs = ready.artifacts.filter { it.id in stage.inputArtifacts }
             .sortedBy { it.kind.name }
-        val inputData = try {
+        val inputData = readForExecute {
             withContext(blockingDispatcher) {
                 inputs.map { artifact -> artifact to host.readBytes(artifact.declaredPath) }
             }
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (_: Exception) {
+        }.getOrElse {
             // No stage lease or model/tool work has begun.
             return denied("INPUT_READ_UNAVAILABLE")
         }
@@ -382,13 +389,13 @@ class RunPreparationStageUseCase(
                 validation.requiredChecks.map { it.checkId }.toSet() != checks ||
                 validation.requiredChecks.any { !it.passed })
                 return terminal(validation.deniedCode ?: "STAGE_VALIDATION_FAILED")
-            val bytes = try {
+            val bytes = readForExecute {
                 withContext(blockingDispatcher) { host.readBytes(command.outputPath) }
-            } catch (cancelled: CancellationException) { throw cancelled }
-            catch (_: Exception) { null } ?: return terminal("ARTIFACT_MISSING")
+            }.getOrElse { return terminal("OUTPUT_READ_UNAVAILABLE") }
+                ?: return terminal("ARTIFACT_MISSING")
             val intended = proposed.toByteArray(Charsets.UTF_8)
             if (!bytes.contentEquals(intended)) return terminal("ARTIFACT_DIGEST_MISMATCH")
-            frozenInputFailure(running, stage, "FROZEN_INPUT_CHANGED")?.let {
+            frozenInputFailure(running, stage, changedCode = "FROZEN_INPUT_CHANGED")?.let {
                 return terminal(it)
             }
             val outputKind = kind.output ?: return terminal("INVALID_STAGE_OUTPUT")
@@ -409,13 +416,16 @@ class RunPreparationStageUseCase(
             } catch (_: Exception) { return terminal("HOST_APPROVAL_UNAVAILABLE") }
             if (decision == null) return halted("ROLE_TIMED_OUT")
             checkpoint()?.let { return halted(it) }
-            val after = try {
+            val afterRead = readForExecute {
                 withContext(blockingDispatcher) { host.readBytes(command.outputPath) }
-            } catch (cancelled: CancellationException) { throw cancelled }
-            catch (_: Exception) { null }
-            if (!live(lease, snapshot) || after == null || !after.contentEquals(bytes))
+            }
+            // Authority wins over read diagnostics; never accept against a
+            // revoked lease. Confirm output integrity before checking inputs.
+            if (!live(lease, snapshot)) return terminal("STALE_ARTIFACT_APPROVAL")
+            val after = afterRead.getOrElse { return terminal("OUTPUT_READ_UNAVAILABLE") }
+            if (after == null || !after.contentEquals(bytes))
                 return terminal("STALE_ARTIFACT_APPROVAL")
-            frozenInputFailure(running, stage, "STALE_ARTIFACT_APPROVAL")?.let {
+            frozenInputFailure(running, stage, changedCode = "STALE_ARTIFACT_APPROVAL")?.let {
                 return terminal(it)
             }
             if (decision == PreparationApproval.REJECT)
