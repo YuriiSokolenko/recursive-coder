@@ -99,6 +99,7 @@ class RunPreparationStageIntegrationTest : PreparationStageHostContract() {
         var beforeCurrent: (() -> Unit)? = null
         var beforeRead: (() -> Unit)? = null
         var unavailableReadPath: String? = null
+        var cancelledReadPath: String? = null
         var beforeApprove: (() -> Unit)? = null
         var beforeFinish: (() -> Unit)? = null
         @Volatile var activeLease: String? = null
@@ -120,6 +121,8 @@ class RunPreparationStageIntegrationTest : PreparationStageHostContract() {
         @Synchronized fun revoke() { leaseGeneration = null }
         override fun readBytes(path: String): ByteArray? {
             beforeRead?.invoke()
+            if (path == cancelledReadPath)
+                throw kotlinx.coroutines.CancellationException("cancelled input read")
             if (path == unavailableReadPath) throw java.io.IOException("temporary host read failure")
             return files[path]?.clone()
         }
@@ -719,6 +722,68 @@ class RunPreparationStageIntegrationTest : PreparationStageHostContract() {
             assertTrue(outputPath in host.files)
             assertFalse(artifactIds.getValue(StageKind.ATDD) in host.accepted)
         }
+    }
+
+    @Test fun frozenReadCancellationPropagatesAndOnlyActiveAttemptIsCancelled() = runBlocking {
+        for (failureAt in listOf("preflight", "before-approval", "after-approval")) {
+            val host = FakeHost()
+            val roles = FakeRoles()
+            val tools = FakeTools(host)
+            assertIs<PreparationStageOutcome.Accepted>(
+                run(host, roles, tools, initial(), StageKind.SDD).outcome)
+            host.plan(StageKind.ATDD)
+            val graph = requireNotNull(host.graph)
+            val accepted = host.accepted.toSet()
+            val path = paths.getValue(StageKind.SDD)
+            when (failureAt) {
+                "preflight" -> host.cancelledReadPath = path
+                "before-approval" -> roles.onExecute = { host.cancelledReadPath = path }
+                else -> host.beforeApprove = { host.cancelledReadPath = path }
+            }
+            assertFailsWith<kotlinx.coroutines.CancellationException>(failureAt) {
+                run(host, roles, tools, graph, StageKind.ATDD)
+            }
+            assertNull(host.activeLease, failureAt)
+            assertEquals(accepted, host.accepted, failureAt)
+            val persisted = requireNotNull(host.graph)
+            assertEquals(graph.artifacts, persisted.artifacts, failureAt)
+            if (failureAt == "preflight") {
+                assertEquals(graph, persisted, failureAt)
+                assertEquals(1, roles.calls.size)
+                assertEquals(1, tools.writes.size)
+            } else {
+                assertEquals(StageState.CANCELLED, persisted.stages.single {
+                    it.kind == StageKind.ATDD
+                }.state, failureAt)
+                assertEquals(2, tools.closeCount)
+            }
+        }
+    }
+
+    @Test fun failedFrozenReadDoesNotMaskUnconfirmedHostFinish() = runBlocking {
+        val host = FakeHost()
+        val roles = FakeRoles()
+        val tools = FakeTools(host)
+        assertIs<PreparationStageOutcome.Accepted>(
+            run(host, roles, tools, initial(), StageKind.SDD).outcome)
+        host.plan(StageKind.ATDD)
+        val graph = requireNotNull(host.graph)
+        val accepted = host.accepted.toSet()
+        host.beforeApprove = {
+            host.unavailableReadPath = paths.getValue(StageKind.SDD)
+        }
+        host.throwAfterFinish = true
+        val result = run(host, roles, tools, graph, StageKind.ATDD)
+        assertEquals(PreparationStageOutcome.ReconciliationRequired("STAGE_FINISH_UNCONFIRMED"),
+            result.outcome)
+        assertNull(result.graph)
+        assertNull(result.hostAcceptedArtifactIds)
+        assertEquals(accepted, host.accepted)
+        assertEquals(graph.artifacts, requireNotNull(host.graph).artifacts)
+        assertEquals(StageState.FAILED, requireNotNull(host.graph).stages.single {
+            it.kind == StageKind.ATDD
+        }.state)
+        assertNull(host.activeLease)
     }
 
     @Test fun missingOrChangedFrozenInputAfterWriteRetainsDistinctDefiniteFailure() = runBlocking {
