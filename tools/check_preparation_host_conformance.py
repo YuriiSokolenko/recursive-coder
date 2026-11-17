@@ -14,9 +14,12 @@ CONTRACT = PACKAGE + "PreparationStageHostContract"
 REGISTRATION = PACKAGE + "PreparationHostConformance"
 TEST = "org/junit/jupiter/api/Test"
 REQUIRED_SUITES = {
-    PACKAGE + "RunPreparationStageIntegrationTest",
-    PACKAGE + "RunDeveloperStageIntegrationTest",
-    PACKAGE + "LinuxFiveRoleWorkflowHostTest",
+    PACKAGE + "RunPreparationStageIntegrationTest":
+        PACKAGE + "RunPreparationStageIntegrationTest$FakeHost",
+    PACKAGE + "RunDeveloperStageIntegrationTest":
+        PACKAGE + "RunDeveloperStageIntegrationTest$FakeHost",
+    PACKAGE + "LinuxFiveRoleWorkflowHostTest":
+        PACKAGE + "LinuxFiveRoleWorkflowHost",
 }
 TIERS = ("test", "integrationTest")
 
@@ -56,7 +59,7 @@ def validate(class_dirs, report_dirs, required_suites=REQUIRED_SUITES):
         problems.append("No concrete production preparation hosts discovered")
     suites = {name for name, info in classes.items()
               if origins[name][1] == "test" and concrete(info) and extends(info, CONTRACT)}
-    for name in required_suites - suites:
+    for name in set(required_suites) - suites:
         problems.append(f"Required preparation suite not discovered: {name}")
 
     registered = defaultdict(list)
@@ -82,6 +85,8 @@ def validate(class_dirs, report_dirs, required_suites=REQUIRED_SUITES):
                 or origins[adapter][0] != module):
             problems.append(f"{suite}: invalid or nonlocal adapter {binary_name}")
             continue
+        if suite in required_suites and required_suites[suite] != adapter:
+            problems.append(f"{suite}: expected adapter {required_suites[suite]}, got {adapter}")
         registered[adapter].append(suite)
         # Do not permit an intermediate class to shadow a shared test method.
         for ancestor in ancestors(info, classes):

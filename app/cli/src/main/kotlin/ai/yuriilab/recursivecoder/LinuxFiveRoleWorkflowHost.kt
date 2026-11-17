@@ -284,21 +284,33 @@ class LinuxFiveRoleWorkflowHost(
                     kind.role, WriteOperationKind.CREATE, path
                 )) == ToolAuthorizationDecision.Permit })
             throw IOException("Preparation read path is not authorized")
-        preparationReadTestHook?.invoke(path)
-        fun read(dir: SecureDirectoryStream<Path>, names: List<String>): ByteArray {
+        fun read(dir: SecureDirectoryStream<Path>, names: List<String>): ByteArray? {
             if (names.size > 1) {
-                dir.newDirectoryStream(Path.of(names.first()), LinkOption.NOFOLLOW_LINKS).use {
+                val stream = try {
+                    dir.newDirectoryStream(Path.of(names.first()), LinkOption.NOFOLLOW_LINKS)
+                } catch (_: NoSuchFileException) {
+                    return null
+                }
+                stream.use {
                     val child = it as? SecureDirectoryStream<Path>
-                        ?: error("Secure directory stream required")
+                        ?: throw IOException("Secure directory stream required")
                     return read(child, names.drop(1))
                 }
             }
             val name = Path.of(names.single())
             val view = dir.getFileAttributeView(name,
                 BasicFileAttributeView::class.java, LinkOption.NOFOLLOW_LINKS)
-                ?: error("Regular-file attributes required")
-            if (!view.readAttributes().isRegularFile)
+                ?: throw IOException("Regular-file attributes required")
+            val attributes = try {
+                view.readAttributes()
+            } catch (_: NoSuchFileException) {
+                return null
+            }
+            if (!attributes.isRegularFile)
                 throw IOException("Only ordinary regular files may be read")
+            // Fault injection is inside the real read, after presence has
+            // been established; a failed open/read after stat is unavailable.
+            preparationReadTestHook?.invoke(path)
             dir.newByteChannel(name,
                 setOf(StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)).use {
                 val result = Channels.newInputStream(it).readNBytes(8 * 1024 * 1024 + 1)
@@ -309,13 +321,9 @@ class LinuxFiveRoleWorkflowHost(
         return Files.newDirectoryStream(root).use {
             val dir = it as? SecureDirectoryStream<Path>
                 ?: throw IOException("Secure directory stream required")
-            try {
-                read(dir, path.split("/"))
-            } catch (_: NoSuchFileException) {
-                // Only descriptor-relative absence, never a missing root,
-                // denied path, nonregular entry, cancellation or other I/O.
-                null
-            }
+            // Only descriptor-relative lookup can establish absence. A
+            // missing root or failure after a successful lookup propagates.
+            read(dir, path.split("/"))
         }
     }
 

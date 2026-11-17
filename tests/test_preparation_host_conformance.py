@@ -81,7 +81,7 @@ class PreparationConformanceGateTest(unittest.TestCase):
         ET.ElementTree(root).write(directory / "TEST-Suite.xml")
 
     def problems(self):
-        return validate(self.outputs, self.reports, required_suites=set())
+        return validate(self.outputs, self.reports, required_suites={})
 
     def test_indirect_concrete_adapter_passes_with_all_methods_executed(self):
         self.assertEqual([], self.problems())
@@ -106,3 +106,18 @@ class PreparationConformanceGateTest(unittest.TestCase):
         problems = self.problems()
         self.assertTrue(any(":test:" in p and "#read" in p for p in problems))
         self.assertTrue(any(":integrationTest:" in p and "#transaction" in p for p in problems))
+
+    def test_missing_registration_is_rejected(self):
+        # Recompile a real concrete subclass without the registration.
+        source = self.root / "source" / "Suite.java"
+        package = PACKAGE.replace("/", ".").rstrip(".")
+        source.write_text(f"package {package}; "
+                          "public class Suite extends PreparationStageHostContract {}",
+                          encoding="utf-8")
+        subprocess.run(["javac", "-cp", str(self.root / "compiled"), "-d",
+                        str(self.test), str(source)],
+                       check=True, capture_output=True, text=True)
+        problems = self.problems()
+        self.assertTrue(any("missing exact adapter registration" in p for p in problems))
+        self.assertTrue(any("Concrete production adapter without conformance suite" in p
+                            for p in problems))

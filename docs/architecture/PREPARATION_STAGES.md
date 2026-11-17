@@ -199,7 +199,7 @@ writes and sandbox check receipts for acceptance, not fake evidence.
    evidence. Each inherited test checks the actual runtime host class against
    the registration. Never register a surrogate or use synthetic evidence for
    a physical adapter.
-3. Run `./gradlew clean checkPreparationHostConformance` on a supported Linux
+3. Run `./gradlew --no-build-cache clean checkPreparationHostConformance` on a supported Linux
    host with the restricted bubblewrap profile (see TEST_SUITES.md).
    The task compiles every product JVM main/test/test-fixture output, walks
    bytecode superclass and interface ancestry, requires a registered suite in
