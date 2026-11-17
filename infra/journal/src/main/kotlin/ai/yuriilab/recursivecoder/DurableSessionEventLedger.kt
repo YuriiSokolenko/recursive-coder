@@ -14,6 +14,7 @@ import java.nio.file.Path
 import java.nio.file.StandardOpenOption
 import java.security.MessageDigest
 import java.time.Instant
+import java.util.HexFormat
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.serialization.json.*
 
@@ -30,6 +31,37 @@ data class VerifiedSessionEventLedger(
     val lastTrustedOffset: Long
 )
 
+/**
+ * Explicit compile-time opt-in for test-only fault seams. This is NOT a JVM
+ * security boundary; production wiring must never expose these callbacks.
+ */
+@RequiresOptIn(level = RequiresOptIn.Level.ERROR)
+internal annotation class LedgerTestFaultInjection
+
+/**
+ * Single fail-closed event policy shared by resume admission and reopened
+ * publication. Issue #114 authorizes metadata-only pre-execution work, not
+ * arbitrary legal runtime lifecycle transitions (those remain gated by #105).
+ */
+internal object FencedGraphMetadataPolicy {
+    fun permittedFencedGraphMetadata(event: JsonObject, rootGraphId: String): Boolean {
+        val metadata = event["metadata"] ?: return true
+        val obj = metadata as? JsonObject ?: return false
+        if ("parentGraphId" in obj || "childGraphId" in obj) return false
+        val graph = obj["graphId"] ?: return true
+        return graph is JsonPrimitive && graph.isString && graph.content == rootGraphId
+    }
+}
+
+/** A local pre-write policy rejection is not a loss of the resume lease. */
+private class FencedPolicyRefusal : RuntimeException()
+
+/** A normal frame validation failure has not attempted a physical write. */
+private class FencedInputRefusal(val reason: SessionLedgerUnconfirmed) : RuntimeException(reason)
+
+/** Known writer-state refusals must not convert checkpoint ambiguity to poisoning. */
+private class FencedStateRefusal(val reason: SessionLedgerUnconfirmed) : RuntimeException(reason)
+
 /** No corrupt, incomplete or unsupported log may be treated as recoverable. */
 class SessionLedgerUnconfirmed(val code: String, cause: Throwable? = null) :
     IllegalStateException(code, cause)
@@ -42,7 +74,7 @@ class SessionLedgerUnconfirmed(val code: String, cause: Throwable? = null) :
  * A valid prefix establishes only the events durably present. A crash during a
  * force may leave a complete but unacknowledged record; replay does not imply a
  * side effect was committed. A torn tail always requires operator reconciliation;
- * this class never truncates or appends to an existing ledger.
+ * existing ledgers reopen only through a current lease and fenced atomic append.
  *
  * The caller provisions a private directory outside the workspace. Advisory OS
  * leases exclude cooperating processes, not hostile same-UID filesystem writers.
@@ -51,7 +83,9 @@ class DurableSessionEventLedger private constructor(
     private val path: Path,
     private val channel: FileChannel,
     private val leaseChannel: FileChannel,
-    private val lease: FileLock
+    private val lease: FileLock,
+    private val resumeLease: SessionResumeLease? = null,
+    private val fencedGraphId: String? = null
 ) : EventSink {
     /** Host-only path for verifying the checkpoint storage boundary. */
     internal val checkpointStoragePath: Path get() = path
@@ -59,23 +93,61 @@ class DurableSessionEventLedger private constructor(
     private var closed = false
     private var closeVerified = false
     private var poisoned = false
+    /** Only failures after a physical write/force may imply unacknowledged bytes. */
+    private var uncertainWrite = false
+    /** Reopened writers must persist a matching checkpoint before clean close. */
+    private var acknowledgedSinceCheckpoint = false
+    /** Persist may have published C2 before returning a failure; never auto-retry. */
+    private var checkpointPublicationUnconfirmed = false
     private var committedSequence = 0
     private var lastEventId: String? = null
     private var committedIdentity: Pair<String, String>? = null
     private var pendingIdentity: Pair<String, String>? = null
     private var lastDigest = ByteArray(32)
+    /** Confirmed pre-execution phase, restored from the checkpoint and replay. */
+    private var committedPhase: String? = null
+    private var pendingPhase: String? = null
     private var pending: Pair<String, ByteArray>? = null
 
     companion object {
         private val MAGIC = "RCLDG1\n".toByteArray(StandardCharsets.US_ASCII)
         private const val MAX_EVENT_BYTES = 16 * 1024
+        private const val FRAME_OVERHEAD_BYTES = 36L
         private const val MAX_LEDGER_BYTES = 32L * 1024 * 1024
         // Single host-only live checkpoint limit, enforced under the append monitor
         // before replay. The normal closed-ledger capacity is separate.
         internal const val MAX_LIVE_CHECKPOINT_LEDGER_BYTES = 4L * 1024 * 1024
         internal const val LIVE_CHECKPOINT_SIZE_EXCEEDED_CODE =
             "LEDGER_CHECKPOINT_SIZE_EXCEEDED"
-        private const val MAX_EVENTS = 100_000
+        internal const val REOPEN_CHECKPOINT_CAPACITY_CODE =
+            "LEDGER_REOPEN_CHECKPOINT_CAPACITY"
+        internal const val MAX_EVENTS = 100_000
+        /** A closed-ledger prefix must fit within the live-checkpoint bound. */
+        internal fun requireReopenCheckpointCapacity(position: Long) {
+            if (position < 0 || position > MAX_LIVE_CHECKPOINT_LEDGER_BYTES)
+                throw SessionLedgerUnconfirmed(REOPEN_CHECKPOINT_CAPACITY_CODE)
+        }
+
+        /** A new full framed record must leave the reopened ledger checkpointable. */
+        internal fun requireReopenCheckpointCapacity(position: Long, payloadSize: Int) {
+            if (payloadSize <= 0 || position < 0 ||
+                position + FRAME_OVERHEAD_BYTES + payloadSize > MAX_LIVE_CHECKPOINT_LEDGER_BYTES)
+                throw SessionLedgerUnconfirmed(REOPEN_CHECKPOINT_CAPACITY_CODE)
+        }
+        /** Both normal and reopened writers enforce the replayable whole-file caps. */
+        internal fun requireAppendCapacity(committed: Int, position: Long, payloadSize: Int) {
+            if (committed >= MAX_EVENTS)
+                throw SessionLedgerUnconfirmed("LEDGER_EVENT_LIMIT_EXCEEDED")
+            if (payloadSize !in 1..MAX_EVENT_BYTES ||
+                position < MAGIC.size || position + FRAME_OVERHEAD_BYTES + payloadSize > MAX_LEDGER_BYTES)
+                throw SessionLedgerUnconfirmed("LEDGER_RECORD_SIZE_INVALID")
+        }
+
+        private fun reopenCheckpointFailure(error: CheckpointUnconfirmed): SessionLedgerUnconfirmed =
+            SessionLedgerUnconfirmed(
+                if (error.code == "CHECKPOINT_LEASE_HELD") "LEDGER_REOPEN_BUSY"
+                else "LEDGER_REOPEN_CHECKPOINT_MISMATCH", error)
+
         private val ROOT_FIELDS = SessionEventJournal.emittedFields
         private val heldLockPaths = ConcurrentHashMap.newKeySet<Path>()
         private val SAFE_KEY = Regex("[A-Za-z][A-Za-z0-9_-]{0,63}")
@@ -340,9 +412,19 @@ class DurableSessionEventLedger private constructor(
             throw SessionLedgerUnconfirmed("LEDGER_EVENT_INVALID_JSON", e)
         }
 
-        /** Internal parser; external inspect still requires an exclusive ledger lease. */
-        private fun replayUnlocked(file: Path): VerifiedSessionEventLedger {
-            FileChannel.open(file, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS).use { reader ->
+        /** Read-only inspect owns a separate READ channel under its own lease. */
+        private fun replayUnlocked(file: Path): VerifiedSessionEventLedger =
+            FileChannel.open(file, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS).use {
+                replayChannel(it)
+            }
+
+        /**
+         * Replay from the exact channel that will append after fenced reopen.
+         * No new path lookup or second descriptor can change the file identity
+         * between validation and the long-lived writer's subsequent writes.
+         */
+        private fun replayChannel(reader: FileChannel): VerifiedSessionEventLedger {
+                reader.position(0L)
                 val size = reader.size()
                 if (size < MAGIC.size || size > MAX_LEDGER_BYTES)
                     throw SessionLedgerUnconfirmed("LEDGER_SIZE_INVALID")
@@ -386,8 +468,7 @@ class DurableSessionEventLedger private constructor(
                 }
                 return VerifiedSessionEventLedger(events, sequence,
                     hex(previousHash), hex(whole.digest()), size)
-            }
-    }
+        }
 
         /** Immutable, fully checked read. Never interprets a prefix as safe resume. */
         fun inspect(path: Path): VerifiedSessionEventLedger {
@@ -412,6 +493,143 @@ class DurableSessionEventLedger private constructor(
             }
         }
 
+        /**
+         * Trusted host only. Inspect the checkpoint before taking the long-lived
+         * ledger lock, then re-verify the entire prefix under that lock.
+         */
+        @OptIn(LedgerTestFaultInjection::class)
+        fun reopenForAppend(
+            path: Path, workspaceRoot: Path, checkpointDirectory: Path,
+            context: CheckpointHostContext, lease: SessionResumeLease
+        ): DurableSessionEventLedger =
+            reopenForAppendWithFault(path, workspaceRoot, checkpointDirectory, context, lease) { }
+
+        /** Internal fault seam only; do not expose callback injection to production hosts. */
+        @LedgerTestFaultInjection
+        internal fun reopenForAppendWithFault(
+            path: Path, workspaceRoot: Path, checkpointDirectory: Path,
+            context: CheckpointHostContext, lease: SessionResumeLease,
+            afterPhase: (String) -> Unit
+        ): DurableSessionEventLedger {
+            lease.assertCurrent()
+            val file = guardedPath(path)
+            if (workspaceRoot.toRealPath() != context.workspaceRoot.toRealPath())
+                throw SessionLedgerUnconfirmed("LEDGER_REOPEN_CONTEXT_MISMATCH")
+            if (file.startsWith(workspaceRoot.toRealPath()))
+                throw SessionLedgerUnconfirmed("LEDGER_INSIDE_WORKSPACE")
+            lease.requireLedgerPath(file)
+            // Inspect immutable checkpoint evidence under the SHORT checkpoint
+            // lock without taking a ledger lock; the full ledger is reverified
+            // below under the reopened writer's long-lived ledger OS lock.
+            val admitted = try {
+                SessionCheckpointStore.admittedCheckpointForReopen(
+                    lease, checkpointDirectory, context)
+            } catch (error: CheckpointUnconfirmed) {
+                throw reopenCheckpointFailure(error)
+            }
+            val expected = admitted.snapshot
+            // Deliberately before acquiring the ledger lock: tests can
+            // deterministically publish C2 after this C1 inspection.
+            afterPhase("checkpoint-inspected")
+            val (owner, lock) = acquire(file, createLock = false)
+            var writerChannel: FileChannel? = null
+            var opened = false
+            var failure: Throwable? = null
+            try {
+                afterPhase("ledger-lock-acquired")
+                lease.assertCurrent()
+                lease.requireLedgerPath(file)
+                writerChannel = FileChannel.open(file, StandardOpenOption.READ,
+                    StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)
+                lease.requireLedgerPath(file)
+                val actualSize = writerChannel.size()
+                // A closed-ledger checkpoint may cover up to 32 MiB, but an
+                // *open* resumed writer can only checkpoint a 4 MiB prefix.
+                // Refuse before any append that could strand this session.
+                requireReopenCheckpointCapacity(expected.lastTrustedJournalOffset)
+                if (actualSize > expected.lastTrustedJournalOffset)
+                    throw SessionLedgerUnconfirmed("LEDGER_REOPEN_TAIL_UNCONFIRMED")
+                if (actualSize < expected.lastTrustedJournalOffset)
+                    throw SessionLedgerUnconfirmed("LEDGER_REOPEN_CHECKPOINT_MISMATCH")
+                val verified = try { replayChannel(writerChannel) }
+                    catch (error: SessionLedgerUnconfirmed) {
+                        throw SessionLedgerUnconfirmed(
+                            "LEDGER_REOPEN_CHECKPOINT_MISMATCH", error)
+                    }
+                if (verified.lastSequence != expected.journalSequence ||
+                    verified.headSha256 != expected.journalHeadSha256 ||
+                    verified.fileSha256 != expected.journalFileSha256 ||
+                    verified.lastTrustedOffset != expected.lastTrustedJournalOffset ||
+                    verified.events.any {
+                        (it["sessionId"] as? JsonPrimitive)?.content != expected.sessionId ||
+                        (it["traceId"] as? JsonPrimitive)?.content != expected.traceId
+                    })
+                    throw SessionLedgerUnconfirmed("LEDGER_REOPEN_CHECKPOINT_MISMATCH")
+                val admittedPhase = PreExecutionPhasePolicy.phaseFromVerifiedHistory(
+                    expected.phase, verified.events)
+                    ?: throw SessionLedgerUnconfirmed("LEDGER_REOPEN_CHECKPOINT_MISMATCH")
+                try {
+                    SessionCheckpointStore.verifyReopenLedger(expected, context, verified)
+                } catch (error: CheckpointUnconfirmed) {
+                    throw SessionLedgerUnconfirmed("LEDGER_REOPEN_CHECKPOINT_MISMATCH", error)
+                }
+                afterPhase("ledger-prefix-verified")
+                lease.assertCurrent()
+                lease.requireLedgerPath(file)
+                // Recheck the latest checkpoint while holding the ledger OS
+                // lock. We have ALREADY entered the lease monitor above via
+                // assertCurrent/requireLedgerPath, so this is not a global
+                // ledger-before-lease ordering guarantee. The checkpoint
+                // helper avoids ONE ADDITIONAL lease-monitor call; every OS
+                // file lock used on this path is nonblocking tryLock.
+                // A competing same-lease writer may have published C2 after
+                // the first C1 inspection, before this lock was acquired.
+                val currentCheckpoint = try {
+                    SessionCheckpointStore.admittedCheckpointHeadForReopen(
+                        lease.admittedCheckpointSha256, checkpointDirectory, context)
+                } catch (error: CheckpointUnconfirmed) {
+                    throw reopenCheckpointFailure(error)
+                }
+                if (currentCheckpoint.sha256 != admitted.sha256)
+                    throw SessionLedgerUnconfirmed("LEDGER_REOPEN_CHECKPOINT_MISMATCH")
+                if (writerChannel.size() != expected.lastTrustedJournalOffset)
+                    throw SessionLedgerUnconfirmed("LEDGER_REOPEN_CHECKPOINT_MISMATCH")
+                writerChannel.position(expected.lastTrustedJournalOffset)
+                val writer = DurableSessionEventLedger(
+                    file, writerChannel, owner, lock, lease, expected.binding.graphId)
+                writer.committedSequence = verified.lastSequence
+                writer.lastEventId = verified.events.lastOrNull()
+                    ?.get("eventId")?.jsonPrimitive?.content
+                writer.committedIdentity = expected.sessionId to expected.traceId
+                writer.committedPhase = admittedPhase
+                writer.lastDigest = try {
+                    HexFormat.of().parseHex(verified.headSha256).also {
+                        if (it.size != 32)
+                            throw SessionLedgerUnconfirmed(
+                                "LEDGER_REOPEN_CHECKPOINT_MISMATCH")
+                    }
+                } catch (error: IllegalArgumentException) {
+                    throw SessionLedgerUnconfirmed(
+                        "LEDGER_REOPEN_CHECKPOINT_MISMATCH", error)
+                }
+                opened = true
+                return writer
+            } catch (error: Throwable) {
+                failure = error
+                throw error
+            } finally {
+                if (!opened) {
+                    try { writerChannel?.close() }
+                    catch (cleanup: Exception) { failure?.addSuppressed(cleanup) }
+                    try { release(file, owner, lock) }
+                    catch (cleanup: Exception) {
+                        if (failure != null) failure.addSuppressed(cleanup)
+                        else throw cleanup
+                    }
+                }
+            }
+        }
+
         /** Adapts the workspace-aware creation contract to the existing EventSinkFactory port. */
         fun factory(workspaceRoot: Path): EventSinkFactory =
             EventSinkFactory { file -> create(file, workspaceRoot) }
@@ -425,13 +643,25 @@ class DurableSessionEventLedger private constructor(
     @Synchronized internal fun <T> withCommittedCheckpointAnchor(
         block: (VerifiedSessionEventLedger) -> T
     ): T {
-        if (closed || poisoned || pending != null)
+        if (checkpointPublicationUnconfirmed)
+            throw SessionLedgerUnconfirmed("LEDGER_REOPEN_CHECKPOINT_UNCONFIRMED")
+        if (closed || poisoned)
+            throw SessionLedgerUnconfirmed(if (resumeLease != null)
+                "LEDGER_REOPEN_WRITER_POISONED" else "LEDGER_UNACKNOWLEDGED_APPEND")
+        if (pending != null)
             throw SessionLedgerUnconfirmed("LEDGER_UNACKNOWLEDGED_APPEND")
         // Refuse before replay so checkpointing cannot hold the append monitor
         // across a larger ledger than the opt-in bounded persistence contract.
         if (channel.size() > MAX_LIVE_CHECKPOINT_LEDGER_BYTES)
             throw SessionLedgerUnconfirmed(LIVE_CHECKPOINT_SIZE_EXCEEDED_CODE)
-        val verified = replayUnlocked(path)
+        // A reopened writer must replay its *own* descriptor, not a fresh
+        // path lookup. Reader position is restored even on a failed replay,
+        // so a subsequent append cannot accidentally overwrite the prefix.
+        val verified = if (resumeLease != null) {
+            val offset = channel.position()
+            try { replayChannel(channel) }
+            finally { channel.position(offset) }
+        } else replayUnlocked(path)
         if (verified.lastSequence != committedSequence ||
             verified.headSha256 != hex(lastDigest) ||
             verified.lastTrustedOffset != channel.position())
@@ -439,13 +669,143 @@ class DurableSessionEventLedger private constructor(
         return block(verified)
     }
 
+    /** Distinguish ordinary CREATE_NEW writer misuse from ledger drift. */
+    internal fun requireFencedCheckpointWriter() {
+        if (resumeLease == null) throw SessionLedgerUnconfirmed("LEDGER_NOT_FENCED")
+    }
+
+    /**
+     * PRE-PUBLICATION proof. Called by the trusted host under the existing
+     * lease → writer monitor lock order, before any checkpoint bytes are
+     * committed. No post-persist validator may turn a completed publication
+     * into a false failure.
+     */
+    @Synchronized internal fun requireFencedCheckpointPublication(
+        currentLease: SessionResumeLease,
+        anchor: VerifiedSessionEventLedger,
+        snapshot: SessionCheckpoint
+    ) {
+        if (resumeLease == null)
+            throw SessionLedgerUnconfirmed("LEDGER_NOT_FENCED")
+        if (resumeLease !== currentLease ||
+            closed || poisoned || pending != null || checkpointPublicationUnconfirmed ||
+            committedSequence != anchor.lastSequence ||
+            hex(lastDigest) != anchor.headSha256 ||
+            channel.position() != anchor.lastTrustedOffset ||
+            snapshot.journalSequence != anchor.lastSequence ||
+            snapshot.journalHeadSha256 != anchor.headSha256 ||
+            snapshot.journalFileSha256 != anchor.fileSha256 ||
+            snapshot.lastTrustedJournalOffset != anchor.lastTrustedOffset ||
+            !PreExecutionSnapshotPolicy.safe(snapshot) ||
+            PreExecutionPhasePolicy.phaseFromVerifiedHistory(
+                snapshot.phase, anchor.events) != committedPhase)
+            throw SessionLedgerUnconfirmed("LEDGER_REOPEN_CHECKPOINT_MISMATCH")
+    }
+
+    /**
+     * No-throw bookkeeping after a successful durable fenced save. Preconditions
+     * (lease identity, writer state, snapshot/anchor) were proven while the
+     * SAME writer monitor was held before persist; append cannot race this.
+     */
+    @Synchronized internal fun markFencedCheckpointPublished() {
+        acknowledgedSinceCheckpoint = false
+        checkpointPublicationUnconfirmed = false
+    }
+
+    /** Called only when checkpoint-store publication had an ambiguous result. */
+    @Synchronized internal fun markFencedCheckpointPublicationUnconfirmed() {
+        checkpointPublicationUnconfirmed = true
+    }
+
+    /**
+     * Atomically fenced append: lease monitor precedes the writer monitor.
+     * The whole append, force and acknowledgement share one publication.
+     * The trusted host must close the writer BEFORE retiring its resume lease;
+     * close does not acquire the lease monitor (avoids monitor inversion).
+     */
+    @OptIn(LedgerTestFaultInjection::class)
+    fun appendFenced(event: JsonObject) = appendFencedWithFault(event) { }
+
+    /**
+     * Integration-test-only seam. Deliberately internal: production hosts must
+     * never execute arbitrary callbacks while owning the resume lease monitor.
+     */
+    @LedgerTestFaultInjection
+    internal fun appendFencedWithFault(event: JsonObject, afterPhase: (String) -> Unit) {
+        val currentLease = resumeLease
+            ?: throw SessionLedgerUnconfirmed("LEDGER_NOT_FENCED")
+        try {
+            // Reject closed/poisoned writers before event-type validation,
+            // preserving the writer-state diagnostic on bad input.
+            currentLease.publishIfCurrent {
+                synchronized(this) {
+                    if (closed)
+                        throw FencedStateRefusal(
+                            SessionLedgerUnconfirmed("LEDGER_REOPEN_WRITER_CLOSED"))
+                    if (checkpointPublicationUnconfirmed)
+                        throw FencedStateRefusal(
+                            SessionLedgerUnconfirmed("LEDGER_REOPEN_CHECKPOINT_UNCONFIRMED"))
+                    if (poisoned || pending != null)
+                        throw FencedStateRefusal(
+                            SessionLedgerUnconfirmed("LEDGER_REOPEN_WRITER_POISONED"))
+                    currentLease.requireLedgerPath(path)
+                    if (channel.size() != channel.position()) {
+                        poisoned = true
+                        throw SessionLedgerUnconfirmed("LEDGER_REOPEN_CHECKPOINT_MISMATCH")
+                    }
+                    val phase = committedPhase ?: throw FencedPolicyRefusal()
+                    val nextPhase = PreExecutionPhasePolicy.step(event, phase)
+                        ?: throw FencedPolicyRefusal()
+                    if (!FencedGraphMetadataPolicy.permittedFencedGraphMetadata(
+                            event, fencedGraphId ?: throw FencedPolicyRefusal()))
+                        throw FencedPolicyRefusal()
+                    // Fault seam for verifying that an authority exception
+                    // with a policy-like public code still revokes the writer.
+                    afterPhase("before-record-write")
+                    try {
+                        appendFrame(event)
+                    } catch (error: SessionLedgerUnconfirmed) {
+                        // appendFrame poisons itself on any attempted physical
+                        // write failure. A still-healthy writer means this was
+                        // only frame/sequence/identity validation before I/O.
+                        if (!poisoned) throw FencedInputRefusal(error)
+                        throw error
+                    }
+                    pendingPhase = nextPhase
+                    afterPhase("record-written")
+                    forcePending { afterPhase("forced-before-ack") }
+                }
+            }
+        } catch (_: FencedPolicyRefusal) {
+            // This specific local sentinel is the ONLY non-poisoning policy
+            // refusal. A lease failure with the same public code is not one.
+            throw SessionLedgerUnconfirmed("LEDGER_REOPEN_EVENT_REFUSED")
+        } catch (error: FencedInputRefusal) {
+            throw error.reason
+        } catch (error: FencedStateRefusal) {
+            // This is a known non-mutating state denial, not new I/O ambiguity.
+            throw error.reason
+        } catch (error: Throwable) {
+            // Unknown failures and stale/missing lease authority revoke the
+            // writer; uncertain physical writes are separately tracked by
+            // appendFrame/forcePending for close() diagnostics.
+            synchronized(this) { poisoned = true }
+            throw error
+        }
+    }
+
     @Synchronized override fun append(event: JsonObject) {
+        if (resumeLease != null) throw SessionLedgerUnconfirmed("LEDGER_FENCED_API_REQUIRED")
+        appendFrame(event)
+    }
+
+    private fun appendFrame(event: JsonObject) {
         check(!closed && !poisoned && pending == null) { "Ledger not ready for append" }
         val next = committedSequence + 1
         val payload = event.toString().toByteArray(StandardCharsets.UTF_8)
-        if (payload.size !in 1..MAX_EVENT_BYTES ||
-            channel.position() + 4L + 32 + payload.size > MAX_LEDGER_BYTES)
-            throw SessionLedgerUnconfirmed("LEDGER_RECORD_SIZE_INVALID")
+        if (resumeLease != null)
+            requireReopenCheckpointCapacity(channel.position(), payload.size)
+        requireAppendCapacity(committedSequence, channel.position(), payload.size)
         validate(event, next, lastEventId)
         val identity = (event["sessionId"] as JsonPrimitive).content to
             (event["traceId"] as JsonPrimitive).content
@@ -458,27 +818,40 @@ class DurableSessionEventLedger private constructor(
             writeFully(channel, frame)
             pending = (event["eventId"] as JsonPrimitive).content to hash
             pendingIdentity = identity
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             poisoned = true
+            uncertainWrite = true
             throw SessionLedgerUnconfirmed("LEDGER_WRITE_UNCONFIRMED", e)
         }
     }
 
-    /** The sink must not acknowledge an append until FileChannel.force succeeds. */
+    /** Ordinary EventSink flush is disallowed on reopened writers. */
     @Synchronized override fun flush() {
+        if (resumeLease != null) throw SessionLedgerUnconfirmed("LEDGER_FENCED_API_REQUIRED")
+        forcePending()
+    }
+
+    private fun forcePending(afterForce: () -> Unit = {}) {
         check(!closed && !poisoned) { "Ledger unavailable" }
         try {
             channel.force(true)
+            afterForce()
             pending?.let { (eventId, digest) ->
                 committedSequence++
                 lastEventId = eventId
                 lastDigest = digest
                 committedIdentity = pendingIdentity
+                if (resumeLease != null) {
+                    committedPhase = pendingPhase
+                    acknowledgedSinceCheckpoint = true
+                }
+                pendingPhase = null
                 pendingIdentity = null
                 pending = null
             }
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             poisoned = true
+            uncertainWrite = true
             throw SessionLedgerUnconfirmed("LEDGER_SYNC_UNCONFIRMED", e)
         }
     }
@@ -486,17 +859,52 @@ class DurableSessionEventLedger private constructor(
     @Synchronized override fun close() {
         if (closed) return
         closed = true
-        val unconfirmed = poisoned || pending != null
+        val unconfirmed = uncertainWrite || pending != null
+        val revoked = poisoned && !unconfirmed && !checkpointPublicationUnconfirmed
+        // Preserve primary C2 uncertainty, but also preserve lease revocation
+        // as a suppressed cause; never force a revoked writer during close.
+        val revokedWithAmbiguousCheckpoint =
+            poisoned && !unconfirmed && checkpointPublicationUnconfirmed
+        // Even a metadata-only save with no new append can leave an
+        // uncertain new generation; never report clean close in that state.
+        val missingCheckpoint = resumeLease != null &&
+            (acknowledgedSinceCheckpoint || checkpointPublicationUnconfirmed)
+        val checkpointDiagnostic = if (checkpointPublicationUnconfirmed)
+            "LEDGER_REOPEN_CHECKPOINT_UNCONFIRMED"
+        else "LEDGER_REOPEN_CHECKPOINT_REQUIRED"
+        var leaseReleased = false
         try {
-            if (!unconfirmed) channel.force(true)
+            if (!unconfirmed && !revoked && !revokedWithAmbiguousCheckpoint)
+                channel.force(true)
             channel.close()
             release(path, leaseChannel, lease)
+            leaseReleased = true
             if (unconfirmed) throw SessionLedgerUnconfirmed("LEDGER_UNACKNOWLEDGED_APPEND")
+            if (revoked) throw SessionLedgerUnconfirmed("LEDGER_REOPEN_WRITER_POISONED")
+            // Do not truncate or repair a durable uncheckpointed tail. The
+            // host learns about it now, not on a subsequent admission.
+            if (missingCheckpoint)
+                throw SessionLedgerUnconfirmed(checkpointDiagnostic)
             closeVerified = true
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
+            if (revokedWithAmbiguousCheckpoint &&
+                (e as? SessionLedgerUnconfirmed)?.code != "LEDGER_REOPEN_WRITER_POISONED" &&
+                e.suppressed.none {
+                    (it as? SessionLedgerUnconfirmed)?.code ==
+                        "LEDGER_REOPEN_WRITER_POISONED"
+                })
+                e.addSuppressed(SessionLedgerUnconfirmed("LEDGER_REOPEN_WRITER_POISONED"))
+            if (missingCheckpoint &&
+                (e as? SessionLedgerUnconfirmed)?.code != checkpointDiagnostic &&
+                e.suppressed.none {
+                    (it as? SessionLedgerUnconfirmed)?.code == checkpointDiagnostic
+                })
+                e.addSuppressed(SessionLedgerUnconfirmed(checkpointDiagnostic))
             poisoned = true
             try { channel.close() } catch (cleanup: Exception) { e.addSuppressed(cleanup) }
-            if (heldLockPaths.contains(leasePath(path))) {
+            // A successful release removed our JVM reservation. Never try to
+            // release another writer's lock if it acquired the same path since.
+            if (!leaseReleased && heldLockPaths.contains(leasePath(path))) {
                 try { release(path, leaseChannel, lease) }
                 catch (cleanup: Exception) { e.addSuppressed(cleanup) }
             }

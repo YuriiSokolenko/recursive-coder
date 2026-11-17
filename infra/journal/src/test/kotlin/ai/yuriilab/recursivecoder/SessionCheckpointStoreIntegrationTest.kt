@@ -7,18 +7,23 @@ import java.nio.file.FileSystems
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import java.nio.file.attribute.PosixFilePermission
+import java.nio.ByteBuffer
+import java.nio.file.StandardOpenOption
+import java.nio.file.StandardCopyOption
+import java.security.MessageDigest
 import java.nio.charset.StandardCharsets
 import java.util.UUID
 import kotlinx.serialization.json.*
 import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.Timeout
 import org.junit.jupiter.api.io.TempDir
 import kotlin.test.*
 
-@Tag("integration")
-@OptIn(ResumeOperatorOnlyApi::class)
-class SessionCheckpointStoreIntegrationTest {
-    @TempDir lateinit var temp: Path
+/** Shared Linux checkpoint/ledger fixtures for integration test classes. */
+@OptIn(ResumeOperatorOnlyApi::class, LedgerTestFaultInjection::class)
+abstract class SessionCheckpointTestFixture {
+    @TempDir protected lateinit var temp: Path
 
     @BeforeEach fun requiresLinuxCheckpointFilesystem() {
         val supported = System.getProperty("os.name") == "Linux" &&
@@ -33,10 +38,10 @@ class SessionCheckpointStoreIntegrationTest {
             assumeTrue(supported, reason)
         }
     }
-    private val artifactDigest = "f".repeat(64)
+    protected val artifactDigest = "f".repeat(64)
 
-    private fun workspace(): Path = temp.resolve("workspace").also { Files.createDirectories(it) }
-    private fun store(): Path = temp.resolve("checkpoints").also {
+    protected fun workspace(): Path = temp.resolve("workspace").also { Files.createDirectories(it) }
+    protected fun store(): Path = temp.resolve("checkpoints").also {
         if (!Files.exists(it)) {
             Files.createDirectories(it)
             Files.setPosixFilePermissions(it, setOf(
@@ -45,13 +50,28 @@ class SessionCheckpointStoreIntegrationTest {
                 PosixFilePermission.OWNER_EXECUTE))
         }
     }
-    private fun ledger(): Path = temp.resolve("events.ledger")
+    protected fun ledger(): Path = temp.resolve("events.ledger")
 
-    private fun context() = CheckpointHostContext(workspace(), "a".repeat(64),
+    /** Avoid a blocking BufferedReader.readLine() when a child JVM stalls. */
+    protected fun awaitChildLockSignal(child: Process, output: Path, expected: String) {
+        val deadline = System.nanoTime() +
+            java.util.concurrent.TimeUnit.SECONDS.toNanos(30)
+        while (System.nanoTime() < deadline) {
+            val value = if (Files.exists(output)) Files.readString(output) else ""
+            if (value.lineSequence().any { it.trim() == expected }) return
+            assertTrue(child.isAlive,
+                "Child exited before '$expected': $value")
+            Thread.sleep(20L)
+        }
+        fail("Child lock signal '$expected' timed out: " +
+            if (Files.exists(output)) Files.readString(output) else "(no output)")
+    }
+
+    protected fun context() = CheckpointHostContext(workspace(), "a".repeat(64),
         "b".repeat(40), "refs/heads/dev", "c".repeat(64),
         "graph-root", 5, "d".repeat(64))
 
-    private fun event(sequence: Int, correlation: String, status: String,
+    protected fun event(sequence: Int, correlation: String, status: String,
                       metadata: JsonObject, kind: String = if (sequence == 1) "agent.started" else "tool.completed"
     ): JsonObject = buildJsonObject {
         put("kind", "session-event")
@@ -74,7 +94,7 @@ class SessionCheckpointStoreIntegrationTest {
         put("metadata", metadata)
     }
 
-    private fun createLedger() {
+    protected fun createLedger() {
         DurableSessionEventLedger.create(ledger(), workspace()).use { writer ->
             writer.append(event(1, "req-one", "started", buildJsonObject {
                 put("graphId", "graph-root")
@@ -90,7 +110,7 @@ class SessionCheckpointStoreIntegrationTest {
         }
     }
 
-    private fun snapshot(sequence: Long = 1, previous: String? = null,
+    protected fun snapshot(sequence: Long = 1, previous: String? = null,
                          unknown: Boolean = false,
                          providedAnchor: VerifiedSessionEventLedger? = null): SessionCheckpoint {
         val verified = providedAnchor ?: DurableSessionEventLedger.inspect(ledger())
@@ -111,27 +131,27 @@ class SessionCheckpointStoreIntegrationTest {
         )
     }
 
-    private fun save(s: SessionCheckpoint, previous: String? = null) =
+    protected fun save(s: SessionCheckpoint, previous: String? = null) =
         SessionCheckpointStore.save(store(), context(), ledger(), s, previous)
 
-    private fun inspect() = SessionCheckpointStore.inspect(store(), context(), ledger())
+    protected fun inspect() = SessionCheckpointStore.inspect(store(), context(), ledger())
 
     // Dense but protocol-valid metadata keeps the real 4 MiB boundary tests
     // to roughly a thousand fsynced records rather than tens of thousands.
-    private val paddingKeys = listOf("tool", "provider", "features", "deniedCode",
+    protected val paddingKeys = listOf("tool", "provider", "features", "deniedCode",
         "recursiveEvent", "roleEvent", "origin", "role", "kind", "stageState",
         "approval", "verdict", "reasonCode", "scope", "code", "childResourceAudit",
         "recursiveStopCode")
 
-    private fun frameBytes(value: JsonObject): Int =
+    protected fun frameBytes(value: JsonObject): Int =
         36 + value.toString().toByteArray(StandardCharsets.UTF_8).size
 
-    private fun maximumPaddingEvent(sequence: Int): JsonObject =
+    protected fun maximumPaddingEvent(sequence: Int): JsonObject =
         event(sequence, "req-padding", "started", buildJsonObject {
             paddingKeys.forEach { put(it, "x".repeat(256)) }
         }, "agent.started")
 
-    private fun preciselySizedEvent(sequence: Int, frameSize: Int): JsonObject {
+    protected fun preciselySizedEvent(sequence: Int, frameSize: Int): JsonObject {
         for (count in 1..paddingKeys.size) {
             val selected = paddingKeys.take(count)
             val minimum = frameBytes(event(sequence, "req-padding", "started",
@@ -153,7 +173,7 @@ class SessionCheckpointStoreIntegrationTest {
         error("Cannot produce valid event frame with length " + frameSize)
     }
 
-    private fun fillLiveLedgerTo(writer: DurableSessionEventLedger, targetBytes: Long): Int {
+    protected fun fillLiveLedgerTo(writer: DurableSessionEventLedger, targetBytes: Long): Int {
         writer.append(event(1, "req-one", "started", buildJsonObject {
             put("graphId", "graph-root")
         }))
@@ -186,6 +206,49 @@ class SessionCheckpointStoreIntegrationTest {
         return next + 2
     }
 
+    protected fun createPreExecutionCheckpoint(): VerifiedSessionCheckpoint {
+        DurableSessionEventLedger.create(ledger(), workspace()).use { writer ->
+            // A CREATED snapshot needs no lifecycle transition. A synthetic
+            // session.transition without a phase edge would now be refused.
+            writer.append(event(1, "req-one", "completed", buildJsonObject {
+                put("graphId", "graph-root")
+            }, "checkpoint.saved"))
+            writer.flush()
+        }
+        val early = snapshot().copy(
+            phase = "created",
+            taskAttempt = 0,
+            taskState = "created",
+            children = listOf(CheckpointChild("graph-child", "graph-root", "ready")),
+            acceptedArtifacts = emptyList(),
+            hostAssertedUsage = emptyList(),
+            pendingEffects = emptyList()
+        )
+        return save(early)
+    }
+
+    protected fun resumeAttestation(
+        expected: Long = 0L,
+        allowed: Set<String> = ToolAuthorizationPolicy.knownReadTools
+    ) = ResumeHostAttestation(expected,
+        ReadPolicyFacts("read-only", allowed, writablePathsPresent = false,
+            immutableInputsPresent = false), externalActionsReconciled = true)
+    /** Extra v1 transition data supplied by the host, never inferred from the ledger. */
+    protected fun fencedTransition(sequence: Int, from: String, to: String): JsonObject {
+        val base = event(sequence, "req-transition-$sequence", "completed",
+            buildJsonObject { put("graphId", "graph-root") }, "session.transition")
+        return JsonObject(base.toMutableMap().also {
+            it["transition"] = buildJsonObject {
+                put("from", from)
+                put("to", to)
+            }
+        })
+    }
+}
+
+@Tag("integration")
+@OptIn(ResumeOperatorOnlyApi::class, LedgerTestFaultInjection::class)
+class SessionCheckpointStoreIntegrationTest : SessionCheckpointTestFixture() {
     @Test fun directoryOwnerUsesEffectiveUidNotMutableUserName() {
         assertEquals(0L, LinuxCheckpointOwner.parseEffectiveUid(
             "Name:\tjava\nUid:\t1000\t0\t0\t0\n"))
@@ -646,32 +709,27 @@ class SessionCheckpointStoreIntegrationTest {
         assertTrue(Files.exists(store().resolve("000000000001.rcp")))
     }
 
-    private fun createPreExecutionCheckpoint(): VerifiedSessionCheckpoint {
-        DurableSessionEventLedger.create(ledger(), workspace()).use { writer ->
-            writer.append(event(1, "req-one", "completed", buildJsonObject {
-                put("graphId", "graph-root")
-            }, "checkpoint.saved"))
-            writer.flush()
-        }
-        val early = snapshot().copy(
-            phase = "created",
-            taskAttempt = 0,
-            taskState = "created",
-            children = listOf(CheckpointChild("graph-child", "graph-root", "ready")),
-            acceptedArtifacts = emptyList(),
-            hostAssertedUsage = emptyList(),
-            pendingEffects = emptyList()
+    @Test fun fenceGenerationBudgetRefuses257BeforePublication() {
+        val checkpoint = createPreExecutionCheckpoint()
+        val previous = ResumeFenceRecord(
+            generation = 256L,
+            previousSha256 = "0".repeat(64),
+            checkpointSha256 = checkpoint.sha256,
+            toolAuthoritySha256 = "1".repeat(64),
+            sessionId = checkpoint.snapshot.sessionId,
+            traceId = checkpoint.snapshot.traceId,
+            policySha256 = checkpoint.snapshot.binding.policySha256,
+            sha256 = "2".repeat(64)
         )
-        return save(early)
+        assertEquals("RESUME_FENCE_LIMIT",
+            assertFailsWith<SessionResumeUnconfirmed> {
+                ResumeFenceStorage.publish(store(), previous, checkpoint,
+                    "1".repeat(64)) {
+                    fail("Limit must be checked before preparing any immutable anchor")
+                }
+            }.code)
+        assertFalse(Files.exists(store().resolve("resume-000000000257.rcf")))
     }
-
-    private fun resumeAttestation(
-        expected: Long = 0L,
-        allowed: Set<String> = ToolAuthorizationPolicy.knownReadTools
-    ) = ResumeHostAttestation(expected,
-        ReadPolicyFacts("read-only", allowed, writablePathsPresent = false,
-            immutableInputsPresent = false), externalActionsReconciled = true)
-
 
     @Test fun admissionRefusesTransitionWithoutExplicitPhaseEdge() {
         DurableSessionEventLedger.create(ledger(), workspace()).use { writer ->
@@ -806,6 +864,64 @@ class SessionCheckpointStoreIntegrationTest {
         assertEquals(2L, SessionResumeAdmission.currentGeneration(store(), context(), ledger()))
     }
 
+    @Test fun pathFencedSaveRequiresAdmissibleSnapshotAndExplicitPhaseHistory() {
+        val first = createPreExecutionCheckpoint()
+        SessionResumeAdmission.admit(store(), context(), ledger(), resumeAttestation()).use { lease ->
+            val proposed = first.snapshot.copy(sequence = 2L, previousSha256 = first.sha256)
+            val unsafe = listOf(
+                proposed.copy(phase = "accepted", taskState = "ready"),
+                proposed.copy(taskAttempt = 1),
+                proposed.copy(children = listOf(
+                    CheckpointChild("graph-child", "graph-root", "running")))
+            )
+            val ledgerBytes = Files.readAllBytes(ledger())
+            for (snapshot in unsafe) {
+                assertEquals("CHECKPOINT_RESUME_UNSAFE_BOUNDARY",
+                    assertFailsWith<CheckpointUnconfirmed> {
+                        SessionCheckpointStore.saveFenced(lease, store(), context(),
+                            ledger(), snapshot, first.sha256)
+                    }.code)
+                assertFalse(Files.exists(store().resolve("000000000002.rcp")))
+                assertContentEquals(ledgerBytes, Files.readAllBytes(ledger()))
+            }
+            // A safe path-only snapshot of the already checkpointed prefix
+            // remains possible, preserving the existing #113 fenced contract.
+            val saved = SessionCheckpointStore.saveFenced(lease, store(), context(),
+                ledger(), proposed, first.sha256)
+            assertEquals(2L, saved.snapshot.sequence)
+        }
+    }
+
+    @Test fun pathFencedSaveCannotPromoteAcknowledgementUnknownTailAfterClose() {
+        val first = createPreExecutionCheckpoint()
+        SessionResumeAdmission.admit(store(), context(), ledger(), resumeAttestation()).use { lease ->
+            val writer = DurableSessionEventLedger.reopenForAppend(
+                ledger(), workspace(), store(), context(), lease)
+            writer.appendFenced(event(2, "req-two", "completed",
+                buildJsonObject { put("graphId", "graph-root") }, "checkpoint.saved"))
+            val anchor = writer.withCommittedCheckpointAnchor { it }
+            val proposed = first.snapshot.copy(
+                sequence = 2L, previousSha256 = first.sha256,
+                journalSequence = anchor.lastSequence,
+                journalHeadSha256 = anchor.headSha256,
+                journalFileSha256 = anchor.fileSha256,
+                lastTrustedJournalOffset = anchor.lastTrustedOffset)
+            val close = assertFailsWith<SessionLedgerUnconfirmed> { writer.close() }
+            assertEquals("LEDGER_REOPEN_CHECKPOINT_REQUIRED", close.code)
+            assertTrue(close.suppressed.isEmpty(),
+                "A normal missing-checkpoint close must not retry lock release")
+            val ledgerBytes = Files.readAllBytes(ledger())
+            assertEquals("CHECKPOINT_FENCED_LEDGER_ADVANCED",
+                assertFailsWith<CheckpointUnconfirmed> {
+                    SessionCheckpointStore.saveFenced(lease, store(), context(),
+                        ledger(), proposed, first.sha256)
+                }.code)
+            assertFalse(Files.exists(store().resolve("000000000002.rcp")))
+            assertContentEquals(ledgerBytes, Files.readAllBytes(ledger()))
+            lease.assertCurrent()
+        }
+    }
+
     @Test fun liveLeaseAndHostEvidenceFailuresDenyWithoutAdvancingFence() {
         createPreExecutionCheckpoint()
         val holder = SessionResumeAdmission.admit(store(), context(), ledger(), resumeAttestation())
@@ -917,7 +1033,7 @@ class SessionCheckpointStoreIntegrationTest {
         DurableSessionEventLedger.create(temp.resolve("other-live.ledger"), workspace()).use { writer ->
             writer.append(event(1, "req-one", "completed", buildJsonObject {
                 put("graphId", "graph-root")
-            }, "checkpoint.saved"))
+            }, "session.transition"))
             writer.flush()
             val current = inspect()
             val anchor = writer.withCommittedCheckpointAnchor { it }
@@ -938,10 +1054,175 @@ class SessionCheckpointStoreIntegrationTest {
                 }.code)
             SessionResumeAdmission.admit(store(), context(), ledger(),
                 resumeAttestation(1)).use { currentLease ->
-                assertEquals("RESUME_LEDGER_PATH_CHANGED",
-                    assertFailsWith<SessionResumeUnconfirmed> {
-                        SessionCheckpointStore.saveFromOpenLedgerFenced(
-                            currentLease, store(), context(), writer, next, current.sha256)
+                val denial = assertFailsWith<CheckpointUnconfirmed> {
+                    SessionCheckpointStore.saveFromOpenLedgerFenced(
+                        currentLease, store(), context(), writer, next, current.sha256)
+                }
+                assertEquals("CHECKPOINT_WRITER_NOT_FENCED", denial.code)
+                assertEquals("LEDGER_NOT_FENCED",
+                    (denial.cause as? SessionLedgerUnconfirmed)?.code)
+            }
+        }
+    }
+
+    /**
+     * Real current adapters, not synthesized protocol objects: a CHILD_RESERVED
+     * or preparation CREATED/READY record uses session.transition without an
+     * explicit lifecycle edge. Such a record must never mint a resume lease.
+     * The same shared policy is used by reopenForAppend, so it cannot bypass
+     * this check even for a hand-constructed lease.
+     */
+    private fun assertCurrentEmitterCannotResume(emit: (SessionEventJournal) -> Unit,
+                                                  expectChildActor: Boolean) {
+        val live = DurableSessionEventLedger.create(ledger(), workspace())
+        val journal = SessionEventJournal("sess-one", "trace-one", "req-one",
+            java.time.Clock.fixed(java.time.Instant.parse("2026-11-15T00:00:00Z"),
+                java.time.ZoneOffset.UTC), live)
+        emit(journal)
+        journal.finish()
+        val prefix = DurableSessionEventLedger.inspect(ledger())
+        assertEquals(1, prefix.lastSequence)
+        val record = prefix.events.single()
+        assertEquals("session.transition", record["type"]?.jsonPrimitive?.content)
+        assertNull(record["transition"])
+        if (expectChildActor) {
+            assertNotEquals(JsonNull, record["actor"]?.jsonObject?.get("childAgentId"))
+        }
+        assertNull(PreExecutionPhasePolicy.phaseFromVerifiedHistory("created", prefix.events))
+        assertNull(PreExecutionPhasePolicy.phaseFromVerifiedHistory("accepted", prefix.events))
+
+        val unsafe = snapshot(providedAnchor = prefix).copy(
+            phase = "created", taskAttempt = 0, taskState = "created",
+            children = listOf(CheckpointChild("graph-child", "graph-root", "ready")),
+            acceptedArtifacts = emptyList(), hostAssertedUsage = emptyList(),
+            pendingEffects = emptyList())
+        save(unsafe)
+        val bytes = Files.readAllBytes(ledger())
+        assertEquals("RESUME_UNSAFE_BOUNDARY",
+            assertFailsWith<SessionResumeUnconfirmed> {
+                SessionResumeAdmission.admit(
+                    store(), context(), ledger(), resumeAttestation())
+            }.code)
+        assertContentEquals(bytes, Files.readAllBytes(ledger()))
+        assertFalse(Files.exists(store().resolve("resume-000000000001.rcf")))
+        assertEquals(0L, SessionResumeAdmission.currentGeneration(
+            store(), context(), ledger()))
+    }
+
+    @Test fun actualRecursiveChildReservedEventCannotMasqueradeAsPreExecution() {
+        assertCurrentEmitterCannotResume({ journal ->
+            // Use the same graph IDs as the persisted checkpoint so the
+            // ordinary checkpoint graph-binding verifier can succeed; only
+            // the pre-execution resume policy should refuse this record.
+            CorrelatedRecursiveSessionEvents(journal).emit(RecursiveEvent(
+                RecursiveEventKind.CHILD_RESERVED, GraphId("graph-child"),
+                StageRunId("stage-child-79"), GraphId("graph-root"),
+                StageRunId("stage-parent-79"), "req-child-79", StageKind.SDD,
+                RecursiveUsage(1, 0), RecursiveUsage(2, 1), RecursiveUsage(8, 3),
+                childGraphId = GraphId("graph-child")))
+        }, expectChildActor = true)
+    }
+
+    @Test fun actualPreparationCreatedCannotMasqueradeAsPreExecution() {
+        assertCurrentEmitterCannotResume({ journal ->
+            CorrelatedPreparationSessionEvents(journal).emit(PreparationStageEvent(
+                StageCorrelation("sess-one", GraphId("graph-root"),
+                    StageRunId("stage-preparation"), "req-one", "corr-one"),
+                StageKind.SDD, StageState.CREATED))
+        }, expectChildActor = false)
+    }
+
+    @Test fun actualPreparationReadyCannotMasqueradeAsPreExecution() {
+        assertCurrentEmitterCannotResume({ journal ->
+            CorrelatedPreparationSessionEvents(journal).emit(PreparationStageEvent(
+                StageCorrelation("sess-one", GraphId("graph-root"),
+                    StageRunId("stage-preparation"), "req-one", "corr-one"),
+                StageKind.SDD, StageState.READY))
+        }, expectChildActor = false)
+    }
+
+    @Test fun explicitPhaseEdgeWithRecursiveActorCannotAdmitOrAppend() {
+        val forbidden = JsonObject(fencedTransition(1, "created", "accepted")
+            .toMutableMap().also {
+                it["actor"] = buildJsonObject {
+                    put("agentId", "agent-sess-one")
+                    put("childAgentId", "agent-recursive-child")
+                }
+            })
+        DurableSessionEventLedger.create(ledger(), workspace()).use { writer ->
+            writer.append(forbidden)
+            writer.flush()
+        }
+        val unsafe = snapshot().copy(
+            phase = "accepted", taskAttempt = 0, taskState = "ready",
+            children = listOf(CheckpointChild("graph-child", "graph-root", "ready")),
+            acceptedArtifacts = emptyList(), hostAssertedUsage = emptyList(),
+            pendingEffects = emptyList())
+        save(unsafe)
+        assertEquals("RESUME_UNSAFE_BOUNDARY",
+            assertFailsWith<SessionResumeUnconfirmed> {
+                SessionResumeAdmission.admit(
+                    store(), context(), ledger(), resumeAttestation())
+            }.code)
+        assertNull(PreExecutionPhasePolicy.step(forbidden, "created"))
+    }
+
+    @Test fun admissionRefusesExplicitExecutionTransitionEvenWhenEventTypeIsAllowed() {
+        DurableSessionEventLedger.create(ledger(), workspace()).use { writer ->
+            writer.append(fencedTransition(1, "created", "running"))
+            writer.flush()
+        }
+        val early = snapshot().copy(
+            phase = "created", taskAttempt = 0, taskState = "created",
+            children = listOf(CheckpointChild("graph-child", "graph-root", "ready")),
+            acceptedArtifacts = emptyList(), hostAssertedUsage = emptyList(),
+            pendingEffects = emptyList())
+        val preexisting = save(early)
+        assertEquals(1, preexisting.snapshot.journalSequence)
+        assertEquals("RESUME_UNSAFE_BOUNDARY",
+            assertFailsWith<SessionResumeUnconfirmed> {
+                SessionResumeAdmission.admit(
+                    store(), context(), ledger(), resumeAttestation())
+            }.code)
+        assertFalse(Files.exists(store().resolve("resume-000000000001.rcf")))
+    }
+
+    @Test fun acceptedSnapshotWithOmittedTransitionCannotInferExecutionFreePhase() {
+        DurableSessionEventLedger.create(ledger(), workspace()).use { writer ->
+            writer.append(event(1, "req-one", "completed",
+                buildJsonObject { put("graphId", "graph-root") }, "checkpoint.saved"))
+            writer.flush()
+        }
+        val accepted = snapshot().copy(
+            phase = "accepted", taskAttempt = 0, taskState = "ready",
+            children = listOf(CheckpointChild("graph-child", "graph-root", "ready")),
+            acceptedArtifacts = emptyList(), hostAssertedUsage = emptyList(),
+            pendingEffects = emptyList())
+        save(accepted)
+        assertEquals("RESUME_UNSAFE_BOUNDARY",
+            assertFailsWith<SessionResumeUnconfirmed> {
+                SessionResumeAdmission.admit(
+                    store(), context(), ledger(), resumeAttestation())
+            }.code)
+    }
+
+    @Test fun acceptedSnapshotWithExplicitPreExecutionTransitionAdmits() {
+        DurableSessionEventLedger.create(ledger(), workspace()).use { writer ->
+            writer.append(fencedTransition(1, "created", "accepted"))
+            writer.flush()
+        }
+        val accepted = snapshot().copy(
+            phase = "accepted", taskAttempt = 0, taskState = "ready",
+            children = listOf(CheckpointChild("graph-child", "graph-root", "ready")),
+            acceptedArtifacts = emptyList(), hostAssertedUsage = emptyList(),
+            pendingEffects = emptyList())
+        save(accepted)
+        SessionResumeAdmission.admit(store(), context(), ledger(), resumeAttestation()).use { lease ->
+            DurableSessionEventLedger.reopenForAppend(
+                ledger(), workspace(), store(), context(), lease).use { writer ->
+                assertEquals("LEDGER_REOPEN_EVENT_REFUSED",
+                    assertFailsWith<SessionLedgerUnconfirmed> {
+                        writer.appendFenced(fencedTransition(2, "created", "accepted"))
                     }.code)
             }
         }
@@ -1643,7 +1924,7 @@ class SessionCheckpointStoreIntegrationTest {
             }.code)
     }
 
-    @Test fun independentOsLockProcessBlocksAdmissionAndReleasesOnKill() {
+    @Test @Timeout(120) fun independentOsLockProcessBlocksAdmissionAndReleasesOnKill() {
         createPreExecutionCheckpoint()
         SessionResumeAdmission.admit(store(), context(), ledger(), resumeAttestation()).close()
         val source = temp.resolve("ResumeLockHolder.java")
@@ -1663,10 +1944,12 @@ class SessionCheckpointStoreIntegrationTest {
             }
         """.trimIndent())
         val javaBin = Path.of(System.getProperty("java.home"), "bin", "java").toString()
+        val output = temp.resolve("resume-lock-holder.log")
         val child = ProcessBuilder(javaBin, source.toString(),
-            store().resolve("resume.lock").toString()).redirectErrorStream(true).start()
+            store().resolve("resume.lock").toString())
+            .redirectErrorStream(true).redirectOutput(output.toFile()).start()
         try {
-            assertEquals("ACQUIRED", child.inputStream.bufferedReader().readLine())
+            awaitChildLockSignal(child, output, "ACQUIRED")
             assertEquals("RESUME_LEASE_HELD",
                 assertFailsWith<SessionResumeUnconfirmed> {
                     SessionResumeAdmission.admit(store(), context(), ledger(),
@@ -1681,3 +1964,4 @@ class SessionCheckpointStoreIntegrationTest {
         }
     }
 }
+

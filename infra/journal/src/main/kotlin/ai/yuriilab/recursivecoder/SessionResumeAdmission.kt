@@ -310,6 +310,9 @@ class SessionResumeLease internal constructor(
      * Serialize short host-owned state/receipt publications with close(), so
      * a callback cannot pass a check, lose its lease and commit afterward.
      * Never run model calls, external tools or blocking network I/O here.
+     * A single local ledger FileChannel.force(true) during appendFenced is a
+     * deliberate durability exception: it can delay lease retirement, but
+     * must stay inside the same authority-checked publication.
      */
     @Synchronized fun <T> publishIfCurrent(publication: () -> T): T {
         assertCurrent()
@@ -473,8 +476,7 @@ object SessionResumeAdmission {
                 if (verified.reconciliationRequired ||
                     !PreExecutionSnapshotPolicy.safe(s) ||
                     PreExecutionPhasePolicy.phaseFromVerifiedHistory(
-                        s.phase, ledger.events) == null)
-                    fail("RESUME_UNSAFE_BOUNDARY")
+                        s.phase, ledger.events) == null) fail("RESUME_UNSAFE_BOUNDARY")
                 val prior = ResumeFenceStorage.latest(checkedDir)
                 val priorAnchor = if (operator == null)
                     ResumeFenceAnchor.verify(ledgerPath, prior, checkedDir) else null

@@ -710,14 +710,20 @@ object SessionCheckpointStore {
             throw CheckpointUnconfirmed(code, e)
         }
 
-    /** An old or retired callback cannot publish after the first resume fence. */
+    /**
+     * Path-based fenced publication is restricted to an unchanged, already
+     * checkpoint-covered pre-execution ledger. It cannot promote a stranded
+     * post-append tail (whose fsync acknowledgement may be unknown).
+     * Reopened writers must use saveFromOpenLedgerFenced while still open.
+     */
     fun saveFenced(lease: SessionResumeLease, directory: Path,
                    context: CheckpointHostContext, ledgerPath: Path,
                    snapshot: SessionCheckpoint, expectedPreviousSha256: String?): VerifiedSessionCheckpoint =
         lease.publishIfCurrent {
             lease.requireLedgerPath(ledgerPath)
             persist(directory, context, snapshot, expectedPreviousSha256, {},
-                LinuxCheckpointOwner::effectiveUid, lease) {
+                LinuxCheckpointOwner::effectiveUid, lease,
+                requireCoveredPreExecutionPrefix = true) {
                 inspectLedger(ledgerPath, context.workspaceRoot)
             }
         }
@@ -725,17 +731,63 @@ object SessionCheckpointStore {
     fun saveFromOpenLedgerFenced(lease: SessionResumeLease, directory: Path,
                    context: CheckpointHostContext, ledger: DurableSessionEventLedger,
                    snapshot: SessionCheckpoint, expectedPreviousSha256: String?): VerifiedSessionCheckpoint =
+        saveFromOpenLedgerFencedImpl(lease, directory, context, ledger, snapshot,
+            expectedPreviousSha256, {})
+
+    /** Inject failure at the same durable boundaries as the regular save tests. */
+    @LedgerTestFaultInjection
+    internal fun saveFromOpenLedgerFencedWithFault(lease: SessionResumeLease,
+                   directory: Path, context: CheckpointHostContext,
+                   ledger: DurableSessionEventLedger, snapshot: SessionCheckpoint,
+                   expectedPreviousSha256: String?,
+                   afterPhase: (String) -> Unit): VerifiedSessionCheckpoint =
+        saveFromOpenLedgerFencedImpl(lease, directory, context, ledger, snapshot,
+            expectedPreviousSha256, afterPhase)
+
+    private fun saveFromOpenLedgerFencedImpl(lease: SessionResumeLease, directory: Path,
+                   context: CheckpointHostContext, ledger: DurableSessionEventLedger,
+                   snapshot: SessionCheckpoint, expectedPreviousSha256: String?,
+                   afterPhase: (String) -> Unit): VerifiedSessionCheckpoint =
         lease.publishIfCurrent {
-            lease.requireLedgerPath(ledger.checkpointStoragePath)
             try {
+                // Only reopened lease-bound writers may enter this save path.
+                ledger.requireFencedCheckpointWriter()
+                lease.requireLedgerPath(ledger.checkpointStoragePath)
                 assertLedgerOutsideWorkspace(ledger.checkpointStoragePath, context.workspaceRoot)
                 ledger.withCommittedCheckpointAnchor { anchor ->
-                    persist(directory, context, snapshot, expectedPreviousSha256, {},
-                        LinuxCheckpointOwner::effectiveUid, lease) { anchor }
+                    // Pre-persist proof, under the SAME writer monitor as the
+                    // publication and post-persist acknowledgement.
+                    ledger.requireFencedCheckpointPublication(lease, anchor, snapshot)
+                    var generationRenamed = false
+                    var publicationWriteStarted = false
+                    val persisted = try {
+                        persist(directory, context, snapshot, expectedPreviousSha256,
+                            { phase ->
+                                if (phase == "renamed") generationRenamed = true
+                                afterPhase(phase)
+                            }, LinuxCheckpointOwner::effectiveUid, lease,
+                            onPublicationStarted = { publicationWriteStarted = true }) { anchor }
+                    } catch (error: Throwable) {
+                        // A refusal before temp-file writing cannot publish C2.
+                        // Once writing began, even a failed pre-rename publication
+                        // may have uncertain effects and is never retried blindly.
+                        val uncertain = publicationWriteStarted || generationRenamed
+                        if (uncertain)
+                            ledger.markFencedCheckpointPublicationUnconfirmed()
+                        throw error
+                    }
+                    ledger.markFencedCheckpointPublished()
+                    persisted
                 }
             } catch (e: SessionLedgerUnconfirmed) {
-                val code = if (e.code == DurableSessionEventLedger.LIVE_CHECKPOINT_SIZE_EXCEEDED_CODE)
-                    "CHECKPOINT_LIVE_LEDGER_TOO_LARGE" else "CHECKPOINT_JOURNAL_UNCONFIRMED"
+                val code = when (e.code) {
+                    DurableSessionEventLedger.LIVE_CHECKPOINT_SIZE_EXCEEDED_CODE ->
+                        "CHECKPOINT_LIVE_LEDGER_TOO_LARGE"
+                    "LEDGER_NOT_FENCED" -> "CHECKPOINT_WRITER_NOT_FENCED"
+                    "LEDGER_REOPEN_CHECKPOINT_UNCONFIRMED" ->
+                        "CHECKPOINT_WRITE_UNCONFIRMED"
+                    else -> "CHECKPOINT_JOURNAL_UNCONFIRMED"
+                }
                 throw CheckpointUnconfirmed(code, e)
             }
         }
@@ -745,6 +797,8 @@ object SessionCheckpointStore {
              afterPhase: (String) -> Unit,
              effectiveUid: () -> Long?,
              fence: SessionResumeLease? = null,
+             requireCoveredPreExecutionPrefix: Boolean = false,
+             onPublicationStarted: () -> Unit = {},
              ledgerEvidence: () -> VerifiedSessionEventLedger): VerifiedSessionCheckpoint {
         val dir = checkedDirectory(directory, context.workspaceRoot, effectiveUid)
         return withLease(dir, create = true) {
@@ -764,6 +818,24 @@ object SessionCheckpointStore {
                 if (fence == null)
                     throw CheckpointUnconfirmed("CHECKPOINT_RESUME_ANCHOR_UNCONFIRMED", e)
                 throw e
+            }
+            if (requireCoveredPreExecutionPrefix) {
+                // Both fenced checkpoint APIs must use the exact same
+                // pre-execution snapshot and verified phase-history contract.
+                if (!PreExecutionSnapshotPolicy.safe(snapshot) ||
+                    PreExecutionPhasePolicy.phaseFromVerifiedHistory(
+                        snapshot.phase, ledger.events) == null)
+                    refuse("CHECKPOINT_RESUME_UNSAFE_BOUNDARY")
+                // Only an open, acknowledged fenced writer can prove new frames
+                // were fsynced. Path-only saves may not bless a valid-looking
+                // but uncheckpointed tail after a crash or failed close.
+                val covered = previous?.snapshot
+                    ?: refuse("CHECKPOINT_FENCED_LEDGER_ADVANCED")
+                if (covered.journalSequence != ledger.lastSequence ||
+                    covered.journalHeadSha256 != ledger.headSha256 ||
+                    covered.journalFileSha256 != ledger.fileSha256 ||
+                    covered.lastTrustedJournalOffset != ledger.lastTrustedOffset)
+                    refuse("CHECKPOINT_FENCED_LEDGER_ADVANCED")
             }
             SessionCheckpointCodec.validate(snapshot)
             verify(snapshot, context, ledger)
@@ -786,6 +858,9 @@ object SessionCheckpointStore {
             try {
                 FileChannel.open(temporary, StandardOpenOption.CREATE_NEW,
                     StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS).use { channel ->
+                    // Mark the start of physical generation write operations.
+                    // Earlier validation and fence refusals leave C2 absent.
+                    onPublicationStarted()
                     val bytes = ByteBuffer.wrap(frame)
                     while (bytes.hasRemaining()) {
                         if (channel.write(bytes) <= 0) refuse("CHECKPOINT_WRITE_UNCONFIRMED")
@@ -836,6 +911,47 @@ object SessionCheckpointStore {
             verify(latest.snapshot, context, ledger)
             block(dir, latest, ledger)
         }
+    }
+
+    /**
+     * Initial read: validate lease authority before the ledger lock exists.
+     * The later head recheck uses admittedCheckpointHeadForReopen() so that
+     * ledger → checkpoint does not add a ledger → lease monitor acquisition.
+     */
+    internal fun admittedCheckpointForReopen(
+        lease: SessionResumeLease, directory: Path, context: CheckpointHostContext
+    ): VerifiedSessionCheckpoint {
+        lease.assertCurrent()
+        return admittedCheckpointHeadForReopen(
+            lease.admittedCheckpointSha256, directory, context)
+    }
+
+    /**
+     * Check the immutable pinned checkpoint SHA under the short checkpoint
+     * lock only. No resume-lease monitor or ledger lock is acquired here.
+     * Safe to call with the long-lived ledger OS lock already held.
+     */
+    internal fun admittedCheckpointHeadForReopen(
+        admittedSha256: String, directory: Path, context: CheckpointHostContext
+    ): VerifiedSessionCheckpoint {
+        val checked = checkedDirectory(directory, context.workspaceRoot,
+            LinuxCheckpointOwner::effectiveUid)
+        return withLease(checked, create = false) {
+            val current = readAll(checked).lastOrNull() ?: refuse("CHECKPOINT_MISSING")
+            if (current.sha256 != admittedSha256 ||
+                current.snapshot.binding != context.binding() ||
+                current.reconciliationRequired)
+                refuse("CHECKPOINT_REOPEN_UNCONFIRMED")
+            current
+        }
+    }
+
+    /** Full semantic replay validation for the reopened writer, under ledger OS lock. */
+    internal fun verifyReopenLedger(
+        checkpoint: SessionCheckpoint, context: CheckpointHostContext,
+        ledger: VerifiedSessionEventLedger
+    ) {
+        verify(checkpoint, context, ledger)
     }
 
     /** Read-only inspection creates no files and verifies every published generation. */

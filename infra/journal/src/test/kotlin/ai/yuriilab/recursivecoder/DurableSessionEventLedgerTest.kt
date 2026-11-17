@@ -64,6 +64,20 @@ class DurableSessionEventLedgerTest {
         return path
     }
 
+    @Test fun unfencedCreateNewWriterRejectsFencedAppendWithoutPoisoning() {
+        DurableSessionEventLedger.create(file(), workspace()).use { ledger ->
+            val before = Files.readAllBytes(file())
+            assertEquals("LEDGER_NOT_FENCED",
+                assertFailsWith<SessionLedgerUnconfirmed> {
+                    ledger.appendFenced(event(1))
+                }.code)
+            assertContentEquals(before, Files.readAllBytes(file()))
+            ledger.append(event(1))
+            ledger.flush()
+        }
+        assertEquals(1, DurableSessionEventLedger.inspect(file()).lastSequence)
+    }
+
     @Test fun sessionJournalAcknowledgesFsyncedEventsAndVerifiedReplay() {
         val path = file()
         val sink = DurableSessionEventLedger.create(path, workspace())
