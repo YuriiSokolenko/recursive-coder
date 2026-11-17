@@ -117,6 +117,23 @@ class RunPreparationStageUseCase(
             }
         }
 
+    /**
+     * A thrown read is not proof of missing or changed frozen bytes.
+     * Execute has no durable pending-human draft to retry: the caller must
+     * terminate its active attempt, or reconcile an unconfirmed finish.
+     * Human continuation retains its existing separate read-failure policy.
+     */
+    private suspend fun frozenInputFailure(
+        graph: StageGraph, stage: StageNode, changedCode: String
+    ): String? =
+        try {
+            if (inputsIntact(graph, stage)) null else changedCode
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            "INPUT_READ_UNAVAILABLE"
+        }
+
     private suspend fun live(lease: PreparationStageLease, snapshot: StageToolHostSnapshot): Boolean =
         try {
             withContext(blockingDispatcher) {
@@ -214,12 +231,15 @@ class RunPreparationStageUseCase(
 
         val inputs = ready.artifacts.filter { it.id in stage.inputArtifacts }
             .sortedBy { it.kind.name }
-        val inputData = withContext(blockingDispatcher) {
-            inputs.map { artifact ->
-                artifact to try { host.readBytes(artifact.declaredPath) }
-                    catch (cancelled: CancellationException) { throw cancelled }
-                    catch (_: Exception) { null }
+        val inputData = try {
+            withContext(blockingDispatcher) {
+                inputs.map { artifact -> artifact to host.readBytes(artifact.declaredPath) }
             }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            // No stage lease or model/tool work has begun.
+            return denied("INPUT_READ_UNAVAILABLE")
         }
         val instruction = buildString {
             append(command.instruction)
@@ -368,7 +388,9 @@ class RunPreparationStageUseCase(
             catch (_: Exception) { null } ?: return terminal("ARTIFACT_MISSING")
             val intended = proposed.toByteArray(Charsets.UTF_8)
             if (!bytes.contentEquals(intended)) return terminal("ARTIFACT_DIGEST_MISMATCH")
-            if (!inputsIntact(running, stage)) return terminal("FROZEN_INPUT_CHANGED")
+            frozenInputFailure(running, stage, "FROZEN_INPUT_CHANGED")?.let {
+                return terminal(it)
+            }
             val outputKind = kind.output ?: return terminal("INVALID_STAGE_OUTPUT")
             val candidate = StageArtifactManifest(command.artifactId, outputKind,
                 command.outputPath, digest(bytes), kind.role, id, 1L,
@@ -391,8 +413,11 @@ class RunPreparationStageUseCase(
                 withContext(blockingDispatcher) { host.readBytes(command.outputPath) }
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (_: Exception) { null }
-            if (!live(lease, snapshot) || after == null || !after.contentEquals(bytes) ||
-                !inputsIntact(running, stage)) return terminal("STALE_ARTIFACT_APPROVAL")
+            if (!live(lease, snapshot) || after == null || !after.contentEquals(bytes))
+                return terminal("STALE_ARTIFACT_APPROVAL")
+            frozenInputFailure(running, stage, "STALE_ARTIFACT_APPROVAL")?.let {
+                return terminal(it)
+            }
             if (decision == PreparationApproval.REJECT)
                 return terminal("HOST_REJECTED", StageState.REJECTED, rejected = true)
 

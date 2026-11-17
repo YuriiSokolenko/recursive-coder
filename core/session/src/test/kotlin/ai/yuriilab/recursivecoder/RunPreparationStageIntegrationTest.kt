@@ -647,6 +647,102 @@ class RunPreparationStageIntegrationTest : PreparationStageHostContract() {
         }
     }
 
+    @Test fun frozenInputReadFailureBeforeAdmissionDoesNotClaimOrExecuteStage() = runBlocking {
+        val host = FakeHost()
+        val roles = FakeRoles()
+        val tools = FakeTools(host)
+        assertIs<PreparationStageOutcome.Accepted>(
+            run(host, roles, tools, initial(), StageKind.SDD).outcome)
+        host.plan(StageKind.ATDD)
+        val graph = requireNotNull(host.graph)
+        val accepted = host.accepted.toSet()
+        val files = host.files.mapValues { it.value.clone() }
+        host.unavailableReadPath = paths.getValue(StageKind.SDD)
+        val events = mutableListOf<PreparationStageEvent>()
+        val result = run(host, roles, tools, graph, StageKind.ATDD, events = events)
+        assertEquals(PreparationStageOutcome.Denied("INPUT_READ_UNAVAILABLE"), result.outcome)
+        assertEquals(graph, result.graph)
+        assertEquals(graph, host.graph)
+        assertEquals(accepted, host.accepted)
+        assertEquals(accepted, result.hostAcceptedArtifactIds)
+        assertNull(host.activeLease)
+        assertEquals(1, roles.calls.size)
+        assertEquals(1, tools.writes.size)
+        assertEquals(1, host.approvals.size)
+        assertTrue(events.isEmpty())
+        assertEquals(files.keys, host.files.keys)
+        files.forEach { (path, bytes) -> assertContentEquals(bytes, host.files[path]) }
+    }
+
+    @Test fun frozenInputReadFailureBeforeOrAfterApprovalNeverAcceptsOutput() = runBlocking {
+        for (afterApproval in listOf(false, true)) {
+            val host = FakeHost()
+            val roles = FakeRoles()
+            val tools = FakeTools(host)
+            assertIs<PreparationStageOutcome.Accepted>(
+                run(host, roles, tools, initial(), StageKind.SDD).outcome)
+            host.plan(StageKind.ATDD)
+            val before = requireNotNull(host.graph)
+            val accepted = host.accepted.toSet()
+            val inputPath = paths.getValue(StageKind.SDD)
+            val frozen = requireNotNull(host.files[inputPath]).clone()
+            val outputPath = paths.getValue(StageKind.ATDD)
+            if (afterApproval) {
+                host.beforeApprove = { host.unavailableReadPath = inputPath }
+            } else {
+                // The initial frozen-input read succeeds; after the first
+                // proposal starts, this specific frozen path becomes unreadable.
+                roles.onExecute = { host.unavailableReadPath = inputPath }
+            }
+            val events = mutableListOf<PreparationStageEvent>()
+            val result = run(host, roles, tools, before, StageKind.ATDD, events = events)
+            assertEquals(PreparationStageOutcome.Failed("INPUT_READ_UNAVAILABLE"),
+                result.outcome, "afterApproval=$afterApproval")
+            val persisted = requireNotNull(host.graph)
+            assertEquals(result.graph, persisted)
+            assertEquals(StageState.FAILED, persisted.stages.single {
+                it.kind == StageKind.ATDD
+            }.state)
+            assertEquals(before.artifacts, persisted.artifacts)
+            assertEquals(accepted, host.accepted)
+            assertEquals(accepted, result.hostAcceptedArtifactIds)
+            assertNull(host.activeLease)
+            assertEquals(2, roles.calls.size)
+            assertEquals(2, tools.writes.size)
+            assertEquals(2, tools.closeCount)
+            assertEquals(if (afterApproval) 2 else 1, host.approvals.size)
+            assertEquals("INPUT_READ_UNAVAILABLE", events.last().code)
+            assertEquals(StageState.FAILED, events.last().state)
+            assertContentEquals(frozen, host.files[inputPath])
+            // Physical output may exist from the trusted write, but there is
+            // no accepted/frozen manifest or permission to repeat that effect.
+            assertTrue(outputPath in host.files)
+            assertFalse(artifactIds.getValue(StageKind.ATDD) in host.accepted)
+        }
+    }
+
+    @Test fun missingOrChangedFrozenInputAfterWriteRetainsDistinctDefiniteFailure() = runBlocking {
+        for (missing in listOf(false, true)) {
+            val host = FakeHost()
+            val roles = FakeRoles()
+            val tools = FakeTools(host)
+            assertIs<PreparationStageOutcome.Accepted>(
+                run(host, roles, tools, initial(), StageKind.SDD).outcome)
+            host.plan(StageKind.ATDD)
+            val path = paths.getValue(StageKind.SDD)
+            roles.onExecute = {
+                if (missing) host.files.remove(path)
+                else host.files[path] = bytes("changed")
+            }
+            val accepted = host.accepted.toSet()
+            val result = run(host, roles, tools, requireNotNull(host.graph), StageKind.ATDD)
+            assertEquals(PreparationStageOutcome.Failed("FROZEN_INPUT_CHANGED"), result.outcome)
+            assertEquals(accepted, host.accepted)
+            assertEquals(1, host.approvals.size)
+            assertNull(host.activeLease)
+        }
+    }
+
     @Test fun unexpectedModelExceptionsFailClosedAndReleaseLease() = runBlocking {
         val host = FakeHost()
         val roles = FakeRoles().apply { onExecute = { error("MODEL_CRASH") } }

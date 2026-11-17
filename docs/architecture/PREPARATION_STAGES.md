@@ -85,7 +85,17 @@ revalidates the current source during tool operations.
   by the new orchestration use case.
 - The output SHA-256 is computed from **physical output bytes**, matched
   against the intended UTF-8 proposal bytes. Each frozen input is checked
-  again before and after independent approval.
+  again before and after independent approval. In the initial execute path a
+  thrown frozen-input read yields `INPUT_READ_UNAVAILABLE`, not
+  `ARTIFACT_MISSING`, a digest mismatch, or a generic stage failure. At
+  preflight it denies without an acquired generation or any model/tool work.
+  Before or after approval it fails the current attempt using the authoritative
+  fenced finish transaction; an unconfirmed or stale finish is still
+  reconciliation-required. A missing/changed input retains the existing
+  `ARTIFACT_MISSING` / `ARTIFACT_DIGEST_MISMATCH`,
+  `FROZEN_INPUT_CHANGED` or `STALE_ARTIFACT_APPROVAL` codes as appropriate.
+  No output is accepted/frozen on a read exception; physical output bytes
+  already written remain subject to host reconciliation, not automatic replay.
 - A DRAFT/EDITABLE `StageArtifactManifest` is presented to the trusted host
   for ACCEPT, REJECT or HUMAN_REVIEW_REQUIRED. Accept freezes it as
   ACCEPTED/FROZEN and commits the terminal stage plus the additional
@@ -149,7 +159,13 @@ The host port, lease, snapshot and pending-evidence types belong to
 `:core:contracts` so a future infrastructure implementation does not depend
 on `:core:session`. Its reusable
 `PreparationStageHostContract` is published in `core/contracts/src/testFixtures`;
-host adapter tests can depend on `testFixtures(project(":core:contracts"))`.
+every concrete adapter **must extend and execute this suite in CI** against
+its actual authoritative host, including the future durable host. Adapter
+tests can depend on `testFixtures(project(":core:contracts"))`. Passing pure
+`PreparationStageFinishPolicy` tests is not sufficient: the adapter must
+enforce the policy atomically against authoritative graph and accepted IDs
+and preserve the lease on invalid successors. The existing stateful fake
+extends this contract; there is no durable implementation yet.
 It covers two-thread CAS admission, stale graph/accepted IDs, generation
 consumption, authority revocation, rejection of changes to unrelated stages
 or accepted IDs, exact host approval for frozen outputs, malformed pending
