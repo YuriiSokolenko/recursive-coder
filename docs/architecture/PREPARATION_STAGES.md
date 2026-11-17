@@ -85,7 +85,27 @@ revalidates the current source during tool operations.
   by the new orchestration use case.
 - The output SHA-256 is computed from **physical output bytes**, matched
   against the intended UTF-8 proposal bytes. Each frozen input is checked
-  again before and after independent approval.
+  again before and after independent approval. In the initial execute path
+  an unavailable frozen-input read yields `INPUT_READ_UNAVAILABLE`, and an
+  unavailable output read yields `OUTPUT_READ_UNAVAILABLE`. A host-thrown
+  `CancellationException` (for example, from an executor's cancelled Future)
+  is read unavailability while the caller's coroutine is active; actual caller
+  Job cancellation is propagated and the active attempt is cancelled.
+  A preflight input denial acquires no generation and begins no model/tool work:
+  after the read is restored it may retry the same `stageRunId` against the
+  same still-current authoritative plan. After admission, either unavailable
+  read fails the current attempt through the fenced finish transaction. A
+  confirmed FAILED stage cannot be restarted with its old ID: reconcile any
+  existing physical output and use a new stage run through supersession.
+  A stale or unconfirmed finish instead requires authoritative reconciliation
+  before any retry. Missing input/output bytes before initial approval checks
+  use `ARTIFACT_MISSING` at initial preflight or initial output read;
+  a digest mismatch there uses `ARTIFACT_DIGEST_MISMATCH`. Missing or changed
+  frozen input after admission, before approval, uses `FROZEN_INPUT_CHANGED`.
+  Confirmed missing/changed input or output after approval uses
+  `STALE_ARTIFACT_APPROVAL`; stale authority takes precedence over read
+  diagnostics. No output is accepted/frozen on a read exception; already-written
+  physical bytes remain subject to host reconciliation, not automatic replay.
 - A DRAFT/EDITABLE `StageArtifactManifest` is presented to the trusted host
   for ACCEPT, REJECT or HUMAN_REVIEW_REQUIRED. Accept freezes it as
   ACCEPTED/FROZEN and commits the terminal stage plus the additional
@@ -149,7 +169,17 @@ The host port, lease, snapshot and pending-evidence types belong to
 `:core:contracts` so a future infrastructure implementation does not depend
 on `:core:session`. Its reusable
 `PreparationStageHostContract` is published in `core/contracts/src/testFixtures`;
-host adapter tests can depend on `testFixtures(project(":core:contracts"))`.
+every concrete adapter **must extend and execute this suite in CI** against
+its actual authoritative host, including the future durable host. Adapter
+tests can depend on `testFixtures(project(":core:contracts"))`. Passing pure
+`PreparationStageFinishPolicy` tests is not sufficient: the adapter must
+enforce the policy atomically against authoritative graph and accepted IDs
+and preserve the lease on invalid successors. The existing stateful fake
+extends this contract; there is no durable implementation yet. The current
+suite does not establish an adapter's absent-vs-unreadable read behavior or
+mechanically enforce discovery/execution of a matching adapter suite. Both
+are explicit acceptance gates before or with the first durable host
+implementation in #105.
 It covers two-thread CAS admission, stale graph/accepted IDs, generation
 consumption, authority revocation, rejection of changes to unrelated stages
 or accepted IDs, exact host approval for frozen outputs, malformed pending

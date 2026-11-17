@@ -68,6 +68,13 @@ data class PreparationStageLease(
  * revoke authority and consume the generation. A stale lease is not reusable.
  * An exception during finish/abort has UNKNOWN outcome: caller must reload.
  *
+ * Every concrete host adapter (including a durable adapter) MUST extend and
+ * execute the shared PreparationStageHostContract test fixture in CI against
+ * its actual authoritative implementation. Passing the pure
+ * PreparationStageFinishPolicy tests alone does not establish that the host
+ * performs the required atomic checks, consumes a generation only on commit,
+ * or rejects invalid successors without changing authoritative state.
+ *
  * approve is a synchronous, PROMPT, bounded host decision. Coroutine
  * withTimeout cannot preempt uncooperative blocking implementation I/O:
  * the host MUST enforce its own deadline and fence late results by generation.
@@ -80,6 +87,7 @@ data class PreparationStageLease(
  * mutate accepted IDs or freeze an artifact.
  */
 interface PreparationStageHost {
+    /** Null means confirmed absence; throw when the read cannot be established. */
     fun readBytes(path: String): ByteArray?
     fun beginStage(
         expectedGraph: StageGraph, stageRunId: StageRunId,
