@@ -21,6 +21,9 @@ internal enum class SessionPhase(val wire: String, val terminal: Boolean = false
  * This is not a public state machine, resume API, or a list of planned phases.
  */
 object SessionPhaseVocabulary {
+    val createdWire: String = SessionPhase.CREATED.wire
+    // Runtime ADMITTED is serialized as "accepted" in Session Protocol v1.
+    val acceptedWire: String = SessionPhase.ADMITTED.wire
     val wires: Set<String> = Collections.unmodifiableSet(
         SessionPhase.entries.mapTo(linkedSetOf()) { it.wire })
     val terminalWires: Set<String> = Collections.unmodifiableSet(

@@ -46,10 +46,16 @@ Changing allowed read tools across admissions refuses with
 
 Only a **pre-execution** snapshot is supported: phase created/accepted,
 task state created/ready, task attempt zero, no non-ready children,
-no accepted artifacts, no pending effects, no unknown or nonzero
-host-asserted consumption, and no agent/model/tool/event types other than
-session transitions and checkpoint.saved. These are deliberately narrower
-than the currently emitted "running" checkpoints. Any later state or uncertain
+no accepted artifacts, no pending effects, and no unknown or nonzero
+host-asserted consumption. The verified event history may contain only
+completed `checkpoint.saved` metadata or a single explicit
+`session.transition` with a legal `created → accepted` edge and no
+recursive/tool actor or stage metadata. A created checkpoint has no phase
+edge; accepted requires exactly one. Type-only legacy transition records
+(`CHILD_RESERVED`, preparation `CREATED`/`READY`) now refuse with
+`RESUME_UNSAFE_BOUNDARY`. **This intentionally tightens #113 admission**
+and can reject previously accepted checkpoints; it never replays side
+effects. These constraints are narrower than the current runtime emissions. Any later state or uncertain
 effect returns `RESUME_UNSAFE_BOUNDARY` and needs operator reconciliation;
 there is no opportunistic retry or optimistic tool replay. Prior bytes,
 including "known" usage, are not independent usage/accounting receipts.
