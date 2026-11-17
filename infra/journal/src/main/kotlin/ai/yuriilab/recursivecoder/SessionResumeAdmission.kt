@@ -29,6 +29,22 @@ data class ResumeHostAttestation(
 class SessionResumeUnconfirmed(val code: String, cause: Throwable? = null) :
     IllegalStateException(code, cause)
 
+/**
+ * Snapshot constraints remain in infra because SessionCheckpoint is the
+ * durable adapter type; phase/event decisions live in core:session.
+ */
+internal object PreExecutionSnapshotPolicy {
+    fun safe(snapshot: SessionCheckpoint): Boolean =
+        snapshot.phase in setOf(
+            SessionPhaseVocabulary.createdWire, SessionPhaseVocabulary.acceptedWire) &&
+            snapshot.taskState in setOf("created", "ready") &&
+            snapshot.taskAttempt == 0 &&
+            snapshot.acceptedArtifacts.isEmpty() &&
+            snapshot.pendingEffects.isEmpty() &&
+            snapshot.children.all { it.state == "ready" } &&
+            snapshot.hostAssertedUsage.all { it.certainty == "known" && it.units == 0L }
+}
+
 /** Compile-time acknowledgement required at trusted operator recovery call sites. */
 @RequiresOptIn(
     message = "Explicit trusted-host authorization is required for resume operator reconciliation.",
@@ -455,16 +471,10 @@ object SessionResumeAdmission {
                 val s = verified.snapshot
                 // Only before the first model, tool, agent or recursive execution.
                 if (verified.reconciliationRequired ||
-                    s.phase !in setOf("created", "accepted") ||
-                    s.taskState !in setOf("created", "ready") ||
-                    s.taskAttempt != 0 || s.acceptedArtifacts.isNotEmpty() ||
-                    s.pendingEffects.isNotEmpty() ||
-                    s.children.any { it.state != "ready" } ||
-                    s.hostAssertedUsage.any { it.certainty != "known" || it.units != 0L } ||
-                    ledger.events.any {
-                        it["type"]?.jsonPrimitive?.content !in
-                            setOf("session.transition", "checkpoint.saved")
-                    }) fail("RESUME_UNSAFE_BOUNDARY")
+                    !PreExecutionSnapshotPolicy.safe(s) ||
+                    PreExecutionPhasePolicy.phaseFromVerifiedHistory(
+                        s.phase, ledger.events) == null)
+                    fail("RESUME_UNSAFE_BOUNDARY")
                 val prior = ResumeFenceStorage.latest(checkedDir)
                 val priorAnchor = if (operator == null)
                     ResumeFenceAnchor.verify(ledgerPath, prior, checkedDir) else null
