@@ -694,6 +694,31 @@ class SessionCheckpointStoreIntegrationTest {
             store(), context(), ledger()))
     }
 
+
+    @Test fun admissionRefusesCheckpointSavedWithExecutionMetadata() {
+        DurableSessionEventLedger.create(ledger(), workspace()).use { writer ->
+            writer.append(event(1, "req-one", "completed", buildJsonObject {
+                put("graphId", "graph-root")
+                put("recursiveEvent", "SUCCEEDED")
+                put("stageRunId", "stage-one")
+                put("stageState", "completed")
+            }, "checkpoint.saved"))
+            writer.flush()
+        }
+        val early = snapshot().copy(
+            phase = "created", taskAttempt = 0, taskState = "created",
+            children = emptyList(),
+            acceptedArtifacts = emptyList(), hostAssertedUsage = emptyList(),
+            pendingEffects = emptyList())
+        save(early)
+        assertEquals("RESUME_UNSAFE_BOUNDARY",
+            assertFailsWith<SessionResumeUnconfirmed> {
+                SessionResumeAdmission.admit(store(), context(), ledger(), resumeAttestation())
+            }.code)
+        assertEquals(0L, SessionResumeAdmission.currentGeneration(
+            store(), context(), ledger()))
+    }
+
     @Test fun acceptedCheckpointRequiresExactlyOneLegalCreatedToAcceptedEdge() {
         val base = event(1, "req-one", "completed",
             buildJsonObject { put("graphId", "graph-root") }, "session.transition")
@@ -709,7 +734,7 @@ class SessionCheckpointStoreIntegrationTest {
         }
         val accepted = snapshot().copy(
             phase = "accepted", taskAttempt = 0, taskState = "ready",
-            children = listOf(CheckpointChild("graph-child", "graph-root", "ready")),
+            children = emptyList(),
             acceptedArtifacts = emptyList(), hostAssertedUsage = emptyList(),
             pendingEffects = emptyList())
         save(accepted)
