@@ -1244,30 +1244,33 @@ class RunPreparationStageIntegrationTest : PreparationStageHostContract() {
         }
     }
 
-    @Test fun humanPostApprovalAuthorityFailureRetainsDraft() = runBlocking {
-        val host = FakeHost().apply { decision = PreparationApproval.HUMAN_REVIEW_REQUIRED }
-        val roles = FakeRoles()
-        val tools = FakeTools(host)
-        assertIs<PreparationStageOutcome.AwaitingHuman>(
-            run(host, roles, tools, initial(), StageKind.SDD).outcome)
-        val graph = requireNotNull(host.graph)
-        host.decision = PreparationApproval.ACCEPT
-        host.beforeApprove = {
-            host.beforeCurrent = {
-                host.beforeCurrent = null
-                throw kotlinx.coroutines.CancellationException("authority unavailable")
+    @Test fun humanAuthorityFailureRetainsDraftBeforeAndAfterApproval() = runBlocking {
+        for (afterApproval in listOf(false, true)) {
+            val host = FakeHost().apply { decision = PreparationApproval.HUMAN_REVIEW_REQUIRED }
+            val roles = FakeRoles()
+            val tools = FakeTools(host)
+            assertIs<PreparationStageOutcome.AwaitingHuman>(
+                run(host, roles, tools, initial(), StageKind.SDD).outcome)
+            val graph = requireNotNull(host.graph)
+            host.decision = PreparationApproval.ACCEPT
+            val inject = {
+                host.beforeCurrent = {
+                    host.beforeCurrent = null
+                    throw kotlinx.coroutines.CancellationException("authority unavailable")
+                }
             }
+            if (afterApproval) host.beforeApprove = inject else inject()
+            val continuation = RunPreparationStageUseCase(roles, tools, host)
+            val failed = continuation.completeHumanApproval(graph, host.accepted, ids.getValue(StageKind.SDD),
+                Instant.now().plusSeconds(30), Cancellation(), PreparationStageEventSink { })
+            assertEquals(PreparationStageOutcome.Failed("HUMAN_APPROVAL_AUTHORITY_UNAVAILABLE"), failed.outcome)
+            assertEquals(graph, host.graph)
+            assertNull(host.activeLease)
+            host.beforeApprove = null
+            assertIs<PreparationStageOutcome.Accepted>(
+                continuation.completeHumanApproval(graph, host.accepted, ids.getValue(StageKind.SDD),
+                    Instant.now().plusSeconds(30), Cancellation(), PreparationStageEventSink { }).outcome)
         }
-        val continuation = RunPreparationStageUseCase(roles, tools, host)
-        val failed = continuation.completeHumanApproval(graph, host.accepted, ids.getValue(StageKind.SDD),
-            Instant.now().plusSeconds(30), Cancellation(), PreparationStageEventSink { })
-        assertEquals(PreparationStageOutcome.Failed("HUMAN_APPROVAL_AUTHORITY_UNAVAILABLE"), failed.outcome)
-        assertEquals(graph, host.graph)
-        assertNull(host.activeLease)
-        host.beforeApprove = null
-        assertIs<PreparationStageOutcome.Accepted>(
-            continuation.completeHumanApproval(graph, host.accepted, ids.getValue(StageKind.SDD),
-                Instant.now().plusSeconds(30), Cancellation(), PreparationStageEventSink { }).outcome)
     }
 
     @Test fun humanApprovalDeadlineReturnsResultNotCallerCancellation() = runBlocking {
