@@ -1072,11 +1072,12 @@ class RunPreparationStageIntegrationTest : PreparationStageHostContract() {
     }
 
     @Test fun humanApprovalTransientReadFailuresRetainDraftAndPermitRetry() = runBlocking {
-        for (failure in listOf("draft-output", "frozen-input", "post-approval-read")) {
+        for (failure in listOf("draft-output", "frozen-input", "post-approval-read", "post-approval-input", "approval")) {
+            for (hostCancellation in listOf(false, true)) {
             val host = FakeHost().apply { decision = PreparationApproval.HUMAN_REVIEW_REQUIRED }
             val roles = FakeRoles()
             val tools = FakeTools(host)
-            val kind = if (failure == "frozen-input") StageKind.ATDD else StageKind.SDD
+            val kind = if (failure in setOf("frozen-input", "post-approval-input")) StageKind.ATDD else StageKind.SDD
             if (kind == StageKind.ATDD) {
                 host.decision = PreparationApproval.ACCEPT
                 assertIs<PreparationStageOutcome.Accepted>(
@@ -1087,18 +1088,28 @@ class RunPreparationStageIntegrationTest : PreparationStageHostContract() {
             assertIs<PreparationStageOutcome.AwaitingHuman>(
                 run(host, roles, tools, host.graph ?: initial(), kind).outcome)
             val pendingGraph = requireNotNull(host.graph)
-            val unreadable = if (failure == "frozen-input")
+            val unreadable = if (kind == StageKind.ATDD)
                 paths.getValue(StageKind.SDD) else paths.getValue(kind)
             host.decision = PreparationApproval.ACCEPT
-            if (failure == "post-approval-read")
-                host.beforeApprove = { host.unavailableReadPath = unreadable }
-            else host.unavailableReadPath = unreadable
+            val injectReadFailure = {
+                if (hostCancellation) host.cancelledReadPath = unreadable
+                else host.unavailableReadPath = unreadable
+            }
+            when (failure) {
+                "approval" -> host.beforeApprove = {
+                    if (hostCancellation) throw kotlinx.coroutines.CancellationException("host approval cancelled")
+                    else throw java.io.IOException("approval unavailable")
+                }
+                "post-approval-read", "post-approval-input" -> host.beforeApprove = injectReadFailure
+                else -> injectReadFailure()
+            }
             val continuation = RunPreparationStageUseCase(roles, tools, host)
             val failed = continuation.completeHumanApproval(pendingGraph, host.accepted,
                 ids.getValue(kind), Instant.now().plusSeconds(30),
                 Cancellation(), PreparationStageEventSink { })
             assertEquals(PreparationStageOutcome.Failed(
-                "HUMAN_APPROVAL_READ_UNAVAILABLE"), failed.outcome, failure)
+                if (failure == "approval") "HOST_APPROVAL_UNAVAILABLE"
+                else "HUMAN_APPROVAL_READ_UNAVAILABLE"), failed.outcome, failure)
             assertEquals(pendingGraph, host.graph, failure)
             assertNull(host.activeLease, failure)
             assertEquals(StageState.RUNNING, requireNotNull(host.graph).stages.single {
@@ -1106,11 +1117,13 @@ class RunPreparationStageIntegrationTest : PreparationStageHostContract() {
             }.state)
             host.beforeApprove = null
             host.unavailableReadPath = null
+            host.cancelledReadPath = null
             val accepted = continuation.completeHumanApproval(requireNotNull(host.graph),
                 host.accepted, ids.getValue(kind), Instant.now().plusSeconds(30),
                 Cancellation(), PreparationStageEventSink { })
             assertIs<PreparationStageOutcome.Accepted>(accepted.outcome, failure)
             assertNull(host.activeLease, failure)
+            }
         }
     }
 

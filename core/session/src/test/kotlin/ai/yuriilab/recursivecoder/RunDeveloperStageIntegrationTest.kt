@@ -4,6 +4,7 @@ import java.nio.file.Path
 import java.security.MessageDigest
 import java.time.Instant
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.async
 import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
 import kotlin.test.*
@@ -135,8 +136,12 @@ class RunDeveloperStageIntegrationTest : PreparationStageHostContract() {
         }
         var contractReadFailure: Pair<String, Exception>? = null
         var readFailureOnApprovalPath: String? = null
+        var readFailureOnApproval: Exception = java.io.IOException("post-approval read unavailable")
+        var beforeReadPath: ((String) -> Unit)? = null
+        var approvalFailure: Exception? = null
         var approvals = 0
         @Synchronized override fun readBytes(path: String): ByteArray? {
+            beforeReadPath?.invoke(path)
             contractReadFailure?.let { (failedPath, failure) ->
                 if (failedPath == path) throw failure
             }
@@ -233,9 +238,10 @@ class RunDeveloperStageIntegrationTest : PreparationStageHostContract() {
             usage: StageRoleUsage
         ): PreparationApproval {
             approvals++
+            approvalFailure?.let { throw it }
             approval = candidate to decision
             readFailureOnApprovalPath?.let {
-                contractReadFailure = it to java.io.IOException("post-approval read unavailable")
+                contractReadFailure = it to readFailureOnApproval
             }
             mutateOnApproval?.let { files[it] = bytes("tampered after validation") }
             return decision
@@ -471,25 +477,104 @@ class RunDeveloperStageIntegrationTest : PreparationStageHostContract() {
     @Test fun unavailableVerificationBytesFailClosedBeforeAndAfterApproval() = runBlocking {
         for (afterApproval in listOf(false, true)) {
             for (path in listOf(source, manifestPath, paths.getValue(StageKind.TDD))) {
-                val host = FakeHost()
-                val tools = FakeTools(host)
-                if (afterApproval) {
-                    host.readFailureOnApprovalPath = path
-                } else {
-                    tools.cancelOnCheck = {
-                        host.contractReadFailure = path to java.io.IOException("read unavailable")
+                for (failure in listOf(java.io.IOException("read unavailable"),
+                    kotlinx.coroutines.CancellationException("host read cancelled"))) {
+                    val host = FakeHost()
+                    val tools = FakeTools(host)
+                    if (afterApproval) {
+                        host.readFailureOnApprovalPath = path
+                        host.readFailureOnApproval = failure
+                    } else {
+                        tools.cancelOnCheck = { host.contractReadFailure = path to failure }
                     }
+                    val result = execute(host, FakeModel(), tools)
+                    val code = if (path == paths.getValue(StageKind.TDD))
+                        "INPUT_READ_UNAVAILABLE" else "OUTPUT_READ_UNAVAILABLE"
+                    assertEquals(DeveloperStageOutcome.Failed(code, true),
+                        result.outcome, "$path afterApproval=$afterApproval")
+                    assertEquals(if (afterApproval) 1 else 0, host.approvals)
+                    assertEquals(StageState.FAILED, host.graph.stages.last().state)
+                    assertEquals(artifactIds.values.toSet(), host.accepted)
+                    assertNull(host.active)
+                    assertEquals(1, tools.closeCount)
+                    assertNotNull(host.files[path], "The bytes were present, not missing")
                 }
-                val result = execute(host, FakeModel(), tools)
-                assertEquals(DeveloperStageOutcome.Failed("FROZEN_INPUT_OR_OUTPUT_CHANGED", true),
-                    result.outcome, "$path afterApproval=$afterApproval")
-                assertEquals(if (afterApproval) 1 else 0, host.approvals)
-                assertEquals(StageState.FAILED, host.graph.stages.last().state)
-                assertEquals(artifactIds.values.toSet(), host.accepted)
-                assertNull(host.active)
-                assertEquals(1, tools.closeCount)
-                assertNotNull(host.files[path], "The bytes were present, not missing")
             }
+        }
+    }
+
+    @Test fun preflightReadFailuresDoNotAdmitDeveloper() = runBlocking {
+        for ((path, code) in listOf(source to "TARGET_READ_UNAVAILABLE",
+            paths.getValue(StageKind.TDD) to "INPUT_READ_UNAVAILABLE")) {
+            for (failure in listOf(java.io.IOException("unavailable"),
+                kotlinx.coroutines.CancellationException("host cancelled"))) {
+                val host = FakeHost()
+                val original = host.graph
+                val model = FakeModel()
+                host.contractReadFailure = path to failure
+                val result = execute(host, model, FakeTools(host))
+                assertEquals(DeveloperStageOutcome.Denied(code), result.outcome)
+                assertEquals(original, host.graph)
+                assertEquals(0, host.generation)
+                assertTrue(model.calls.isEmpty())
+                assertNull(host.active)
+            }
+        }
+    }
+
+    @Test fun hostLocalApprovalCancellationIsFailedAndDirty() = runBlocking {
+        val host = FakeHost().apply {
+            approvalFailure = kotlinx.coroutines.CancellationException("host approval cancelled")
+        }
+        val result = execute(host, FakeModel(), FakeTools(host))
+        assertEquals(DeveloperStageOutcome.Failed("HOST_APPROVAL_UNAVAILABLE", true), result.outcome)
+        assertEquals(StageState.FAILED, host.graph.stages.last().state)
+        assertNull(host.active)
+        assertEquals(artifactIds.values.toSet(), host.accepted)
+    }
+
+    @Test fun unavailableVerificationDoesNotMaskUnconfirmedFinish() = runBlocking {
+        val host = FakeHost().apply {
+            readFailureOnApprovalPath = source
+            readFailureOnApproval = kotlinx.coroutines.CancellationException("host read cancelled")
+            throwAfterFinish = true
+        }
+        val result = execute(host, FakeModel(), FakeTools(host))
+        assertEquals(DeveloperStageOutcome.ReconciliationRequired("STAGE_FINISH_UNCONFIRMED", true),
+            result.outcome)
+        assertNull(result.graph)
+        assertNull(result.hostAcceptedArtifactIds)
+        assertNull(host.active)
+    }
+
+    @Test fun realCallerCancellationDuringDeveloperReadPropagates() = runBlocking {
+        for (afterAdmission in listOf(false, true)) {
+            val host = FakeHost()
+            val tools = FakeTools(host)
+            val entered = java.util.concurrent.CountDownLatch(1)
+            val release = java.util.concurrent.CountDownLatch(1)
+            val gate: (String) -> Unit = { path ->
+                if (path == source) {
+                    entered.countDown()
+                    check(release.await(10, java.util.concurrent.TimeUnit.SECONDS))
+                }
+            }
+            if (afterAdmission) tools.cancelOnCheck = { host.beforeReadPath = gate }
+            else host.beforeReadPath = gate
+            val job = async(kotlinx.coroutines.Dispatchers.Default) {
+                execute(host, FakeModel(), tools)
+            }
+            try {
+                assertTrue(entered.await(10, java.util.concurrent.TimeUnit.SECONDS))
+                job.cancel()
+            } finally {
+                release.countDown()
+            }
+            assertFailsWith<kotlinx.coroutines.CancellationException> { job.await() }
+            assertNull(host.active)
+            assertEquals(if (afterAdmission) StageState.CANCELLED else StageState.CREATED,
+                host.graph.stages.last().state)
+            assertEquals(artifactIds.values.toSet(), host.accepted)
         }
     }
 
