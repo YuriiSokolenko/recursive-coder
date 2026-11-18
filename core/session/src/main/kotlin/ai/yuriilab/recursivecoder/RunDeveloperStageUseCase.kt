@@ -262,31 +262,55 @@ class RunDeveloperStageUseCase(
 
         val inputs = ready.artifacts.filter { it.id in stage.inputArtifacts }
             .sortedBy { it.kind.name }
-        // Stable ordering and confirmed evidence take precedence over unavailable reads.
-        val targetReads = targets.sortedBy { it.path }.map { target ->
-            target to captureHostCall { withContext(blockingDispatcher) { host.readBytes(target.path) } }
+        // Read all paths: a confirmed violation must not be hidden by I/O failure.
+        // Select the denial by code priority, never by file name or caller order.
+        val targetReads = targets.map { target ->
+            target to captureHostCall {
+                withContext(blockingDispatcher) { host.readBytes(target.path) }
+            }
         }
         val inputReads = inputs.map { artifact ->
-            artifact to captureHostCall { withContext(blockingDispatcher) { host.readBytes(artifact.declaredPath) } }
+            artifact to captureHostCall {
+                withContext(blockingDispatcher) { host.readBytes(artifact.declaredPath) }
+            }
         }
+        val preflightDenials = mutableSetOf<String>()
         for ((target, read) in targetReads) {
-            if (read.isFailure) continue
+            if (read.isFailure) {
+                preflightDenials += "TARGET_READ_UNAVAILABLE"
+                continue
+            }
             val before = read.getOrThrow()
-            if (target.expectedSha256 == null && before != null)
-                return denied("CREATE_TARGET_EXISTS")
-            if (target.expectedSha256 != null &&
-                (before == null || sha(before) != target.expectedSha256))
-                return denied("STALE_TARGET_BASELINE")
-            if (before != null && utf8(before) == null) return denied("TARGET_ENCODING_INVALID")
+            when {
+                target.expectedSha256 != null &&
+                    (before == null || sha(before) != target.expectedSha256) ->
+                    preflightDenials += "STALE_TARGET_BASELINE"
+                target.expectedSha256 == null && before != null ->
+                    preflightDenials += "CREATE_TARGET_EXISTS"
+                before != null && utf8(before) == null ->
+                    preflightDenials += "TARGET_ENCODING_INVALID"
+            }
         }
         for ((artifact, read) in inputReads) {
-            if (read.isFailure) continue
-            val bytes = read.getOrThrow() ?: return denied("ARTIFACT_MISSING")
-            if (sha(bytes) != artifact.sha256) return denied("ARTIFACT_DIGEST_MISMATCH")
-            if (utf8(bytes) == null) return denied("ARTIFACT_ENCODING_INVALID")
+            if (read.isFailure) {
+                preflightDenials += "INPUT_READ_UNAVAILABLE"
+                continue
+            }
+            val bytes = read.getOrThrow()
+            when {
+                bytes == null -> preflightDenials += "ARTIFACT_MISSING"
+                sha(bytes) != artifact.sha256 ->
+                    preflightDenials += "ARTIFACT_DIGEST_MISMATCH"
+                utf8(bytes) == null ->
+                    preflightDenials += "ARTIFACT_ENCODING_INVALID"
+            }
         }
-        if (targetReads.any { it.second.isFailure }) return denied("TARGET_READ_UNAVAILABLE")
-        if (inputReads.any { it.second.isFailure }) return denied("INPUT_READ_UNAVAILABLE")
+        val preflightPriority = listOf(
+            "STALE_TARGET_BASELINE", "CREATE_TARGET_EXISTS", "TARGET_ENCODING_INVALID",
+            "ARTIFACT_MISSING", "ARTIFACT_DIGEST_MISMATCH", "ARTIFACT_ENCODING_INVALID",
+            "TARGET_READ_UNAVAILABLE", "INPUT_READ_UNAVAILABLE"
+        )
+        preflightPriority.firstOrNull { it in preflightDenials }?.let { return denied(it) }
         val instruction = buildString {
             append(command.instruction)
             append("\n\nReturn ONLY a JSON object with a files array, one path and" +
@@ -538,7 +562,11 @@ class RunDeveloperStageUseCase(
                 frozen, changed, requireNotNull(writeToolId), verified, usage
             ), events, frozen, workspaceMayBeDirty = workspaceMayBeDirty)
         } catch (failure: Exception) {
-            val cancelled = callerCancellation(failure) ?: return terminal("DEVELOPER_STAGE_FAILED")
+            val cancelled = callerCancellation(failure)
+            if (cancelled == null) {
+                stopped(command)?.let { return halted(it) }
+                return terminal("DEVELOPER_STAGE_FAILED")
+            }
             withContext(NonCancellable) {
                 try { terminal("ROLE_CANCELLED", StageState.CANCELLED) }
                 catch (cleanup: Exception) {

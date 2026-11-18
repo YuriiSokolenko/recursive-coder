@@ -434,7 +434,11 @@ class RunPreparationStageUseCase(
                 PreparationStageOutcome.Accepted(frozen, validation, proposal.usage),
                 events, frozen)
         } catch (failure: Exception) {
-            val cancelled = callerCancellation(failure) ?: return terminal("PREPARATION_STAGE_FAILED")
+            val cancelled = callerCancellation(failure)
+            if (cancelled == null) {
+                stopped(command)?.let { return halted(it) }
+                return terminal("PREPARATION_STAGE_FAILED")
+            }
             withContext(NonCancellable) {
                 try { terminal("ROLE_CANCELLED", StageState.CANCELLED) }
                 catch (cleanup: Exception) {
@@ -574,7 +578,9 @@ class RunPreparationStageUseCase(
                 PreparationStageOutcome.Accepted(frozen, approvedEvidence, originalUsage),
                 events, frozen)
         } catch (failure: Exception) {
-            val cancelled = callerCancellation(failure) ?: return failed("HUMAN_APPROVAL_FAILED")
+            val cancelled = callerCancellation(failure)
+            if (cancelled == null)
+                return failed(stoppedHuman() ?: "HUMAN_APPROVAL_FAILED")
             withContext(NonCancellable) {
                 try { failed("HUMAN_APPROVAL_STOPPED") }
                 catch (cleanup: Exception) {
