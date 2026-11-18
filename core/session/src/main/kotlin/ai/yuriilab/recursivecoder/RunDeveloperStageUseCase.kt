@@ -11,11 +11,10 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -127,8 +126,10 @@ class RunDeveloperStageUseCase(
         withContext(blockingDispatcher) {
             host.current(lease) && lease.authority.current() == snapshot
         }
-    } catch (cancelled: CancellationException) { throw cancelled }
-    catch (_: Exception) { false }
+    } catch (failure: Exception) {
+            ensureHostCallerActive(failure)
+            false
+        }
 
     private fun emit(
         events: PreparationStageEventSink, graph: StageGraph, id: StageRunId,
@@ -268,9 +269,9 @@ class RunDeveloperStageUseCase(
                 " complete UTF-8 source content for every host-selected target." +
                 " Never propose test/spec changes, commands, renames or tool calls.")
             for (target in targets) {
-                val before = try { withContext(blockingDispatcher) { host.readBytes(target.path) } }
-                    catch (cancelled: CancellationException) { throw cancelled }
-                    catch (_: Exception) { return denied("TARGET_READ_UNAVAILABLE") }
+                val before = captureHostCall {
+                    withContext(blockingDispatcher) { host.readBytes(target.path) }
+                }.getOrElse { return denied("TARGET_READ_UNAVAILABLE") }
                 if (target.expectedSha256 == null && before != null)
                     return denied("CREATE_TARGET_EXISTS")
                 if (target.expectedSha256 != null &&
@@ -288,10 +289,10 @@ class RunDeveloperStageUseCase(
                 }
             }
             for (artifact in inputs) {
-                val bytes = try { withContext(blockingDispatcher) {
-                    host.readBytes(artifact.declaredPath)
-                } } catch (cancelled: CancellationException) { throw cancelled }
-                catch (_: Exception) { null } ?: return denied("ARTIFACT_MISSING")
+                val bytes = captureHostCall {
+                    withContext(blockingDispatcher) { host.readBytes(artifact.declaredPath) }
+                }.getOrElse { return denied("INPUT_READ_UNAVAILABLE") }
+                    ?: return denied("ARTIFACT_MISSING")
                 if (sha(bytes) != artifact.sha256)
                     return denied("ARTIFACT_DIGEST_MISMATCH")
                 val source = utf8(bytes) ?: return denied("ARTIFACT_ENCODING_INVALID")
@@ -339,30 +340,26 @@ class RunDeveloperStageUseCase(
         suspend fun checkpoint(): String? {
             currentCoroutineContext().ensureActive()
             if (stopped(command) != null) return stopped(command)
-            return if (withContext(blockingDispatcher) { host.current(lease) }) null
-            else "STALE_STAGE_LEASE"
+            val current = captureHostCall {
+                withContext(blockingDispatcher) { host.current(lease) }
+            }.getOrElse { return "STAGE_AUTHORITY_UNAVAILABLE" }
+            return if (current) null else "STALE_STAGE_LEASE"
         }
         suspend fun halted(code: String): DeveloperStageResult = terminal(code,
             if (code == "ROLE_CANCELLED" || code == "ROLE_TIMED_OUT")
                 StageState.CANCELLED else StageState.FAILED)
 
-        // Preserve the existing negative verification outcome on I/O failure.
-        // The separately tracked #105 cancellation/read classification work
-        // will distinguish host-local cancellation and unavailable inputs.
-        fun readForVerification(path: String): ByteArray? = try {
-            host.readBytes(path)
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (_: Exception) {
-            null
-        }
-
-        suspend fun inputsIntact(): Boolean = withContext(blockingDispatcher) {
-            inputs.all {
-                val bytes = readForVerification(it.declaredPath)
-                bytes != null && sha(bytes) == it.sha256
+        suspend fun inputFailure(): String? = captureHostCall {
+            withContext(blockingDispatcher) {
+                inputs.all {
+                    val bytes = host.readBytes(it.declaredPath)
+                    bytes != null && sha(bytes) == it.sha256
+                }
             }
-        }
+        }.fold(
+            onSuccess = { if (it) null else "FROZEN_INPUT_OR_OUTPUT_CHANGED" },
+            onFailure = { "INPUT_READ_UNAVAILABLE" }
+        )
 
         try {
             checkpoint()?.let { return halted(it) }
@@ -407,9 +404,10 @@ class RunDeveloperStageUseCase(
             }.sortedBy { it.path }
             val manifestText = manifestContent(changed)
             val authority = lease.authority
-            val snapshot = try { withContext(blockingDispatcher) { authority.current() } }
-                catch (cancelled: CancellationException) { throw cancelled }
-                catch (_: Exception) { null } ?: return terminal("STAGE_AUTHORITY_UNAVAILABLE")
+            val snapshot = captureHostCall {
+                withContext(blockingDispatcher) { authority.current() }
+            }.getOrElse { return terminal("STAGE_AUTHORITY_UNAVAILABLE") }
+                ?: return terminal("STAGE_AUTHORITY_UNAVAILABLE")
             if (snapshot.graph != running || snapshot.stageRunId != id ||
                 snapshot.requestId != stage.correlation.requestId ||
                 snapshot.hostAcceptedArtifactIds != accepted ||
@@ -470,15 +468,20 @@ class RunDeveloperStageUseCase(
                 writeToolId == null || writeToolId in checked.map { it.toolId })
                 return terminal("STAGE_VALIDATION_FAILED")
 
-            suspend fun outputsIntact(): Boolean = withContext(blockingDispatcher) {
-                changed.all {
-                    val bytes = readForVerification(it.path)
-                    bytes != null && sha(bytes) == it.afterSha256
-                } && readForVerification(command.manifestPath)?.contentEquals(
-                    manifestText.toByteArray(Charsets.UTF_8)) == true &&
-                    inputsIntact()
+            suspend fun verificationFailure(): String? {
+                val intact = captureHostCall {
+                    withContext(blockingDispatcher) {
+                        changed.all {
+                            val bytes = host.readBytes(it.path)
+                            bytes != null && sha(bytes) == it.afterSha256
+                        } && host.readBytes(command.manifestPath)?.contentEquals(
+                            manifestText.toByteArray(Charsets.UTF_8)) == true
+                    }
+                }.getOrElse { return "OUTPUT_READ_UNAVAILABLE" }
+                if (!intact) return "FROZEN_INPUT_OR_OUTPUT_CHANGED"
+                return inputFailure()
             }
-            if (!outputsIntact()) return terminal("FROZEN_INPUT_OR_OUTPUT_CHANGED")
+            verificationFailure()?.let { return terminal(it) }
             val candidate = StageArtifactManifest(command.artifactId,
                 StageArtifactKind.IMPLEMENTATION, command.manifestPath,
                 sha(manifestText.toByteArray(Charsets.UTF_8)), EngineeringRole.DEVELOPER,
@@ -488,15 +491,15 @@ class RunDeveloperStageUseCase(
                 withContext(blockingDispatcher) {
                     val remaining = Duration.between(Instant.now(clock), command.deadline).toMillis()
                     if (remaining <= 0) return@withContext null
-                    withTimeout(remaining) { host.approve(candidate, verified, usage) }
+                    withTimeoutOrNull(remaining) { host.approve(candidate, verified, usage) }
                 }
-            } catch (_: TimeoutCancellationException) {
-                return halted("ROLE_TIMED_OUT")
-            } catch (cancelled: CancellationException) { throw cancelled }
-            catch (_: Exception) { return terminal("HOST_APPROVAL_UNAVAILABLE") }
+            } catch (failure: Exception) {
+                ensureHostCallerActive(failure)
+                return terminal("HOST_APPROVAL_UNAVAILABLE")
+            }
             if (decision == null) return halted("ROLE_TIMED_OUT")
             checkpoint()?.let { return halted(it) }
-            if (!outputsIntact()) return terminal("FROZEN_INPUT_OR_OUTPUT_CHANGED")
+            verificationFailure()?.let { return terminal(it) }
             if (!live(lease, snapshot)) return terminal("STALE_STAGE_AUTHORITY")
             if (decision == PreparationApproval.HUMAN_REVIEW_REQUIRED)
                 return terminal("DEVELOPER_HUMAN_APPROVAL_REQUIRED")
