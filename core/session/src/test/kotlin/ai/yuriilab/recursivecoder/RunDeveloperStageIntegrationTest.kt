@@ -882,8 +882,8 @@ class RunDeveloperStageIntegrationTest : PreparationStageHostContract() {
             val result = execute(host, model, FakeTools(host), targets = targets)
             assertIs<DeveloperStageOutcome.Accepted>(result.outcome)
             val instruction = model.calls.single().instruction
-            val first = instruction.indexOf("<target path=\"\u0024{targets[0].path}\"")
-            val second = instruction.indexOf("<target path=\"\u0024{targets[1].path}\"")
+            val first = instruction.indexOf("<target path=\"" + targets[0].path + "\"")
+            val second = instruction.indexOf("<target path=\"" + targets[1].path + "\"")
             assertTrue(first >= 0 && second > first, "model target order changed")
         }
     }
