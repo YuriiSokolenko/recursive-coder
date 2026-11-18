@@ -7,7 +7,6 @@ import java.security.MessageDigest
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -127,9 +126,9 @@ class RunDeveloperStageUseCase(
             host.current(lease) && lease.authority.current() == snapshot
         }
     } catch (failure: Exception) {
-            ensureHostCallerActive(failure)
-            false
-        }
+        ensureHostCallerActive(failure)
+        false
+    }
 
     private fun emit(
         events: PreparationStageEventSink, graph: StageGraph, id: StageRunId,
@@ -263,39 +262,51 @@ class RunDeveloperStageUseCase(
 
         val inputs = ready.artifacts.filter { it.id in stage.inputArtifacts }
             .sortedBy { it.kind.name }
+        // Stable ordering and confirmed evidence take precedence over unavailable reads.
+        val targetReads = targets.sortedBy { it.path }.map { target ->
+            target to captureHostCall { withContext(blockingDispatcher) { host.readBytes(target.path) } }
+        }
+        val inputReads = inputs.map { artifact ->
+            artifact to captureHostCall { withContext(blockingDispatcher) { host.readBytes(artifact.declaredPath) } }
+        }
+        for ((target, read) in targetReads) {
+            if (read.isFailure) continue
+            val before = read.getOrThrow()
+            if (target.expectedSha256 == null && before != null)
+                return denied("CREATE_TARGET_EXISTS")
+            if (target.expectedSha256 != null &&
+                (before == null || sha(before) != target.expectedSha256))
+                return denied("STALE_TARGET_BASELINE")
+            if (before != null && utf8(before) == null) return denied("TARGET_ENCODING_INVALID")
+        }
+        for ((artifact, read) in inputReads) {
+            if (read.isFailure) continue
+            val bytes = read.getOrThrow() ?: return denied("ARTIFACT_MISSING")
+            if (sha(bytes) != artifact.sha256) return denied("ARTIFACT_DIGEST_MISMATCH")
+            if (utf8(bytes) == null) return denied("ARTIFACT_ENCODING_INVALID")
+        }
+        if (targetReads.any { it.second.isFailure }) return denied("TARGET_READ_UNAVAILABLE")
+        if (inputReads.any { it.second.isFailure }) return denied("INPUT_READ_UNAVAILABLE")
         val instruction = buildString {
             append(command.instruction)
             append("\n\nReturn ONLY a JSON object with a files array, one path and" +
                 " complete UTF-8 source content for every host-selected target." +
                 " Never propose test/spec changes, commands, renames or tool calls.")
-            for (target in targets) {
-                val before = captureHostCall {
-                    withContext(blockingDispatcher) { host.readBytes(target.path) }
-                }.getOrElse { return denied("TARGET_READ_UNAVAILABLE") }
-                if (target.expectedSha256 == null && before != null)
-                    return denied("CREATE_TARGET_EXISTS")
-                if (target.expectedSha256 != null &&
-                    (before == null || sha(before) != target.expectedSha256))
-                    return denied("STALE_TARGET_BASELINE")
+            for ((target, read) in targetReads) {
+                val before = read.getOrThrow()
                 append("\n<target path=\"").append(xmlAttr(target.path)).append("\" operation=\"")
                     .append(if (target.expectedSha256 == null) "create" else "edit")
                     .append("\" />")
                 if (before != null) {
-                    val source = utf8(before) ?: return denied("TARGET_ENCODING_INVALID")
+                    val source = requireNotNull(utf8(before))
                     append("\n<current-source sha256=\"").append(xmlAttr(requireNotNull(target.expectedSha256)))
                         .append("\">\n")
                         .append(source.replace("&", "&amp;").replace("<", "&lt;"))
                         .append("\n</current-source>")
                 }
             }
-            for (artifact in inputs) {
-                val bytes = captureHostCall {
-                    withContext(blockingDispatcher) { host.readBytes(artifact.declaredPath) }
-                }.getOrElse { return denied("INPUT_READ_UNAVAILABLE") }
-                    ?: return denied("ARTIFACT_MISSING")
-                if (sha(bytes) != artifact.sha256)
-                    return denied("ARTIFACT_DIGEST_MISMATCH")
-                val source = utf8(bytes) ?: return denied("ARTIFACT_ENCODING_INVALID")
+            for ((artifact, read) in inputReads) {
+                val source = requireNotNull(utf8(requireNotNull(read.getOrThrow())))
                 append("\n<verified-input kind=\"").append(artifact.kind.name)
                     .append("\" sha256=\"").append(xmlAttr(artifact.sha256)).append("\">\n")
                     .append(source.replace("&", "&amp;").replace("<", "&lt;"))
@@ -348,18 +359,6 @@ class RunDeveloperStageUseCase(
         suspend fun halted(code: String): DeveloperStageResult = terminal(code,
             if (code == "ROLE_CANCELLED" || code == "ROLE_TIMED_OUT")
                 StageState.CANCELLED else StageState.FAILED)
-
-        suspend fun inputFailure(): String? = captureHostCall {
-            withContext(blockingDispatcher) {
-                inputs.all {
-                    val bytes = host.readBytes(it.declaredPath)
-                    bytes != null && sha(bytes) == it.sha256
-                }
-            }
-        }.fold(
-            onSuccess = { if (it) null else "FROZEN_INPUT_OR_OUTPUT_CHANGED" },
-            onFailure = { "INPUT_READ_UNAVAILABLE" }
-        )
 
         try {
             checkpoint()?.let { return halted(it) }
@@ -424,7 +423,9 @@ class RunDeveloperStageUseCase(
             var checkDenial: String? = null
             var writeToolId: String? = null
             val checked = mutableListOf<StageCheckEvidence>()
-            val verified = try {
+            val verified = withStageSessionCleanup(
+                close = { withContext(NonCancellable + blockingDispatcher) { session.close() } }
+            ) {
                 withContext(blockingDispatcher) {
                     checkDenial = checkpoint()
                     if (checkDenial != null) return@withContext null
@@ -453,8 +454,6 @@ class RunDeveloperStageUseCase(
                     if (checkDenial != null) return@withContext null
                     session.verify()
                 }
-            } finally {
-                withContext(NonCancellable + blockingDispatcher) { session.close() }
             }
             checkpoint()?.let { return halted(it) }
             if (!live(lease, snapshot)) return terminal("STALE_STAGE_AUTHORITY")
@@ -469,17 +468,28 @@ class RunDeveloperStageUseCase(
                 return terminal("STAGE_VALIDATION_FAILED")
 
             suspend fun verificationFailure(): String? {
-                val intact = captureHostCall {
-                    withContext(blockingDispatcher) {
-                        changed.all {
-                            val bytes = host.readBytes(it.path)
-                            bytes != null && sha(bytes) == it.afterSha256
-                        } && host.readBytes(command.manifestPath)?.contentEquals(
-                            manifestText.toByteArray(Charsets.UTF_8)) == true
+                val outputChecks: List<Pair<String, (ByteArray?) -> Boolean>> = changed.map { file ->
+                    file.path to { bytes: ByteArray? -> bytes != null && sha(bytes) == file.afterSha256 }
+                } + (command.manifestPath to { bytes: ByteArray? ->
+                    bytes?.contentEquals(manifestText.toByteArray(Charsets.UTF_8)) == true
+                })
+                val inputChecks = inputs.map { artifact ->
+                    artifact.declaredPath to { bytes: ByteArray? ->
+                        bytes != null && sha(bytes) == artifact.sha256
                     }
-                }.getOrElse { return "OUTPUT_READ_UNAVAILABLE" }
-                if (!intact) return "FROZEN_INPUT_OR_OUTPUT_CHANGED"
-                return inputFailure()
+                }
+                val output = verifyHostReads(outputChecks) { path ->
+                    withContext(blockingDispatcher) { host.readBytes(path) }
+                }
+                val input = verifyHostReads(inputChecks) { path ->
+                    withContext(blockingDispatcher) { host.readBytes(path) }
+                }
+                return when {
+                    HostReadVerification.CHANGED in listOf(output, input) -> "FROZEN_INPUT_OR_OUTPUT_CHANGED"
+                    output == HostReadVerification.UNAVAILABLE -> "OUTPUT_READ_UNAVAILABLE"
+                    input == HostReadVerification.UNAVAILABLE -> "INPUT_READ_UNAVAILABLE"
+                    else -> null
+                }
             }
             verificationFailure()?.let { return terminal(it) }
             val candidate = StageArtifactManifest(command.artifactId,
@@ -499,8 +509,9 @@ class RunDeveloperStageUseCase(
             }
             if (decision == null) return halted("ROLE_TIMED_OUT")
             checkpoint()?.let { return halted(it) }
-            verificationFailure()?.let { return terminal(it) }
+            val verification = verificationFailure()
             if (!live(lease, snapshot)) return terminal("STALE_STAGE_AUTHORITY")
+            verification?.let { return terminal(it) }
             if (decision == PreparationApproval.HUMAN_REVIEW_REQUIRED)
                 return terminal("DEVELOPER_HUMAN_APPROVAL_REQUIRED")
             if (decision == PreparationApproval.REJECT)
@@ -526,7 +537,8 @@ class RunDeveloperStageUseCase(
             return finish(lease, completed, acceptedIds, DeveloperStageOutcome.Accepted(
                 frozen, changed, requireNotNull(writeToolId), verified, usage
             ), events, frozen, workspaceMayBeDirty = workspaceMayBeDirty)
-        } catch (cancelled: CancellationException) {
+        } catch (failure: Exception) {
+            val cancelled = callerCancellation(failure) ?: return terminal("DEVELOPER_STAGE_FAILED")
             withContext(NonCancellable) {
                 try { terminal("ROLE_CANCELLED", StageState.CANCELLED) }
                 catch (cleanup: Exception) {
@@ -534,8 +546,6 @@ class RunDeveloperStageUseCase(
                 }
             }
             throw cancelled
-        } catch (_: Exception) {
-            return terminal("DEVELOPER_STAGE_FAILED")
         }
     }
 }
