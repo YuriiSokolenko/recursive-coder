@@ -131,9 +131,14 @@ the host-owned pending draft so a later attempt can retry safely. Only a
 confirmed missing/mismatched artifact is terminal, and takes precedence over
 unavailable reads of other paths. A post-approval authority-call exception yields
 `HUMAN_APPROVAL_AUTHORITY_UNAVAILABLE`; the pending draft is retained only if
-its fenced finish is confirmed. Host-local role/tool cancellation fails the
-stage rather than cancelling the caller; session-close exceptions do not replace
-a primary failure. Model-generated evidence or a bare human approval
+its fenced finish is confirmed. Host-local role/tool cancellation without command stop signals yields
+`PREPARATION_STAGE_FAILED`, not caller cancellation; explicit command expiry
+or cancellation takes precedence as `ROLE_TIMED_OUT` or `ROLE_CANCELLED`.
+Human continuation uses `HUMAN_APPROVAL_STOPPED` (requested/expired signal)
+or `HUMAN_APPROVAL_TIMED_OUT` (deadline), otherwise
+`HUMAN_APPROVAL_FAILED` for unexpected failures outside typed read/authority/
+approval boundaries. The pending draft is retained only after a confirmed
+fenced finish. Session-close exceptions do not replace a primary failure. Model-generated evidence or a bare human approval
 string is never sufficient. This is a volatile in-process continuation; the
 durable crash/restart story remains part of #10.
 

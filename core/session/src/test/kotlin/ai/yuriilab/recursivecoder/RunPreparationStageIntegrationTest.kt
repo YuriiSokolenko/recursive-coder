@@ -906,14 +906,73 @@ class RunPreparationStageIntegrationTest : PreparationStageHostContract() {
         }
     }
 
+
+    @Test fun hostLocalAdapterCancellationRespectsPreparationStopSignals() = runBlocking {
+        for ((stop, code) in listOf("deadline" to "ROLE_TIMED_OUT",
+            "cancel" to "ROLE_CANCELLED")) {
+            for (boundary in listOf("role", "check")) {
+                val host = FakeHost()
+                val signal = Cancellation()
+                val roles = FakeRoles()
+                val tools = FakeTools(host)
+                val terminate = {
+                    if (stop == "deadline") signal.expire() else signal.cancel()
+                    throw kotlinx.coroutines.CancellationException("adapter stopped")
+                }
+                if (boundary == "role") roles.onExecute = terminate
+                else tools.cancelDuringCheck = terminate
+                val result = run(host, roles, tools, initial(), StageKind.SDD,
+                    modify = { it.copy(cancellation = signal) })
+                assertEquals(PreparationStageOutcome.Failed(code), result.outcome,
+                    "$stop/$boundary")
+                assertEquals(StageState.CANCELLED, requireNotNull(host.graph).stages.first().state)
+                assertNull(host.activeLease)
+                assertTrue(host.accepted.isEmpty())
+                assertEquals(if (boundary == "check") 1 else 0, tools.closeCount)
+            }
+        }
+    }
+
+    @Test fun hostLocalApprovalCancellationRespectsHumanStopSignal() = runBlocking {
+        val host = FakeHost().apply { decision = PreparationApproval.HUMAN_REVIEW_REQUIRED }
+        val roles = FakeRoles()
+        val tools = FakeTools(host)
+        assertIs<PreparationStageOutcome.AwaitingHuman>(
+            run(host, roles, tools, initial(), StageKind.SDD).outcome)
+        val pending = requireNotNull(host.graph)
+        val accepted = host.accepted
+        val signal = Cancellation()
+        host.beforeApprove = {
+            signal.cancel()
+            throw kotlinx.coroutines.CancellationException("host approval cancelled")
+        }
+        host.decision = PreparationApproval.ACCEPT
+        val continuation = RunPreparationStageUseCase(roles, tools, host)
+        val stopped = continuation.completeHumanApproval(
+            pending, accepted, ids.getValue(StageKind.SDD), Instant.now().plusSeconds(30),
+            signal, PreparationStageEventSink { })
+        assertEquals(PreparationStageOutcome.Failed("HUMAN_APPROVAL_STOPPED"), stopped.outcome)
+        assertEquals(pending, host.graph)
+        assertEquals(accepted, host.accepted)
+        assertNull(host.activeLease)
+        host.beforeApprove = null
+        assertIs<PreparationStageOutcome.Accepted>(
+            continuation.completeHumanApproval(
+                pending, accepted, ids.getValue(StageKind.SDD), Instant.now().plusSeconds(30),
+                Cancellation(), PreparationStageEventSink { }).outcome)
+    }
+
     @Test fun outputReadUnavailableDoesNotDowngradeRevokedApprovalAuthority() = runBlocking {
         val host = FakeHost()
         val path = paths.getValue(StageKind.SDD)
-        var reads = 0
-        host.beforeReadPath = { currentPath ->
-            if (currentPath == path && ++reads == 2) {
-                host.revoke()
-                host.unavailableReadPath = path
+        // Arm the fault only after approval; avoid depending on read counts.
+        host.beforeApprove = {
+            host.beforeReadPath = { currentPath ->
+                if (currentPath == path) {
+                    host.beforeReadPath = null
+                    host.revoke()
+                    host.unavailableReadPath = path
+                }
             }
         }
         val result = run(host, FakeRoles(), FakeTools(host), initial(), StageKind.SDD)

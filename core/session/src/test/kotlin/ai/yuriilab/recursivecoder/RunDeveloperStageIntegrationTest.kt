@@ -844,6 +844,71 @@ class RunDeveloperStageIntegrationTest : PreparationStageHostContract() {
         assertFalse(ArtifactId("implementation-76") in host.accepted)
     }
 
+
+    @Test fun preflightDenialPriorityIsIndependentOfPathAndTargetOrder() = runBlocking {
+        val targetOrder = listOf(DeveloperFileTarget(source, sha(oldSource)),
+            DeveloperFileTarget(extra))
+        for (targets in listOf(targetOrder, targetOrder.reversed())) {
+            // Both targets are dirty. A stale edit is always preferred to a create conflict.
+            val host = FakeHost().apply {
+                files[source] = bytes(newSource)
+                files[extra] = bytes(newExtra)
+            }
+            val model = FakeModel()
+            val result = execute(host, model, FakeTools(host), targets = targets)
+            assertEquals(DeveloperStageOutcome.Denied("STALE_TARGET_BASELINE"), result.outcome)
+            assertTrue(model.calls.isEmpty())
+            assertNull(host.active)
+            assertEquals(0, host.generation)
+        }
+
+        val host = FakeHost().apply {
+            files[paths.getValue(StageKind.ATDD)] = bytes("changed")
+            files.remove(paths.getValue(StageKind.SDD))
+            contractReadFailure = extra to java.io.IOException("unavailable target")
+        }
+        val result = execute(host, FakeModel(), FakeTools(host))
+        assertEquals(DeveloperStageOutcome.Denied("ARTIFACT_MISSING"), result.outcome)
+        assertNull(host.active)
+        assertEquals(0, host.generation)
+    }
+
+    @Test fun developerPromptPreservesHostSelectedTargetOrder() = runBlocking {
+        val targetOrder = listOf(DeveloperFileTarget(source, sha(oldSource)),
+            DeveloperFileTarget(extra))
+        for (targets in listOf(targetOrder, targetOrder.reversed())) {
+            val host = FakeHost()
+            val model = FakeModel()
+            val result = execute(host, model, FakeTools(host), targets = targets)
+            assertIs<DeveloperStageOutcome.Accepted>(result.outcome)
+            val instruction = model.calls.single().instruction
+            val first = instruction.indexOf("<target path=\"\u0024{targets[0].path}\"")
+            val second = instruction.indexOf("<target path=\"\u0024{targets[1].path}\"")
+            assertTrue(first >= 0 && second > first, "model target order changed")
+        }
+    }
+
+    @Test fun hostLocalRoleCancellationRespectsDeveloperCommandStopSignals() = runBlocking {
+        for ((stop, code) in listOf("deadline" to "ROLE_TIMED_OUT",
+            "cancel" to "ROLE_CANCELLED")) {
+            val host = FakeHost()
+            val signal = Cancellation()
+            val model = FakeModel().apply {
+                onExecute = {
+                    if (stop == "deadline") signal.expire() else signal.cancel()
+                    throw kotlinx.coroutines.CancellationException("role adapter stopped")
+                }
+            }
+            val tools = FakeTools(host)
+            val result = execute(host, model, tools,
+                modify = { it.copy(cancellation = signal) })
+            assertEquals(DeveloperStageOutcome.Failed(code, false), result.outcome, stop)
+            assertEquals(StageState.CANCELLED, host.graph.stages.last().state, stop)
+            assertEquals(0, tools.writes)
+            assertNull(host.active)
+        }
+    }
+
     @Test fun dirtyAfterFailedCheckRequiresHostReconciliationBeforeRetry() = runBlocking {
         val host = FakeHost()
         val tools = FakeTools(host).apply { failCheck = true }
