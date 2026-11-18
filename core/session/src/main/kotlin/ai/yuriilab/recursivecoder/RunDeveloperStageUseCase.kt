@@ -529,6 +529,7 @@ class RunDeveloperStageUseCase(
                 }
             } catch (failure: Exception) {
                 ensureHostCallerActive(failure)
+                stopped(command)?.let { return halted(it) }
                 return terminal("HOST_APPROVAL_UNAVAILABLE")
             }
             if (decision == null) return halted("ROLE_TIMED_OUT")

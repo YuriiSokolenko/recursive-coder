@@ -389,6 +389,7 @@ class RunPreparationStageUseCase(
                 }
             } catch (failure: Exception) {
                 ensureHostCallerActive(failure)
+                stopped(command)?.let { return halted(it) }
                 return terminal("HOST_APPROVAL_UNAVAILABLE")
             }
             if (decision == null) return halted("ROLE_TIMED_OUT")
@@ -539,7 +540,7 @@ class RunPreparationStageUseCase(
                 }
             } catch (failure: Exception) {
                 ensureHostCallerActive(failure)
-                return failed("HOST_APPROVAL_UNAVAILABLE")
+                return failed(stoppedHuman() ?: "HOST_APPROVAL_UNAVAILABLE")
             }
             if (decision == null) return failed("HUMAN_APPROVAL_TIMED_OUT")
             stoppedHuman()?.let { return failed(it) }
