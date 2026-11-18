@@ -5,15 +5,13 @@ import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.time.Instant
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import java.time.Clock
 import java.time.Duration
 
@@ -109,47 +107,22 @@ class RunPreparationStageUseCase(
         }
     }
 
-    private suspend fun inputsIntact(graph: StageGraph, stage: StageNode): Boolean =
-        withContext(blockingDispatcher) {
-            graph.artifacts.filter { it.id in stage.inputArtifacts }.all { artifact ->
-                val bytes = host.readBytes(artifact.declaredPath)
+    private suspend fun verifyInputs(graph: StageGraph, stage: StageNode): HostReadVerification =
+        verifyHostReads(graph.artifacts.filter { it.id in stage.inputArtifacts }.map { artifact ->
+            artifact.declaredPath to { bytes: ByteArray? ->
                 bytes != null && digest(bytes) == artifact.sha256
             }
-        }
-
-    /**
-     * A thrown read is not proof of missing or changed frozen bytes.
-     * Execute has no durable pending-human draft to retry: the caller must
-     * terminate its active attempt, or reconcile an unconfirmed finish.
-     * Human continuation retains its existing separate read-failure policy.
-     */
-    private suspend fun frozenInputFailure(
-        graph: StageGraph, stage: StageNode, changedCode: String
-    ): String? =
-        readForExecute { inputsIntact(graph, stage) }.fold(
-            onSuccess = { if (it) null else changedCode },
-            onFailure = { "INPUT_READ_UNAVAILABLE" }
-        )
-
-    // A host can throw java.util.concurrent.CancellationException while the
-    // caller's Job is still active (for example from a cancelled Future).
-    // Classify that as unavailable I/O, not as cancellation of this attempt.
-    // Conversely, never mask actual caller cancellation with a read failure.
-    private suspend fun <T> readForExecute(read: suspend () -> T): Result<T> =
-        try {
-            Result.success(read())
-        } catch (failure: Exception) {
-            currentCoroutineContext().ensureActive()
-            Result.failure(failure)
-        }
+        }) { path -> withContext(blockingDispatcher) { host.readBytes(path) } }
 
     private suspend fun live(lease: PreparationStageLease, snapshot: StageToolHostSnapshot): Boolean =
         try {
             withContext(blockingDispatcher) {
                 host.current(lease) && lease.authority.current() == snapshot
             }
-        } catch (cancelled: CancellationException) { throw cancelled }
-        catch (_: Exception) { false }
+        } catch (failure: Exception) {
+            ensureHostCallerActive(failure)
+            false
+        }
 
     private fun emit(
         events: PreparationStageEventSink, graph: StageGraph, id: StageRunId,
@@ -178,8 +151,6 @@ class RunPreparationStageUseCase(
             withContext(NonCancellable + blockingDispatcher) {
                 host.finishStage(lease, graph, accepted, pending)
             }
-        } catch (cancelled: CancellationException) {
-            throw cancelled
         } catch (_: Exception) {
             return PreparationStageResult(null, null,
                 PreparationStageOutcome.ReconciliationRequired("STAGE_FINISH_UNCONFIRMED"))
@@ -240,21 +211,22 @@ class RunPreparationStageUseCase(
 
         val inputs = ready.artifacts.filter { it.id in stage.inputArtifacts }
             .sortedBy { it.kind.name }
-        val inputData = readForExecute {
-            withContext(blockingDispatcher) {
-                inputs.map { artifact -> artifact to host.readBytes(artifact.declaredPath) }
+        val inputData = inputs.map { artifact ->
+            artifact to captureHostCall {
+                withContext(blockingDispatcher) { host.readBytes(artifact.declaredPath) }
             }
-        }.getOrElse {
-            // No stage lease or model/tool work has begun.
-            return denied("INPUT_READ_UNAVAILABLE")
         }
+        for ((artifact, read) in inputData) {
+            if (read.isFailure) continue
+            val bytes = read.getOrThrow() ?: return denied("ARTIFACT_MISSING")
+            if (digest(bytes) != artifact.sha256) return denied("ARTIFACT_DIGEST_MISMATCH")
+            if (utf8(bytes) == null) return denied("ARTIFACT_ENCODING_INVALID")
+        }
+        if (inputData.any { it.second.isFailure }) return denied("INPUT_READ_UNAVAILABLE")
         val instruction = buildString {
             append(command.instruction)
-            for ((artifact, bytes) in inputData) {
-                if (bytes == null) return denied("ARTIFACT_MISSING")
-                if (digest(bytes) != artifact.sha256)
-                    return denied("ARTIFACT_DIGEST_MISMATCH")
-                val text = utf8(bytes) ?: return denied("ARTIFACT_ENCODING_INVALID")
+            for ((artifact, read) in inputData) {
+                val text = requireNotNull(utf8(requireNotNull(read.getOrThrow())))
                 append("\n\n<verified-input kind=\"").append(artifact.kind.name)
                     .append("\" sha256=\"").append(artifact.sha256).append("\">\n")
                 append(text.replace("&", "&amp;").replace("<", "&lt;"))
@@ -305,9 +277,11 @@ class RunPreparationStageUseCase(
         }
         suspend fun checkpoint(): String? {
             currentCoroutineContext().ensureActive()
-            return stopped(command) ?: if (
-                !withContext(blockingDispatcher) { host.current(lease) }
-            ) "STALE_STAGE_LEASE" else null
+            stopped(command)?.let { return it }
+            val current = captureHostCall {
+                withContext(blockingDispatcher) { host.current(lease) }
+            }.getOrElse { return "STAGE_AUTHORITY_UNAVAILABLE" }
+            return if (current) null else "STALE_STAGE_LEASE"
         }
         suspend fun halted(code: String): PreparationStageResult = terminal(code,
             if (code == "ROLE_CANCELLED" || code == "ROLE_TIMED_OUT")
@@ -336,10 +310,10 @@ class RunPreparationStageUseCase(
                 StageRoleLimits.MAX_PROPOSAL_BYTES)
                 return terminal("MODEL_INVALID_RESPONSE")
             val authority = lease.authority
-            val snapshot = try {
+            val snapshot = captureHostCall {
                 withContext(blockingDispatcher) { authority.current() }
-            } catch (cancelled: CancellationException) { throw cancelled }
-            catch (_: Exception) { null } ?: return terminal("STAGE_AUTHORITY_UNAVAILABLE")
+            }.getOrElse { return terminal("STAGE_AUTHORITY_UNAVAILABLE") }
+                ?: return terminal("STAGE_AUTHORITY_UNAVAILABLE")
             if (snapshot.graph != running || snapshot.stageRunId != id ||
                 snapshot.requestId != stage.correlation.requestId ||
                 snapshot.hostAcceptedArtifactIds != accepted ||
@@ -354,7 +328,9 @@ class RunPreparationStageUseCase(
             if (open is StageToolOpenResult.Denied) return terminal(open.code)
             val session = (open as StageToolOpenResult.Granted).session
             var checkDenial: String? = null
-            val validation = try {
+            val validation = withStageSessionCleanup(
+                close = { withContext(NonCancellable + blockingDispatcher) { session.close() } }
+            ) {
                 withContext(blockingDispatcher) {
                     checkDenial = checkpoint()
                     if (checkDenial != null) return@withContext null
@@ -378,8 +354,6 @@ class RunPreparationStageUseCase(
                     if (checkDenial != null) return@withContext null
                     session.verify()
                 }
-            } finally {
-                withContext(NonCancellable + blockingDispatcher) { session.close() }
             }
             checkpoint()?.let { return halted(it) }
             if (!live(lease, snapshot)) return terminal("STALE_STAGE_AUTHORITY")
@@ -389,15 +363,19 @@ class RunPreparationStageUseCase(
                 validation.requiredChecks.map { it.checkId }.toSet() != checks ||
                 validation.requiredChecks.any { !it.passed })
                 return terminal(validation.deniedCode ?: "STAGE_VALIDATION_FAILED")
-            val bytes = readForExecute {
+            val outputRead = captureHostCall {
                 withContext(blockingDispatcher) { host.readBytes(command.outputPath) }
-            }.getOrElse { return terminal("OUTPUT_READ_UNAVAILABLE") }
-                ?: return terminal("ARTIFACT_MISSING")
-            val intended = proposed.toByteArray(Charsets.UTF_8)
-            if (!bytes.contentEquals(intended)) return terminal("ARTIFACT_DIGEST_MISMATCH")
-            frozenInputFailure(running, stage, changedCode = "FROZEN_INPUT_CHANGED")?.let {
-                return terminal(it)
             }
+            val inputsVerified = verifyInputs(running, stage)
+            val intended = proposed.toByteArray(Charsets.UTF_8)
+            if (outputRead.isSuccess) {
+                val output = outputRead.getOrThrow() ?: return terminal("ARTIFACT_MISSING")
+                if (!output.contentEquals(intended)) return terminal("ARTIFACT_DIGEST_MISMATCH")
+            }
+            if (inputsVerified == HostReadVerification.CHANGED) return terminal("FROZEN_INPUT_CHANGED")
+            val bytes = outputRead.getOrElse { return terminal("OUTPUT_READ_UNAVAILABLE") }
+                ?: return terminal("ARTIFACT_MISSING")
+            if (inputsVerified == HostReadVerification.UNAVAILABLE) return terminal("INPUT_READ_UNAVAILABLE")
             val outputKind = kind.output ?: return terminal("INVALID_STAGE_OUTPUT")
             val candidate = StageArtifactManifest(command.artifactId, outputKind,
                 command.outputPath, digest(bytes), kind.role, id, 1L,
@@ -407,27 +385,27 @@ class RunPreparationStageUseCase(
                 withContext(blockingDispatcher) {
                     val remaining = Duration.between(Instant.now(clock), command.deadline).toMillis()
                     if (remaining <= 0) return@withContext null
-                    withTimeout(remaining) { host.approve(candidate, validation, proposal.usage) }
+                    withTimeoutOrNull(remaining) { host.approve(candidate, validation, proposal.usage) }
                 }
-            } catch (_: TimeoutCancellationException) {
-                return halted("ROLE_TIMED_OUT")
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (_: Exception) { return terminal("HOST_APPROVAL_UNAVAILABLE") }
+            } catch (failure: Exception) {
+                ensureHostCallerActive(failure)
+                stopped(command)?.let { return halted(it) }
+                return terminal("HOST_APPROVAL_UNAVAILABLE")
+            }
             if (decision == null) return halted("ROLE_TIMED_OUT")
             checkpoint()?.let { return halted(it) }
-            val afterRead = readForExecute {
+            val afterRead = captureHostCall {
                 withContext(blockingDispatcher) { host.readBytes(command.outputPath) }
             }
             // Authority wins over read diagnostics; never accept against a
             // revoked lease. Confirm output integrity before checking inputs.
             if (!live(lease, snapshot)) return terminal("STALE_ARTIFACT_APPROVAL")
-            val after = afterRead.getOrElse { return terminal("OUTPUT_READ_UNAVAILABLE") }
-            if (after == null || !after.contentEquals(bytes))
+            val inputStatus = verifyInputs(running, stage)
+            if (inputStatus == HostReadVerification.CHANGED ||
+                (afterRead.isSuccess && afterRead.getOrThrow()?.contentEquals(bytes) != true))
                 return terminal("STALE_ARTIFACT_APPROVAL")
-            frozenInputFailure(running, stage, changedCode = "STALE_ARTIFACT_APPROVAL")?.let {
-                return terminal(it)
-            }
+            if (afterRead.isFailure) return terminal("OUTPUT_READ_UNAVAILABLE")
+            if (inputStatus == HostReadVerification.UNAVAILABLE) return terminal("INPUT_READ_UNAVAILABLE")
             if (decision == PreparationApproval.REJECT)
                 return terminal("HOST_REJECTED", StageState.REJECTED, rejected = true)
 
@@ -456,8 +434,12 @@ class RunPreparationStageUseCase(
             return finish(lease, completed, acceptedIds,
                 PreparationStageOutcome.Accepted(frozen, validation, proposal.usage),
                 events, frozen)
-        } catch (cancelled: CancellationException) {
-            // A failed host abort must not replace the original cancellation.
+        } catch (failure: Exception) {
+            val cancelled = callerCancellation(failure)
+            if (cancelled == null) {
+                stopped(command)?.let { return halted(it) }
+                return terminal("PREPARATION_STAGE_FAILED")
+            }
             withContext(NonCancellable) {
                 try { terminal("ROLE_CANCELLED", StageState.CANCELLED) }
                 catch (cleanup: Exception) {
@@ -465,8 +447,6 @@ class RunPreparationStageUseCase(
                 }
             }
             throw cancelled
-        } catch (_: Exception) {
-            return terminal("PREPARATION_STAGE_FAILED")
         }
     }
 
@@ -519,8 +499,7 @@ class RunPreparationStageUseCase(
                 pending != null &&
                 validation.requiredChecks.map { it.checkId }.toSet().let { checks ->
                     "git_diff_check" in checks && checks.any { it != "git_diff_check" }
-                } && validation.requiredChecks.all { it.passed } &&
-                withContext(NonCancellable + blockingDispatcher) { host.current(lease) }
+                } && validation.requiredChecks.all { it.passed }
         } catch (_: Exception) { false }
         if (!validHumanLease)
             return withContext(NonCancellable) {
@@ -535,70 +514,74 @@ class RunPreparationStageUseCase(
         suspend fun stale(code: String): PreparationStageResult =
             abort(lease, StageState.FAILED, code, events)
         try {
-        // An I/O exception is not evidence of changed bytes. A missing or
-        // mismatched artifact is terminal; transient read failures preserve the
-        // host-owned RUNNING/DRAFT record for a later human retry.
-        val before = try {
-            val output = withContext(blockingDispatcher) {
-                host.readBytes(candidate.declaredPath)
+            val initialCurrent = captureHostCall {
+                withContext(blockingDispatcher) { host.current(lease) }
+            }.getOrElse { return failed("HUMAN_APPROVAL_AUTHORITY_UNAVAILABLE") }
+            if (!initialCurrent) return stale("INVALID_HUMAN_APPROVAL_LEASE")
+            // A confirmed change wins over transient read failures, regardless of path order.
+            val before = captureHostCall {
+                withContext(blockingDispatcher) { host.readBytes(candidate.declaredPath) }
             }
-            val inputsValid = inputsIntact(expectedGraph, stage)
-            output to inputsValid
-        } catch (cancelled: CancellationException) { throw cancelled }
-        catch (_: Exception) { return failed("HUMAN_APPROVAL_READ_UNAVAILABLE") }
-        val bytes = before.first
-        if (bytes == null || digest(bytes) != candidate.sha256 || !before.second)
-            return stale("STALE_HUMAN_APPROVAL")
-        stoppedHuman()?.let { return failed(it) }
-        val decision = try {
-            withContext(blockingDispatcher) {
-                val remaining = Duration.between(Instant.now(clock), deadline).toMillis()
-                if (remaining <= 0) return@withContext null
-                withTimeout(remaining) {
-                    host.approve(candidate, approvedEvidence, originalUsage)
+            val beforeInputs = verifyInputs(expectedGraph, stage)
+            if (beforeInputs == HostReadVerification.CHANGED ||
+                (before.isSuccess && before.getOrThrow()?.let { digest(it) == candidate.sha256 } != true))
+                return stale("STALE_HUMAN_APPROVAL")
+            if (beforeInputs == HostReadVerification.UNAVAILABLE || before.isFailure)
+                return failed("HUMAN_APPROVAL_READ_UNAVAILABLE")
+            val bytes = requireNotNull(before.getOrThrow())
+            stoppedHuman()?.let { return failed(it) }
+            val decision = try {
+                withContext(blockingDispatcher) {
+                    val remaining = Duration.between(Instant.now(clock), deadline).toMillis()
+                    if (remaining <= 0) return@withContext null
+                    withTimeoutOrNull(remaining) {
+                        host.approve(candidate, approvedEvidence, originalUsage)
+                    }
                 }
+            } catch (failure: Exception) {
+                ensureHostCallerActive(failure)
+                return failed(stoppedHuman() ?: "HOST_APPROVAL_UNAVAILABLE")
             }
-        } catch (_: TimeoutCancellationException) {
-            return failed("HUMAN_APPROVAL_TIMED_OUT")
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (_: Exception) { return failed("HOST_APPROVAL_UNAVAILABLE") }
-        if (decision == null) return failed("HUMAN_APPROVAL_TIMED_OUT")
-        stoppedHuman()?.let { return failed(it) }
-        val postApproval = try {
-            val output = withContext(blockingDispatcher) {
-                host.readBytes(candidate.declaredPath)
+            if (decision == null) return failed("HUMAN_APPROVAL_TIMED_OUT")
+            stoppedHuman()?.let { return failed(it) }
+            val after = captureHostCall {
+                withContext(blockingDispatcher) { host.readBytes(candidate.declaredPath) }
             }
-            val current = withContext(blockingDispatcher) { host.current(lease) }
-            val inputsValid = inputsIntact(expectedGraph, stage)
-            Triple(output, current, inputsValid)
-        } catch (cancelled: CancellationException) { throw cancelled }
-        catch (_: Exception) { return failed("HUMAN_APPROVAL_READ_UNAVAILABLE") }
-        if (!postApproval.second || postApproval.first == null ||
-            !postApproval.first.contentEquals(bytes) || !postApproval.third)
-            return stale("STALE_HUMAN_APPROVAL")
-        if (decision == PreparationApproval.HUMAN_REVIEW_REQUIRED)
-            return finish(lease, expectedGraph, acceptedIds,
-                PreparationStageOutcome.AwaitingHuman(candidate), events, candidate,
-                "HUMAN_APPROVAL_REQUIRED", pending = pending)
-        if (decision == PreparationApproval.REJECT) {
-            val rejected = transition(expectedGraph, stageRunId, StageState.REJECTED,
-                acceptedIds) ?: return failed("STAGE_REJECTION_FAILED")
-            return finish(lease, rejected, acceptedIds,
-                PreparationStageOutcome.Denied("HOST_REJECTED"), events, candidate, "HOST_REJECTED")
-        }
-        val frozen = candidate.copy(approval = ArtifactApproval.ACCEPTED,
-            freeze = ArtifactFreeze.FROZEN)
-        val graph = expectedGraph.copy(artifacts = expectedGraph.artifacts.map {
-            if (it.id == frozen.id) frozen else it
-        })
-        val accepted = acceptedIds + frozen.id
-        val completed = transition(graph, stageRunId, StageState.ACCEPTED, accepted)
-            ?: return failed("STAGE_ACCEPTANCE_DENIED")
-        return finish(lease, completed, accepted,
-            PreparationStageOutcome.Accepted(frozen, approvedEvidence, originalUsage),
-            events, frozen)
-        } catch (cancelled: CancellationException) {
+            val afterInputs = verifyInputs(expectedGraph, stage)
+            val current = captureHostCall {
+                withContext(blockingDispatcher) { host.current(lease) }
+            }
+            if (current.getOrNull() == false || afterInputs == HostReadVerification.CHANGED ||
+                (after.isSuccess && after.getOrThrow()?.contentEquals(bytes) != true))
+                return stale("STALE_HUMAN_APPROVAL")
+            if (current.isFailure) return failed("HUMAN_APPROVAL_AUTHORITY_UNAVAILABLE")
+            if (after.isFailure || afterInputs == HostReadVerification.UNAVAILABLE)
+                return failed("HUMAN_APPROVAL_READ_UNAVAILABLE")
+            if (decision == PreparationApproval.HUMAN_REVIEW_REQUIRED)
+                return finish(lease, expectedGraph, acceptedIds,
+                    PreparationStageOutcome.AwaitingHuman(candidate), events, candidate,
+                    "HUMAN_APPROVAL_REQUIRED", pending = pending)
+            if (decision == PreparationApproval.REJECT) {
+                val rejected = transition(expectedGraph, stageRunId, StageState.REJECTED,
+                    acceptedIds) ?: return failed("STAGE_REJECTION_FAILED")
+                return finish(lease, rejected, acceptedIds,
+                    PreparationStageOutcome.Denied("HOST_REJECTED"), events, candidate, "HOST_REJECTED")
+            }
+            val frozen = candidate.copy(approval = ArtifactApproval.ACCEPTED,
+                freeze = ArtifactFreeze.FROZEN)
+            val graph = expectedGraph.copy(artifacts = expectedGraph.artifacts.map {
+                if (it.id == frozen.id) frozen else it
+            })
+            val accepted = acceptedIds + frozen.id
+            val completed = transition(graph, stageRunId, StageState.ACCEPTED, accepted)
+                ?: return failed("STAGE_ACCEPTANCE_DENIED")
+            return finish(lease, completed, accepted,
+                PreparationStageOutcome.Accepted(frozen, approvedEvidence, originalUsage),
+                events, frozen)
+        } catch (failure: Exception) {
+            val cancelled = callerCancellation(failure)
+            if (cancelled == null)
+                return failed(stoppedHuman() ?: "HUMAN_APPROVAL_FAILED")
             withContext(NonCancellable) {
                 try { failed("HUMAN_APPROVAL_STOPPED") }
                 catch (cleanup: Exception) {

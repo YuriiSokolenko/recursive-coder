@@ -308,11 +308,17 @@ class RunPreparationStageIntegrationTest : PreparationStageHostContract() {
         val roles = mutableListOf<EngineeringRole>()
         val writes = mutableListOf<String>()
         var closeCount = 0
+        var failAt: String? = null
+        var closeFailure: Exception? = null
+        private fun fail(boundary: String) {
+            if (failAt == boundary) throw kotlinx.coroutines.CancellationException("host $boundary cancelled")
+        }
         var denyOpen = false
         var denyWrite = false
         var failCheck = false
         var cancelDuringCheck: (() -> Unit)? = null
         override fun open(authority: StageToolAuthoritySource): StageToolOpenResult {
+            fail("open")
             if (denyOpen) return StageToolOpenResult.Denied("TOOL_OPEN_DENIED")
             val snap = authority.current() ?: return StageToolOpenResult.Denied("STALE_STAGE_AUTHORITY")
             val stage = snap.graph.stages.single {
@@ -321,6 +327,7 @@ class RunPreparationStageIntegrationTest : PreparationStageHostContract() {
             roles += stage.kind.role
             return StageToolOpenResult.Granted(object : StageToolSession {
                 override fun write(operations: List<StageWrite>): StageWriteEvidence {
+                    fail("write")
                     if (denyWrite) return StageWriteEvidence(null, "WRITE_DENIED")
                     val op = operations.single() as? StageWrite.Create
                         ?: return StageWriteEvidence(null, "CREATE_ONLY")
@@ -339,18 +346,22 @@ class RunPreparationStageIntegrationTest : PreparationStageHostContract() {
                     return StageWriteEvidence("write-receipt")
                 }
                 override fun runCheck(checkId: String): StageCheckEvidence {
+                    fail("check")
                     cancelDuringCheck?.invoke()
                     return if (failCheck) StageCheckEvidence(checkId, null,
                         deniedCode = "CHECK_FAILED")
                     else StageCheckEvidence(checkId, "receipt-$checkId", "baseline", "policy", "manifest")
                 }
-                override fun verify() = StageValidationEvidence(
+                override fun verify(): StageValidationEvidence {
+                    fail("verify")
+                    return StageValidationEvidence(
                     stage.correlation, requireNotNull(stage.agentId),
                     snap.requiredChecks.sorted().map { check ->
                         StageCheckEvidence(check, "receipt-$check", "baseline", "policy", "manifest")
                     }, true
                 )
-                override fun close() { closeCount++ }
+                }
+                override fun close() { closeCount++; closeFailure?.let { throw it }; fail("close") }
             })
         }
     }
@@ -625,16 +636,20 @@ class RunPreparationStageIntegrationTest : PreparationStageHostContract() {
         assertNull(host.beginStage(initial(), ids.getValue(StageKind.SDD), emptySet()))
     }
 
-    @Test fun modelCancellationExceptionAbortsAndRethrows() = runBlocking {
-        val host = FakeHost()
-        val roles = FakeRoles().apply {
-            onExecute = { throw kotlinx.coroutines.CancellationException("caller cancelled") }
+    @Test fun localToolAndRoleCancellationFailsWithoutCancellingCaller() = runBlocking {
+        for (boundary in listOf("role", "open", "write", "check", "verify", "close")) {
+            val host = FakeHost()
+            val roles = FakeRoles()
+            val tools = FakeTools(host)
+            if (boundary == "role") roles.onExecute = {
+                throw kotlinx.coroutines.CancellationException("local model failure")
+            } else tools.failAt = boundary
+            val result = run(host, roles, tools, initial(), StageKind.SDD)
+            assertEquals(PreparationStageOutcome.Failed("PREPARATION_STAGE_FAILED"), result.outcome, boundary)
+            assertEquals(StageState.FAILED, requireNotNull(host.graph).stages.first().state)
+            assertNull(host.activeLease)
+            assertEquals(if (boundary in setOf("role", "open")) 0 else 1, tools.closeCount)
         }
-        val tools = FakeTools(host)
-        assertFailsWith<kotlinx.coroutines.CancellationException> {
-            run(host, roles, tools, initial(), StageKind.SDD)
-        }
-        assertEquals(StageState.CANCELLED, requireNotNull(host.graph).stages.first().state)
     }
 
     @Test fun unreadableAndInvalidUtf8InputsFailBeforeModelInvocation() = runBlocking {
@@ -891,14 +906,73 @@ class RunPreparationStageIntegrationTest : PreparationStageHostContract() {
         }
     }
 
+
+    @Test fun hostLocalAdapterCancellationRespectsPreparationStopSignals() = runBlocking {
+        for ((stop, code) in listOf("deadline" to "ROLE_TIMED_OUT",
+            "cancel" to "ROLE_CANCELLED")) {
+            for (boundary in listOf("role", "check")) {
+                val host = FakeHost()
+                val signal = Cancellation()
+                val roles = FakeRoles()
+                val tools = FakeTools(host)
+                val terminate = {
+                    if (stop == "deadline") signal.expire() else signal.cancel()
+                    throw kotlinx.coroutines.CancellationException("adapter stopped")
+                }
+                if (boundary == "role") roles.onExecute = terminate
+                else tools.cancelDuringCheck = terminate
+                val result = run(host, roles, tools, initial(), StageKind.SDD,
+                    modify = { it.copy(cancellation = signal) })
+                assertEquals(PreparationStageOutcome.Failed(code), result.outcome,
+                    "$stop/$boundary")
+                assertEquals(StageState.CANCELLED, requireNotNull(host.graph).stages.first().state)
+                assertNull(host.activeLease)
+                assertTrue(host.accepted.isEmpty())
+                assertEquals(if (boundary == "check") 1 else 0, tools.closeCount)
+            }
+        }
+    }
+
+    @Test fun hostLocalApprovalCancellationRespectsHumanStopSignal() = runBlocking {
+        val host = FakeHost().apply { decision = PreparationApproval.HUMAN_REVIEW_REQUIRED }
+        val roles = FakeRoles()
+        val tools = FakeTools(host)
+        assertIs<PreparationStageOutcome.AwaitingHuman>(
+            run(host, roles, tools, initial(), StageKind.SDD).outcome)
+        val pending = requireNotNull(host.graph)
+        val accepted = host.accepted
+        val signal = Cancellation()
+        host.beforeApprove = {
+            signal.cancel()
+            throw kotlinx.coroutines.CancellationException("host approval cancelled")
+        }
+        host.decision = PreparationApproval.ACCEPT
+        val continuation = RunPreparationStageUseCase(roles, tools, host)
+        val stopped = continuation.completeHumanApproval(
+            pending, accepted, ids.getValue(StageKind.SDD), Instant.now().plusSeconds(30),
+            signal, PreparationStageEventSink { })
+        assertEquals(PreparationStageOutcome.Failed("HUMAN_APPROVAL_STOPPED"), stopped.outcome)
+        assertEquals(pending, host.graph)
+        assertEquals(accepted, host.accepted)
+        assertNull(host.activeLease)
+        host.beforeApprove = null
+        assertIs<PreparationStageOutcome.Accepted>(
+            continuation.completeHumanApproval(
+                pending, accepted, ids.getValue(StageKind.SDD), Instant.now().plusSeconds(30),
+                Cancellation(), PreparationStageEventSink { }).outcome)
+    }
+
     @Test fun outputReadUnavailableDoesNotDowngradeRevokedApprovalAuthority() = runBlocking {
         val host = FakeHost()
         val path = paths.getValue(StageKind.SDD)
-        var reads = 0
-        host.beforeReadPath = { currentPath ->
-            if (currentPath == path && ++reads == 2) {
-                host.revoke()
-                host.unavailableReadPath = path
+        // Arm the fault only after approval; avoid depending on read counts.
+        host.beforeApprove = {
+            host.beforeReadPath = { currentPath ->
+                if (currentPath == path) {
+                    host.beforeReadPath = null
+                    host.revoke()
+                    host.unavailableReadPath = path
+                }
             }
         }
         val result = run(host, FakeRoles(), FakeTools(host), initial(), StageKind.SDD)
@@ -1072,45 +1146,189 @@ class RunPreparationStageIntegrationTest : PreparationStageHostContract() {
     }
 
     @Test fun humanApprovalTransientReadFailuresRetainDraftAndPermitRetry() = runBlocking {
-        for (failure in listOf("draft-output", "frozen-input", "post-approval-read")) {
+        for (failure in listOf("draft-output", "frozen-input", "post-approval-read", "post-approval-input", "approval")) {
+            for (hostCancellation in listOf(false, true)) {
+                val host = FakeHost().apply { decision = PreparationApproval.HUMAN_REVIEW_REQUIRED }
+                val roles = FakeRoles()
+                val tools = FakeTools(host)
+                val kind = if (failure in setOf("frozen-input", "post-approval-input")) StageKind.ATDD else StageKind.SDD
+                if (kind == StageKind.ATDD) {
+                    host.decision = PreparationApproval.ACCEPT
+                    assertIs<PreparationStageOutcome.Accepted>(
+                        run(host, roles, tools, initial(), StageKind.SDD).outcome)
+                    host.plan(StageKind.ATDD)
+                    host.decision = PreparationApproval.HUMAN_REVIEW_REQUIRED
+                }
+                assertIs<PreparationStageOutcome.AwaitingHuman>(
+                    run(host, roles, tools, host.graph ?: initial(), kind).outcome)
+                val pendingGraph = requireNotNull(host.graph)
+                val unreadable = if (kind == StageKind.ATDD)
+                    paths.getValue(StageKind.SDD) else paths.getValue(kind)
+                host.decision = PreparationApproval.ACCEPT
+                val injectReadFailure = {
+                    if (hostCancellation) host.cancelledReadPath = unreadable
+                    else host.unavailableReadPath = unreadable
+                }
+                when (failure) {
+                    "approval" -> host.beforeApprove = {
+                        if (hostCancellation) throw kotlinx.coroutines.CancellationException("host approval cancelled")
+                        else throw java.io.IOException("approval unavailable")
+                    }
+                    "post-approval-read", "post-approval-input" -> host.beforeApprove = injectReadFailure
+                    else -> injectReadFailure()
+                }
+                val continuation = RunPreparationStageUseCase(roles, tools, host)
+                val failed = continuation.completeHumanApproval(pendingGraph, host.accepted,
+                    ids.getValue(kind), Instant.now().plusSeconds(30),
+                    Cancellation(), PreparationStageEventSink { })
+                assertEquals(PreparationStageOutcome.Failed(
+                    if (failure == "approval") "HOST_APPROVAL_UNAVAILABLE"
+                    else "HUMAN_APPROVAL_READ_UNAVAILABLE"), failed.outcome, failure)
+                assertEquals(pendingGraph, host.graph, failure)
+                assertNull(host.activeLease, failure)
+                assertEquals(StageState.RUNNING, requireNotNull(host.graph).stages.single {
+                    it.correlation.stageRunId == ids.getValue(kind)
+                }.state)
+                host.beforeApprove = null
+                host.unavailableReadPath = null
+                host.cancelledReadPath = null
+                val accepted = continuation.completeHumanApproval(requireNotNull(host.graph),
+                    host.accepted, ids.getValue(kind), Instant.now().plusSeconds(30),
+                    Cancellation(), PreparationStageEventSink { })
+                assertIs<PreparationStageOutcome.Accepted>(accepted.outcome, failure)
+                assertNull(host.activeLease, failure)
+            }
+        }
+    }
+
+    @Test fun realCallerCancellationRetainsPendingHumanDraft() = runBlocking {
+        for (boundary in listOf("draft", "approval", "post-approval")) {
             val host = FakeHost().apply { decision = PreparationApproval.HUMAN_REVIEW_REQUIRED }
             val roles = FakeRoles()
             val tools = FakeTools(host)
-            val kind = if (failure == "frozen-input") StageKind.ATDD else StageKind.SDD
-            if (kind == StageKind.ATDD) {
-                host.decision = PreparationApproval.ACCEPT
-                assertIs<PreparationStageOutcome.Accepted>(
-                    run(host, roles, tools, initial(), StageKind.SDD).outcome)
-                host.plan(StageKind.ATDD)
-                host.decision = PreparationApproval.HUMAN_REVIEW_REQUIRED
-            }
             assertIs<PreparationStageOutcome.AwaitingHuman>(
-                run(host, roles, tools, host.graph ?: initial(), kind).outcome)
-            val pendingGraph = requireNotNull(host.graph)
-            val unreadable = if (failure == "frozen-input")
-                paths.getValue(StageKind.SDD) else paths.getValue(kind)
+                run(host, roles, tools, initial(), StageKind.SDD).outcome)
+            val graph = requireNotNull(host.graph)
+            val accepted = host.accepted
             host.decision = PreparationApproval.ACCEPT
-            if (failure == "post-approval-read")
-                host.beforeApprove = { host.unavailableReadPath = unreadable }
-            else host.unavailableReadPath = unreadable
+            val entered = java.util.concurrent.CountDownLatch(1)
+            val release = java.util.concurrent.CountDownLatch(1)
+            val gate = {
+                entered.countDown()
+                check(release.await(10, java.util.concurrent.TimeUnit.SECONDS))
+            }
+            when (boundary) {
+                "draft" -> host.beforeRead = gate
+                "approval" -> host.beforeApprove = gate
+                else -> host.beforeApprove = { host.beforeRead = gate }
+            }
             val continuation = RunPreparationStageUseCase(roles, tools, host)
-            val failed = continuation.completeHumanApproval(pendingGraph, host.accepted,
-                ids.getValue(kind), Instant.now().plusSeconds(30),
-                Cancellation(), PreparationStageEventSink { })
-            assertEquals(PreparationStageOutcome.Failed(
-                "HUMAN_APPROVAL_READ_UNAVAILABLE"), failed.outcome, failure)
-            assertEquals(pendingGraph, host.graph, failure)
-            assertNull(host.activeLease, failure)
-            assertEquals(StageState.RUNNING, requireNotNull(host.graph).stages.single {
-                it.correlation.stageRunId == ids.getValue(kind)
-            }.state)
+            val job = async(kotlinx.coroutines.Dispatchers.Default) {
+                continuation.completeHumanApproval(graph, accepted, ids.getValue(StageKind.SDD),
+                    Instant.now().plusSeconds(30), Cancellation(), PreparationStageEventSink { })
+            }
+            try {
+                assertTrue(entered.await(10, java.util.concurrent.TimeUnit.SECONDS), boundary)
+                job.cancel()
+            } finally {
+                release.countDown()
+            }
+            assertFailsWith<kotlinx.coroutines.CancellationException> { job.await() }
+            assertEquals(graph, host.graph, boundary)
+            assertEquals(accepted, host.accepted, boundary)
+            assertNull(host.activeLease, boundary)
+            host.beforeRead = null
             host.beforeApprove = null
-            host.unavailableReadPath = null
-            val accepted = continuation.completeHumanApproval(requireNotNull(host.graph),
-                host.accepted, ids.getValue(kind), Instant.now().plusSeconds(30),
+            assertIs<PreparationStageOutcome.Accepted>(
+                continuation.completeHumanApproval(graph, accepted, ids.getValue(StageKind.SDD),
+                    Instant.now().plusSeconds(30), Cancellation(), PreparationStageEventSink { }).outcome)
+        }
+    }
+
+    @Test fun hostLocalApprovalCancellationDoesNotCancelPreparation() = runBlocking {
+        val host = FakeHost().apply {
+            beforeApprove = { throw kotlinx.coroutines.CancellationException("host approval cancelled") }
+        }
+        val result = run(host, FakeRoles(), FakeTools(host), initial(), StageKind.SDD)
+        assertEquals(PreparationStageOutcome.Failed("HOST_APPROVAL_UNAVAILABLE"), result.outcome)
+        assertEquals(StageState.FAILED, requireNotNull(host.graph).stages.first().state)
+        assertNull(host.activeLease)
+        assertTrue(host.accepted.isEmpty())
+    }
+
+    @Test fun hostLocalCurrentCancellationDoesNotCancelPreparation() = runBlocking {
+        val host = FakeHost()
+        val roles = FakeRoles().apply {
+            onExecute = {
+                host.beforeCurrent = {
+                    host.beforeCurrent = null
+                    throw kotlinx.coroutines.CancellationException("host current cancelled")
+                }
+            }
+        }
+        val result = run(host, roles, FakeTools(host), initial(), StageKind.SDD)
+        assertEquals(PreparationStageOutcome.Failed("STAGE_AUTHORITY_UNAVAILABLE"), result.outcome)
+        assertEquals(StageState.FAILED, requireNotNull(host.graph).stages.first().state)
+        assertNull(host.activeLease)
+    }
+
+    @Test fun humanConfirmedCorruptionWinsOverUnavailableRead() = runBlocking {
+        for (afterApproval in listOf(false, true)) for (outputChanged in listOf(false, true)) {
+            val host = FakeHost()
+            val roles = FakeRoles()
+            val tools = FakeTools(host)
+            assertIs<PreparationStageOutcome.Accepted>(
+                run(host, roles, tools, initial(), StageKind.SDD).outcome)
+            host.plan(StageKind.ATDD)
+            host.decision = PreparationApproval.HUMAN_REVIEW_REQUIRED
+            assertIs<PreparationStageOutcome.AwaitingHuman>(
+                run(host, roles, tools, requireNotNull(host.graph), StageKind.ATDD).outcome)
+            val graph = requireNotNull(host.graph)
+            val output = paths.getValue(StageKind.ATDD)
+            val input = paths.getValue(StageKind.SDD)
+            val inject = {
+                host.unavailableReadPath = if (outputChanged) input else output
+                host.files[if (outputChanged) output else input] = bytes("changed")
+            }
+            host.decision = PreparationApproval.ACCEPT
+            if (afterApproval) host.beforeApprove = inject else inject()
+            val result = RunPreparationStageUseCase(roles, tools, host).completeHumanApproval(
+                graph, host.accepted, ids.getValue(StageKind.ATDD), Instant.now().plusSeconds(30),
                 Cancellation(), PreparationStageEventSink { })
-            assertIs<PreparationStageOutcome.Accepted>(accepted.outcome, failure)
-            assertNull(host.activeLease, failure)
+            assertEquals(PreparationStageOutcome.Failed("STALE_HUMAN_APPROVAL"), result.outcome)
+            assertEquals(StageState.FAILED, requireNotNull(host.graph).stages.single {
+                it.correlation.stageRunId == ids.getValue(StageKind.ATDD)
+            }.state)
+            assertNull(host.activeLease)
+        }
+    }
+
+    @Test fun humanAuthorityFailureRetainsDraftBeforeAndAfterApproval() = runBlocking {
+        for (afterApproval in listOf(false, true)) {
+            val host = FakeHost().apply { decision = PreparationApproval.HUMAN_REVIEW_REQUIRED }
+            val roles = FakeRoles()
+            val tools = FakeTools(host)
+            assertIs<PreparationStageOutcome.AwaitingHuman>(
+                run(host, roles, tools, initial(), StageKind.SDD).outcome)
+            val graph = requireNotNull(host.graph)
+            host.decision = PreparationApproval.ACCEPT
+            val inject = {
+                host.beforeCurrent = {
+                    host.beforeCurrent = null
+                    throw kotlinx.coroutines.CancellationException("authority unavailable")
+                }
+            }
+            if (afterApproval) host.beforeApprove = inject else inject()
+            val continuation = RunPreparationStageUseCase(roles, tools, host)
+            val failed = continuation.completeHumanApproval(graph, host.accepted, ids.getValue(StageKind.SDD),
+                Instant.now().plusSeconds(30), Cancellation(), PreparationStageEventSink { })
+            assertEquals(PreparationStageOutcome.Failed("HUMAN_APPROVAL_AUTHORITY_UNAVAILABLE"), failed.outcome)
+            assertEquals(graph, host.graph)
+            assertNull(host.activeLease)
+            host.beforeApprove = null
+            assertIs<PreparationStageOutcome.Accepted>(
+                continuation.completeHumanApproval(graph, host.accepted, ids.getValue(StageKind.SDD),
+                    Instant.now().plusSeconds(30), Cancellation(), PreparationStageEventSink { }).outcome)
         }
     }
 
