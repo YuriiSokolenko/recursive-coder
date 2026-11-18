@@ -55,7 +55,7 @@ the IMPLEMENTATION handoff artifact for independent Reviewer #77.
 
 The host acquires the same generation-fenced atomic stage lease as #75.
 The host `approve` callback is synchronous and must be prompt: coroutine
-`withTimeout` cannot forcibly interrupt blocked host I/O. The host owns
+`withTimeoutOrNull` cannot forcibly interrupt blocked host I/O. The host owns
 its own deadline enforcement and generation-fenced late-result handling.
 No write occurs before this lease is acquired, validated and confirmed live.
 Only `LinuxStageToolSessionOpener` can map the stage authority to the
@@ -84,6 +84,21 @@ bytes/hashes. It rechecks the live generation and authority snapshot. An
 independent host `ACCEPT` for the exact candidate is required to atomically
 commit the Developer stage as ACCEPTED and the IMPLEMENTATION manifest as
 ACCEPTED/FROZEN, adding precisely one accepted artifact ID.
+
+Preflight reads distinguish `TARGET_READ_UNAVAILABLE` and `INPUT_READ_UNAVAILABLE`
+from confirmed target conflicts or missing/changed frozen artifacts. Confirmed
+violations take precedence over unavailable reads; target paths are checked in
+stable lexical order. No lease is acquired on a preflight denial.
+After admission, any confirmed changed or missing file yields
+`FROZEN_INPUT_OR_OUTPUT_CHANGED`; otherwise unavailable output/manifest reads
+yield `OUTPUT_READ_UNAVAILABLE`, or unavailable frozen inputs yield
+`INPUT_READ_UNAVAILABLE`. Post-approval authority drift takes precedence over
+read diagnostics. A throwing checkpoint or initial authority snapshot yields
+`STAGE_AUTHORITY_UNAVAILABLE`. Approval failures yield `HOST_APPROVAL_UNAVAILABLE`.
+Host-local cancellation at role/tool boundaries is a stage failure, not
+caller cancellation. Actual Job cancellation is propagated after non-cancellable
+cleanup; a secondary session-close failure cannot mask the primary failure.
+A throwing finish CAS remains `STAGE_FINISH_UNCONFIRMED` with no trusted snapshot.
 
 An explicit `REJECT` is terminal. A `HUMAN_REVIEW_REQUIRED` result is
 **not accepted or silently queued**: this Developer iteration fails closed

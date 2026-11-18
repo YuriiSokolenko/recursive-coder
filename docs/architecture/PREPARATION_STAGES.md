@@ -128,7 +128,12 @@ An expired or cancelled approval attempt retains the pending draft for
 explicit retrial. An exception while reading a draft or frozen input is not
 proof of corruption: it yields `HUMAN_APPROVAL_READ_UNAVAILABLE` and keeps
 the host-owned pending draft so a later attempt can retry safely. Only a
-confirmed missing/mismatched artifact is terminal. Model-generated evidence or a bare human approval
+confirmed missing/mismatched artifact is terminal, and takes precedence over
+unavailable reads of other paths. A post-approval authority-call exception yields
+`HUMAN_APPROVAL_AUTHORITY_UNAVAILABLE`; the pending draft is retained only if
+its fenced finish is confirmed. Host-local role/tool cancellation fails the
+stage rather than cancelling the caller; session-close exceptions do not replace
+a primary failure. Model-generated evidence or a bare human approval
 string is never sufficient. This is a volatile in-process continuation; the
 durable crash/restart story remains part of #10.
 
@@ -219,7 +224,7 @@ writes and sandbox check receipts for acceptance, not fake evidence.
 Fake and in-process Linux conformance do not establish durable atomicity.
 The first durable adapter must run every shared case against its actual
 durable store, with real transaction/fault injection and restart evidence in
-#105. The remaining cancellation boundaries are also tracked in #105.
+#105. Durable effect reconciliation and receipt journaling remain tracked in #105.
 
 Original deterministic integration-tier fixtures use a stateful fake host with
 atomic begin/finish/abort and per-attempt generation fences. They cover three
