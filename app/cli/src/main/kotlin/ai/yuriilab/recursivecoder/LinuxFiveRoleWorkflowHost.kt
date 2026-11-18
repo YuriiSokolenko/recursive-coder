@@ -2,9 +2,11 @@ package ai.yuriilab.recursivecoder
 
 import java.io.ByteArrayOutputStream
 import java.io.DataOutputStream
+import java.io.IOException
 import java.nio.channels.Channels
 import java.nio.file.Files
 import java.nio.file.LinkOption
+import java.nio.file.NoSuchFileException
 import java.nio.file.Path
 import java.nio.file.SecureDirectoryStream
 import java.nio.file.StandardOpenOption
@@ -272,27 +274,43 @@ class LinuxFiveRoleWorkflowHost(
      * devices and symlink entries. External hostile same-UID swaps still require
      * the caller's isolated-checkout deployment contract.
      */
+    // Fault seam at the actual port boundary, never installed by production.
+    @Volatile internal var preparationReadTestHook: ((String) -> Unit)? = null
+
     override fun readBytes(path: String): ByteArray? {
         if (!ToolAuthorizationPolicy.validDeclaredPath(path) ||
             StageKind.entries.none { kind -> kind != StageKind.REVIEW &&
                 ToolAuthorizationPolicy.authorizeWrite(WriteAuthorizationFacts(
                     kind.role, WriteOperationKind.CREATE, path
-                )) == ToolAuthorizationDecision.Permit }) return null
-        fun read(dir: SecureDirectoryStream<Path>, names: List<String>): ByteArray {
+                )) == ToolAuthorizationDecision.Permit })
+            throw IOException("Preparation read path is not authorized")
+        fun read(dir: SecureDirectoryStream<Path>, names: List<String>): ByteArray? {
             if (names.size > 1) {
-                dir.newDirectoryStream(Path.of(names.first()), LinkOption.NOFOLLOW_LINKS).use {
+                val stream = try {
+                    dir.newDirectoryStream(Path.of(names.first()), LinkOption.NOFOLLOW_LINKS)
+                } catch (_: NoSuchFileException) {
+                    return null
+                }
+                stream.use {
                     val child = it as? SecureDirectoryStream<Path>
-                        ?: error("Secure directory stream required")
+                        ?: throw IOException("Secure directory stream required")
                     return read(child, names.drop(1))
                 }
             }
             val name = Path.of(names.single())
             val view = dir.getFileAttributeView(name,
                 BasicFileAttributeView::class.java, LinkOption.NOFOLLOW_LINKS)
-                ?: error("Regular-file attributes required")
-            require(view.readAttributes().isRegularFile) {
-                "Only ordinary regular files may be read"
+                ?: throw IOException("Regular-file attributes required")
+            val attributes = try {
+                view.readAttributes()
+            } catch (_: NoSuchFileException) {
+                return null
             }
+            if (!attributes.isRegularFile)
+                throw IOException("Only ordinary regular files may be read")
+            // Fault injection is inside the real read, after presence has
+            // been established; a failed open/read after stat is unavailable.
+            preparationReadTestHook?.invoke(path)
             dir.newByteChannel(name,
                 setOf(StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)).use {
                 val result = Channels.newInputStream(it).readNBytes(8 * 1024 * 1024 + 1)
@@ -300,18 +318,24 @@ class LinuxFiveRoleWorkflowHost(
                 return result
             }
         }
-        return try {
-            Files.newDirectoryStream(root).use {
-                val dir = it as? SecureDirectoryStream<Path> ?: return null
-                read(dir, path.split("/"))
-            }
-        } catch (_: Exception) { null }
+        return Files.newDirectoryStream(root).use {
+            val dir = it as? SecureDirectoryStream<Path>
+                ?: throw IOException("Secure directory stream required")
+            // Only descriptor-relative lookup can establish absence. A
+            // missing root or failure after a successful lookup propagates.
+            read(dir, path.split("/"))
+        }
     }
+
+    // Other, pre-existing receipt/reviewer predicates deny on any read failure.
+    // The preparation port itself must distinguish unavailable from absent.
+    internal fun readBytesForVerification(path: String): ByteArray? =
+        try { readBytes(path) } catch (_: Exception) { null }
 
     private fun frozenIntact(): Boolean = graph.artifacts
         .filter { it.id in accepted || it.freeze == ArtifactFreeze.FROZEN }
         .all { item ->
-            readBytes(item.declaredPath)?.let { digest(it) == item.sha256 } == true
+            readBytesForVerification(item.declaredPath)?.let { digest(it) == item.sha256 } == true
         }
 
     private fun idle() = !quarantined && writer == null && reviewing == null
@@ -512,7 +536,7 @@ class LinuxFiveRoleWorkflowHost(
                 candidate.freeze != ArtifactFreeze.EDITABLE ||
                 checked.files.none { it.path == candidate.declaredPath &&
                     it.after == candidate.sha256 } || !frozenIntact() ||
-                readBytes(candidate.declaredPath)?.let { digest(it) == candidate.sha256 } != true)
+                readBytesForVerification(candidate.declaredPath)?.let { digest(it) == candidate.sha256 } != true)
                 return PreparationApproval.REJECT
             active.approvalPending = true
             active
@@ -533,7 +557,7 @@ class LinuxFiveRoleWorkflowHost(
                 checked != null && authentic(checked) &&
                 checked.validation == evidence &&
                 checked.files.all { file ->
-                    readBytes(file.path)?.let { digest(it) == file.after } == true
+                    readBytesForVerification(file.path)?.let { digest(it) == file.after } == true
                 } && frozenIntact()
             if (!valid) {
                 // Never re-prompt a human gateway on a lease whose bytes/fence
@@ -576,7 +600,7 @@ class LinuxFiveRoleWorkflowHost(
                 proof.files.none { it.path == manifest.declaredPath &&
                     it.after == manifest.sha256 } ||
                 proof.files.any { item ->
-                    readBytes(item.path)?.let { digest(it) == item.after } != true
+                    readBytesForVerification(item.path)?.let { digest(it) == item.after } != true
                 } || !frozenIntact()) return false
             val usage = active.usage ?: return false
             completed[lease.stageRunId] = AcceptedEvidence(proof, usage)
@@ -806,7 +830,7 @@ class LinuxFiveRoleWorkflowHost(
             proof.files.map { it.path }.toSet().size != proof.files.size ||
             !frozenIntact()) return null
         if (proof.files.any { item ->
-                readBytes(item.path)?.let { digest(it) == item.after } != true
+                readBytesForVerification(item.path)?.let { digest(it) == item.after } != true
             }) return null
         return AuthenticatedAcceptedStageReceipt(graph.correlation, stage.correlation,
             stage.kind, manifest, proof.writeId,
@@ -831,7 +855,7 @@ class LinuxFiveRoleWorkflowHost(
             graph.artifacts.contains(evidence.manifest) &&
             evidence.manifest.id in accepted &&
             proof.files.all { item ->
-                readBytes(item.path)?.let { digest(it) == item.after } == true
+                readBytesForVerification(item.path)?.let { digest(it) == item.after } == true
             } && frozenIntact()
     }
 
@@ -901,7 +925,7 @@ class LinuxFiveRoleWorkflowHost(
      * The Reviewer never sees StageToolSessionOpener or writer authority.
      */
     val reviewerHost: ReviewerStageHost = object : ReviewerStageHost {
-        override fun readBytes(path: String) = this@LinuxFiveRoleWorkflowHost.readBytes(path)
+        override fun readBytes(path: String) = this@LinuxFiveRoleWorkflowHost.readBytesForVerification(path)
 
         override fun beginStage(expectedGraph: StageGraph, stageRunId: StageRunId,
             expectedAcceptedIds: Set<ArtifactId>): ReviewerStageLease? =
@@ -1090,5 +1114,5 @@ class LinuxAuthenticatedRecursiveChildIntegrationHost(
             listOf(it.manifest)
         }
 
-    override fun readBytes(path: String): ByteArray? = host.readBytes(path)
+    override fun readBytes(path: String): ByteArray? = host.readBytesForVerification(path)
 }

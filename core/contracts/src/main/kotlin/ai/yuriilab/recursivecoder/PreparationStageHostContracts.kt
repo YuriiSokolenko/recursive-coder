@@ -70,7 +70,10 @@ data class PreparationStageLease(
  *
  * Every concrete host adapter (including a durable adapter) MUST extend and
  * execute the shared PreparationStageHostContract test fixture in CI against
- * its actual authoritative implementation. Passing the pure
+ * its actual authoritative implementation. The existing volatile Linux
+ * five-role host must prove explicit refusal of pending transactions and
+ * continuation; new adapters must pass the full pending round trip. See
+ * checkPreparationHostConformance and PREPARATION_STAGES.md. Passing the pure
  * PreparationStageFinishPolicy tests alone does not establish that the host
  * performs the required atomic checks, consumes a generation only on commit,
  * or rejects invalid successors without changing authoritative state.

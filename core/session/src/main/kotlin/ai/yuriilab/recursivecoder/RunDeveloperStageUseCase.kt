@@ -346,9 +346,20 @@ class RunDeveloperStageUseCase(
             if (code == "ROLE_CANCELLED" || code == "ROLE_TIMED_OUT")
                 StageState.CANCELLED else StageState.FAILED)
 
+        // Preserve the existing negative verification outcome on I/O failure.
+        // The separately tracked #105 cancellation/read classification work
+        // will distinguish host-local cancellation and unavailable inputs.
+        fun readForVerification(path: String): ByteArray? = try {
+            host.readBytes(path)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            null
+        }
+
         suspend fun inputsIntact(): Boolean = withContext(blockingDispatcher) {
             inputs.all {
-                val bytes = host.readBytes(it.declaredPath)
+                val bytes = readForVerification(it.declaredPath)
                 bytes != null && sha(bytes) == it.sha256
             }
         }
@@ -461,9 +472,9 @@ class RunDeveloperStageUseCase(
 
             suspend fun outputsIntact(): Boolean = withContext(blockingDispatcher) {
                 changed.all {
-                    val bytes = host.readBytes(it.path)
+                    val bytes = readForVerification(it.path)
                     bytes != null && sha(bytes) == it.afterSha256
-                } && host.readBytes(command.manifestPath)?.contentEquals(
+                } && readForVerification(command.manifestPath)?.contentEquals(
                     manifestText.toByteArray(Charsets.UTF_8)) == true &&
                     inputsIntact()
             }

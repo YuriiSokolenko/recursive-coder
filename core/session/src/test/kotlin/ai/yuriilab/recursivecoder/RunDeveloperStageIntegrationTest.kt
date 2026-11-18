@@ -10,6 +10,7 @@ import kotlin.test.*
 
 /** Deterministic FakeModel + trusted-host contract fixture. No external model or network. */
 @Tag("integration")
+@PreparationHostConformance("ai.yuriilab.recursivecoder.RunDeveloperStageIntegrationTest\$FakeHost")
 class RunDeveloperStageIntegrationTest : PreparationStageHostContract() {
     private val graphId = GraphId("graph-76")
     private val devId = StageRunId("develop-76")
@@ -82,12 +83,30 @@ class RunDeveloperStageIntegrationTest : PreparationStageHostContract() {
             StageBudget(10_000, 60_000, 0, 0))
     }
 
-    override fun fixtureForHostContract(): PreparationHostFixture {
+    override fun createHostFixture(): PreparationHostFixture {
         val graph = hostContractGraph()
         val host = FakeHost(graph, emptySet())
-        return PreparationHostFixture(host, graph, graph.stages.first().correlation.stageRunId) {
-            host.decision = it
+        val path = "specs/host-contract-read.md"
+        val expected = byteArrayOf(0, 1, -1, 42)
+        val read = PreparationReadFixture(path, expected) { state ->
+            if (state == PreparationReadState.ABSENT) {
+                host.files.remove(path)
+                assertFalse(path in host.files)
+            } else {
+                host.files[path] = expected.copyOf()
+                assertContentEquals(expected, host.files.getValue(path))
+            }
+            host.contractReadFailure = when (state) {
+                PreparationReadState.UNAVAILABLE -> path to java.io.IOException("host I/O unavailable")
+                PreparationReadState.HOST_CANCELLED -> path to java.util.concurrent.CancellationException("host cancelled")
+                else -> null
+            }
         }
+        return PreparationHostFixture(host, graph, graph.stages.first().correlation.stageRunId, read,
+            prepareOutput = { lease, output, content ->
+                host.files[output] = bytes(content)
+                fakePreparationEvidence(lease)
+            }, setApproval = { host.decision = it })
     }
 
     private inner class FakeHost(
@@ -114,7 +133,15 @@ class RunDeveloperStageIntegrationTest : PreparationStageHostContract() {
             texts.forEach { (kind, value) -> files[paths.getValue(kind)] = bytes(value) }
             files[source] = bytes(oldSource)
         }
-        @Synchronized override fun readBytes(path: String) = files[path]?.clone()
+        var contractReadFailure: Pair<String, Exception>? = null
+        var readFailureOnApprovalPath: String? = null
+        var approvals = 0
+        @Synchronized override fun readBytes(path: String): ByteArray? {
+            contractReadFailure?.let { (failedPath, failure) ->
+                if (failedPath == path) throw failure
+            }
+            return files[path]?.clone()
+        }
         @Synchronized override fun beginStage(
             expectedGraph: StageGraph, stageRunId: StageRunId,
             expectedAcceptedIds: Set<ArtifactId>
@@ -205,7 +232,11 @@ class RunDeveloperStageIntegrationTest : PreparationStageHostContract() {
             candidate: StageArtifactManifest, evidence: StageValidationEvidence,
             usage: StageRoleUsage
         ): PreparationApproval {
+            approvals++
             approval = candidate to decision
+            readFailureOnApprovalPath?.let {
+                contractReadFailure = it to java.io.IOException("post-approval read unavailable")
+            }
             mutateOnApproval?.let { files[it] = bytes("tampered after validation") }
             return decision
         }
@@ -434,6 +465,31 @@ class RunDeveloperStageIntegrationTest : PreparationStageHostContract() {
             assertEquals(artifactIds.values.toSet(), host.accepted)
             assertEquals(1, tools.closeCount)
             assertFalse(ArtifactId("implementation-76") in host.accepted)
+        }
+    }
+
+    @Test fun unavailableVerificationBytesFailClosedBeforeAndAfterApproval() = runBlocking {
+        for (afterApproval in listOf(false, true)) {
+            for (path in listOf(source, manifestPath, paths.getValue(StageKind.TDD))) {
+                val host = FakeHost()
+                val tools = FakeTools(host)
+                if (afterApproval) {
+                    host.readFailureOnApprovalPath = path
+                } else {
+                    tools.cancelOnCheck = {
+                        host.contractReadFailure = path to java.io.IOException("read unavailable")
+                    }
+                }
+                val result = execute(host, FakeModel(), tools)
+                assertEquals(DeveloperStageOutcome.Failed("FROZEN_INPUT_OR_OUTPUT_CHANGED", true),
+                    result.outcome, "$path afterApproval=$afterApproval")
+                assertEquals(if (afterApproval) 1 else 0, host.approvals)
+                assertEquals(StageState.FAILED, host.graph.stages.last().state)
+                assertEquals(artifactIds.values.toSet(), host.accepted)
+                assertNull(host.active)
+                assertEquals(1, tools.closeCount)
+                assertNotNull(host.files[path], "The bytes were present, not missing")
+            }
         }
     }
 

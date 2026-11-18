@@ -19,8 +19,55 @@ import kotlin.test.*
 
 /** Real Linux Git and trusted-write-port regressions; no model or fake receipts. */
 @Tag("integration")
-class LinuxFiveRoleWorkflowHostTest {
+@PreparationHostConformance("ai.yuriilab.recursivecoder.LinuxFiveRoleWorkflowHost",
+    pending = PreparationPendingProfile.REFUSED)
+class LinuxFiveRoleWorkflowHostTest : PreparationStageHostContract() {
     @TempDir lateinit var temp: Path
+
+    override fun createHostFixture(): PreparationHostFixture {
+        var decision = PreparationApproval.ACCEPT
+        val checkout = Files.createTempDirectory(temp, "host-contract-").fileName.toString()
+        val (host, repo) = newHost(checkoutName = checkout) { _, _, _ -> decision }
+        val snapshot = host.snapshot()
+        val path = "specs/host-contract-read.md"
+        val file = repo.resolve(path)
+        val expected = byteArrayOf(0, 1, -1, 42)
+        val read = PreparationReadFixture(path, expected) { state ->
+            host.preparationReadTestHook = null
+            if (state == PreparationReadState.ABSENT) {
+                Files.deleteIfExists(file)
+                assertTrue(Files.notExists(file))
+            } else {
+                Files.write(file, expected)
+                assertContentEquals(expected, Files.readAllBytes(file))
+            }
+            // The real bytes remain present; inject the I/O failure at the
+            // actual adapter read boundary, never replace the adapter.
+            host.preparationReadTestHook = { requested ->
+                if (requested == path) when (state) {
+                    PreparationReadState.UNAVAILABLE -> throw java.io.IOException("induced I/O failure")
+                    PreparationReadState.HOST_CANCELLED -> throw java.util.concurrent.CancellationException("host cancelled")
+                    else -> Unit
+                }
+            }
+        }
+        return PreparationHostFixture(host, snapshot.graph,
+            snapshot.graph.stages.single().correlation.stageRunId, read,
+            prepareOutput = { lease, output, content ->
+                val tool = assertIs<StageToolOpenResult.Granted>(host.open(lease.authority)).session
+                try {
+                    val write = tool.write(listOf(StageWrite.Create(output, content)))
+                    assertTrue(write.permitted, write.deniedCode)
+                    for (check in listOf("git_diff_check", "smoke")) {
+                        val result = tool.runCheck(check)
+                        assertTrue(result.passed, result.deniedCode)
+                    }
+                    tool.verify()
+                } finally {
+                    tool.close()
+                }
+            }, setApproval = { decision = it })
+    }
 
     private val oldSource = "fun featureFull() = 1\n"
     private val newSource = "fun featureFull() = 2\n"
@@ -619,12 +666,12 @@ class LinuxFiveRoleWorkflowHostTest {
 
     @Test fun fifoAndProtectedPathsAreNotReadable() {
         val (host, repo) = newHost()
-        assertNull(host.readBytes(".git/config"))
+        assertFailsWith<java.io.IOException> { host.readBytes(".git/config") }
         Files.writeString(repo.resolve(".env"), "SECRET=never-read\n")
         Files.createDirectories(repo.resolve("secrets"))
         Files.writeString(repo.resolve("secrets/token"), "blocked\n")
-        assertNull(host.readBytes(".env"))
-        assertNull(host.readBytes("secrets/token"))
+        assertFailsWith<java.io.IOException> { host.readBytes(".env") }
+        assertFailsWith<java.io.IOException> { host.readBytes("secrets/token") }
         val roleOnly = "tests/unit/LegitimateTest.kt"
         Files.writeString(repo.resolve(roleOnly), "fun approvedTest() = Unit\n")
         assertEquals("fun approvedTest() = Unit\n",
@@ -635,10 +682,71 @@ class LinuxFiveRoleWorkflowHostTest {
         assertEquals(0, process.waitFor())
         val pool = Executors.newSingleThreadExecutor()
         try {
-            val read = pool.submit<ByteArray?> { host.readBytes("specs/blocked-fifo.md") }
-            assertNull(read.get(2, TimeUnit.SECONDS), "FIFO open must not block")
+            val read = pool.submit<Unit> {
+                assertFailsWith<java.io.IOException> { host.readBytes("specs/blocked-fifo.md") }
+            }
+            read.get(2, TimeUnit.SECONDS) // FIFO open must not block
         } finally {
             pool.shutdownNow()
+        }
+    }
+
+    @Test fun intermediateReadLookupDistinguishesAbsenceFromUnavailable() {
+        val (host, repo) = newHost()
+        val intermediate = repo.resolve("specs/intermediate")
+        val path = "specs/intermediate/read.md"
+        assertNull(host.readBytes(path))
+        Files.writeString(intermediate, "not a directory")
+        assertFailsWith<java.io.IOException> { host.readBytes(path) }
+        Files.delete(intermediate)
+        Files.createDirectory(intermediate)
+        Files.writeString(repo.resolve(path), "present")
+        val permissions = Files.getPosixFilePermissions(intermediate)
+        try {
+            Files.setPosixFilePermissions(intermediate, emptySet())
+            // Unprivileged CI must exercise a real lookup failure. Privileged
+            // local runs still execute the non-directory regression above.
+            if (!Files.isExecutable(intermediate))
+                assertFailsWith<java.io.IOException> { host.readBytes(path) }
+        } finally {
+            Files.setPosixFilePermissions(intermediate, permissions)
+        }
+        assertEquals("present", host.readBytes(path)?.toString(Charsets.UTF_8))
+    }
+
+    @Test fun recursiveReceiptByteVerificationDeniesLateReadFailures() {
+        fun acceptedHost(name: String): Pair<LinuxFiveRoleWorkflowHost, AuthenticatedAcceptedStageReceipt> {
+            val (host, _) = newHost(checkoutName = name)
+            val prepared = prepareVerifiedApproval(host)
+            assertEquals(PreparationApproval.ACCEPT,
+                host.approve(prepared.manifest, prepared.verification, prepared.usage))
+            val frozen = prepared.manifest.copy(approval = ArtifactApproval.ACCEPTED,
+                freeze = ArtifactFreeze.FROZEN)
+            val graph = prepared.lease.graph.copy(
+                stages = prepared.lease.graph.stages.map {
+                    it.copy(state = StageState.ACCEPTED, outputArtifacts = setOf(frozen.id))
+                },
+                artifacts = listOf(frozen))
+            assertTrue(host.finishStage(prepared.lease, graph, setOf(frozen.id)))
+            return host to assertNotNull(host.authenticatedAcceptedStage(prepared.lease.stageRunId))
+        }
+        val (parent, parentReceipt) = acceptedHost("receipt-parent")
+        val (child, childReceipt) = acceptedHost("receipt-child")
+        val target = FiveRoleArtifactTarget(parentReceipt.manifest.id, parentReceipt.manifest.declaredPath)
+        fun verify() = installedParentEvidenceMatches(StageKind.SDD, target, parent, child,
+            parentReceipt, childReceipt, null)
+        assertTrue(verify())
+        for (host in listOf(parent, child)) {
+            // Both receipts were authenticated before this second bytes check.
+            host.preparationReadTestHook = { path ->
+                if (path == target.path) throw java.io.IOException("late read unavailable")
+            }
+            try {
+                assertFalse(verify())
+            } finally {
+                host.preparationReadTestHook = null
+            }
+            assertTrue(verify())
         }
     }
 

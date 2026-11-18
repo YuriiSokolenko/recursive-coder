@@ -174,16 +174,52 @@ its actual authoritative host, including the future durable host. Adapter
 tests can depend on `testFixtures(project(":core:contracts"))`. Passing pure
 `PreparationStageFinishPolicy` tests is not sufficient: the adapter must
 enforce the policy atomically against authoritative graph and accepted IDs
-and preserve the lease on invalid successors. The existing stateful fake
-extends this contract; there is no durable implementation yet. The current
-suite does not establish an adapter's absent-vs-unreadable read behavior or
-mechanically enforce discovery/execution of a matching adapter suite. Both
-are explicit acceptance gates before or with the first durable host
-implementation in #105.
-It covers two-thread CAS admission, stale graph/accepted IDs, generation
-consumption, authority revocation, rejection of changes to unrelated stages
-or accepted IDs, exact host approval for frozen outputs, malformed pending
-transactions and pending-human evidence round trips.
+and preserve the lease on invalid successors. The stateful preparation and Developer fakes and the actual
+`LinuxFiveRoleWorkflowHost` execute the shared suite. The Linux host has
+an explicitly limited, existing in-process profile: it must reject pending
+commits and continuation; the shared tests assert this refusal rather than
+skipping those cases. Every new adapter must pass the full pending round
+trip. No durable implementation or new resume authority is enabled by #119.
+
+The executable contract covers present bytes, confirmed absence, induced I/O
+failure and host-local cancellation with present-byte preconditions and
+restoration; two-thread CAS admission, graph/accepted-ID mismatches, generation
+consumption, authority revocation, changes to unrelated stages/accepted IDs,
+exact approval and pending evidence. The Linux fixture uses genuine trusted
+writes and sandbox check receipts for acceptance, not fake evidence.
+
+### Mandatory adapter conformance (issue #119)
+
+1. Add the actual adapter's integration suite in its owning JVM module and
+   depend on `testFixtures(project(":core:contracts"))`.
+2. Extend `PreparationStageHostContract`, tag it `integration` and add
+   `@PreparationHostConformance("fully.qualified.BinaryAdapterName")`.
+   The existing Linux host explicitly registers `pending = REFUSED`;
+   the gate rejects that profile for all other adapters.
+   Implement `createHostFixture` with fresh authoritative graph/store, real
+   adapter-controlled read setup, fault injection, approval and output/check
+   evidence. Each inherited test checks the actual runtime host class against
+   the registration. Never register a surrogate or use synthetic evidence for
+   a physical adapter.
+3. Run `./gradlew --no-build-cache clean checkPreparationHostConformance` on a supported Linux
+   host with the restricted bubblewrap profile (see TEST_SUITES.md).
+   The task compiles every product JVM main/test/test-fixture output, walks
+   bytecode superclass and interface ancestry, requires a registered suite in
+   the adapter's module, and checks each compiled shared test method in both
+   unfiltered `test` and focused `integrationTest` JUnit XML exactly once,
+   with no skips, failures or errors. Missing classes, registration or results
+   fail closed. CI starts with clean outputs; a stale XML file is not proof.
+   Keep production adapters in the main source set; any new production source
+   set must be included in this gate before use.
+4. The architecture job runs compiled negative discovery fixtures, including
+   indirect concrete implementations and absent/excluded/skipped tests. The
+   full JVM job runs the conformance gate after both test tasks; neither pure
+   policy tests nor documentation satisfy it.
+
+Fake and in-process Linux conformance do not establish durable atomicity.
+The first durable adapter must run every shared case against its actual
+durable store, with real transaction/fault injection and restart evidence in
+#105. The remaining cancellation boundaries are also tracked in #105.
 
 Original deterministic integration-tier fixtures use a stateful fake host with
 atomic begin/finish/abort and per-attempt generation fences. They cover three
