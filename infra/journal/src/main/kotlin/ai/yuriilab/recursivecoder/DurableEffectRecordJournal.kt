@@ -656,6 +656,8 @@ class DurableEffectRecordJournal private constructor(
     @Synchronized internal fun checkpointHeadUnderLease(
         currentLease: SessionResumeLease
     ): CheckpointEffectJournalHead {
+        if (closed || poisoned)
+            throw EffectJournalStorageUnconfirmed("EFFECT_JOURNAL_WRITER_UNAVAILABLE")
         if (!Thread.holdsLock(currentLease))
             throw EffectJournalStorageUnconfirmed("EFFECT_JOURNAL_LEASE_MONITOR_REQUIRED")
         if (currentLease !== lease ||

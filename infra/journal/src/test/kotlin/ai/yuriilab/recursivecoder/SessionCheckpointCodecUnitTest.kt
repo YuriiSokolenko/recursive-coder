@@ -67,7 +67,7 @@ class SessionCheckpointCodecUnitTest {
             }.code)
         assertEquals("CHECKPOINT_VERSION_UNSUPPORTED",
             assertFailsWith<CheckpointUnconfirmed> {
-                SessionCheckpointCodec.decode(text.replace("\"version\":1", "\"version\":2")
+                SessionCheckpointCodec.decode(text.replace("\"version\":1", "\"version\":3")
                     .toByteArray(StandardCharsets.UTF_8))
             }.code)
     }
