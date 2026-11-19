@@ -5,7 +5,9 @@ A verified snapshot alone cannot authorize a model request, tool invocation,
 write, retry or replay. Issue #104 adds a separate pre-execution,
 generation-fenced admission API (see [FENCED_RESUME.md](FENCED_RESUME.md)),
 but automatic restart and external-effect reconciliation remain out of scope
-(#105). The default CLI and Session Protocol v1 do not consume these files.
+(#105). The [effect intent and receipt contracts](EFFECT_INTENTS.md) define
+pure classifications only; no checkpoint effect receipts are yet authenticated
+or reconciled by a durable adapter. The default CLI and Session Protocol v1 do not consume these files.
 
 ## Trusted inputs and snapshot format
 
