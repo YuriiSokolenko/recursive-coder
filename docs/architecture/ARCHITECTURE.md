@@ -33,7 +33,7 @@ This project is not a plugin for another orchestration platform. Cloud providers
        Event Journal / Checkpoints (opt-in verified snapshots; no resume)
 ```
 
-The opt-in [checkpoint layer](SESSION_CHECKPOINTS.md) (#103) stores immutable journal-bound metadata snapshots. Separate [fenced resume admission](FENCED_RESUME.md) (#104, Draft PR #113) supports a narrow pre-execution boundary with an independently anchored fence head. Inspection alone cannot authorize replay. CLI crash-resume and restarting ledger append remain future milestones.
+The opt-in [checkpoint layer](SESSION_CHECKPOINTS.md) (#103) stores immutable journal-bound metadata snapshots. Separate [fenced resume admission](FENCED_RESUME.md) (#104, Draft PR #113) supports a narrow pre-execution boundary with an independently anchored fence head. Inspection alone cannot authorize replay. An opt-in [trusted durable created-to-accepted handoff](DURABLE_CREATED_ACCEPTED_HANDOFF.md) publishes an independently verified C2 checkpoint, but still does **not** authorize runtime/model/tool execution. CLI crash-resume and authenticated execution remain future milestones.
 
 ### Current Gradle module boundaries
 

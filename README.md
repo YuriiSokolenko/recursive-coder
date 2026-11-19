@@ -61,6 +61,7 @@ With Gradle 9.8.1 and JDK 21 installed:
 - [Durable event ledger and fenced pre-execution reopen (#102 / #114)](docs/architecture/DURABLE_EVENT_LEDGER.md)
 - [Host-owned atomic session checkpoints (#103)](docs/architecture/SESSION_CHECKPOINTS.md)
 - [Fenced admission and recovery boundaries (#104)](docs/architecture/FENCED_RESUME.md)
+- [Trusted durable created-to-accepted handoff (#104, opt-in)](docs/architecture/DURABLE_CREATED_ACCEPTED_HANDOFF.md)
 - [First executable CLI session](docs/architecture/FIRST_SESSION.md)
 - [Native Task Manager and local scheduling](docs/architecture/TASK_MANAGER.md)
 - [Workspace security and read-only tools](docs/architecture/WORKSPACE.md)
