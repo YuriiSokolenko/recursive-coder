@@ -182,6 +182,8 @@ class DurableEffectRecordJournalIntegrationTest : SessionCheckpointTestFixture()
             val original = path().resolveSibling("original.rcfx")
             Files.move(path(), original)
             Files.write(path(), byteArrayOf(1, 2, 3), StandardOpenOption.CREATE_NEW)
+            Files.setPosixFilePermissions(path(), setOf(
+                PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE))
             denied("EFFECT_JOURNAL_PATH_CHANGED") { writer.append(intent()) }
             writer.close()
         }
