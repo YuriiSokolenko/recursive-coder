@@ -119,8 +119,8 @@ internal object EffectJournalHeadAnchor {
         }
         val text = body(header, sidecar, sequence, headMac, previous)
         val digest = signature(text)
-        val final = checkpointDir.resolve(filename(header.fenceGeneration, sequence))
-        if (Files.exists(final, LinkOption.NOFOLLOW_LINKS))
+        val destination = checkpointDir.resolve(filename(header.fenceGeneration, sequence))
+        if (Files.exists(destination, LinkOption.NOFOLLOW_LINKS))
             fail("EFFECT_ANCHOR_EXISTS")
         val temporary = checkpointDir.resolve(".effect-anchor-" + UUID.randomUUID() + ".tmp")
         try {
@@ -136,12 +136,12 @@ internal object EffectJournalHeadAnchor {
                 channel.force(true)
             }
             try {
-                ResumeImmutablePublication.linkAndSync(checkpointDir, temporary, final,
+                ResumeImmutablePublication.linkAndSync(checkpointDir, temporary, destination,
                     "EFFECT_ANCHOR_EXISTS", "EFFECT_ANCHOR_PUBLISH_UNCONFIRMED")
             } catch (error: SessionResumeUnconfirmed) {
                 throw EffectJournalStorageUnconfirmed("EFFECT_ANCHOR_PUBLISH_UNCONFIRMED", error)
             }
-            return decode(final, header, sidecar, sequence, previous)
+            return decode(destination, header, sidecar, sequence, previous)
         } catch (error: Exception) {
             if (error is EffectJournalStorageUnconfirmed) throw error
             throw EffectJournalStorageUnconfirmed("EFFECT_ANCHOR_PUBLISH_UNCONFIRMED", error)
