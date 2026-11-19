@@ -425,6 +425,22 @@ object SessionResumeAdmission {
             genesisOperator = operator, genesisSidecar = sidecarPath,
             genesisKey = hostKey, afterAnchorCommitted = {})
 
+    /** Test-only simulated crash after committed v3 and before fence PREPARE. */
+    @ResumeOperatorOnlyApi
+    @LedgerTestFaultInjection
+    internal fun reconcileGenesisWithFault(
+        directory: Path, context: CheckpointHostContext, ledgerPath: Path,
+        sidecarPath: Path, hostKey: ByteArray,
+        attestation: ResumeHostAttestation,
+        operator: GenesisEffectHeadReconciliation,
+        afterCheckpointCommitted: () -> Unit
+    ): SessionResumeLease =
+        admitChecked(directory, context, ledgerPath, attestation, null,
+            genesisOperator = operator, genesisSidecar = sidecarPath,
+            genesisKey = hostKey,
+            afterGenesisCheckpointCommitted = afterCheckpointCommitted,
+            afterAnchorCommitted = {})
+
     /** Explicit operator path: never selected by normal session admission. */
     @ResumeOperatorOnlyApi
     fun reconcilePreparedAdmission(
@@ -471,6 +487,7 @@ object SessionResumeAdmission {
         genesisOperator: GenesisEffectHeadReconciliation? = null,
         genesisSidecar: Path? = null,
         genesisKey: ByteArray? = null,
+        afterGenesisCheckpointCommitted: () -> Unit = {},
         afterAnchorCommitted: () -> Unit
     ): SessionResumeLease {
         if (genesisOperator != null &&
@@ -577,7 +594,7 @@ object SessionResumeAdmission {
                 dir, context, ledgerPath,
                 genesisSidecar ?: fail("RESUME_EFFECT_RECONCILIATION_INVALID"),
                 genesisKey ?: fail("RESUME_EFFECT_RECONCILIATION_INVALID"),
-                genesisOperator, commit)
+                genesisOperator, afterGenesisCheckpointCommitted, commit)
             transferred = true
             return result
         } catch (error: Exception) {

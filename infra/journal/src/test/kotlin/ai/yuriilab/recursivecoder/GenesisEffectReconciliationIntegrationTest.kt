@@ -16,7 +16,7 @@ import kotlin.test.*
  * a Started record is never classified from an operator boolean.
  */
 @Tag("integration")
-@OptIn(ResumeOperatorOnlyApi::class)
+@OptIn(ResumeOperatorOnlyApi::class, LedgerTestFaultInjection::class)
 class GenesisEffectReconciliationIntegrationTest : SessionCheckpointTestFixture() {
     private val key = ByteArray(32) { (it + 1).toByte() }
     private fun parent(): Path = temp.resolve("effect-private").also {
@@ -183,6 +183,55 @@ class GenesisEffectReconciliationIntegrationTest : SessionCheckpointTestFixture(
                 ready.pinned.sha256)
         }
         assertEquals(ready.pinned.sha256, inspect().sha256)
+    }
+
+    @Test fun v3CrashBeforeFenceRetriesSameSealedTransitionWithoutDuplicate() {
+        val ready = pinnedGenesis()
+        val failure = assertFailsWith<SessionResumeUnconfirmed> {
+            SessionResumeAdmission.reconcileGenesisWithFault(
+                store(), context(), ledger(), path(), key,
+                resumeAttestation(1L), approval(ready)) {
+                error("simulated crash after durable v3 before successor fence")
+            }.close()
+        }
+        assertEquals("RESUME_ADMISSION_UNCONFIRMED", failure.code)
+        val durable = inspect()
+        assertEquals(3L, durable.snapshot.sequence)
+        assertNull(durable.snapshot.effectJournalHead)
+        assertNotNull(durable.snapshot.effectReconciliation)
+        assertEquals(1L, ResumeFenceStorage.latest(store())!!.generation)
+        reconcile(ready).use { lease ->
+            assertEquals(2L, lease.generation)
+            assertEquals(durable.sha256, inspect().sha256)
+        }
+        assertEquals(3L, inspect().snapshot.sequence)
+    }
+
+    @Test fun forgedReconciliationMacWithValidCheckpointShaNeverAdmits() {
+        val ready = pinnedGenesis()
+        assertFailsWith<SessionResumeUnconfirmed> {
+            SessionResumeAdmission.reconcileGenesisWithFault(
+                store(), context(), ledger(), path(), key,
+                resumeAttestation(1L), approval(ready)) {
+                error("simulated crash after durable v3 before successor fence")
+            }.close()
+        }
+        val c3 = inspect()
+        val rec = assertNotNull(c3.snapshot.effectReconciliation)
+        val payload = SessionCheckpointCodec.encode(c3.snapshot.copy(
+            effectReconciliation = rec.copy(approvalMacSha256 = "f".repeat(64))))
+        val frame = ByteBuffer.allocate(7 + 4 + 32 + payload.size)
+            .put("RCCHK1\n".toByteArray(StandardCharsets.US_ASCII))
+            .putInt(payload.size)
+            .put(MessageDigest.getInstance("SHA-256").digest(payload))
+            .put(payload).array()
+        Files.write(store().resolve("000000000003.rcp"), frame,
+            StandardOpenOption.TRUNCATE_EXISTING)
+        assertEquals("RESUME_EFFECT_RECONCILIATION_MAC_MISMATCH",
+            assertFailsWith<SessionResumeUnconfirmed> {
+                reconcile(ready).close()
+            }.code)
+        assertEquals(1L, ResumeFenceStorage.latest(store())!!.generation)
     }
 
     @Test fun rawRehashWithForgeryCannotAuthorizeNormalResume() {

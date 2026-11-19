@@ -1142,7 +1142,7 @@ object SessionCheckpointStore {
                     snapshot.journalSequence < previous.snapshot.journalSequence ||
                     snapshot.lastTrustedJournalOffset < previous.snapshot.lastTrustedJournalOffset))
                 refuse("CHECKPOINT_CHAIN_MISMATCH")
-            return publishGeneration(dir, snapshot, afterPhase, onPublicationStarted)
+            publishGeneration(dir, snapshot, afterPhase, onPublicationStarted)
         }
     }
 
@@ -1217,6 +1217,7 @@ object SessionCheckpointStore {
         directory: Path, context: CheckpointHostContext, ledgerPath: Path,
         sidecarPath: Path, hostKey: ByteArray,
         operator: GenesisEffectHeadReconciliation,
+        afterCheckpointCommitted: () -> Unit = {},
         block: (Path, VerifiedSessionCheckpoint, VerifiedSessionEventLedger) -> T
     ): T {
         val dir = checkedAdmissionDirectory(directory, context)
@@ -1293,6 +1294,9 @@ object SessionCheckpointStore {
                 if (rebound.sha256 != published.sha256 ||
                     rebound.snapshot != published.snapshot)
                     refuse("CHECKPOINT_EFFECT_RECONCILIATION_UNCONFIRMED")
+                // Testable crash seam: v3 durable, successor fence NOT yet
+                // prepared/published. Never erase v3 on callback failure.
+                afterCheckpointCommitted()
                 published
             }
             block(dir, verified, ledger)
