@@ -1,8 +1,10 @@
 # Host-authenticated effect intent and receipt contracts (#105, first slice)
 
-**Scope:** Pure, in-memory `:core:contracts` state machine and fixture tests only.
-No external tool execution, Git CAS, journal storage, crypto-key management, CLI
-registration, runtime resume, or automatic replay is enabled by this change.
+**Scope:** The merged first slice is a pure `:core:contracts` state machine.
+The next isolated host-only slice supplies a physically durable, HMAC-authenticated
+effect record file under `:infra:journal`. Neither slice executes external
+tools or Git CAS, produces usable runtime resume permission, supplies an
+independent external-state verifier, or enables CLI/replay wiring.
 
 ## Contract and strict publication order
 
@@ -42,8 +44,10 @@ check full-prefix continuity and exact head/sequence, and reconstruct an
 **exact, complete** effect projection to compare with `view.entries`.
 An arbitrary filtered subset is invalid, even if each included record has
 a plausible MAC. Matching SHA-256 strings without actual authenticated
-prefix and projection verification are not sufficient. This slice supplies
-only the verification port and a test double, not the real adapter.
+prefix and projection verification are not sufficient. The physical host
+journal below is a **separate, provisional record stream**; it does not yet
+construct an `EffectJournalView` from the checkpoint-bound Session Protocol
+event ledger or implement `HostEffectEvidenceVerifier`.
 
 ## Recovery classification
 
@@ -82,14 +86,94 @@ Large valid histories may still require paginated/streamed authenticated
 verification and explicit host resource budgeting; those responsibilities
 belong to a future adapter, not a permanent denial on every long session.
 
+## Host-only physical effect record journal (next bounded slice)
+
+`DurableEffectRecordJournal` writes **RCEFX1** in an existing private
+Linux/POSIX directory outside the workspace (effective-UID-owned, mode
+0700). The journal and persistent `.lock` file use mode 0600. The API
+requires explicit `@ResumeOperatorOnlyApi` opt-in, a trusted host-supplied
+secret key of at least 32 bytes (never stored with the journal), an exact
+session identity, and a live `SessionResumeLease`. It does **not** grant
+execution; the lease still admits only pre-execution histories.
+
+`create` is `CREATE_NEW` and **never** reopens for append. A failed
+create **after CREATE_NEW** leaves the partial journal in place; a later
+attempt returns `EFFECT_JOURNAL_EXISTS` and requires operator inspection,
+not automatic deletion or retry.
+
+After the seven-byte `RCEFX1\n` magic, the **first mandatory frame** is a
+HMAC-authenticated *genesis* JSON payload containing the exact `sessionId`,
+`fenceGeneration` N, `admittedCheckpointSha256`, and
+`toolAuthoritySha256` captured from the live `SessionResumeLease`.
+The provided session ID must match the lease's trusted session. Even an
+empty event stream has a verifiable genesis identity and a keyed head.
+Subsequent frames are effect entries of the same session and issuing
+generation N. `inspect` requires an expected session ID and can additionally
+enforce expected N, checkpoint SHA, and authority SHA. The genesis binds
+identities **inside this file** only; a later adapter still must independently
+verify the issuing fence and checkpoint chain on disk.
+
+Every frame is `int32 payload length | 32-byte HMAC-SHA256 tag |
+canonical JSON payload`. The host supplies a master key of at least 32
+bytes; the journal derives a dedicated HMAC-SHA256 subkey using
+`recursive-coder/effect-record-journal/v1`. The tag includes `RCEFX1\n`,
+the **normalized absolute file path** (`toAbsolutePath().normalize()`,
+not a path canonicalized via `toRealPath()`), previous tag and entire payload.
+The genesis tag starts from 32 zero bytes and becomes the seed for all
+effect tags. Moving or restoring this file under another path invalidates
+its HMAC. `Intent -> Started -> Committed` or
+`Intent [-> Started] -> Unconfirmed` are enforced before physical writes
+with an O(1) average-time last-state map by `operationId`, including
+same-session operation-ID uniqueness. The writer holds the OS journal lock,
+performs lease-held append + `FileChannel.force(true)` before acknowledgement,
+and becomes poisoned after uncertain I/O; it never truncates or guesses
+whether a post-fsync acknowledgement was observed.
+
+`inspect` is **read-only**, and strictly refuses a wrong expected
+session/generation/checkpoint/authority, invalid key, broken tag chain,
+noncanonical record, duplicate ID, unsupported transition, torn tail,
+live writer, missing lock or unsafe path. It independently verifies the
+complete file under the journal's exclusive OS lock. A separate
+`inspectForDiagnostics` accepts only an *incomplete final effect frame*
+and reports the authenticated prefix, physical `byteLength`,
+`verifiedByteLength` and `tornTailOffset`. It **never repairs**, truncates,
+allows append or authorizes a not-started / committed classification. A torn
+genesis, MAC mismatch, noncanonical payload or invalid transition still
+refuses even diagnostics. A forged frame length may be indistinguishable
+from truncation, so a diagnostic torn tail is *not proof of a crash*.
+
+The returned authenticated header, entry list, keyed head and file digest
+are **diagnostic physical-file evidence only**, NOT the checkpoint-anchored
+complete session-journal projection. In particular, HMAC alone cannot
+detect deletion of a complete suffix or replay of an older valid file by a
+same-UID actor: a separate independently published checkpoint/anchor
+binding is mandatory before effects can be classified after a crash.
+
+**Still forbidden:** physical tool/CAS execution, signed no-start/commit
+proofs, automatic `ProvenNotStarted` or `ConfirmedCommitted`, history
+projection into `EffectReconciliationPolicy`, resumed writes to a prior
+journal, or expanding the pre-execution fenced-ledger event policy.
+No caller may infer that an intact record tail is durable acknowledgement
+or that an authenticated `Committed` has an independently verified external
+result. Key creation/retention/rotation and explicit operator reconciliation
+remain trusted-host responsibilities outside this slice.
+
+`DurableEffectRecordJournalIntegrationTest` exercises fsync, authenticated
+genesis with empty and full histories, exact expected context, correctly
+MACed noncanonical and foreign-session/generation payloads, forged frame
+length, strict vs diagnostic torn tails, unknown terminal transitions,
+uncertain post-fsync acknowledgement, duplicate operations, stale lease,
+live/missing/symlinked lock, workspace directory safety, path substitution,
+and lease retirement.
+
 ## Deferred work and acceptance
 
 The existing checkpoint `pendingEffects` and pre-execution fenced ledger
-have NOT been wired to these new types. The new barrier field and
-verifier method are a contract only: no effective OS fence, host authentication,
-execution exclusion or actual no-start proof is implemented here. A later PR must supply canonical
-serialization and physical host MAC verification, crash-safe durable append,
-whole-journal verification, authoritative external-state checks and no-start
-proofs, atomic receipt publication with the current resume lease, adapter
-conformance, and kill/timeout testing around every intent-effect-receipt
-boundary. See #105 for the remaining full P1 acceptance criteria.
+have NOT been wired to these new types. The barrier field and
+verifier method are a contract only: this sidecar storage adds real record
+HMAC verification but does **not** provide a physical successor execution
+barrier, independently verified external completion, or a no-start proof. A later PR must supply independent checkpoint/anchor binding
+for this physical file (including its authenticated genesis and full head),
+authoritative full-session-journal projection, verified external state and
+no-start proofs, atomic receipt publication, production adapter conformance,
+and kill/timeout tests around every intent-effect-receipt boundary. See #105 for the remaining full P1 acceptance criteria.

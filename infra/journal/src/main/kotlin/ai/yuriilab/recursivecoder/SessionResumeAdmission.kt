@@ -297,6 +297,18 @@ class SessionResumeLease internal constructor(
             throw SessionResumeUnconfirmed("RESUME_LEDGER_PATH_CHANGED")
     }
 
+    /**
+     * Fetch the actual issuing session from the immutable, verified fence.
+     * Call ONLY from a live publishIfCurrent guard; never trust a caller's
+     * claimed session identity to mint effect-journal genesis.
+     */
+    internal fun admittedSessionId(): String {
+        if (!Thread.holdsLock(this))
+            throw SessionResumeUnconfirmed("RESUME_FENCE_MONITOR_REQUIRED")
+        return ResumeFenceStorage.requireHead(
+            directory, generation, admittedFenceSha256).sessionId
+    }
+
     /** Required before callbacks or trusted receipt publication. */
     @Synchronized fun assertCurrent() {
         if (closed || !lock.isValid)
@@ -310,9 +322,13 @@ class SessionResumeLease internal constructor(
      * Serialize short host-owned state/receipt publications with close(), so
      * a callback cannot pass a check, lose its lease and commit afterward.
      * Never run model calls, external tools or blocking network I/O here.
-     * A single local ledger FileChannel.force(true) during appendFenced is a
-     * deliberate durability exception: it can delay lease retirement, but
-     * must stay inside the same authority-checked publication.
+     * Local durable FileChannel.force(true) operations are deliberate
+     * exceptions for both the fenced session ledger appendFenced and the
+     * isolated host-only effect journal create/append. Effect-journal genesis
+     * creation also persists the parent directory entry within this guard.
+     * These local fsync operations may delay lease retirement; they MUST stay
+     * inside the same authority-checked publication. No model, tool or
+     * network calls may run under this monitor.
      */
     @Synchronized fun <T> publishIfCurrent(publication: () -> T): T {
         assertCurrent()
