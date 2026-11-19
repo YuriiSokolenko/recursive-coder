@@ -216,9 +216,11 @@ the normal resume-fence admission rules.
 `tool.completed` audit events and `llm.capabilities` **before**
 `created → accepted`; the shared policy deliberately rejects these types.
 The #114 two-generation continuation tests use host-controlled synthetic
-metadata. Production integration needs a separately authorized host-side
-pre-execution producer and durable `accepted` checkpoint handoff in #104,
-or a separately reviewed policy change under #105. Do not attach this
+metadata. A separate opt-in [durable `created → accepted` handoff](DURABLE_CREATED_ACCEPTED_HANDOFF.md)
+now publishes C2 from a verified on-disk C1 under a trusted host lease;
+it is **not** connected to runtime execution. Production integration still
+needs a separately authorized pre-execution producer and #105 runtime/receipt
+fencing (or a separately reviewed policy change). Do not attach this
 writer directly to the existing runtime event stream.
 
 The older path-based `saveFenced` now enforces the **same**
