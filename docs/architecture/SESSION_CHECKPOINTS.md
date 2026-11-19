@@ -6,8 +6,67 @@ write, retry or replay. Issue #104 adds a separate pre-execution,
 generation-fenced admission API (see [FENCED_RESUME.md](FENCED_RESUME.md)),
 but automatic restart and external-effect reconciliation remain out of scope
 (#105). The [effect intent and receipt contracts](EFFECT_INTENTS.md) define
-pure classifications only; no checkpoint effect receipts are yet authenticated
-or reconciled by a durable adapter. The default CLI and Session Protocol v1 do not consume these files.
+pure classifications. A bounded host-only checkpoint v2 extension now stores an
+exact RCEFX1 effect-head pin; this is physical evidence only, not independently
+verified external effect completion. The default CLI and Session Protocol v1 do not consume these files.
+
+## Effect journal head checkpoints (opt-in v2)
+
+Legacy checkpoints remain canonical v1 with exactly the original field set.
+Only the dedicated `saveEffectHeadFenced` API may publish a v2 checkpoint,
+which adds `effectJournalHead`: session ID, issuing fence generation,
+admitted checkpoint SHA, tool authority SHA, normalized absolute sidecar
+path SHA, last effect sequence and the host MAC head. This single atomic,
+SHA-chained checkpoint generation binds all fields together; arbitrary
+callers cannot provide one of these pins through ordinary `saveFenced`.
+Both v1 and v2 decoders reject unknown fields and noncanonical payloads.
+
+The head is obtained from the exact live RCEFX1 journal under the existing
+lease monitor. The journal's genesis is pin-able at sequence zero. Every
+v2 checkpoint, including an empty genesis pin, requires operator
+reconciliation and is **not eligible for another resume admission**.
+`inspectEffectHeadBound` checks the latest verified checkpoint, physical
+path binding, and complete journal HMAC prefix against the recorded pin.
+When reading the checkpoint chain, every pin must also resolve to an
+**earlier verified checkpoint SHA** in that same chain and to a committed
+fence record for exactly its issuing generation. The fence must agree
+with the pin's session, trace, policy, admitted checkpoint SHA and tool
+authority SHA. Missing, foreign or modified fence/checkpoint identities
+are rejected before trusting any sidecar payload.
+
+### Pinned-generation transition policy (not yet an executor)
+
+The current `pinnedHeadTransition` is intentionally **terminal for
+ordinary resume**. Once pinned, subsequent checkpoints may only advance
+the HMAC sequence in the **same** fence generation, using the same
+sidecar, authority and admitted checkpoint. They cannot omit the pin or
+switch generations. An operator reconciliation cannot currently create
+a successor fence and sidecar. A future explicit authenticated
+**reconciliation transition record** must be added as a distinct,
+validated chain transition; implementers must extend that transition
+rule with evidence rather than relax the existing monotonic checks.
+No implicit generation switch or silent reset to a genesis head is
+permitted.
+
+The pin's v2 payload is restricted to phases `created` / `accepted`,
+`taskAttempt == 0` and no pending effects. These are deliberate
+**pre-execution-only** constraints: an executor integration must update
+phase rules and reconciliation protocol consciously, with specific
+tests of the `Started` pin ordering before any external effect.
+
+After an uncertain pin checkpoint publication (e.g. an interrupted
+temp-file fsync or rename), the journal writer is quarantined. Calls
+to append or obtain a head, and `close()` after releasing resources,
+report `EFFECT_JOURNAL_PIN_PUBLICATION_UNCONFIRMED` rather than
+mistaking the failure for `EFFECT_JOURNAL_APPEND_UNCONFIRMED`.
+
+**Durability is not the same as an independent rollback-resistant head.**
+The current fence anchors the previously admitted checkpoint, not each
+later checkpoint version. A coherent rollback of newer checkpoint versions
+and matching RCEFX1 tail still needs an independent monotonic authority
+outside that rollback domain. No external effects may be enabled until
+that guard and the pre-execution Started pin barrier are implemented.
+See [EFFECT_INTENTS.md](EFFECT_INTENTS.md).
 
 ## Trusted inputs and snapshot format
 

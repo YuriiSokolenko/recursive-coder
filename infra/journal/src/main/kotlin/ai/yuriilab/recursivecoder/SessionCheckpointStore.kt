@@ -47,6 +47,21 @@ data class HostAssertedCheckpointUsage(
 )
 data class CheckpointEffect(val id: String, val correlationId: String, val state: String)
 
+/** Exact issuing fence and HMAC head, co-published in a canonical checkpoint. */
+data class CheckpointEffectJournalHead(
+    val sessionId: String,
+    val fenceGeneration: Long,
+    val admittedCheckpointSha256: String,
+    val toolAuthoritySha256: String,
+    val sidecarPathSha256: String,
+    val lastSequence: Long,
+    val headMacSha256: String
+) {
+    fun expectation() = EffectJournalExpectation(sessionId, fenceGeneration,
+        admittedCheckpointSha256, toolAuthoritySha256)
+    fun pin() = EffectJournalHeadPin(lastSequence, headMacSha256)
+}
+
 data class SessionCheckpoint(
     val sequence: Long,
     val previousSha256: String?,
@@ -64,7 +79,9 @@ data class SessionCheckpoint(
     val journalSequence: Int,
     val journalHeadSha256: String,
     val journalFileSha256: String,
-    val lastTrustedJournalOffset: Long
+    val lastTrustedJournalOffset: Long,
+    /** Non-null selects the canonical v2 payload; legacy v1 stays unchanged. */
+    val effectJournalHead: CheckpointEffectJournalHead? = null
 )
 
 data class VerifiedSessionCheckpoint(
@@ -180,6 +197,18 @@ object SessionCheckpointCodec {
                 it.state !in setOf("pending", "unknown") } ||
             s.pendingEffects.map { it.id }.toSet().size != s.pendingEffects.size)
             invalid()
+        s.effectJournalHead?.let { head ->
+            if (head.sessionId != s.sessionId ||
+                !validId(head.sessionId) ||
+                head.fenceGeneration <= 0L ||
+                !listOf(head.admittedCheckpointSha256, head.toolAuthoritySha256,
+                    head.sidecarPathSha256, head.headMacSha256).all(::digest) ||
+                head.lastSequence !in 0L..100_000L ||
+                // This slice only pins isolated pre-execution physical evidence.
+                s.phase !in setOf("created", "accepted") ||
+                s.taskAttempt != 0 || s.pendingEffects.isNotEmpty())
+                invalid()
+        }
     }
 
     fun encode(s: SessionCheckpoint): ByteArray {
@@ -187,7 +216,7 @@ object SessionCheckpointCodec {
         val b = s.binding
         val root = buildJsonObject {
             put("kind", "host-checkpoint")
-            put("version", 1)
+            put("version", if (s.effectJournalHead == null) 1 else 2)
             put("sequence", s.sequence)
             put("previousSha256", s.previousSha256?.let(::JsonPrimitive) ?: JsonNull)
             put("binding", buildJsonObject {
@@ -243,6 +272,17 @@ object SessionCheckpointCodec {
             put("journalHeadSha256", s.journalHeadSha256)
             put("journalFileSha256", s.journalFileSha256)
             put("lastTrustedJournalOffset", s.lastTrustedJournalOffset)
+            s.effectJournalHead?.let { head ->
+                put("effectJournalHead", buildJsonObject {
+                    put("sessionId", head.sessionId)
+                    put("fenceGeneration", head.fenceGeneration)
+                    put("admittedCheckpointSha256", head.admittedCheckpointSha256)
+                    put("toolAuthoritySha256", head.toolAuthoritySha256)
+                    put("sidecarPathSha256", head.sidecarPathSha256)
+                    put("lastSequence", head.lastSequence)
+                    put("headMacSha256", head.headMacSha256)
+                })
+            }
         }
         val bytes = root.toString().toByteArray(StandardCharsets.UTF_8)
         if (bytes.size > MAX_PAYLOAD) invalid()
@@ -276,13 +316,18 @@ object SessionCheckpointCodec {
                 .onMalformedInput(CodingErrorAction.REPORT)
                 .onUnmappableCharacter(CodingErrorAction.REPORT)
                 .decode(ByteBuffer.wrap(bytes)).toString()
-            val o = fields(obj(Json.parseToJsonElement(decoded)), "kind", "version", "sequence",
-                "previousSha256", "binding", "sessionId", "traceId", "phase", "taskId",
-                "taskAttempt", "taskState", "children", "acceptedArtifacts", "hostAssertedUsage",
-                "pendingEffects", "journalSequence", "journalHeadSha256", "journalFileSha256",
-                "lastTrustedJournalOffset")
-            if (string(o, "kind") != "host-checkpoint" || long(o, "version") != 1L)
+            val root = obj(Json.parseToJsonElement(decoded))
+            val version = long(root, "version")
+            if (version !in setOf(1L, 2L) ||
+                string(root, "kind") != "host-checkpoint")
                 throw CheckpointUnconfirmed("CHECKPOINT_VERSION_UNSUPPORTED")
+            val keys = arrayOf("kind", "version", "sequence", "previousSha256",
+                "binding", "sessionId", "traceId", "phase", "taskId", "taskAttempt",
+                "taskState", "children", "acceptedArtifacts", "hostAssertedUsage",
+                "pendingEffects", "journalSequence", "journalHeadSha256",
+                "journalFileSha256", "lastTrustedJournalOffset")
+            val o = if (version == 1L) fields(root, *keys)
+                else fields(root, *keys, "effectJournalHead")
             val b = fields(obj(o["binding"]), "policySha256", "workspaceIdentitySha256",
                 "gitHead", "gitBranch", "gitBaselineSha256", "graphId",
                 "graphGeneration", "frozenInputsSha256")
@@ -313,12 +358,22 @@ object SessionCheckpointCodec {
             if (attempt !in Int.MIN_VALUE..Int.MAX_VALUE ||
                 eventSequence !in Int.MIN_VALUE..Int.MAX_VALUE)
                 invalid()
+            val head = if (version == 2L) {
+                val h = fields(obj(o["effectJournalHead"]), "sessionId",
+                    "fenceGeneration", "admittedCheckpointSha256",
+                    "toolAuthoritySha256", "sidecarPathSha256", "lastSequence",
+                    "headMacSha256")
+                CheckpointEffectJournalHead(string(h, "sessionId"),
+                    long(h, "fenceGeneration"), string(h, "admittedCheckpointSha256"),
+                    string(h, "toolAuthoritySha256"), string(h, "sidecarPathSha256"),
+                    long(h, "lastSequence"), string(h, "headMacSha256"))
+            } else null
             val s = SessionCheckpoint(long(o, "sequence"), nullableString(o, "previousSha256"),
                 binding, string(o, "sessionId"), string(o, "traceId"), string(o, "phase"),
                 string(o, "taskId"), attempt.toInt(), string(o, "taskState"),
                 children, artifacts, usage, effects, eventSequence.toInt(),
                 string(o, "journalHeadSha256"), string(o, "journalFileSha256"),
-                long(o, "lastTrustedJournalOffset"))
+                long(o, "lastTrustedJournalOffset"), head)
             if (!encode(s).contentEquals(bytes))
                 throw CheckpointUnconfirmed("CHECKPOINT_NONCANONICAL")
             return s
@@ -486,7 +541,29 @@ object SessionCheckpointStore {
         val checkpoint = SessionCheckpointCodec.decode(payload)
         return VerifiedSessionCheckpoint(checkpoint, SessionCheckpointCodec.sha256(payload),
             checkpoint.hostAssertedUsage.any { it.certainty == "unknown" } ||
-                checkpoint.pendingEffects.isNotEmpty())
+                checkpoint.pendingEffects.isNotEmpty() || checkpoint.effectJournalHead != null)
+    }
+
+    /**
+     * The SHA-chained checkpoint generation must not drop, regress, or
+     * silently retarget a previously published effect pin.
+     */
+    private fun pinnedHeadTransition(
+        previous: SessionCheckpoint?, next: SessionCheckpoint
+    ): Boolean {
+        val old = previous?.effectJournalHead ?: return true
+        val current = next.effectJournalHead ?: return false
+        if (old.sessionId != current.sessionId ||
+            old.fenceGeneration != current.fenceGeneration ||
+            old.admittedCheckpointSha256 != current.admittedCheckpointSha256 ||
+            old.toolAuthoritySha256 != current.toolAuthoritySha256 ||
+            old.sidecarPathSha256 != current.sidecarPathSha256 ||
+            current.lastSequence < old.lastSequence)
+            return false
+        // The checkpoint reader has no HMAC key. A higher sequence must be
+        // checked against the actual RCEFX1 chain by inspectEffectHeadBound.
+        return current.lastSequence != old.lastSequence ||
+            current.headMacSha256 == old.headMacSha256
     }
 
     private fun readAll(directory: Path): List<VerifiedSessionCheckpoint> {
@@ -517,11 +594,16 @@ object SessionCheckpointStore {
             }
         }
         if (snapshots.size > MAX_GENERATIONS) refuse("CHECKPOINT_SIZE_INVALID")
-        // Every published fence is verified on read, even outside resume admission.
-        try { ResumeFenceStorage.latest(directory) }
+        // Verify the complete fence chain first. Each pinned checkpoint
+        // must name an actual committed issuing fence and an earlier
+        // checkpoint from THIS verified chain, not self-authenticated
+        // claims from its own sidecar genesis.
+        val latestFence = try { ResumeFenceStorage.latest(directory) }
         catch (e: SessionResumeUnconfirmed) {
             throw CheckpointUnconfirmed("CHECKPOINT_RESUME_FENCE_UNCONFIRMED", e)
         }
+        val fencesByGeneration = mutableMapOf<Long, ResumeFenceRecord>()
+        val precedingCheckpointShas = mutableSetOf<String>()
         val sorted = snapshots.sortedBy { it.fileName.toString() }
         val result = ArrayList<VerifiedSessionCheckpoint>()
         for ((index, path) in sorted.withIndex()) {
@@ -538,9 +620,33 @@ object SessionCheckpointStore {
                     s.lastTrustedJournalOffset < previous.snapshot.lastTrustedJournalOffset ||
                     (s.journalSequence == previous.snapshot.journalSequence &&
                         (s.journalHeadSha256 != previous.snapshot.journalHeadSha256 ||
-                            s.journalFileSha256 != previous.snapshot.journalFileSha256)))))
+                            s.journalFileSha256 != previous.snapshot.journalFileSha256)) ||
+                    !pinnedHeadTransition(previous.snapshot, s))))
                 refuse("CHECKPOINT_CHAIN_MISMATCH")
+            s.effectJournalHead?.let { head ->
+                if (head.admittedCheckpointSha256 !in precedingCheckpointShas)
+                    refuse("CHECKPOINT_EFFECT_HEAD_ADMISSION_MISMATCH")
+                if (latestFence == null ||
+                    head.fenceGeneration > latestFence.generation)
+                    refuse("CHECKPOINT_EFFECT_HEAD_FENCE_MISMATCH")
+                val issuer = try {
+                    fencesByGeneration.getOrPut(head.fenceGeneration) {
+                        ResumeFenceStorage.atGeneration(directory, head.fenceGeneration)
+                    }
+                } catch (e: Exception) {
+                    throw CheckpointUnconfirmed("CHECKPOINT_EFFECT_HEAD_FENCE_MISMATCH", e)
+                }
+                if (issuer.generation != head.fenceGeneration ||
+                    issuer.sessionId != head.sessionId ||
+                    issuer.sessionId != s.sessionId ||
+                    issuer.traceId != s.traceId ||
+                    issuer.policySha256 != s.binding.policySha256 ||
+                    issuer.checkpointSha256 != head.admittedCheckpointSha256 ||
+                    issuer.toolAuthoritySha256 != head.toolAuthoritySha256)
+                    refuse("CHECKPOINT_EFFECT_HEAD_FENCE_MISMATCH")
+            }
             result.add(current)
+            precedingCheckpointShas.add(current.sha256)
         }
         return result
     }
@@ -728,6 +834,89 @@ object SessionCheckpointStore {
             }
         }
 
+    /**
+     * Host-only, pre-execution physical head publication. Pins the exact
+     * live journal writer under the current resume lease, then writes it
+     * atomically inside the canonical SHA-chained checkpoint payload.
+     *
+     * This is NOT effect execution authority. Pinned checkpoints require
+     * reconciliation, so automatic resume is blocked after publication.
+     * The sidecar must be fsynced before this call; Started must be pinned
+     * through this API before any future executor invokes an effect.
+     */
+    @OptIn(ResumeOperatorOnlyApi::class)
+    fun saveEffectHeadFenced(lease: SessionResumeLease,
+                   directory: Path, context: CheckpointHostContext,
+                   ledgerPath: Path, journal: DurableEffectRecordJournal,
+                   snapshot: SessionCheckpoint,
+                   expectedPreviousSha256: String?): VerifiedSessionCheckpoint =
+        saveEffectHeadFencedImpl(lease, directory, context, ledgerPath,
+            journal, snapshot, expectedPreviousSha256, {})
+
+    /** Test-only deterministic failure after forced temp or generation rename. */
+    @LedgerTestFaultInjection
+    @OptIn(ResumeOperatorOnlyApi::class)
+    internal fun saveEffectHeadFencedWithFault(lease: SessionResumeLease,
+                   directory: Path, context: CheckpointHostContext,
+                   ledgerPath: Path, journal: DurableEffectRecordJournal,
+                   snapshot: SessionCheckpoint, expectedPreviousSha256: String?,
+                   afterPhase: (String) -> Unit): VerifiedSessionCheckpoint =
+        saveEffectHeadFencedImpl(lease, directory, context, ledgerPath,
+            journal, snapshot, expectedPreviousSha256, afterPhase)
+
+    @OptIn(ResumeOperatorOnlyApi::class)
+    private fun saveEffectHeadFencedImpl(lease: SessionResumeLease,
+                   directory: Path, context: CheckpointHostContext,
+                   ledgerPath: Path, journal: DurableEffectRecordJournal,
+                   snapshot: SessionCheckpoint, expectedPreviousSha256: String?,
+                   afterPhase: (String) -> Unit): VerifiedSessionCheckpoint =
+        lease.publishIfCurrent {
+            lease.requireLedgerPath(ledgerPath)
+            if (snapshot.effectJournalHead != null)
+                refuse("CHECKPOINT_EFFECT_HEAD_CALLER_SUPPLIED")
+            val head = journal.checkpointHeadUnderLease(lease)
+            if (snapshot.sessionId != head.sessionId)
+                refuse("CHECKPOINT_EFFECT_HEAD_CONTEXT_MISMATCH")
+            val pinned = snapshot.copy(effectJournalHead = head)
+            var publicationStarted = false
+            try {
+                persist(directory, context, pinned, expectedPreviousSha256,
+                    afterPhase, LinuxCheckpointOwner::effectiveUid, lease,
+                    requireCoveredPreExecutionPrefix = true,
+                    onPublicationStarted = { publicationStarted = true },
+                    pinnedHeadEvidence = head) {
+                    inspectLedger(ledgerPath, context.workspaceRoot)
+                }
+            } catch (error: Throwable) {
+                // Once a generation write started, neither its publication
+                // nor directory fsync acknowledgement may be guessed.
+                // No more effects can be acknowledged through this writer.
+                if (publicationStarted) journal.markPinPublicationUnconfirmed()
+                throw error
+            }
+        }
+
+    /**
+     * Read the latest authenticated checkpoint generation and require its
+     * exact effect head to match the independently authenticated RCEFX1
+     * stream. Never synthesize an expected pin from the sidecar itself.
+     * The checkpoint chain and existing fence/anchor remain the trust base;
+     * protecting against total rollback of that entire root is deferred.
+     */
+    @OptIn(ResumeOperatorOnlyApi::class)
+    fun inspectEffectHeadBound(directory: Path, context: CheckpointHostContext,
+                   ledgerPath: Path, sidecarPath: Path,
+                   hostKey: ByteArray): VerifiedEffectRecordJournal {
+        val verified = inspect(directory, context, ledgerPath)
+        val head = verified.snapshot.effectJournalHead
+            ?: refuse("CHECKPOINT_EFFECT_HEAD_MISSING")
+        val pathDigest = effectJournalPathSha256(sidecarPath)
+        if (head.sidecarPathSha256 != pathDigest)
+            refuse("CHECKPOINT_EFFECT_HEAD_PATH_MISMATCH")
+        return DurableEffectRecordJournal.inspectBound(sidecarPath,
+            context.workspaceRoot, hostKey, head.expectation(), head.pin())
+    }
+
     fun saveFromOpenLedgerFenced(lease: SessionResumeLease, directory: Path,
                    context: CheckpointHostContext, ledger: DurableSessionEventLedger,
                    snapshot: SessionCheckpoint, expectedPreviousSha256: String?): VerifiedSessionCheckpoint =
@@ -799,6 +988,7 @@ object SessionCheckpointStore {
              fence: SessionResumeLease? = null,
              requireCoveredPreExecutionPrefix: Boolean = false,
              onPublicationStarted: () -> Unit = {},
+             pinnedHeadEvidence: CheckpointEffectJournalHead? = null,
              ledgerEvidence: () -> VerifiedSessionEventLedger): VerifiedSessionCheckpoint {
         val dir = checkedDirectory(directory, context.workspaceRoot, effectiveUid)
         return withLease(dir, create = true) {
@@ -809,6 +999,10 @@ object SessionCheckpointStore {
             }
             val existing = readAll(dir)
             val previous = existing.lastOrNull()
+            if (snapshot.effectJournalHead != pinnedHeadEvidence)
+                refuse("CHECKPOINT_EFFECT_HEAD_UNVERIFIED")
+            if (!pinnedHeadTransition(previous?.snapshot, snapshot))
+                refuse("CHECKPOINT_EFFECT_HEAD_ROLLBACK")
             if (expectedPreviousSha256 != previous?.sha256 ||
                 snapshot.sequence != (previous?.snapshot?.sequence ?: 0L) + 1L ||
                 snapshot.previousSha256 != previous?.sha256)
