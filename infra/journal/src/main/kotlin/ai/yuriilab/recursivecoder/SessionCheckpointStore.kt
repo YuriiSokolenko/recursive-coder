@@ -814,11 +814,32 @@ object SessionCheckpointStore {
      * The sidecar must be fsynced before this call; Started must be pinned
      * through this API before any future executor invokes an effect.
      */
+    @OptIn(ResumeOperatorOnlyApi::class)
     fun saveEffectHeadFenced(lease: SessionResumeLease,
                    directory: Path, context: CheckpointHostContext,
                    ledgerPath: Path, journal: DurableEffectRecordJournal,
                    snapshot: SessionCheckpoint,
                    expectedPreviousSha256: String?): VerifiedSessionCheckpoint =
+        saveEffectHeadFencedImpl(lease, directory, context, ledgerPath,
+            journal, snapshot, expectedPreviousSha256, {})
+
+    /** Test-only deterministic failure after forced temp or generation rename. */
+    @LedgerTestFaultInjection
+    @OptIn(ResumeOperatorOnlyApi::class)
+    internal fun saveEffectHeadFencedWithFault(lease: SessionResumeLease,
+                   directory: Path, context: CheckpointHostContext,
+                   ledgerPath: Path, journal: DurableEffectRecordJournal,
+                   snapshot: SessionCheckpoint, expectedPreviousSha256: String?,
+                   afterPhase: (String) -> Unit): VerifiedSessionCheckpoint =
+        saveEffectHeadFencedImpl(lease, directory, context, ledgerPath,
+            journal, snapshot, expectedPreviousSha256, afterPhase)
+
+    @OptIn(ResumeOperatorOnlyApi::class)
+    private fun saveEffectHeadFencedImpl(lease: SessionResumeLease,
+                   directory: Path, context: CheckpointHostContext,
+                   ledgerPath: Path, journal: DurableEffectRecordJournal,
+                   snapshot: SessionCheckpoint, expectedPreviousSha256: String?,
+                   afterPhase: (String) -> Unit): VerifiedSessionCheckpoint =
         lease.publishIfCurrent {
             lease.requireLedgerPath(ledgerPath)
             if (snapshot.effectJournalHead != null)
@@ -827,11 +848,21 @@ object SessionCheckpointStore {
             if (snapshot.sessionId != head.sessionId)
                 refuse("CHECKPOINT_EFFECT_HEAD_CONTEXT_MISMATCH")
             val pinned = snapshot.copy(effectJournalHead = head)
-            persist(directory, context, pinned, expectedPreviousSha256, {},
-                LinuxCheckpointOwner::effectiveUid, lease,
-                requireCoveredPreExecutionPrefix = true,
-                pinnedHeadEvidence = head) {
-                inspectLedger(ledgerPath, context.workspaceRoot)
+            var publicationStarted = false
+            try {
+                persist(directory, context, pinned, expectedPreviousSha256,
+                    afterPhase, LinuxCheckpointOwner::effectiveUid, lease,
+                    requireCoveredPreExecutionPrefix = true,
+                    onPublicationStarted = { publicationStarted = true },
+                    pinnedHeadEvidence = head) {
+                    inspectLedger(ledgerPath, context.workspaceRoot)
+                }
+            } catch (error: Throwable) {
+                // Once a generation write started, neither its publication
+                // nor directory fsync acknowledgement may be guessed.
+                // No more effects can be acknowledged through this writer.
+                if (publicationStarted) journal.markPinPublicationUnconfirmed()
+                throw error
             }
         }
 
@@ -842,6 +873,7 @@ object SessionCheckpointStore {
      * The checkpoint chain and existing fence/anchor remain the trust base;
      * protecting against total rollback of that entire root is deferred.
      */
+    @OptIn(ResumeOperatorOnlyApi::class)
     fun inspectEffectHeadBound(directory: Path, context: CheckpointHostContext,
                    ledgerPath: Path, sidecarPath: Path,
                    hostKey: ByteArray): VerifiedEffectRecordJournal {

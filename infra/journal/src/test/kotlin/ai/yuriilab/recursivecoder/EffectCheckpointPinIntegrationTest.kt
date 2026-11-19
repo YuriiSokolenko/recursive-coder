@@ -12,7 +12,7 @@ import kotlin.test.*
 
 /** Real filesystem/checkpoint/fence regressions. No external effect execution. */
 @Tag("integration")
-@OptIn(ResumeOperatorOnlyApi::class)
+@OptIn(ResumeOperatorOnlyApi::class, LedgerTestFaultInjection::class)
 class EffectCheckpointPinIntegrationTest : SessionCheckpointTestFixture() {
     private val key = ByteArray(32) { (it + 1).toByte() }
     private fun parent(): Path = temp.resolve("effect-private").also {
@@ -165,6 +165,33 @@ class EffectCheckpointPinIntegrationTest : SessionCheckpointTestFixture() {
             assertEquals("EFFECT_JOURNAL_WRITER_UNAVAILABLE",
                 assertFailsWith<EffectJournalStorageUnconfirmed> {
                     savePin(lease, journal, first)
+                }.code)
+            assertEquals(first.sha256, inspect().sha256)
+            assertFalse(Files.exists(store().resolve("000000000002.rcp")))
+        }
+    }
+
+    @Test fun uncertainCheckpointPinPublicationQuarantinesWriter() {
+        val first = createPreExecutionCheckpoint()
+        admit().use { lease ->
+            val journal = open(lease)
+            journal.append(EffectRecord.Intent(identity))
+            val failure = assertFailsWith<CheckpointUnconfirmed> {
+                SessionCheckpointStore.saveEffectHeadFencedWithFault(
+                    lease, store(), context(), ledger(), journal,
+                    advanced(first), first.sha256) { phase ->
+                    if (phase == "temp-synced")
+                        error("simulated lost checkpoint pin acknowledgement")
+                }
+            }
+            assertEquals("CHECKPOINT_WRITE_UNCONFIRMED", failure.code)
+            assertEquals("EFFECT_JOURNAL_WRITER_UNAVAILABLE",
+                assertFailsWith<EffectJournalStorageUnconfirmed> {
+                    journal.append(EffectRecord.Started(identity))
+                }.code)
+            assertEquals("EFFECT_JOURNAL_APPEND_UNCONFIRMED",
+                assertFailsWith<EffectJournalStorageUnconfirmed> {
+                    journal.close()
                 }.code)
             assertEquals(first.sha256, inspect().sha256)
             assertFalse(Files.exists(store().resolve("000000000002.rcp")))

@@ -676,6 +676,15 @@ class DurableEffectRecordJournal private constructor(
             pin.lastSequence, pin.headMacSha256)
     }
 
+    /**
+     * After an ambiguous checkpoint-pin fsync/rename, any subsequent effect
+     * append would advance from an unconfirmed authority head. Quarantine
+     * the writer permanently; the operator must inspect exact disk evidence.
+     */
+    @Synchronized internal fun markPinPublicationUnconfirmed() {
+        poisoned = true
+    }
+
     @Synchronized override fun close() {
         if (closed) return
         closed = true
