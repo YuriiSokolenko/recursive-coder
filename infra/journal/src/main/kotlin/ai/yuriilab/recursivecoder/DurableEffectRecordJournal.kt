@@ -421,7 +421,7 @@ class DurableEffectRecordJournal private constructor(
                     FileChannel.open(file, StandardOpenOption.READ,
                         LinkOption.NOFOLLOW_LINKS).use { channel ->
                         val size = channel.size()
-                        if (size < magic.size + 36 || size > MAX_FILE_BYTES ||
+                        if (size < magic.size || size > MAX_FILE_BYTES ||
                             size > Int.MAX_VALUE)
                             refuse("EFFECT_JOURNAL_SIZE_INVALID")
                         val all = ByteBuffer.allocate(size.toInt())
@@ -432,6 +432,8 @@ class DurableEffectRecordJournal private constructor(
                         val bytes = all.array()
                         if (!bytes.copyOfRange(0, magic.size).contentEquals(magic))
                             refuse("EFFECT_JOURNAL_VERSION_INVALID")
+                        if (bytes.size < magic.size + 36)
+                            refuse("EFFECT_JOURNAL_GENESIS_INVALID")
 
                         // Genesis is an authenticated mandatory first frame;
                         // an empty effect stream still has a provable identity.
