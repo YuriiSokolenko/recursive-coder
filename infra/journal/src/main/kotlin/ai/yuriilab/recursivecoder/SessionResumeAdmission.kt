@@ -267,7 +267,6 @@ internal object ResumeFenceStorage {
  */
 class SessionResumeLease internal constructor(
     val generation: Long,
-    val sessionId: String,
     val admittedCheckpointSha256: String,
     val toolAuthoritySha256: String,
     private val directory: Path,
@@ -287,8 +286,7 @@ class SessionResumeLease internal constructor(
         if (closed || !lock.isValid || directory != expectedDirectory ||
             generation != current.generation ||
             toolAuthoritySha256 != current.toolAuthoritySha256 ||
-            admittedCheckpointSha256 != current.checkpointSha256 ||
-            sessionId != current.sessionId)
+            admittedCheckpointSha256 != current.checkpointSha256)
             throw SessionResumeUnconfirmed("RESUME_FENCE_STALE_WRITER")
     }
 
@@ -298,6 +296,14 @@ class SessionResumeLease internal constructor(
             SessionResumeAdmission.ledgerFileKey(candidate) != admittedLedgerFileKey)
             throw SessionResumeUnconfirmed("RESUME_LEDGER_PATH_CHANGED")
     }
+
+    /**
+     * Fetch the actual issuing session from the immutable, verified fence.
+     * Call ONLY from a live publishIfCurrent guard; never trust a caller's
+     * claimed session identity to mint effect-journal genesis.
+     */
+    internal fun admittedSessionId(): String =
+        ResumeFenceStorage.requireHead(directory, generation, admittedFenceSha256).sessionId
 
     /** Required before callbacks or trusted receipt publication. */
     @Synchronized fun assertCurrent() {
@@ -528,7 +534,7 @@ object SessionResumeAdmission {
                         fail("RESUME_LEDGER_PATH_CHANGED")
                 }
                 val anchor = preparedAnchor ?: fail("RESUME_FENCE_ANCHOR_UNCONFIRMED")
-                SessionResumeLease(next.generation, next.sessionId, next.checkpointSha256,
+                SessionResumeLease(next.generation, next.checkpointSha256,
                     next.toolAuthoritySha256, checkedDir, ledgerPath, next.sha256,
                     anchor.sha256, ledgerKey, lockPath, acquiredOwner,
                     acquiredLock) { heldLocks.remove(it) }

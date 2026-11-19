@@ -333,14 +333,16 @@ class DurableEffectRecordJournal private constructor(
             hostKey: ByteArray, lease: SessionResumeLease
         ): DurableEffectRecordJournal {
             val file = checkedPath(path, workspaceRoot)
-            if (!ToolAuthorizationPolicy.validHostIdentifier(sessionId) ||
-                sessionId != lease.sessionId)
+            if (!ToolAuthorizationPolicy.validHostIdentifier(sessionId))
                 refuse("EFFECT_JOURNAL_CONTEXT_MISMATCH")
             val derived = checkedKey(hostKey)
             try {
                 return lease.publishIfCurrent {
+                    val admittedSession = lease.admittedSessionId()
+                    if (sessionId != admittedSession)
+                        refuse("EFFECT_JOURNAL_CONTEXT_MISMATCH")
                     val header = EffectJournalHeader(
-                        lease.sessionId, lease.generation,
+                        admittedSession, lease.generation,
                         lease.admittedCheckpointSha256, lease.toolAuthoritySha256)
                     val (lockChannel, lock) = acquire(file, create = true)
                     var channel: FileChannel? = null
