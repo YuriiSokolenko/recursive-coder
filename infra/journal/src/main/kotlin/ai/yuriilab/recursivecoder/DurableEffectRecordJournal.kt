@@ -73,6 +73,14 @@ data class VerifiedEffectRecordJournal(
     val tailKind: EffectJournalTailKind? = null
 )
 
+/**
+ * One canonical normalized-absolute sidecar locator fingerprint, shared by
+ * the trusted pin publisher and its checkpoint-bound reader.
+ */
+internal fun effectJournalPathSha256(path: Path): String =
+    SessionCheckpointCodec.sha256(path.toAbsolutePath().normalize().toString()
+        .toByteArray(StandardCharsets.UTF_8))
+
 /** Test-only fault callback; production callers must use append(). */
 @RequiresOptIn(level = RequiresOptIn.Level.ERROR)
 @Retention(AnnotationRetention.BINARY)
@@ -95,7 +103,13 @@ class DurableEffectRecordJournal private constructor(
     private val latestByOperation = mutableMapOf<String, EffectRecord>()
     private var previousMac = genesisMac.copyOf()
     private var poisoned = false
+    /** Distinguish uncertain checkpoint-pin publication from an uncertain append. */
+    private var pinPublicationUnconfirmed = false
     private var closed = false
+
+    private fun writerUnavailableCode(): String =
+        if (pinPublicationUnconfirmed) "EFFECT_JOURNAL_PIN_PUBLICATION_UNCONFIRMED"
+        else "EFFECT_JOURNAL_WRITER_UNAVAILABLE"
 
     companion object {
         private val magic = "RCEFX1\n".toByteArray(StandardCharsets.US_ASCII)
@@ -597,7 +611,7 @@ class DurableEffectRecordJournal private constructor(
         EffectJournalEntry = lease.publishIfCurrent {
         synchronized(this) {
             if (closed || poisoned)
-                throw EffectJournalStorageUnconfirmed("EFFECT_JOURNAL_WRITER_UNAVAILABLE")
+                throw EffectJournalStorageUnconfirmed(writerUnavailableCode())
             if (record.identity.fenceGeneration != lease.generation)
                 throw EffectJournalStorageUnconfirmed("EFFECT_JOURNAL_STALE_GENERATION")
             checkedTransition(latestByOperation, record, header)
@@ -635,16 +649,12 @@ class DurableEffectRecordJournal private constructor(
     }
 
     /**
-     * Close before retiring resume lease. No truncation/repair after an
-     * uncertain write; an intact tail alone is not external effect evidence.
-     */
-    /**
      * A value for the trusted host to publish, never a recovery-time trust
      * source. Includes the HMAC-authenticated genesis head (sequence zero).
      */
     @Synchronized fun headPin(): EffectJournalHeadPin {
         if (closed || poisoned)
-            throw EffectJournalStorageUnconfirmed("EFFECT_JOURNAL_WRITER_UNAVAILABLE")
+            throw EffectJournalStorageUnconfirmed(writerUnavailableCode())
         return EffectJournalHeadPin(entries.size.toLong(), previousMac.toHex())
     }
 
@@ -657,7 +667,7 @@ class DurableEffectRecordJournal private constructor(
         currentLease: SessionResumeLease
     ): CheckpointEffectJournalHead {
         if (closed || poisoned)
-            throw EffectJournalStorageUnconfirmed("EFFECT_JOURNAL_WRITER_UNAVAILABLE")
+            throw EffectJournalStorageUnconfirmed(writerUnavailableCode())
         if (!Thread.holdsLock(currentLease))
             throw EffectJournalStorageUnconfirmed("EFFECT_JOURNAL_LEASE_MONITOR_REQUIRED")
         if (currentLease !== lease ||
@@ -674,7 +684,7 @@ class DurableEffectRecordJournal private constructor(
         val pin = headPin()
         return CheckpointEffectJournalHead(header.sessionId, header.fenceGeneration,
             header.admittedCheckpointSha256, header.toolAuthoritySha256,
-            digest(path.toString().toByteArray(StandardCharsets.UTF_8)),
+            effectJournalPathSha256(path),
             pin.lastSequence, pin.headMacSha256)
     }
 
@@ -685,8 +695,15 @@ class DurableEffectRecordJournal private constructor(
      */
     @Synchronized internal fun markPinPublicationUnconfirmed() {
         poisoned = true
+        pinPublicationUnconfirmed = true
     }
 
+    /**
+     * Close before retiring resume lease. No truncation/repair after an
+     * uncertain write; an intact tail alone is not external effect evidence.
+     * A poisoned writer always releases locks, then reports which durable
+     * publication boundary is unconfirmed.
+     */
     @Synchronized override fun close() {
         if (closed) return
         closed = true
@@ -698,6 +715,8 @@ class DurableEffectRecordJournal private constructor(
         }
         if (error != null)
             throw EffectJournalStorageUnconfirmed("EFFECT_JOURNAL_CLOSE_UNCONFIRMED", error)
+        if (pinPublicationUnconfirmed)
+            throw EffectJournalStorageUnconfirmed("EFFECT_JOURNAL_PIN_PUBLICATION_UNCONFIRMED")
         if (poisoned)
             throw EffectJournalStorageUnconfirmed("EFFECT_JOURNAL_APPEND_UNCONFIRMED")
     }

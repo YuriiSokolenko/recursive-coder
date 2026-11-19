@@ -6,6 +6,7 @@ import java.nio.file.Path
 import java.nio.file.StandardOpenOption
 import java.nio.charset.StandardCharsets
 import java.nio.file.attribute.PosixFilePermission
+import java.security.MessageDigest
 import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
 import kotlin.test.*
@@ -185,17 +186,67 @@ class EffectCheckpointPinIntegrationTest : SessionCheckpointTestFixture() {
                 }
             }
             assertEquals("CHECKPOINT_WRITE_UNCONFIRMED", failure.code)
-            assertEquals("EFFECT_JOURNAL_WRITER_UNAVAILABLE",
-                assertFailsWith<EffectJournalStorageUnconfirmed> {
-                    journal.append(EffectRecord.Started(identity))
-                }.code)
-            assertEquals("EFFECT_JOURNAL_APPEND_UNCONFIRMED",
+            for (action in listOf<() -> Unit>(
+                { journal.headPin() },
+                { journal.append(EffectRecord.Started(identity)) },
+                { lease.publishIfCurrent { journal.checkpointHeadUnderLease(lease) } }
+            )) {
+                assertEquals("EFFECT_JOURNAL_PIN_PUBLICATION_UNCONFIRMED",
+                    assertFailsWith<EffectJournalStorageUnconfirmed>(block = action).code)
+            }
+            assertEquals("EFFECT_JOURNAL_PIN_PUBLICATION_UNCONFIRMED",
                 assertFailsWith<EffectJournalStorageUnconfirmed> {
                     journal.close()
                 }.code)
             assertEquals(first.sha256, inspect().sha256)
             assertFalse(Files.exists(store().resolve("000000000002.rcp")))
         }
+    }
+
+    /** Rewrite with a VALID outer SHA: checkpoint read must reject semantics. */
+    private fun rewritePublishedCheckpoint(
+        original: VerifiedSessionCheckpoint, head: CheckpointEffectJournalHead
+    ) {
+        val file = store().resolve("000000000002.rcp")
+        val payload = SessionCheckpointCodec.encode(
+            original.snapshot.copy(effectJournalHead = head))
+        val framed = ByteBuffer.allocate(7 + 4 + 32 + payload.size)
+            .put("RCCHK1\n".toByteArray(StandardCharsets.US_ASCII))
+            .putInt(payload.size)
+            .put(MessageDigest.getInstance("SHA-256").digest(payload))
+            .put(payload)
+            .array()
+        Files.write(file, framed, StandardOpenOption.TRUNCATE_EXISTING)
+    }
+
+    @Test fun authenticatedCheckpointPinMustReferenceActualEarlierCheckpointAndFence() {
+        val first = createPreExecutionCheckpoint()
+        lateinit var pinned: VerifiedSessionCheckpoint
+        admit().use { lease ->
+            open(lease).use { journal ->
+                pinned = savePin(lease, journal, first)
+            }
+        }
+        val originalHead = assertNotNull(pinned.snapshot.effectJournalHead)
+        assertEquals(pinned.sha256, inspect().sha256)
+
+        rewritePublishedCheckpoint(pinned, originalHead.copy(
+            admittedCheckpointSha256 = "f".repeat(64)))
+        assertEquals("CHECKPOINT_EFFECT_HEAD_ADMISSION_MISMATCH",
+            assertFailsWith<CheckpointUnconfirmed> { inspect() }.code)
+
+        rewritePublishedCheckpoint(pinned, originalHead.copy(
+            fenceGeneration = originalHead.fenceGeneration + 1))
+        assertEquals("CHECKPOINT_EFFECT_HEAD_FENCE_MISMATCH",
+            assertFailsWith<CheckpointUnconfirmed> { inspect() }.code)
+
+        rewritePublishedCheckpoint(pinned, originalHead.copy(
+            toolAuthoritySha256 = "f".repeat(64)))
+        assertEquals("CHECKPOINT_EFFECT_HEAD_FENCE_MISMATCH",
+            assertFailsWith<CheckpointUnconfirmed> { inspect() }.code)
+
+        rewritePublishedCheckpoint(pinned, originalHead)
+        assertEquals(pinned.sha256, inspect().sha256)
     }
 
     @Test fun malformedV2CannotMasqueradeAsLegacyV1Checkpoint() {

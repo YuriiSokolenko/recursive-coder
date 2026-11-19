@@ -560,6 +560,8 @@ object SessionCheckpointStore {
             old.sidecarPathSha256 != current.sidecarPathSha256 ||
             current.lastSequence < old.lastSequence)
             return false
+        // The checkpoint reader has no HMAC key. A higher sequence must be
+        // checked against the actual RCEFX1 chain by inspectEffectHeadBound.
         return current.lastSequence != old.lastSequence ||
             current.headMacSha256 == old.headMacSha256
     }
@@ -592,11 +594,16 @@ object SessionCheckpointStore {
             }
         }
         if (snapshots.size > MAX_GENERATIONS) refuse("CHECKPOINT_SIZE_INVALID")
-        // Every published fence is verified on read, even outside resume admission.
-        try { ResumeFenceStorage.latest(directory) }
+        // Verify the complete fence chain first. Each pinned checkpoint
+        // must name an actual committed issuing fence and an earlier
+        // checkpoint from THIS verified chain, not self-authenticated
+        // claims from its own sidecar genesis.
+        val latestFence = try { ResumeFenceStorage.latest(directory) }
         catch (e: SessionResumeUnconfirmed) {
             throw CheckpointUnconfirmed("CHECKPOINT_RESUME_FENCE_UNCONFIRMED", e)
         }
+        val fencesByGeneration = mutableMapOf<Long, ResumeFenceRecord>()
+        val precedingCheckpointShas = mutableSetOf<String>()
         val sorted = snapshots.sortedBy { it.fileName.toString() }
         val result = ArrayList<VerifiedSessionCheckpoint>()
         for ((index, path) in sorted.withIndex()) {
@@ -616,7 +623,30 @@ object SessionCheckpointStore {
                             s.journalFileSha256 != previous.snapshot.journalFileSha256)) ||
                     !pinnedHeadTransition(previous.snapshot, s))))
                 refuse("CHECKPOINT_CHAIN_MISMATCH")
+            s.effectJournalHead?.let { head ->
+                if (head.admittedCheckpointSha256 !in precedingCheckpointShas)
+                    refuse("CHECKPOINT_EFFECT_HEAD_ADMISSION_MISMATCH")
+                if (latestFence == null ||
+                    head.fenceGeneration > latestFence.generation)
+                    refuse("CHECKPOINT_EFFECT_HEAD_FENCE_MISMATCH")
+                val issuer = try {
+                    fencesByGeneration.getOrPut(head.fenceGeneration) {
+                        ResumeFenceStorage.atGeneration(directory, head.fenceGeneration)
+                    }
+                } catch (e: Exception) {
+                    throw CheckpointUnconfirmed("CHECKPOINT_EFFECT_HEAD_FENCE_MISMATCH", e)
+                }
+                if (issuer.generation != head.fenceGeneration ||
+                    issuer.sessionId != head.sessionId ||
+                    issuer.sessionId != s.sessionId ||
+                    issuer.traceId != s.traceId ||
+                    issuer.policySha256 != s.binding.policySha256 ||
+                    issuer.checkpointSha256 != head.admittedCheckpointSha256 ||
+                    issuer.toolAuthoritySha256 != head.toolAuthoritySha256)
+                    refuse("CHECKPOINT_EFFECT_HEAD_FENCE_MISMATCH")
+            }
             result.add(current)
+            precedingCheckpointShas.add(current.sha256)
         }
         return result
     }
@@ -880,9 +910,7 @@ object SessionCheckpointStore {
         val verified = inspect(directory, context, ledgerPath)
         val head = verified.snapshot.effectJournalHead
             ?: refuse("CHECKPOINT_EFFECT_HEAD_MISSING")
-        val pathDigest = SessionCheckpointCodec.sha256(
-            sidecarPath.toAbsolutePath().normalize().toString()
-                .toByteArray(StandardCharsets.UTF_8))
+        val pathDigest = effectJournalPathSha256(sidecarPath)
         if (head.sidecarPathSha256 != pathDigest)
             refuse("CHECKPOINT_EFFECT_HEAD_PATH_MISMATCH")
         return DurableEffectRecordJournal.inspectBound(sidecarPath,

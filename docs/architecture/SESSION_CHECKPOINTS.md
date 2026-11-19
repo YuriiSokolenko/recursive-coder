@@ -27,6 +27,38 @@ v2 checkpoint, including an empty genesis pin, requires operator
 reconciliation and is **not eligible for another resume admission**.
 `inspectEffectHeadBound` checks the latest verified checkpoint, physical
 path binding, and complete journal HMAC prefix against the recorded pin.
+When reading the checkpoint chain, every pin must also resolve to an
+**earlier verified checkpoint SHA** in that same chain and to a committed
+fence record for exactly its issuing generation. The fence must agree
+with the pin's session, trace, policy, admitted checkpoint SHA and tool
+authority SHA. Missing, foreign or modified fence/checkpoint identities
+are rejected before trusting any sidecar payload.
+
+### Pinned-generation transition policy (not yet an executor)
+
+The current `pinnedHeadTransition` is intentionally **terminal for
+ordinary resume**. Once pinned, subsequent checkpoints may only advance
+the HMAC sequence in the **same** fence generation, using the same
+sidecar, authority and admitted checkpoint. They cannot omit the pin or
+switch generations. An operator reconciliation cannot currently create
+a successor fence and sidecar. A future explicit authenticated
+**reconciliation transition record** must be added as a distinct,
+validated chain transition; implementers must extend that transition
+rule with evidence rather than relax the existing monotonic checks.
+No implicit generation switch or silent reset to a genesis head is
+permitted.
+
+The pin's v2 payload is restricted to phases `created` / `accepted`,
+`taskAttempt == 0` and no pending effects. These are deliberate
+**pre-execution-only** constraints: an executor integration must update
+phase rules and reconciliation protocol consciously, with specific
+tests of the `Started` pin ordering before any external effect.
+
+After an uncertain pin checkpoint publication (e.g. an interrupted
+temp-file fsync or rename), the journal writer is quarantined. Calls
+to append or obtain a head, and `close()` after releasing resources,
+report `EFFECT_JOURNAL_PIN_PUBLICATION_UNCONFIRMED` rather than
+mistaking the failure for `EFFECT_JOURNAL_APPEND_UNCONFIRMED`.
 
 **Durability is not the same as an independent rollback-resistant head.**
 The current fence anchors the previously admitted checkpoint, not each

@@ -224,12 +224,31 @@ chain, atomic replacement and directory-fsync publication.
 `SessionCheckpointStore.inspectEffectHeadBound` verifies the latest
 checkpoint, existing fence/ledger anchor, the exact sidecar path and
 the fully authenticated RCEFX1 prefix against the checkpoint's
-pinned expectation. It never creates or repairs missing evidence.
+pinned expectation. Read-only checkpoint verification also checks
+the pinned admission SHA against an **earlier** published checkpoint
+and the pinned issuing generation/session/authority against the
+committed fence chain. It never creates or repairs missing evidence.
+
+An ambiguous pin-publication acknowledgement poisons the writer
+separately from an ambiguous sidecar append: append, `headPin()`,
+`checkpointHeadUnderLease()` and `close()` refuse with
+`EFFECT_JOURNAL_PIN_PUBLICATION_UNCONFIRMED` (after releasing
+resources on close). The sidecar path SHA is computed using one
+normalized-absolute-path helper for both publication and inspection.
 
 **Pinned checkpoints are always reconciliation-required, including
 genesis-only pins.** They cannot be used for automatic resume, stage
 acceptance, model execution or tool execution. No physical effect
-executor is connected in this PR.
+executor is connected in this PR. The current v2 pin only permits
+`created` or `accepted`, task attempt zero and no pending effects.
+Future executor enablement requires an explicit phase-policy change
+and tests, never an incidental widening.
+
+A pinned session remains tied to its one issuing fence generation
+until an **authenticated operator reconciliation transition record**
+and validated new-generation rule are implemented. No ordinary resume
+path currently creates that transition. See the pinned-generation
+policy in [SESSION_CHECKPOINTS.md](SESSION_CHECKPOINTS.md).
 
 **Important remaining rollback limitation:** the currently admitted
 fence authenticates the checkpoint it *admitted*, not every later
