@@ -425,6 +425,87 @@ class SessionControllerUnitTest {
         assertEquals(0, gateway.negotiations)
     }
 
+    @Test fun resumeRequestRejectionDoesNotExposePrivateCheckpointPath() {
+        val fresh = fixture()
+        val privateCheckpoint = temp.resolve("host-only-sensitive-checkpoint")
+            .resolve("generation-0002.rcp").toAbsolutePath()
+        val request = withField(fresh, "resume", buildJsonObject {
+            put("mode", "resume")
+            put("fenceGeneration", 2)
+            put("checkpoint", buildJsonObject {
+                put("path", privateCheckpoint.toString())
+                put("sha256", "e".repeat(64))
+            })
+        })
+        // Positive control: the request really carries a private path.
+        assertTrue(request.raw.toString().contains(privateCheckpoint.toString()))
+        val model = StubGateway()
+        val runtime = DefaultRunSessionUseCase(model,
+            WorkspaceOpener { _, _, _ ->
+                throw AssertionError("Unsupported resume must not open a workspace")
+            }, eventSinkFactory)
+
+        val response = runtime.invoke(request, Cancellation()).protocol
+        val failure = response.getValue("error").jsonObject
+        assertEquals("rejected", response.value("status"))
+        assertEquals("UNSUPPORTED_RESUME", failure.value("code"))
+        assertEquals("Resume is not supported", failure.value("safeMessage"))
+        val resultText = Files.readString(request.output("resultPath"))
+        assertEquals(response.toString(), resultText)
+        assertTrue(Files.exists(request.output("diagnosticsPath")))
+        assertTrue(eventSink.events.isNotEmpty())
+        val observable = resultText + eventSink.events.toString() +
+            Files.readString(request.output("diagnosticsPath"))
+        assertFalse(observable.contains(privateCheckpoint.toString()))
+        assertFalse(observable.contains(privateCheckpoint.parent.fileName.toString()))
+        assertFalse(observable.contains("FileSystemException"))
+        assertFalse(observable.contains("\tat "))
+        assertFalse(observable.contains("at ai.yuriilab"))
+        assertEquals(0, model.negotiations)
+        assertEquals(0, model.turns)
+    }
+
+    @Test fun hostExceptionAndSuppressedPathsStayOutOfRuntimeFailureResponse() {
+        val request = fixture()
+        val privateCheckpoint = temp.resolve("host-only-sensitive-checkpoint")
+            .resolve("generation-0002.rcp").toAbsolutePath()
+        val privateLedger = temp.resolve("host-only-sensitive-ledger")
+            .resolve("events.ledger").toAbsolutePath()
+        val cause = java.nio.file.FileSystemException(privateCheckpoint.toString(),
+            privateLedger.toString(), "private filesystem diagnostic")
+        cause.addSuppressed(java.io.IOException(
+            "private suppressed error for " + privateLedger))
+        // Positive controls: both host paths are genuinely present in the
+        // exception, including a suppressed reason that must never be emitted.
+        assertContains(cause.message.orEmpty(), privateCheckpoint.toString())
+        assertContains(cause.message.orEmpty(), privateLedger.toString())
+        assertContains(cause.suppressed.single().message.orEmpty(), privateLedger.toString())
+        val model = StubGateway()
+        val runtime = DefaultRunSessionUseCase(model,
+            WorkspaceOpener { _, _, _ -> throw cause }, eventSinkFactory)
+
+        val response = runtime.invoke(request, Cancellation()).protocol
+        val failure = response.getValue("error").jsonObject
+        assertEquals("failed", response.value("status"))
+        assertEquals("SESSION_EXECUTION_FAILED", failure.value("code"))
+        assertEquals("Session execution failed", failure.value("safeMessage"))
+        val resultText = Files.readString(request.output("resultPath"))
+        assertEquals(response.toString(), resultText)
+        val observable = resultText + eventSink.events.toString() +
+            Files.readString(request.output("diagnosticsPath"))
+        assertFalse(observable.contains(privateCheckpoint.toString()))
+        assertFalse(observable.contains(privateCheckpoint.parent.fileName.toString()))
+        assertFalse(observable.contains(privateLedger.toString()))
+        assertFalse(observable.contains(privateLedger.parent.fileName.toString()))
+        assertFalse(observable.contains("private filesystem diagnostic"))
+        assertFalse(observable.contains("private suppressed error"))
+        assertFalse(observable.contains("FileSystemException"))
+        assertFalse(observable.contains("\tat "))
+        assertFalse(observable.contains("at ai.yuriilab"))
+        assertEquals(0, model.negotiations)
+        assertEquals(0, model.turns)
+    }
+
     @Test fun compatibilityFacadeAcceptsSubstitutedUseCaseWithoutReencoding() {
         val request = fixture()
         val expected = buildJsonObject { put("status", "succeeded") }
