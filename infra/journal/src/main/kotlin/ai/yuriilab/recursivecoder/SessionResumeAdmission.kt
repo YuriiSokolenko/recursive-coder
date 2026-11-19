@@ -406,6 +406,25 @@ object SessionResumeAdmission {
               attestation: ResumeHostAttestation): SessionResumeLease =
         admitChecked(directory, context, ledgerPath, attestation, null) { }
 
+    /**
+     * Narrow, operator-only recovery: GENESIS (sequence zero) is independently
+     * authenticated under the host key before an explicit v3 reconciliation
+     * checkpoint and a successor fence can be durably published.
+     *
+     * No Intent/Started/Committed/Unconfirmed record is eligible. No external
+     * effect, model call, or automatic replay is authorized by this API.
+     */
+    @ResumeOperatorOnlyApi
+    fun reconcileGenesisEffectHead(
+        directory: Path, context: CheckpointHostContext, ledgerPath: Path,
+        sidecarPath: Path, hostKey: ByteArray,
+        attestation: ResumeHostAttestation,
+        operator: GenesisEffectHeadReconciliation
+    ): SessionResumeLease =
+        admitChecked(directory, context, ledgerPath, attestation, null,
+            genesisOperator = operator, genesisSidecar = sidecarPath,
+            genesisKey = hostKey, afterAnchorCommitted = {})
+
     /** Explicit operator path: never selected by normal session admission. */
     @ResumeOperatorOnlyApi
     fun reconcilePreparedAdmission(
@@ -449,8 +468,14 @@ object SessionResumeAdmission {
         hardLinkProbe: (Path, String?) -> Unit = { directory, scope ->
             ResumeImmutablePublication.requireHardLinks(directory, scope)
         },
+        genesisOperator: GenesisEffectHeadReconciliation? = null,
+        genesisSidecar: Path? = null,
+        genesisKey: ByteArray? = null,
         afterAnchorCommitted: () -> Unit
     ): SessionResumeLease {
+        if (genesisOperator != null &&
+            (operator != null || genesisSidecar == null || genesisKey == null))
+            fail("RESUME_EFFECT_RECONCILIATION_INVALID")
         if (attestation.expectedFenceGeneration < 0)
             fail("RESUME_FENCE_EXPECTED_GENERATION_INVALID")
         if (operator != null && (!operator.operatorApproved ||
@@ -485,11 +510,13 @@ object SessionResumeAdmission {
             // Integration test seam: must run after key capture and before
             // actual ledger inspection, while the resume OS lock is held.
             beforeInspection()
-            val result = SessionCheckpointStore.withAdmissionEvidence(dir, context, ledgerPath) {
-                    checkedDir, verified, ledger ->
+            val commit: (Path, VerifiedSessionCheckpoint, VerifiedSessionEventLedger) ->
+                SessionResumeLease = { checkedDir, verified, ledger ->
                 val s = verified.snapshot
                 // Only before the first model, tool, agent or recursive execution.
-                if (verified.reconciliationRequired ||
+                if ((genesisOperator == null && verified.reconciliationRequired) ||
+                    (genesisOperator != null &&
+                        (s.effectReconciliation == null || s.effectJournalHead != null)) ||
                     !PreExecutionSnapshotPolicy.safe(s) ||
                     PreExecutionPhasePolicy.phaseFromVerifiedHistory(
                         s.phase, ledger.events) == null) fail("RESUME_UNSAFE_BOUNDARY")
@@ -543,6 +570,14 @@ object SessionResumeAdmission {
                     anchor.sha256, ledgerKey, lockPath, acquiredOwner,
                     acquiredLock) { heldLocks.remove(it) }
             }
+            val result = if (genesisOperator == null)
+                SessionCheckpointStore.withAdmissionEvidence(
+                    dir, context, ledgerPath, commit)
+            else SessionCheckpointStore.withGenesisReconciliationEvidence(
+                dir, context, ledgerPath,
+                genesisSidecar ?: fail("RESUME_EFFECT_RECONCILIATION_INVALID"),
+                genesisKey ?: fail("RESUME_EFFECT_RECONCILIATION_INVALID"),
+                genesisOperator, commit)
             transferred = true
             return result
         } catch (error: Exception) {

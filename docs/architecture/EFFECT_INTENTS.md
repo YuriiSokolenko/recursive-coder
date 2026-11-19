@@ -194,7 +194,7 @@ entire RCEFX1 chain and refuses a missing complete last record, a
 different head, a different sequence, or an additional complete record.
 The HMAC binds the genesis, path and entire ordered record prefix.
 
-## Canonical checkpoint v2 effect-head pin (next bounded slice)
+## Canonical checkpoint v2 effect-head pin and operator v3 transition
 
 The trusted host can now call `DurableEffectRecordJournal.headPin()`
 to obtain the **current in-memory acknowledged** (sequence, HMAC) pair,
@@ -259,6 +259,25 @@ Before enabling any external effect, the authoritative root must gain
 an independently retained monotonic latest-pin/checkpoint-head guard
 that cannot be reverted with those files; this PR does NOT claim that
 a checkpoint v2 publication by itself solves whole-root rollback.
+
+### Genesis-only operator reconciliation
+
+The new `reconcileGenesisEffectHead` operator API can explicitly move
+from a pinned checkpoint in generation N to a new, pre-execution lease in
+generation N+1 **only when the entire HMAC-authenticated sidecar has no
+effect records (genesis-only, sequence 0)**. An operator approval alone
+cannot settle a `Started` effect. The caller must supply the exact old
+checkpoint SHA, fence SHA/generation, host key and head MAC; any mismatch
+or uncertainty fails closed.
+
+A canonical checkpoint v3 transition record preserves the original
+pinned head and its issuing fence/checkpoint with a dedicated host-key
+HMAC and operator ID. The record cannot be omitted from future
+checkpoint generations or silently replaced. The verified v3 generation
+is durably published **before** the successor resume fence; normal
+`admit()` continues to refuse all v3 checkpoints, and the recovered
+lease remains read-only/pre-execution. Reconciliation of Intent/Started
+and external states remains deferred to the verifier.
 
 ### Required ordering before enabling real effects
 

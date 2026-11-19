@@ -10,6 +10,61 @@ pure classifications. A bounded host-only checkpoint v2 extension now stores an
 exact RCEFX1 effect-head pin; this is physical evidence only, not independently
 verified external effect completion. The default CLI and Session Protocol v1 do not consume these files.
 
+## Explicit operator transition for a genesis-only journal (checkpoint v3)
+
+A checkpoint containing a physical effect pin is not ordinarily resumable.
+The opt-in `SessionResumeAdmission.reconcileGenesisEffectHead` is an
+**operator-only** transition for one sharply delimited case: an authenticated
+RCEFX1 journal whose complete physical body contains **genesis and no effect
+entries at all (sequence 0)**. Any `Intent`, `Started`, `Committed`,
+`Unconfirmed`, torn tail, MAC failure, wrong path or active journal writer
+**must** be refused. Unknown external outcomes are not independently verified
+by this feature. No tool/CAS execution is enabled or authorized.
+
+The host supplies its secret RCEFX1 key, the normalized journal location,
+current read-only policy attestation, and an exact operator approval naming
+the pinned checkpoint SHA, current fence generation/SHA, and physical HMAC
+head. `operatorApproved` is an assertion from the trusted host/operator
+boundary, **not authentication of a human identity by this module**. The
+storage and policy layers validate the old full checkpoint/fence/anchor chain,
+current pre-execution phase, matching host policy, live OS locks, and the
+complete RCEFX1 HMAC prefix before proceeding.
+
+The operator transition becomes the **immediate successor** of the pinned
+v2 checkpoint: canonical checkpoint **v3** contains a fixed
+`effectReconciliation` record with prior checkpoint SHA, prior fence
+generation/SHA, the exact prior pinned head and operator ID, authenticated
+by an independently domain-separated HMAC keyed from the host secret.
+Its physical `effectJournalHead` is `null`; that does NOT mean the prior
+pin was forgotten. The v3 marker persists unchanged in every successor
+checkpoint, including future checkpoints with a new generation's effect
+head, and `readAll` strictly validates its chain ancestry/fence binding.
+
+Publication is under `resume.lock -> checkpoint.lock`; the same
+checkpoint generation atomic force/rename/directory fsync precedes the
+normal immutable fence/sidecar-anchor publication for generation N+1.
+The operator path verifies the keyed transition record on entry,
+including a retry after a committed v3 and before the next fence.
+A crash after the next generation's anchor PREPARE may still require
+separate prepared-fence operator reconciliation; it must **never** be
+automatically repaired or silently retried.
+
+The read-only checkpoint reader validates canonicality, SHA chaining and
+fixed record ancestry, but does not have the HMAC key and **cannot**
+authenticate an operator approval on its own. Accordingly every v3
+checkpoint remains `reconciliationRequired = true`, and regular
+`admit()` **always refuses**. Only the explicitly keyed operator path
+can use the sealed transition. A new-generation lease is still only
+pre-execution read authority; it is not permission to retry effects,
+run tools, classify a `Committed` receipt or accept a stage.
+
+Existing v1 and v2 encodings remain byte-identical. Future reconciliation
+of a journal with even a single effect entry requires independent
+`HostEffectEvidenceVerifier` and stronger evidence/ordering; never widen
+the genesis-only operator shortcut to `Started` without that verifier.
+Coherent rollback of the entire checkpoint/fence/sidecar authority root
+remains unsolved, so no external effects are enabled.
+
 ## Effect journal head checkpoints (opt-in v2)
 
 Legacy checkpoints remain canonical v1 with exactly the original field set.

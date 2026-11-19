@@ -81,7 +81,9 @@ data class SessionCheckpoint(
     val journalFileSha256: String,
     val lastTrustedJournalOffset: Long,
     /** Non-null selects the canonical v2 payload; legacy v1 stays unchanged. */
-    val effectJournalHead: CheckpointEffectJournalHead? = null
+    val effectJournalHead: CheckpointEffectJournalHead? = null,
+    /** Operator-authenticated genesis-only transition; canonical v3. */
+    val effectReconciliation: CheckpointEffectReconciliation? = null
 )
 
 data class VerifiedSessionCheckpoint(
@@ -209,6 +211,23 @@ object SessionCheckpointCodec {
                 s.taskAttempt != 0 || s.pendingEffects.isNotEmpty())
                 invalid()
         }
+        s.effectReconciliation?.let { rec ->
+            val src = rec.sourceHead
+            if (!validId(rec.operatorId) ||
+                !listOf(rec.sourceCheckpointSha256, rec.sourceFenceSha256,
+                    rec.approvalMacSha256).all(::digest) ||
+                rec.sourceFenceGeneration !in 1L..256L ||
+                src.sessionId != s.sessionId || !validId(src.sessionId) ||
+                src.fenceGeneration != rec.sourceFenceGeneration ||
+                src.lastSequence != 0L ||
+                !listOf(src.admittedCheckpointSha256, src.toolAuthoritySha256,
+                    src.sidecarPathSha256, src.headMacSha256).all(::digest) ||
+                (s.effectJournalHead != null &&
+                    s.effectJournalHead.fenceGeneration <= rec.sourceFenceGeneration) ||
+                s.phase !in setOf("created", "accepted") ||
+                s.taskAttempt != 0 || s.pendingEffects.isNotEmpty())
+                invalid()
+        }
     }
 
     fun encode(s: SessionCheckpoint): ByteArray {
@@ -216,7 +235,11 @@ object SessionCheckpointCodec {
         val b = s.binding
         val root = buildJsonObject {
             put("kind", "host-checkpoint")
-            put("version", if (s.effectJournalHead == null) 1 else 2)
+            put("version", when {
+                s.effectReconciliation != null -> 3
+                s.effectJournalHead != null -> 2
+                else -> 1
+            })
             put("sequence", s.sequence)
             put("previousSha256", s.previousSha256?.let(::JsonPrimitive) ?: JsonNull)
             put("binding", buildJsonObject {
@@ -272,6 +295,8 @@ object SessionCheckpointCodec {
             put("journalHeadSha256", s.journalHeadSha256)
             put("journalFileSha256", s.journalFileSha256)
             put("lastTrustedJournalOffset", s.lastTrustedJournalOffset)
+            if (s.effectReconciliation != null && s.effectJournalHead == null)
+                put("effectJournalHead", JsonNull)
             s.effectJournalHead?.let { head ->
                 put("effectJournalHead", buildJsonObject {
                     put("sessionId", head.sessionId)
@@ -281,6 +306,25 @@ object SessionCheckpointCodec {
                     put("sidecarPathSha256", head.sidecarPathSha256)
                     put("lastSequence", head.lastSequence)
                     put("headMacSha256", head.headMacSha256)
+                })
+            }
+            s.effectReconciliation?.let { record ->
+                put("effectReconciliation", buildJsonObject {
+                    put("sourceCheckpointSha256", record.sourceCheckpointSha256)
+                    put("sourceFenceGeneration", record.sourceFenceGeneration)
+                    put("sourceFenceSha256", record.sourceFenceSha256)
+                    put("operatorId", record.operatorId)
+                    put("approvalMacSha256", record.approvalMacSha256)
+                    put("sourceHead", buildJsonObject {
+                        val head = record.sourceHead
+                        put("sessionId", head.sessionId)
+                        put("fenceGeneration", head.fenceGeneration)
+                        put("admittedCheckpointSha256", head.admittedCheckpointSha256)
+                        put("toolAuthoritySha256", head.toolAuthoritySha256)
+                        put("sidecarPathSha256", head.sidecarPathSha256)
+                        put("lastSequence", head.lastSequence)
+                        put("headMacSha256", head.headMacSha256)
+                    })
                 })
             }
         }
@@ -318,7 +362,7 @@ object SessionCheckpointCodec {
                 .decode(ByteBuffer.wrap(bytes)).toString()
             val root = obj(Json.parseToJsonElement(decoded))
             val version = long(root, "version")
-            if (version !in setOf(1L, 2L) ||
+            if (version !in setOf(1L, 2L, 3L) ||
                 string(root, "kind") != "host-checkpoint")
                 throw CheckpointUnconfirmed("CHECKPOINT_VERSION_UNSUPPORTED")
             val keys = arrayOf("kind", "version", "sequence", "previousSha256",
@@ -326,8 +370,11 @@ object SessionCheckpointCodec {
                 "taskState", "children", "acceptedArtifacts", "hostAssertedUsage",
                 "pendingEffects", "journalSequence", "journalHeadSha256",
                 "journalFileSha256", "lastTrustedJournalOffset")
-            val o = if (version == 1L) fields(root, *keys)
-                else fields(root, *keys, "effectJournalHead")
+            val o = when (version) {
+                1L -> fields(root, *keys)
+                2L -> fields(root, *keys, "effectJournalHead")
+                else -> fields(root, *keys, "effectJournalHead", "effectReconciliation")
+            }
             val b = fields(obj(o["binding"]), "policySha256", "workspaceIdentitySha256",
                 "gitHead", "gitBranch", "gitBaselineSha256", "graphId",
                 "graphGeneration", "frozenInputsSha256")
@@ -358,22 +405,34 @@ object SessionCheckpointCodec {
             if (attempt !in Int.MIN_VALUE..Int.MAX_VALUE ||
                 eventSequence !in Int.MIN_VALUE..Int.MAX_VALUE)
                 invalid()
-            val head = if (version == 2L) {
-                val h = fields(obj(o["effectJournalHead"]), "sessionId",
-                    "fenceGeneration", "admittedCheckpointSha256",
-                    "toolAuthoritySha256", "sidecarPathSha256", "lastSequence",
-                    "headMacSha256")
-                CheckpointEffectJournalHead(string(h, "sessionId"),
+            fun readHead(value: JsonElement?): CheckpointEffectJournalHead {
+                val h = fields(obj(value), "sessionId", "fenceGeneration",
+                    "admittedCheckpointSha256", "toolAuthoritySha256",
+                    "sidecarPathSha256", "lastSequence", "headMacSha256")
+                return CheckpointEffectJournalHead(string(h, "sessionId"),
                     long(h, "fenceGeneration"), string(h, "admittedCheckpointSha256"),
                     string(h, "toolAuthoritySha256"), string(h, "sidecarPathSha256"),
                     long(h, "lastSequence"), string(h, "headMacSha256"))
+            }
+            val head = if (version == 1L || (version == 3L &&
+                    o["effectJournalHead"] == JsonNull)) null
+                else readHead(o["effectJournalHead"])
+            val reconciliation = if (version == 3L) {
+                val rec = fields(obj(o["effectReconciliation"]),
+                    "sourceCheckpointSha256", "sourceFenceGeneration",
+                    "sourceFenceSha256", "operatorId", "approvalMacSha256",
+                    "sourceHead")
+                CheckpointEffectReconciliation(string(rec, "sourceCheckpointSha256"),
+                    long(rec, "sourceFenceGeneration"),
+                    string(rec, "sourceFenceSha256"), readHead(rec["sourceHead"]),
+                    string(rec, "operatorId"), string(rec, "approvalMacSha256"))
             } else null
             val s = SessionCheckpoint(long(o, "sequence"), nullableString(o, "previousSha256"),
                 binding, string(o, "sessionId"), string(o, "traceId"), string(o, "phase"),
                 string(o, "taskId"), attempt.toInt(), string(o, "taskState"),
                 children, artifacts, usage, effects, eventSequence.toInt(),
                 string(o, "journalHeadSha256"), string(o, "journalFileSha256"),
-                long(o, "lastTrustedJournalOffset"), head)
+                long(o, "lastTrustedJournalOffset"), head, reconciliation)
             if (!encode(s).contentEquals(bytes))
                 throw CheckpointUnconfirmed("CHECKPOINT_NONCANONICAL")
             return s
@@ -541,7 +600,9 @@ object SessionCheckpointStore {
         val checkpoint = SessionCheckpointCodec.decode(payload)
         return VerifiedSessionCheckpoint(checkpoint, SessionCheckpointCodec.sha256(payload),
             checkpoint.hostAssertedUsage.any { it.certainty == "unknown" } ||
-                checkpoint.pendingEffects.isNotEmpty() || checkpoint.effectJournalHead != null)
+                checkpoint.pendingEffects.isNotEmpty() ||
+                checkpoint.effectJournalHead != null ||
+                checkpoint.effectReconciliation != null)
     }
 
     /**
@@ -549,10 +610,25 @@ object SessionCheckpointStore {
      * silently retarget a previously published effect pin.
      */
     private fun pinnedHeadTransition(
-        previous: SessionCheckpoint?, next: SessionCheckpoint
+        previous: VerifiedSessionCheckpoint?, next: SessionCheckpoint
     ): Boolean {
-        val old = previous?.effectJournalHead ?: return true
-        val current = next.effectJournalHead ?: return false
+        val prior = previous?.snapshot ?: return next.effectReconciliation == null
+        val oldRec = prior.effectReconciliation
+        val newRec = next.effectReconciliation
+        if (oldRec != null && newRec != oldRec) return false
+        if (oldRec == null && newRec != null) {
+            // Exactly one explicit pinned -> reconciled boundary, never
+            // implicit pin deletion or a forged historical marker.
+            if (prior.effectJournalHead == null ||
+                next.effectJournalHead != null ||
+                newRec.sourceCheckpointSha256 != previous.sha256 ||
+                newRec.sourceHead != prior.effectJournalHead ||
+                newRec.sourceFenceGeneration != prior.effectJournalHead.fenceGeneration)
+                return false
+        }
+        val old = prior.effectJournalHead ?: return true
+        val current = next.effectJournalHead ?: return newRec != null &&
+            oldRec == null
         if (old.sessionId != current.sessionId ||
             old.fenceGeneration != current.fenceGeneration ||
             old.admittedCheckpointSha256 != current.admittedCheckpointSha256 ||
@@ -561,7 +637,7 @@ object SessionCheckpointStore {
             current.lastSequence < old.lastSequence)
             return false
         // The checkpoint reader has no HMAC key. A higher sequence must be
-        // checked against the actual RCEFX1 chain by inspectEffectHeadBound.
+        // authenticated against the actual RCEFX1 chain at bound inspection.
         return current.lastSequence != old.lastSequence ||
             current.headMacSha256 == old.headMacSha256
     }
@@ -621,8 +697,29 @@ object SessionCheckpointStore {
                     (s.journalSequence == previous.snapshot.journalSequence &&
                         (s.journalHeadSha256 != previous.snapshot.journalHeadSha256 ||
                             s.journalFileSha256 != previous.snapshot.journalFileSha256)) ||
-                    !pinnedHeadTransition(previous.snapshot, s))))
+                    !pinnedHeadTransition(previous, s))))
                 refuse("CHECKPOINT_CHAIN_MISMATCH")
+            s.effectReconciliation?.let { transition ->
+                if (transition.sourceCheckpointSha256 !in precedingCheckpointShas)
+                    refuse("CHECKPOINT_EFFECT_RECONCILIATION_SOURCE_MISMATCH")
+                val issuer = try {
+                    fencesByGeneration.getOrPut(transition.sourceFenceGeneration) {
+                        ResumeFenceStorage.atGeneration(directory,
+                            transition.sourceFenceGeneration)
+                    }
+                } catch (e: Exception) {
+                    throw CheckpointUnconfirmed(
+                        "CHECKPOINT_EFFECT_RECONCILIATION_FENCE_MISMATCH", e)
+                }
+                if (issuer.generation != transition.sourceFenceGeneration ||
+                    issuer.sha256 != transition.sourceFenceSha256 ||
+                    issuer.sessionId != s.sessionId ||
+                    issuer.traceId != s.traceId ||
+                    issuer.policySha256 != s.binding.policySha256 ||
+                    issuer.checkpointSha256 != transition.sourceHead.admittedCheckpointSha256 ||
+                    issuer.toolAuthoritySha256 != transition.sourceHead.toolAuthoritySha256)
+                    refuse("CHECKPOINT_EFFECT_RECONCILIATION_FENCE_MISMATCH")
+            }
             s.effectJournalHead?.let { head ->
                 if (head.admittedCheckpointSha256 !in precedingCheckpointShas)
                     refuse("CHECKPOINT_EFFECT_HEAD_ADMISSION_MISMATCH")
@@ -1001,7 +1098,12 @@ object SessionCheckpointStore {
             val previous = existing.lastOrNull()
             if (snapshot.effectJournalHead != pinnedHeadEvidence)
                 refuse("CHECKPOINT_EFFECT_HEAD_UNVERIFIED")
-            if (!pinnedHeadTransition(previous?.snapshot, snapshot))
+            // An ordinary save may retain an existing operator transition,
+            // but it can never mint, replace, or silently remove one.
+            if (snapshot.effectReconciliation !=
+                    previous?.snapshot?.effectReconciliation)
+                refuse("CHECKPOINT_EFFECT_RECONCILIATION_UNVERIFIED")
+            if (!pinnedHeadTransition(previous, snapshot))
                 refuse("CHECKPOINT_EFFECT_HEAD_ROLLBACK")
             if (expectedPreviousSha256 != previous?.sha256 ||
                 snapshot.sequence != (previous?.snapshot?.sequence ?: 0L) + 1L ||
@@ -1040,6 +1142,19 @@ object SessionCheckpointStore {
                     snapshot.journalSequence < previous.snapshot.journalSequence ||
                     snapshot.lastTrustedJournalOffset < previous.snapshot.lastTrustedJournalOffset))
                 refuse("CHECKPOINT_CHAIN_MISMATCH")
+            return publishGeneration(dir, snapshot, afterPhase, onPublicationStarted)
+        }
+    }
+
+    /**
+     * Already inside checkpoint.lock. Reuse the established publication
+     * protocol for both normal fenced saves and genesis-only reconciliation.
+     */
+    private fun publishGeneration(
+        dir: Path, snapshot: SessionCheckpoint,
+        afterPhase: (String) -> Unit = {},
+        onPublicationStarted: () -> Unit = {}
+    ): VerifiedSessionCheckpoint {
             val payload = SessionCheckpointCodec.encode(snapshot)
             val digest = MessageDigest.getInstance("SHA-256").digest(payload)
             val frame = ByteBuffer.allocate(MAGIC.size + 4 + 32 + payload.size)
@@ -1085,7 +1200,102 @@ object SessionCheckpointStore {
             val readback = readOne(destination)
             if (readback.snapshot != snapshot)
                 refuse("CHECKPOINT_WRITE_UNCONFIRMED")
-            readback
+            return readback
+    }
+
+    /**
+     * Exactly-once operator reconciliation for a *genesis-only* RCEFX1 head.
+     * Only callable while resume.lock is held by SessionResumeAdmission.
+     * The entire read, sidecar authentication, checkpoint v3 publication and
+     * downstream fence CAS are serialized by checkpoint.lock.
+     *
+     * A record with ANY Intent, Started, Committed or Unconfirmed is denied.
+     * We cannot classify unknown external outcomes without #105 verifier.
+     */
+    @OptIn(ResumeOperatorOnlyApi::class)
+    internal fun <T> withGenesisReconciliationEvidence(
+        directory: Path, context: CheckpointHostContext, ledgerPath: Path,
+        sidecarPath: Path, hostKey: ByteArray,
+        operator: GenesisEffectHeadReconciliation,
+        block: (Path, VerifiedSessionCheckpoint, VerifiedSessionEventLedger) -> T
+    ): T {
+        val dir = checkedAdmissionDirectory(directory, context)
+        return withLease(dir, create = false) {
+            if (!operator.operatorApproved ||
+                !ToolAuthorizationPolicy.validHostIdentifier(operator.operatorId) ||
+                hostKey.size < 32)
+                throw SessionResumeUnconfirmed("RESUME_EFFECT_RECONCILIATION_DENIED")
+            val all = readAll(dir)
+            val latest = all.lastOrNull() ?: refuse("CHECKPOINT_MISSING")
+            val pending = latest.snapshot.effectReconciliation
+            if (pending != null && latest.snapshot.effectJournalHead != null)
+                throw SessionResumeUnconfirmed("RESUME_EFFECT_RECONCILIATION_ALREADY_ADVANCED")
+            val source = if (pending == null) latest
+                else all.getOrNull(all.lastIndex - 1)
+                    ?: refuse("CHECKPOINT_EFFECT_RECONCILIATION_SOURCE_MISMATCH")
+            val head = source.snapshot.effectJournalHead
+                ?: throw SessionResumeUnconfirmed("RESUME_EFFECT_RECONCILIATION_NO_PIN")
+            val fence = ResumeFenceStorage.latest(dir)
+                ?: throw SessionResumeUnconfirmed("RESUME_EFFECT_RECONCILIATION_NO_FENCE")
+            ResumeFenceAnchor.verify(ledgerPath, fence, dir)
+            if (operator.expectedFenceGeneration != fence.generation ||
+                operator.expectedFenceGeneration != head.fenceGeneration ||
+                operator.expectedFenceSha256 != fence.sha256 ||
+                operator.expectedCheckpointSha256 != source.sha256 ||
+                operator.expectedHeadMacSha256 != head.headMacSha256 ||
+                head.sidecarPathSha256 != effectJournalPathSha256(sidecarPath) ||
+                head.sessionId != source.snapshot.sessionId ||
+                fence.checkpointSha256 != head.admittedCheckpointSha256 ||
+                fence.toolAuthoritySha256 != head.toolAuthoritySha256 ||
+                head.lastSequence != 0L)
+                throw SessionResumeUnconfirmed("RESUME_EFFECT_RECONCILIATION_CONTEXT_MISMATCH")
+
+            val ledger = inspectLedger(ledgerPath, context.workspaceRoot)
+            verify(latest.snapshot, context, ledger)
+            if (!PreExecutionSnapshotPolicy.safe(latest.snapshot) ||
+                PreExecutionPhasePolicy.phaseFromVerifiedHistory(
+                    latest.snapshot.phase, ledger.events) == null)
+                throw SessionResumeUnconfirmed("RESUME_EFFECT_RECONCILIATION_UNSAFE_BOUNDARY")
+            val physical = DurableEffectRecordJournal.inspectBound(
+                sidecarPath, context.workspaceRoot, hostKey, head.expectation(), head.pin())
+            if (physical.lastSequence != 0L || physical.entries.isNotEmpty())
+                throw SessionResumeUnconfirmed("RESUME_EFFECT_RECONCILIATION_EFFECT_PRESENT")
+
+            val unsigned = CheckpointEffectReconciliation(
+                source.sha256, fence.generation, fence.sha256, head,
+                operator.operatorId, "0".repeat(64))
+            val signed = GenesisEffectReconciliationSeal.seal(hostKey, unsigned,
+                source.snapshot)
+            val verified = if (pending != null) {
+                GenesisEffectReconciliationSeal.verify(hostKey, pending, source.snapshot)
+                if (pending != signed ||
+                    latest.snapshot.previousSha256 != source.sha256 ||
+                    latest.snapshot.effectJournalHead != null)
+                    throw SessionResumeUnconfirmed("RESUME_EFFECT_RECONCILIATION_CONFLICT")
+                latest
+            } else {
+                if (all.size >= MAX_GENERATIONS)
+                    refuse("CHECKPOINT_SIZE_INVALID")
+                val proposed = source.snapshot.copy(
+                    sequence = source.snapshot.sequence + 1L,
+                    previousSha256 = source.sha256,
+                    effectJournalHead = null,
+                    effectReconciliation = signed)
+                SessionCheckpointCodec.validate(proposed)
+                if (!pinnedHeadTransition(source, proposed))
+                    refuse("CHECKPOINT_EFFECT_RECONCILIATION_UNVERIFIED")
+                verify(proposed, context, ledger)
+                val published = publishGeneration(dir, proposed)
+                // Recheck the full chain under the same lock BEFORE a new fence
+                // may refer to this transition checkpoint.
+                val rebound = readAll(dir).lastOrNull()
+                    ?: refuse("CHECKPOINT_MISSING")
+                if (rebound.sha256 != published.sha256 ||
+                    rebound.snapshot != published.snapshot)
+                    refuse("CHECKPOINT_EFFECT_RECONCILIATION_UNCONFIRMED")
+                published
+            }
+            block(dir, verified, ledger)
         }
     }
 
