@@ -4,6 +4,9 @@ This is an opt-in host-only API in `:infra:journal`. It does **not** wire
 automatic restart into the CLI, enable replay of tool/model calls, or grant
 permissions by trusting a checkpoint. Issue #105 must reconcile uncertain
 external operations before broader resume boundaries become available.
+See the [effect intent and recovery contracts](EFFECT_INTENTS.md) for the
+pure policy, including the successor-generation non-start barrier requirement;
+no live effect reconciliation adapter is enabled here.
 
 ## Boundary and trusted inputs
 

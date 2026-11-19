@@ -51,9 +51,17 @@ only the verification port and a test double, not the real adapter.
   authenticated and ordered under the exact generation and operation ID,
   with the observed external result independently checked.
 - **ProvenNotStarted**: exactly one `Intent`, with an authenticated head-bound
-  `EffectNotStartedEvidence` independently proving non-execution or a
-  trustworthy execution barrier. Absence of `Started` alone is insufficient.
-- **Quarantined**: everything else, including a future issuing generation,
+  `EffectNotStartedEvidence` proving **both** a successor execution barrier
+  and actual non-execution. The policy requires `N < barrierFenceGeneration <=
+  currentFenceGeneration` for issuing generation N. The verifier receives
+  the current generation and MUST authenticate the barrier's effective fence,
+  its binding to the full host-MACed proof and the absence of any in-flight
+  or unfenced execution. Neither a missing `Started` nor a higher numeric
+  generation alone proves non-execution. Same-generation no-start proofs are
+  conservatively quarantined until a separate safe protocol is established.
+- **Quarantined**: everything else, including a future or invalid recovery
+  generation (`EFFECT_FUTURE_OR_INVALID_GENERATION`), a non-successor/
+  future no-start barrier (`EFFECT_NONSTART_BARRIER_INVALID`),
   reused operation ID, duplicate entries, a recorded
   `EffectRecord.Unconfirmed`, conflicting proofs, missing/unverifiable state,
   invalid sequence or verifier failure.
@@ -77,7 +85,9 @@ belong to a future adapter, not a permanent denial on every long session.
 ## Deferred work and acceptance
 
 The existing checkpoint `pendingEffects` and pre-execution fenced ledger
-have NOT been wired to these new types. A later PR must supply canonical
+have NOT been wired to these new types. The new barrier field and
+verifier method are a contract only: no effective OS fence, host authentication,
+execution exclusion or actual no-start proof is implemented here. A later PR must supply canonical
 serialization and physical host MAC verification, crash-safe durable append,
 whole-journal verification, authoritative external-state checks and no-start
 proofs, atomic receipt publication with the current resume lease, adapter

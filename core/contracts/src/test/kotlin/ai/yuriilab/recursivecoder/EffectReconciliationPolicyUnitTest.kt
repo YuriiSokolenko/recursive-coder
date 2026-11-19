@@ -25,8 +25,11 @@ class EffectReconciliationPolicyUnitTest {
             records.mapIndexed { index, record ->
                 EffectJournalEntry(index.toLong() + 1, record, mac)
             })
-    private fun proof(id: EffectIdentity = key, history: EffectJournalView) =
-        EffectNotStartedEvidence(id, history.headSha256, history.lastSequence, b, mac)
+    private fun proof(
+        id: EffectIdentity = key, history: EffectJournalView,
+        barrierGeneration: Long = id.fenceGeneration + 1L
+    ) = EffectNotStartedEvidence(id, history.headSha256, history.lastSequence,
+        barrierGeneration, b, mac)
 
     private class Verifier : HostEffectEvidenceVerifier {
         var historyValid = true
@@ -37,6 +40,8 @@ class EffectReconciliationPolicyUnitTest {
         var notStartedThrows = false
         var lastAuthenticatedGeneration: Long? = null
         var lastIssuedGeneration: Long? = null
+        var verifiedNotStartedGeneration: Long? = null
+        var verifiedBarrierGeneration: Long? = null
         override fun authenticateCompleteJournal(
             view: EffectJournalView, expected: EffectIdentity,
             currentFenceGeneration: Long
@@ -56,8 +61,11 @@ class EffectReconciliationPolicyUnitTest {
             return committedVerified
         }
         override fun independentlyVerifyNotStarted(
-            intent: EffectRecord.Intent, proof: EffectNotStartedEvidence
+            intent: EffectRecord.Intent, proof: EffectNotStartedEvidence,
+            currentFenceGeneration: Long
         ): Boolean {
+            verifiedNotStartedGeneration = currentFenceGeneration
+            verifiedBarrierGeneration = proof.barrierFenceGeneration
             if (notStartedThrows) error("unavailable")
             return absentVerified
         }
@@ -90,10 +98,10 @@ class EffectReconciliationPolicyUnitTest {
             "EFFECT_NOT_STARTED_UNPROVEN")
         assertEquals(EffectRecoveryOutcome.ProvenNotStarted(proof(history = history)),
             recover(key, history, Verifier(),
-                proof(history = history)))
+                proof(history = history), currentGeneration = 4L))
         blocked(recover(key, history,
-            Verifier().apply { absentVerified = false }, proof(history = history)),
-            "EFFECT_NOT_STARTED_UNPROVEN")
+            Verifier().apply { absentVerified = false }, proof(history = history),
+            currentGeneration = 4L), "EFFECT_NOT_STARTED_UNPROVEN")
     }
 
     @Test fun startedWithoutReceiptAndUnconfirmedAreAlwaysQuarantined() {
@@ -113,9 +121,9 @@ class EffectReconciliationPolicyUnitTest {
     @Test fun staleGenerationAndReusedOperationIdCannotChooseAWinningHistory() {
         // The issuing fence is in the FUTURE relative to the recovery lease.
         blocked(recover(key, view(intent(), started(), committed()), Verifier(),
-            currentGeneration = 2L), "EFFECT_STALE_GENERATION")
+            currentGeneration = 2L), "EFFECT_FUTURE_OR_INVALID_GENERATION")
         blocked(recover(key, view(intent(), started(), committed()), Verifier(),
-            currentGeneration = 0L), "EFFECT_STALE_GENERATION")
+            currentGeneration = 0L), "EFFECT_FUTURE_OR_INVALID_GENERATION")
         val stale = key.copy(fenceGeneration = 2)
         blocked(recover(key, view(intent(stale)), Verifier()),
             "EFFECT_STALE_OR_REUSED_OPERATION")
@@ -188,8 +196,8 @@ class EffectReconciliationPolicyUnitTest {
         blocked(recover(key, history,
             Verifier().apply { commitThrows = true }), "EFFECT_COMMIT_UNVERIFIED")
         blocked(recover(key, absent,
-            Verifier().apply { notStartedThrows = true }, proof(history = absent)),
-            "EFFECT_NOT_STARTED_UNPROVEN")
+            Verifier().apply { notStartedThrows = true }, proof(history = absent),
+            currentGeneration = 4L), "EFFECT_NOT_STARTED_UNPROVEN")
     }
 
     @Test fun unrelatedOperationsDoNotHideDuplicateIdsOrCorruptOrdering() {
@@ -222,14 +230,54 @@ class EffectReconciliationPolicyUnitTest {
         assertEquals(4L, verifier.lastAuthenticatedGeneration)
 
         val intentOnly = view(intent())
+        val notStartedVerifier = Verifier()
         assertIs<EffectRecoveryOutcome.ProvenNotStarted>(
-            recover(key, intentOnly, Verifier(), proof(history = intentOnly),
+            recover(key, intentOnly, notStartedVerifier, proof(history = intentOnly),
                 currentGeneration = 5L))
+        assertEquals(5L, notStartedVerifier.verifiedNotStartedGeneration)
+        assertEquals(4L, notStartedVerifier.verifiedBarrierGeneration)
         // Even a valid historical record must not bypass an unavailable
         // historical fence / current lease verification.
         blocked(recover(key, historical,
             Verifier().apply { historyValid = false }, currentGeneration = 4L),
             "EFFECT_HISTORY_UNVERIFIED")
+    }
+
+    @Test fun noStartProofRequiresNewerBarrierWithinAuthenticatedRecoveryGeneration() {
+        val history = view(intent())
+        val verifier = Verifier()
+        val oldBarrier = proof(history = history, barrierGeneration = 2L)
+        blocked(recover(key, history, verifier, oldBarrier, currentGeneration = 5L),
+            "EFFECT_NONSTART_BARRIER_INVALID")
+        // Even a same-generation barrier is not proof against a zombie
+        // executor from the issuing lease in this conservative contract.
+        blocked(recover(key, history, verifier,
+            proof(history = history, barrierGeneration = 3L), currentGeneration = 5L),
+            "EFFECT_NONSTART_BARRIER_INVALID")
+        blocked(recover(key, history, verifier,
+            proof(history = history, barrierGeneration = 6L), currentGeneration = 5L),
+            "EFFECT_NONSTART_BARRIER_INVALID")
+        blocked(recover(key, history, verifier,
+            proof(history = history, barrierGeneration = 0L), currentGeneration = 5L),
+            "EFFECT_NONSTART_BARRIER_INVALID")
+        // No invalid barrier may ever reach the external no-start verifier.
+        assertEquals(null, verifier.verifiedNotStartedGeneration)
+
+        val valid = proof(history = history, barrierGeneration = 4L)
+        assertIs<EffectRecoveryOutcome.ProvenNotStarted>(
+            recover(key, history, verifier, valid, currentGeneration = 4L))
+        assertEquals(4L, verifier.verifiedNotStartedGeneration)
+        assertEquals(4L, verifier.verifiedBarrierGeneration)
+        blocked(recover(key, history, Verifier().apply { absentVerified = false },
+            valid, currentGeneration = 5L), "EFFECT_NOT_STARTED_UNPROVEN")
+    }
+
+    @Test fun sameGenerationNonStartIsConservativelyQuarantinedButCommitStillRecognized() {
+        val history = view(intent())
+        blocked(recover(key, history, Verifier(), proof(history = history)),
+            "EFFECT_NONSTART_BARRIER_INVALID")
+        assertIs<EffectRecoveryOutcome.ConfirmedCommitted>(
+            recover(key, view(intent(), started(), committed()), Verifier()))
     }
 
     @Test fun projectionAllowsUnrelatedGapsOnlyWithAuthoritativeVerification() {
@@ -254,11 +302,11 @@ class EffectReconciliationPolicyUnitTest {
             "EFFECT_INVALID_HISTORY")
         val intentOnly = view(intent())
         blocked(recover(key, intentOnly, Verifier(),
-            proof(history = intentOnly).copy(observedStateSha256 = "wrong")),
-            "EFFECT_NONSTART_PROOF_MISMATCH")
+            proof(history = intentOnly).copy(observedStateSha256 = "wrong"),
+            currentGeneration = 4L), "EFFECT_NONSTART_PROOF_MISMATCH")
         blocked(recover(key, intentOnly, Verifier(),
-            proof(history = intentOnly).copy(hostMacSha256 = "wrong")),
-            "EFFECT_NONSTART_PROOF_MISMATCH")
+            proof(history = intentOnly).copy(hostMacSha256 = "wrong"),
+            currentGeneration = 4L), "EFFECT_NONSTART_PROOF_MISMATCH")
     }
 
     @Test fun longAuthenticatedProjectionsDoNotHitArtificialTenThousandEntryCliff() {

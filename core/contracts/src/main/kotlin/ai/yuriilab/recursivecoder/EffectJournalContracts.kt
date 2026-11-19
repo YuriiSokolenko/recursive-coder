@@ -68,13 +68,17 @@ data class EffectJournalView(
 
 /**
  * Explicit host evidence that the effect could not have begun, not merely a
- * missing STARTED marker. Must bind an authoritative journal head AND an
- * independently checked execution barrier / external absence proof.
+ * missing STARTED marker. Binds both the authoritative journal head and the
+ * generation of a host-verified execution barrier that supersedes the issuing
+ * lease. A generation number or MAC-shaped string is NOT itself such a barrier.
+ *
+ * Host MAC verification must cover every field, including barrierFenceGeneration.
  */
 data class EffectNotStartedEvidence(
     val identity: EffectIdentity,
     val journalHeadSha256: String,
     val journalLastSequence: Long,
+    val barrierFenceGeneration: Long,
     val observedStateSha256: String,
     val hostMacSha256: String
 )
@@ -91,9 +95,13 @@ data class EffectNotStartedEvidence(
  * the immutable fence chain up to the current generation and that the caller
  * owns the current host generation; currentFenceGeneration is not self-authenticating.
  * independentlyVerifyCommitted rechecks the actual external result
- * against the committed receipt. independentlyVerifyNotStarted must establish
- * that execution was impossible or that exact non-execution is independently
- * proven, and authenticate its head-bound evidence.
+ * against the committed receipt. independentlyVerifyNotStarted MUST verify
+ * that the named barrier is an authentic, effective successor fence, the
+ * current recovery lease is authentic, and the old executor cannot begin an
+ * effect after that barrier. It must authenticate the entire proof including
+ * its journal head, barrier generation and observed external state, and prove
+ * actual non-execution. A numeric successor fence alone cannot exclude an
+ * effect already in flight or an unfenced external process.
  *
  * A verifier exception or unavailable external proof fails closed.
  */
@@ -110,7 +118,8 @@ interface HostEffectEvidenceVerifier {
     ): Boolean
     fun independentlyVerifyNotStarted(
         intent: EffectRecord.Intent,
-        proof: EffectNotStartedEvidence
+        proof: EffectNotStartedEvidence,
+        currentFenceGeneration: Long
     ): Boolean
 }
 
@@ -171,7 +180,7 @@ object EffectReconciliationPolicy {
         // A crash-tail operation was issued under N and may be inspected under
         // a newly acquired lease N+1. The current lease grants no effect replay.
         if (currentFenceGeneration <= 0L || expected.fenceGeneration > currentFenceGeneration)
-            return uncertain("EFFECT_STALE_GENERATION")
+            return uncertain("EFFECT_FUTURE_OR_INVALID_GENERATION")
         if (!sha256.matches(view.headSha256) || view.lastSequence <= 0L)
             return uncertain("EFFECT_INVALID_HISTORY")
         var previousSequence = 0L
@@ -212,8 +221,14 @@ object EffectReconciliationPolicy {
                 !sha256.matches(proof.observedStateSha256) ||
                 !sha256.matches(proof.hostMacSha256))
                 return uncertain("EFFECT_NONSTART_PROOF_MISMATCH")
+            // Non-start may only be established after an independently checked
+            // successor execution barrier. Same-generation proof is deliberately
+            // not a safe recovery classification in this first slice.
+            if (proof.barrierFenceGeneration <= expected.fenceGeneration ||
+                proof.barrierFenceGeneration > currentFenceGeneration)
+                return uncertain("EFFECT_NONSTART_BARRIER_INVALID")
             val verified = try {
-                verifier.independentlyVerifyNotStarted(intent, proof)
+                verifier.independentlyVerifyNotStarted(intent, proof, currentFenceGeneration)
             } catch (_: Exception) { false }
             return if (verified) EffectRecoveryOutcome.ProvenNotStarted(proof)
                 else uncertain("EFFECT_NOT_STARTED_UNPROVEN")
