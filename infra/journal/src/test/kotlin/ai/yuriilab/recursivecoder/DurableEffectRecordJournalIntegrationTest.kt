@@ -43,7 +43,7 @@ class DurableEffectRecordJournalIntegrationTest : SessionCheckpointTestFixture()
     private fun inspectEffects() = DurableEffectRecordJournal.inspect(path(), workspace(), key)
 
     private fun denied(code: String, action: () -> Unit) {
-        assertEquals(code, assertFailsWith<EffectJournalStorageUnconfirmed>(action).code)
+        assertEquals(code, assertFailsWith<EffectJournalStorageUnconfirmed>(block = action).code)
     }
 
     @Test fun fsyncedIntentStartAndReceiptHaveRealMacsAndCanBeReplayedReadOnly() {
