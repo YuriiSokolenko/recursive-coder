@@ -40,7 +40,7 @@ class DurableEffectRecordJournalIntegrationTest : SessionCheckpointTestFixture()
     private fun open(lease: SessionResumeLease) =
         DurableEffectRecordJournal.create(path(), workspace(), id.sessionId, key, lease)
 
-    private fun inspect() = DurableEffectRecordJournal.inspect(path(), workspace(), key)
+    private fun inspectEffects() = DurableEffectRecordJournal.inspect(path(), workspace(), key)
 
     private fun denied(code: String, action: () -> Unit) {
         assertEquals(code, assertFailsWith<EffectJournalStorageUnconfirmed>(action).code)
@@ -54,10 +54,10 @@ class DurableEffectRecordJournalIntegrationTest : SessionCheckpointTestFixture()
                 assertEquals(64, first.hostMacSha256.length)
                 journal.append(started())
                 journal.append(committed())
-                denied("EFFECT_JOURNAL_BUSY") { inspect() }
+                denied("EFFECT_JOURNAL_BUSY") { inspectEffects() }
             }
         }
-        val verified = inspect()
+        val verified = inspectEffects()
         assertEquals(3L, verified.lastSequence)
         assertEquals(listOf(intent(), started(), committed()),
             verified.entries.map { it.record })
@@ -77,7 +77,7 @@ class DurableEffectRecordJournalIntegrationTest : SessionCheckpointTestFixture()
             }
         }
         assertEquals(listOf(intent(), started(), unknown()),
-            inspect().entries.map { it.record })
+            inspectEffects().entries.map { it.record })
     }
 
     @Test fun duplicateAndMissingStagesCannotReachDisk() {
@@ -95,7 +95,7 @@ class DurableEffectRecordJournalIntegrationTest : SessionCheckpointTestFixture()
                 journal.append(started())
             }
         }
-        assertEquals(listOf(intent(), started()), inspect().entries.map { it.record })
+        assertEquals(listOf(intent(), started()), inspectEffects().entries.map { it.record })
     }
 
     @Test fun wrongSecretAndChangedRecordBytesFailAuthentication() {
@@ -110,7 +110,7 @@ class DurableEffectRecordJournalIntegrationTest : SessionCheckpointTestFixture()
         val payloadIndex = 7 + 4 + 32 + 14
         bytes[payloadIndex] = (bytes[payloadIndex].toInt() xor 1).toByte()
         Files.write(path(), bytes, StandardOpenOption.TRUNCATE_EXISTING)
-        denied("EFFECT_JOURNAL_AUTH_FAILED") { inspect() }
+        denied("EFFECT_JOURNAL_AUTH_FAILED") { inspectEffects() }
     }
 
     @Test fun tornTailIsNotRepairedOrAcceptedAsAValidPrefix() {
@@ -123,7 +123,7 @@ class DurableEffectRecordJournalIntegrationTest : SessionCheckpointTestFixture()
         val bytes = Files.readAllBytes(path())
         Files.write(path(), bytes.copyOf(bytes.size - 1),
             StandardOpenOption.TRUNCATE_EXISTING)
-        denied("EFFECT_JOURNAL_TRUNCATED") { inspect() }
+        denied("EFFECT_JOURNAL_TRUNCATED") { inspectEffects() }
         assertEquals(bytes.size - 1L, Files.size(path()))
     }
 
@@ -142,7 +142,7 @@ class DurableEffectRecordJournalIntegrationTest : SessionCheckpointTestFixture()
         }
         // Disk record can exist even though append did NOT acknowledge it.
         // Inspection is evidence of bytes, not approval/replay authority.
-        assertEquals(listOf(intent()), inspect().entries.map { it.record })
+        assertEquals(listOf(intent()), inspectEffects().entries.map { it.record })
     }
 
     @Test fun closedOrRevokedLeaseCannotAcknowledgeNewEffectRecords() {
@@ -152,7 +152,7 @@ class DurableEffectRecordJournalIntegrationTest : SessionCheckpointTestFixture()
             assertFailsWith<SessionResumeUnconfirmed> { journal.append(intent()) }
             journal.close()
         }
-        assertEquals(0L, inspect().lastSequence)
+        assertEquals(0L, inspectEffects().lastSequence)
     }
 
     @Test fun privateDirectoryMissingLockAndNoOverwriteAreFailClosed() {
@@ -171,7 +171,7 @@ class DurableEffectRecordJournalIntegrationTest : SessionCheckpointTestFixture()
         }
         val lockFile = path().resolveSibling("effects.rcfx.lock")
         Files.delete(lockFile)
-        denied("EFFECT_JOURNAL_LOCK_UNAVAILABLE") { inspect() }
+        denied("EFFECT_JOURNAL_LOCK_UNAVAILABLE") { inspectEffects() }
         assertFalse(Files.exists(lockFile, LinkOption.NOFOLLOW_LINKS),
             "Read-only inspection must not recreate lock")
     }
@@ -185,6 +185,6 @@ class DurableEffectRecordJournalIntegrationTest : SessionCheckpointTestFixture()
             denied("EFFECT_JOURNAL_PATH_CHANGED") { writer.append(intent()) }
             writer.close()
         }
-        denied("EFFECT_JOURNAL_VERSION_INVALID") { inspect() }
+        denied("EFFECT_JOURNAL_VERSION_INVALID") { inspectEffects() }
     }
 }
