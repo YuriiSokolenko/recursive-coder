@@ -175,7 +175,7 @@ internal object EffectJournalHeadAnchor {
         val prefix = "effect-head-" + String.format(Locale.ROOT, "%012d", header.fenceGeneration) + "-"
         Files.newDirectoryStream(checkpointDir).use { files ->
             val actual = files.filter { it.fileName.toString().startsWith(prefix) }.toList()
-            if (actual.size != expected.lastSequence + 1L ||
+            if (actual.size.toLong() != expected.lastSequence + 1L ||
                 actual.any { !namePattern.matches(it.fileName.toString()) })
                 fail("EFFECT_ANCHOR_CHAIN_MISMATCH")
         }
