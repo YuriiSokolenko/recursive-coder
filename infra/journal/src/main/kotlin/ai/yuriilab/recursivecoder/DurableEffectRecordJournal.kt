@@ -47,6 +47,16 @@ data class EffectJournalExpectation(
     val toolAuthoritySha256: String
 )
 
+/**
+ * A sequence/MAC expected value retained by a separate trusted host root.
+ * Constructing this from the inspected sidecar does NOT establish integrity
+ * against a complete valid suffix rollback; provenance is a caller obligation.
+ */
+data class EffectJournalHeadPin(
+    val lastSequence: Long,
+    val headMacSha256: String
+)
+
 enum class EffectJournalTailKind { SHORT_FRAME, ZERO_FILLED }
 
 data class VerifiedEffectRecordJournal(
@@ -79,8 +89,6 @@ class DurableEffectRecordJournal private constructor(
     private val header: EffectJournalHeader,
     private val key: ByteArray,
     private val fileKey: Any?,
-    private val headAnchorDirectory: Path,
-    private var persistedHead: EffectJournalHeadPin,
     genesisMac: ByteArray
 ) : AutoCloseable {
     private val entries = mutableListOf<EffectJournalEntry>()
@@ -381,12 +389,8 @@ class DurableEffectRecordJournal private constructor(
                         FileChannel.open(file.parent, StandardOpenOption.READ).use { it.force(true) }
                         val inode = Files.readAttributes(file, BasicFileAttributes::class.java,
                             LinkOption.NOFOLLOW_LINKS).fileKey()
-                        val anchorDirectory = lease.effectHeadAnchorDirectory()
-                        val pinned = EffectJournalHeadAnchor.publish(
-                            anchorDirectory, header, file, 0L,
-                            genesisMac.toHex(), null)
                         DurableEffectRecordJournal(file, channel, lockChannel, lock,
-                            lease, header, derived, inode, anchorDirectory, pinned, genesisMac)
+                            lease, header, derived, inode, genesisMac)
                     } catch (e: Exception) {
                         try { channel?.close() } catch (c: Exception) { e.addSuppressed(c) }
                         try { release(file, lockChannel, lock) }
@@ -433,23 +437,28 @@ class DurableEffectRecordJournal private constructor(
             expectedToolAuthoritySha256, allowTornTail = true)
 
         /**
-         * Check an independently trusted checkpoint-directory head pin in
-         * addition to every HMAC'd sidecar frame. The pinned SHA MUST come
-         * from a separately trusted durable checkpoint/anchor root; a pin
-         * copied from these very files cannot detect whole-directory rollback.
-         * This is NOT a HostEffectEvidenceVerifier or execution permission.
+         * Require the exact head that the trusted host pinned BEFORE any
+         * external effect. The caller must load that expectation from a
+         * separately authenticated, durable checkpoint/authority root.
+         * This method NEVER derives a pin from the sidecar and cannot prove
+         * that the supplied pin itself was durably committed.
+         *
+         * A valid extra frame (for example, after a crash between sidecar
+         * fsync and checkpoint-pin publication) also fails closed.
+         * The operator diagnostics API may inspect such a frame, but cannot
+         * authorize a retry, reconciliation or checkpoint acceptance.
          */
         fun inspectBound(
             path: Path, workspaceRoot: Path, hostKey: ByteArray,
-            expected: EffectJournalExpectation, checkpointDirectory: Path,
-            trustedPin: EffectJournalHeadPin
+            expected: EffectJournalExpectation, trustedPin: EffectJournalHeadPin
         ): VerifiedEffectRecordJournal {
+            if (trustedPin.lastSequence < 0L ||
+                !digestPattern.matches(trustedPin.headMacSha256))
+                refuse("EFFECT_JOURNAL_PIN_INVALID")
             val journal = inspect(path, workspaceRoot, hostKey, expected)
             if (journal.lastSequence != trustedPin.lastSequence ||
                 journal.headMacSha256 != trustedPin.headMacSha256)
-                refuse("EFFECT_ANCHOR_HEAD_MISMATCH")
-            EffectJournalHeadAnchor.verify(checkpointDirectory, journal.header,
-                path, trustedPin)
+                refuse("EFFECT_JOURNAL_PIN_MISMATCH")
             return journal
         }
 
@@ -612,11 +621,6 @@ class DurableEffectRecordJournal private constructor(
                 afterPhase("record-written")
                 channel.force(true)
                 afterPhase("forced-before-ack")
-                // The independently persisted anchor is a mandatory
-                // durability step BEFORE acknowledging this effect record.
-                persistedHead = EffectJournalHeadAnchor.publish(
-                    headAnchorDirectory, header, path, seq, mac.toHex(),
-                    persistedHead.anchorSha256)
             } catch (error: Throwable) {
                 poisoned = true
                 throw EffectJournalStorageUnconfirmed("EFFECT_JOURNAL_APPEND_UNCONFIRMED", error)
@@ -628,17 +632,6 @@ class DurableEffectRecordJournal private constructor(
                     latestByOperation[record.identity.operationId] = record
                 }
         }
-    }
-
-    /**
-     * A host may separately pin this authenticated head in its trusted
-     * checkpoint/authority root. This return value by itself is NOT an
-     * independent rollback-proof authority or an effect execution grant.
-     */
-    @Synchronized fun currentHeadPin(): EffectJournalHeadPin {
-        if (closed || poisoned)
-            throw EffectJournalStorageUnconfirmed("EFFECT_JOURNAL_WRITER_UNAVAILABLE")
-        return persistedHead
     }
 
     /**

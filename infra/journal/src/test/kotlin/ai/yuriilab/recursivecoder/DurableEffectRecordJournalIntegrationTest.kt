@@ -312,83 +312,95 @@ class DurableEffectRecordJournalIntegrationTest : SessionCheckpointTestFixture()
     }
 
 
-    @Test fun immutableCheckpointDirectoryAnchorsCoverEveryConfirmedHead() {
-        lateinit var pin: EffectJournalHeadPin
+    @Test fun externallyTrustedHeadDetectsCompleteSuffixRollback() {
+        lateinit var trusted: EffectJournalHeadPin
         withLease { lease ->
             open(lease).use { journal ->
-                val genesis = journal.currentHeadPin()
-                assertEquals(0L, genesis.lastSequence)
-                assertEquals(64, genesis.anchorSha256.length)
                 journal.append(intent())
-                journal.append(started())
-                journal.append(committed())
-                pin = journal.currentHeadPin()
-                assertEquals(3L, pin.lastSequence)
-                assertEquals(64, pin.anchorSha256.length)
+                val receipt = journal.append(started())
+                trusted = EffectJournalHeadPin(receipt.sequence, receipt.hostMacSha256)
             }
         }
-        val verified = DurableEffectRecordJournal.inspectBound(
-            path(), workspace(), key, expectation(), store(), pin)
-        assertEquals(3L, verified.lastSequence)
-        assertEquals(pin.headMacSha256, verified.headMacSha256)
-        for (seq in 0L..3L) {
-            val name = "effect-head-000000000001-" +
-                seq.toString().padStart(12, '0') + ".rca"
-            assertTrue(Files.isRegularFile(store().resolve(name), LinkOption.NOFOLLOW_LINKS))
-        }
-        denied("EFFECT_ANCHOR_PIN_MISMATCH") {
+        assertEquals(2L, DurableEffectRecordJournal.inspectBound(
+            path(), workspace(), key, expectation(), trusted).lastSequence)
+        denied("EFFECT_JOURNAL_PIN_MISMATCH") {
             DurableEffectRecordJournal.inspectBound(path(), workspace(), key,
-                expectation(), store(), pin.copy(anchorSha256 = "0".repeat(64)))
+                expectation(), trusted.copy(headMacSha256 = "0".repeat(64)))
         }
-    }
-
-    @Test fun removedFullRecordOrAnchorCannotPassExternallyPinnedHead() {
-        lateinit var pin: EffectJournalHeadPin
-        withLease { lease ->
-            open(lease).use { journal ->
-                journal.append(intent())
-                journal.append(started())
-                pin = journal.currentHeadPin()
-            }
+        denied("EFFECT_JOURNAL_PIN_INVALID") {
+            DurableEffectRecordJournal.inspectBound(path(), workspace(), key,
+                expectation(), trusted.copy(lastSequence = -1L))
         }
-        val lastAnchor = store().resolve("effect-head-000000000001-000000000002.rca")
-        Files.delete(lastAnchor)
-        denied("EFFECT_ANCHOR_CHAIN_MISMATCH") {
-            DurableEffectRecordJournal.inspectBound(
-                path(), workspace(), key, expectation(), store(), pin)
-        }
-
         val raw = Files.readAllBytes(path())
         var offset = 7
-        // Keep only genesis and the complete intent; remove the second effect.
+        // Keep genesis and complete intent, discard the complete Started frame.
         repeat(2) {
             val size = ByteBuffer.wrap(raw, offset, 4).int
             offset += 36 + size
         }
         Files.write(path(), raw.copyOf(offset), StandardOpenOption.TRUNCATE_EXISTING)
         assertEquals(1L, inspectEffects().lastSequence)
-        denied("EFFECT_ANCHOR_HEAD_MISMATCH") {
+        denied("EFFECT_JOURNAL_PIN_MISMATCH") {
             DurableEffectRecordJournal.inspectBound(
-                path(), workspace(), key, expectation(), store(), pin)
+                path(), workspace(), key, expectation(), trusted)
+        }
+        // There is no independent durable pin in the checkpoint schema yet.
+        // The fixture's 'trusted' value stands in for an externally stored pin.
+    }
+
+    @Test fun validUnpinnedExtraFrameMustNotBePromotedToCommittedHead() {
+        lateinit var prior: EffectJournalHeadPin
+        withLease { lease ->
+            open(lease).use { journal ->
+                val first = journal.append(intent())
+                prior = EffectJournalHeadPin(first.sequence, first.hostMacSha256)
+                journal.append(started())
+            }
+        }
+        assertEquals(2L, inspectEffects().lastSequence)
+        denied("EFFECT_JOURNAL_PIN_MISMATCH") {
+            DurableEffectRecordJournal.inspectBound(
+                path(), workspace(), key, expectation(), prior)
         }
     }
 
-    @Test fun changedIndependentAnchorCannotPassPinnedRecoveryInspection() {
-        lateinit var pin: EffectJournalHeadPin
-        withLease { lease ->
+    @Test fun effectJournalDoesNotBrickCheckpointInspectionFencedSaveOrNextAdmission() {
+        val first = createPreExecutionCheckpoint()
+        SessionResumeAdmission.admit(store(), context(), ledger(), resumeAttestation()).use {
+            lease ->
             open(lease).use { journal ->
                 journal.append(intent())
-                pin = journal.currentHeadPin()
+                journal.append(started())
             }
+            assertEquals(first.sha256, inspect().sha256)
+            val next = SessionCheckpointStore.saveFenced(
+                lease, store(), context(), ledger(),
+                first.snapshot.copy(sequence = 2L, previousSha256 = first.sha256),
+                first.sha256)
+            assertEquals(2L, next.snapshot.sequence)
+            assertEquals(next.sha256, inspect().sha256)
         }
-        val anchor = store().resolve("effect-head-000000000001-000000000001.rca")
-        val raw = Files.readAllBytes(anchor)
-        raw[10] = (raw[10].toInt() xor 1).toByte()
-        Files.write(anchor, raw, StandardOpenOption.TRUNCATE_EXISTING)
-        denied("EFFECT_ANCHOR_CORRUPT") {
-            DurableEffectRecordJournal.inspectBound(
-                path(), workspace(), key, expectation(), store(), pin)
+        SessionResumeAdmission.admit(
+            store(), context(), ledger(), resumeAttestation(1L)).use {
+            assertEquals(2L, it.generation)
+            it.assertCurrent()
         }
+        val names = Files.list(store()).use { stream ->
+            stream.map { it.fileName.toString() }.toList()
+        }
+        assertTrue(names.none { it.startsWith("effect-head-") ||
+            it.startsWith(".effect-anchor-") })
+        assertEquals(listOf(intent(), started()), inspectEffects().entries.map { it.record })
+    }
+
+    @Test fun lengthWrittenWithZeroedBodyIsNotAZeroFilledDiagnosticTail() {
+        withLease { lease -> open(lease).use { it.append(intent()) } }
+        // Length was durably written; only the MAC/body are zero. Do NOT
+        // treat this as an all-zero frame and silently accept it as a crash.
+        val partial = ByteBuffer.allocate(4 + 32 + 32).putInt(32).array()
+        Files.write(path(), partial, StandardOpenOption.APPEND)
+        denied("EFFECT_JOURNAL_AUTH_FAILED") { inspectEffects() }
+        denied("EFFECT_JOURNAL_AUTH_FAILED") { inspectDiagnostic() }
     }
 
     @Test fun zeroFilledExtendedTailIsDiagnosticOnlyAndKeepsVerifiedPrefix() {

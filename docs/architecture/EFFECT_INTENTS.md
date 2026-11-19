@@ -108,9 +108,10 @@ HMAC-authenticated *genesis* JSON payload containing the exact `sessionId`,
 The provided session ID must match the lease's trusted session. Even an
 empty event stream has a verifiable genesis identity and a keyed head.
 Subsequent frames are effect entries of the same session and issuing
-generation N. `inspect` requires an expected session ID and can additionally
-enforce expected N, checkpoint SHA, and authority SHA. The genesis binds
-identities **inside this file** only; a later adapter still must independently
+generation N. Strict `inspect` requires the full
+`EffectJournalExpectation` (session ID, N, checkpoint SHA and authority SHA)
+rather than optional expected fields. The genesis binds identities
+**inside this file** only; a later adapter still must independently
 verify the issuing fence and checkpoint chain on disk.
 
 Every frame is `int32 payload length | 32-byte HMAC-SHA256 tag |
@@ -144,8 +145,11 @@ and `ZERO_FILLED` (all remaining bytes from the first incomplete frame are
 `verifiedByteLength` and physical `byteLength`, retaining the authenticated
 prefix without repairing, truncating or authorizing any operation. **Even
 all-zero bytes could be deliberate tampering, not a proven crash.**
-Strict `inspect` rejects both; a torn genesis, a nonzero MAC mismatch,
-a noncanonical payload or illegal transition rejects even diagnostics.
+A partially written frame with a nonzero length and a zeroed MAC/body
+is *not* classified as `ZERO_FILLED` and fails MAC verification.
+Strict `inspect` rejects both tail classes; a torn genesis, a nonzero
+MAC mismatch, a noncanonical payload or illegal transition rejects
+even diagnostics.
 
 The returned authenticated header, entry list, keyed head and file digest
 are **diagnostic physical-file evidence only**, NOT the checkpoint-anchored
@@ -171,44 +175,62 @@ uncertain post-fsync acknowledgement, duplicate operations, stale lease,
 live/missing/symlinked lock, workspace directory safety, path substitution,
 and lease retirement.
 
-## Checkpoint-directory effect-head receipts (next bounded slice)
+## Trusted-head comparison (bounded inspection; no checkpoint integration)
 
-When the host creates an effect journal, it durably publishes an immutable
-genesis head receipt (`effect-head-<generation>-000000000000.rca`) in the
-existing private checkpoint directory. Each subsequently acknowledged effect
-append is fsynced to the sidecar **and then** published as an immutable,
-hash-chained head receipt in the checkpoint directory before the caller gets
-an acknowledgement. The receipt contains the full genesis context,
-normalized absolute sidecar path hash, effect sequence, HMAC head and prior
-receipt SHA-256. Publication uses a forced temporary file, same-directory
-hard link, and parent-directory fsync. An uncertain publication poisons the
-writer; never truncate/repair the sidecar or claim a confirmed effect.
+The earlier proposal to write one `effect-head-*.rca` file for every
+effect was **removed after PR #127 security review**. It made the
+checkpoint directory unreadable to `SessionCheckpointStore.readAll`,
+created orphanable temporary files, added a file fsync / hard-link /
+directory fsync for every effect record, and gave **no additional
+anti-rollback guarantee** over a genuinely trusted `(sequence, MAC)`
+pin. Ordinary journal creation and append do not write anything into
+the checkpoint directory. Existing checkpoint name validation stays
+strict and unmodified.
 
-`DurableEffectRecordJournal.inspectBound` checks a strict physical
-journal against a mandatory `EffectJournalExpectation`, a trusted
-`EffectJournalHeadPin` (last sequence, head MAC, head receipt SHA), and the
-complete independent checkpoint-directory receipt chain. A removed complete
-effect record, missing receipt, tampered receipt or mismatched pin fails
-closed. The pinned SHA **MUST** be retrieved from an independently trusted
-durable checkpoint/authority root; deriving the pin from the effect sidecar
-or listing this checkpoint directory is unsafe. Current checkpoint schema
-does not yet record the effect head, so such authority-root integration is
-**not** supplied here. In particular, deleting a complete suffix of both
-sidecar and head receipts cannot be detected without a separately retained
-pin. The receipt files are independent of the sidecar but not a complete
-external anti-rollback guarantee.
+`DurableEffectRecordJournal.inspectBound` requires a fully validated
+`EffectJournalExpectation` and an independently trusted
+`EffectJournalHeadPin(lastSequence, headMacSha256)`. It verifies the
+entire RCEFX1 chain and refuses a missing complete last record, a
+different head, a different sequence, or an additional complete record.
+The HMAC binds the genesis, path and entire ordered record prefix.
 
-**Compatibility:** journals created by the earlier unanchored sidecar
-version have no receipt chain and must fail `inspectBound`; do not synthesize
-missing anchors from an untrusted file. They remain available to strict
-physical inspection and operator diagnostics only.
+**The pin MUST be durably committed by an independently authenticated
+checkpoint/anchor authority, not derived from the sidecar or supplied
+by the model. That publication is NOT implemented in this PR.**
+A pin copied from the file under inspection, or minted from a fresh
+inspection after restart, is no protection against rollback. The
+current `SessionCheckpoint` schema does not retain this pin yet.
 
-This slice also does **not** implement `HostEffectEvidenceVerifier`:
-`EffectJournalView` refers to a complete authoritative *session-event*
-ledger projection, not to this separate sidecar. Nor can the adapter
-independently verify a Git CAS or external tool's actual state yet.
-Therefore no `ConfirmedCommitted`, `ProvenNotStarted`, replay or
-automatic accepted stage is authorized by any of these receipts.
+### Required ordering before enabling real effects
+
+1. Write and fsync `Intent` to the RCEFX1 sidecar.
+2. Write and fsync `Started` **before invoking any external effect**.
+3. Commit an independent trusted head pin covering `Started` to the
+   authoritative checkpoint/anchor **before external effect execution**.
+   If this commit fails or is uncertain, do not invoke the effect.
+4. Invoke the effect only under an actually effective execution fence.
+   Independently verify the outcome; do not infer success from `Committed`.
+5. Persist the terminal receipt, then update the trusted pin using the
+   same fail-closed publication discipline.
+
+A process can crash after sidecar fsync but **before** the trusted pin
+publication. The sidecar may therefore contain a complete *extra* frame.
+If the sidecar differs from the already trusted pin in **either**
+direction, strict `inspectBound` fails with
+`EFFECT_JOURNAL_PIN_MISMATCH`. Operator-only `inspect` and
+`inspectForDiagnostics` can show the observed physical prefix and
+(optional) torn/zero tail for investigation. They do not distinguish a
+crash from malicious rollback, publish a new pin, authorize retry or
+accept a checkpoint. A pin covering `Started` must never be inferred
+after the external effect. The future authority adapter must address
+ambiguous publication acknowledgements and kill/timeout points.
+
+No `HostEffectEvidenceVerifier` is implemented by these physical-file
+comparisons: `EffectJournalView` still requires an exact authenticated
+projection of the authoritative *session-event* ledger, and actual Git
+CAS/tool state requires independent verification. Hence this PR enables
+no `ConfirmedCommitted`, `ProvenNotStarted`, automatic replay or stage
+acceptance.
 
 ## Deferred work and acceptance
 
@@ -216,8 +238,9 @@ The existing checkpoint `pendingEffects` and pre-execution fenced ledger
 have NOT been wired to these new types. The barrier field and
 verifier method are a contract only: this sidecar storage adds real record
 HMAC verification but does **not** provide a physical successor execution
-barrier, independently verified external completion, or a no-start proof. A later PR must bind the trusted head pin into an independently verified
-checkpoint/anchor authority root, reconstruct and authenticate the complete
-session-event projection, implement actual external-state confirmation and
-successor-barrier no-start proofs, provide production adapter conformance,
-and kill/timeout tests around each intent-effect-receipt boundary. See #105 for the remaining full P1 acceptance criteria.
+barrier, independently verified external completion, or a no-start proof. A later PR must durably publish the trusted head pin to an independently
+verified checkpoint/anchor authority root *before any external effect*,
+reconstruct and authenticate the complete session-event projection,
+implement actual external-state confirmation and successor-barrier no-start
+proofs, provide production adapter conformance, and kill/timeout tests
+around every intent-effect-receipt boundary. See #105 for the remaining full P1 acceptance criteria.
