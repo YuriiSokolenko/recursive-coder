@@ -39,6 +39,26 @@ data class EffectJournalHeader(
     val toolAuthoritySha256: String
 )
 
+/** Trusted host's mandatory recovered genesis context, NOT derived from the sidecar. */
+data class EffectJournalExpectation(
+    val sessionId: String,
+    val fenceGeneration: Long,
+    val admittedCheckpointSha256: String,
+    val toolAuthoritySha256: String
+)
+
+/**
+ * A sequence/MAC expected value retained by a separate trusted host root.
+ * Constructing this from the inspected sidecar does NOT establish integrity
+ * against a complete valid suffix rollback; provenance is a caller obligation.
+ */
+data class EffectJournalHeadPin(
+    val lastSequence: Long,
+    val headMacSha256: String
+)
+
+enum class EffectJournalTailKind { SHORT_FRAME, ZERO_FILLED }
+
 data class VerifiedEffectRecordJournal(
     val header: EffectJournalHeader,
     val entries: List<EffectJournalEntry>,
@@ -49,7 +69,8 @@ data class VerifiedEffectRecordJournal(
     /** Verified prefix end; less than byteLength only for diagnostic torn tails. */
     val verifiedByteLength: Long,
     /** Non-null ONLY for inspection diagnostics; never execution/recovery authority. */
-    val tornTailOffset: Long? = null
+    val tornTailOffset: Long? = null,
+    val tailKind: EffectJournalTailKind? = null
 )
 
 /** Test-only fault callback; production callers must use append(). */
@@ -388,12 +409,18 @@ class DurableEffectRecordJournal private constructor(
         /** Strict read-only replay: refuses even a torn final frame. */
         fun inspect(
             path: Path, workspaceRoot: Path, hostKey: ByteArray,
-            expectedSessionId: String, expectedFenceGeneration: Long? = null,
-            expectedCheckpointSha256: String? = null,
-            expectedToolAuthoritySha256: String? = null
-        ): VerifiedEffectRecordJournal = inspectInternal(path, workspaceRoot, hostKey,
-            expectedSessionId, expectedFenceGeneration, expectedCheckpointSha256,
-            expectedToolAuthoritySha256, allowTornTail = false)
+            expected: EffectJournalExpectation
+        ): VerifiedEffectRecordJournal {
+            if (!ToolAuthorizationPolicy.validHostIdentifier(expected.sessionId) ||
+                expected.fenceGeneration <= 0L ||
+                !digestPattern.matches(expected.admittedCheckpointSha256) ||
+                !digestPattern.matches(expected.toolAuthoritySha256))
+                refuse("EFFECT_JOURNAL_EXPECTATION_INVALID")
+            return inspectInternal(path, workspaceRoot, hostKey,
+                expected.sessionId, expected.fenceGeneration,
+                expected.admittedCheckpointSha256, expected.toolAuthoritySha256,
+                allowTornTail = false)
+        }
 
         /**
          * Read-only operator diagnostics ONLY. A verified prefix with a torn
@@ -408,6 +435,32 @@ class DurableEffectRecordJournal private constructor(
         ): VerifiedEffectRecordJournal = inspectInternal(path, workspaceRoot, hostKey,
             expectedSessionId, expectedFenceGeneration, expectedCheckpointSha256,
             expectedToolAuthoritySha256, allowTornTail = true)
+
+        /**
+         * Require the exact head that the trusted host pinned BEFORE any
+         * external effect. The caller must load that expectation from a
+         * separately authenticated, durable checkpoint/authority root.
+         * This method NEVER derives a pin from the sidecar and cannot prove
+         * that the supplied pin itself was durably committed.
+         *
+         * A valid extra frame (for example, after a crash between sidecar
+         * fsync and checkpoint-pin publication) also fails closed.
+         * The operator diagnostics API may inspect such a frame, but cannot
+         * authorize a retry, reconciliation or checkpoint acceptance.
+         */
+        fun inspectBound(
+            path: Path, workspaceRoot: Path, hostKey: ByteArray,
+            expected: EffectJournalExpectation, trustedPin: EffectJournalHeadPin
+        ): VerifiedEffectRecordJournal {
+            if (trustedPin.lastSequence < 0L ||
+                !digestPattern.matches(trustedPin.headMacSha256))
+                refuse("EFFECT_JOURNAL_PIN_INVALID")
+            val journal = inspect(path, workspaceRoot, hostKey, expected)
+            if (journal.lastSequence != trustedPin.lastSequence ||
+                journal.headMacSha256 != trustedPin.headMacSha256)
+                refuse("EFFECT_JOURNAL_PIN_MISMATCH")
+            return journal
+        }
 
         private fun inspectInternal(
             path: Path, workspaceRoot: Path, hostKey: ByteArray,
@@ -469,12 +522,30 @@ class DurableEffectRecordJournal private constructor(
                         val entries = mutableListOf<EffectJournalEntry>()
                         val latest = mutableMapOf<String, EffectRecord>()
                         var tornTailOffset: Long? = null
+                        var tailKind: EffectJournalTailKind? = null
+                        // One reverse pass, never rescan the full suffix per
+                        // effect record (which would make inspection O(n^2)).
+                        var zeroSuffixStart = bytes.size
+                        if (allowTornTail) {
+                            while (zeroSuffixStart > offset &&
+                                bytes[zeroSuffixStart - 1] == 0.toByte())
+                                zeroSuffixStart--
+                        }
                         while (offset < bytes.size) {
                             if (entries.size >= MAX_RECORDS)
                                 refuse("EFFECT_JOURNAL_SIZE_INVALID")
                             val remaining = bytes.size - offset
+                            // A post-crash extended but unforced file may read
+                            // back as zero blocks. Diagnostics only; zero bytes
+                            // do NOT prove a crash, completion or non-execution.
+                            if (allowTornTail && offset >= zeroSuffixStart) {
+                                tornTailOffset = offset.toLong()
+                                tailKind = EffectJournalTailKind.ZERO_FILLED
+                                break
+                            }
                             if (remaining < 36) {
                                 tornTailOffset = offset.toLong()
+                                tailKind = EffectJournalTailKind.SHORT_FRAME
                                 break
                             }
                             val length = ByteBuffer.wrap(bytes, offset, 4).int
@@ -482,6 +553,7 @@ class DurableEffectRecordJournal private constructor(
                                 refuse("EFFECT_JOURNAL_RECORD_CORRUPT")
                             if (length > remaining - 36) {
                                 tornTailOffset = offset.toLong()
+                                tailKind = EffectJournalTailKind.SHORT_FRAME
                                 break
                             }
                             val mac = bytes.copyOfRange(offset + 4, offset + 36)
@@ -501,7 +573,7 @@ class DurableEffectRecordJournal private constructor(
                             refuse("EFFECT_JOURNAL_TRUNCATED")
                         return VerifiedEffectRecordJournal(header, entries,
                             entries.size.toLong(), previous.toHex(), digest(bytes),
-                            bytes.size.toLong(), offset.toLong(), tornTailOffset)
+                            bytes.size.toLong(), offset.toLong(), tornTailOffset, tailKind)
                     }
                 } finally {
                     release(file, owner, lock)

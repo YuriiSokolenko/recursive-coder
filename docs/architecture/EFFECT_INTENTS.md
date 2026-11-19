@@ -108,9 +108,10 @@ HMAC-authenticated *genesis* JSON payload containing the exact `sessionId`,
 The provided session ID must match the lease's trusted session. Even an
 empty event stream has a verifiable genesis identity and a keyed head.
 Subsequent frames are effect entries of the same session and issuing
-generation N. `inspect` requires an expected session ID and can additionally
-enforce expected N, checkpoint SHA, and authority SHA. The genesis binds
-identities **inside this file** only; a later adapter still must independently
+generation N. Strict `inspect` requires the full
+`EffectJournalExpectation` (session ID, N, checkpoint SHA and authority SHA)
+rather than optional expected fields. The genesis binds identities
+**inside this file** only; a later adapter still must independently
 verify the issuing fence and checkpoint chain on disk.
 
 Every frame is `int32 payload length | 32-byte HMAC-SHA256 tag |
@@ -129,18 +130,26 @@ performs lease-held append + `FileChannel.force(true)` before acknowledgement,
 and becomes poisoned after uncertain I/O; it never truncates or guesses
 whether a post-fsync acknowledgement was observed.
 
-`inspect` is **read-only**, and strictly refuses a wrong expected
-session/generation/checkpoint/authority, invalid key, broken tag chain,
-noncanonical record, duplicate ID, unsupported transition, torn tail,
-live writer, missing lock or unsafe path. It independently verifies the
-complete file under the journal's exclusive OS lock. A separate
-`inspectForDiagnostics` accepts only an *incomplete final effect frame*
-and reports the authenticated prefix, physical `byteLength`,
-`verifiedByteLength` and `tornTailOffset`. It **never repairs**, truncates,
-allows append or authorizes a not-started / committed classification. A torn
-genesis, MAC mismatch, noncanonical payload or invalid transition still
-refuses even diagnostics. A forged frame length may be indistinguishable
-from truncation, so a diagnostic torn tail is *not proof of a crash*.
+`inspect` is **read-only** and requires one mandatory
+`EffectJournalExpectation` with the independently known session ID,
+issuing fence generation, admitted checkpoint SHA and tool-authority SHA.
+The strict path refuses malformed or mismatched expectations, wrong key,
+broken tag chain, noncanonical record, duplicate ID, illegal transition,
+torn tail, live writer, missing lock or unsafe path. It independently
+verifies the complete file under the journal's exclusive OS lock.
+
+A separate `inspectForDiagnostics` permits only two incomplete tail
+classes: `SHORT_FRAME` (insufficient bytes or incomplete declared frame),
+and `ZERO_FILLED` (all remaining bytes from the first incomplete frame are
+`0x00`). It reports `tailKind`, `tornTailOffset`,
+`verifiedByteLength` and physical `byteLength`, retaining the authenticated
+prefix without repairing, truncating or authorizing any operation. **Even
+all-zero bytes could be deliberate tampering, not a proven crash.**
+A partially written frame with a nonzero length and a zeroed MAC/body
+is *not* classified as `ZERO_FILLED` and fails MAC verification.
+Strict `inspect` rejects both tail classes; a torn genesis, a nonzero
+MAC mismatch, a noncanonical payload or illegal transition rejects
+even diagnostics.
 
 The returned authenticated header, entry list, keyed head and file digest
 are **diagnostic physical-file evidence only**, NOT the checkpoint-anchored
@@ -166,14 +175,72 @@ uncertain post-fsync acknowledgement, duplicate operations, stale lease,
 live/missing/symlinked lock, workspace directory safety, path substitution,
 and lease retirement.
 
+## Trusted-head comparison (bounded inspection; no checkpoint integration)
+
+The earlier proposal to write one `effect-head-*.rca` file for every
+effect was **removed after PR #127 security review**. It made the
+checkpoint directory unreadable to `SessionCheckpointStore.readAll`,
+created orphanable temporary files, added a file fsync / hard-link /
+directory fsync for every effect record, and gave **no additional
+anti-rollback guarantee** over a genuinely trusted `(sequence, MAC)`
+pin. Ordinary journal creation and append do not write anything into
+the checkpoint directory. Existing checkpoint name validation stays
+strict and unmodified.
+
+`DurableEffectRecordJournal.inspectBound` requires a fully validated
+`EffectJournalExpectation` and an independently trusted
+`EffectJournalHeadPin(lastSequence, headMacSha256)`. It verifies the
+entire RCEFX1 chain and refuses a missing complete last record, a
+different head, a different sequence, or an additional complete record.
+The HMAC binds the genesis, path and entire ordered record prefix.
+
+**The pin MUST be durably committed by an independently authenticated
+checkpoint/anchor authority, not derived from the sidecar or supplied
+by the model. That publication is NOT implemented in this PR.**
+A pin copied from the file under inspection, or minted from a fresh
+inspection after restart, is no protection against rollback. The
+current `SessionCheckpoint` schema does not retain this pin yet.
+
+### Required ordering before enabling real effects
+
+1. Write and fsync `Intent` to the RCEFX1 sidecar.
+2. Write and fsync `Started` **before invoking any external effect**.
+3. Commit an independent trusted head pin covering `Started` to the
+   authoritative checkpoint/anchor **before external effect execution**.
+   If this commit fails or is uncertain, do not invoke the effect.
+4. Invoke the effect only under an actually effective execution fence.
+   Independently verify the outcome; do not infer success from `Committed`.
+5. Persist the terminal receipt, then update the trusted pin using the
+   same fail-closed publication discipline.
+
+A process can crash after sidecar fsync but **before** the trusted pin
+publication. The sidecar may therefore contain a complete *extra* frame.
+If the sidecar differs from the already trusted pin in **either**
+direction, strict `inspectBound` fails with
+`EFFECT_JOURNAL_PIN_MISMATCH`. Operator-only `inspect` and
+`inspectForDiagnostics` can show the observed physical prefix and
+(optional) torn/zero tail for investigation. They do not distinguish a
+crash from malicious rollback, publish a new pin, authorize retry or
+accept a checkpoint. A pin covering `Started` must never be inferred
+after the external effect. The future authority adapter must address
+ambiguous publication acknowledgements and kill/timeout points.
+
+No `HostEffectEvidenceVerifier` is implemented by these physical-file
+comparisons: `EffectJournalView` still requires an exact authenticated
+projection of the authoritative *session-event* ledger, and actual Git
+CAS/tool state requires independent verification. Hence this PR enables
+no `ConfirmedCommitted`, `ProvenNotStarted`, automatic replay or stage
+acceptance.
+
 ## Deferred work and acceptance
 
 The existing checkpoint `pendingEffects` and pre-execution fenced ledger
 have NOT been wired to these new types. The barrier field and
 verifier method are a contract only: this sidecar storage adds real record
 HMAC verification but does **not** provide a physical successor execution
-barrier, independently verified external completion, or a no-start proof. A later PR must supply independent checkpoint/anchor binding
-for this physical file (including its authenticated genesis and full head),
-authoritative full-session-journal projection, verified external state and
-no-start proofs, atomic receipt publication, production adapter conformance,
-and kill/timeout tests around every intent-effect-receipt boundary. See #105 for the remaining full P1 acceptance criteria.
+barrier, independently verified external completion, or a no-start proof. A later PR must durably publish the trusted head pin to an independently
+verified checkpoint/anchor authority root *before any external effect*,
+reconstruct and authenticate the complete session-event projection,
+implement actual external-state confirmation and successor-barrier no-start
+proofs, provide production adapter conformance, and kill/timeout tests
+around every intent-effect-receipt boundary. See #105 for the remaining full P1 acceptance criteria.

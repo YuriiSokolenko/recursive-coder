@@ -46,8 +46,14 @@ class DurableEffectRecordJournalIntegrationTest : SessionCheckpointTestFixture()
     private fun open(lease: SessionResumeLease) =
         DurableEffectRecordJournal.create(path(), workspace(), id.sessionId, key, lease)
 
+    private fun expectation(): EffectJournalExpectation =
+        ResumeFenceStorage.atGeneration(store(), 1L).let {
+            EffectJournalExpectation(it.sessionId, it.generation,
+                it.checkpointSha256, it.toolAuthoritySha256)
+        }
+
     private fun inspectEffects() =
-        DurableEffectRecordJournal.inspect(path(), workspace(), key, id.sessionId)
+        DurableEffectRecordJournal.inspect(path(), workspace(), key, expectation())
 
     private fun inspectDiagnostic() =
         DurableEffectRecordJournal.inspectForDiagnostics(
@@ -146,15 +152,17 @@ class DurableEffectRecordJournalIntegrationTest : SessionCheckpointTestFixture()
             assertEquals(64, verified.headMacSha256.length)
             denied("EFFECT_JOURNAL_CONTEXT_MISMATCH") {
                 DurableEffectRecordJournal.inspect(
-                    path(), workspace(), key, "another-session")
+                    path(), workspace(), key,
+                    expectation().copy(sessionId = "another-session"))
             }
             denied("EFFECT_JOURNAL_CONTEXT_MISMATCH") {
                 DurableEffectRecordJournal.inspect(
-                    path(), workspace(), key, id.sessionId, expectedFenceGeneration = 2L)
+                    path(), workspace(), key,
+                    expectation().copy(fenceGeneration = 2L))
             }
             denied("EFFECT_JOURNAL_CONTEXT_MISMATCH") {
                 DurableEffectRecordJournal.inspect(path(), workspace(), key,
-                    id.sessionId, expectedCheckpointSha256 = "0".repeat(64))
+                    expectation().copy(admittedCheckpointSha256 = "0".repeat(64)))
             }
             denied("EFFECT_JOURNAL_CONTEXT_MISMATCH") {
                 DurableEffectRecordJournal.create(path().resolveSibling("other.rcfx"),
@@ -270,7 +278,7 @@ class DurableEffectRecordJournalIntegrationTest : SessionCheckpointTestFixture()
         }
         denied("EFFECT_JOURNAL_AUTH_FAILED") {
             DurableEffectRecordJournal.inspect(
-                path(), workspace(), ByteArray(32) { 42 }, id.sessionId)
+                path(), workspace(), ByteArray(32) { 42 }, expectation())
         }
         val bytes = Files.readAllBytes(path())
         // Derive effect-frame offset from authenticated genesis length.
@@ -296,10 +304,132 @@ class DurableEffectRecordJournalIntegrationTest : SessionCheckpointTestFixture()
         assertEquals(listOf(intent()), diagnostic.entries.map { it.record })
         assertEquals(1L, diagnostic.lastSequence)
         assertNotNull(diagnostic.tornTailOffset)
+        assertEquals(EffectJournalTailKind.SHORT_FRAME, diagnostic.tailKind)
         assertEquals(diagnostic.tornTailOffset, diagnostic.verifiedByteLength)
         assertEquals(bytes.size - 1L, diagnostic.byteLength)
         assertTrue(diagnostic.verifiedByteLength < diagnostic.byteLength)
         assertEquals(bytes.size - 1L, Files.size(path()))
+    }
+
+
+    @Test fun externallyTrustedHeadDetectsCompleteSuffixRollback() {
+        lateinit var trusted: EffectJournalHeadPin
+        withLease { lease ->
+            open(lease).use { journal ->
+                journal.append(intent())
+                val receipt = journal.append(started())
+                trusted = EffectJournalHeadPin(receipt.sequence, receipt.hostMacSha256)
+            }
+        }
+        assertEquals(2L, DurableEffectRecordJournal.inspectBound(
+            path(), workspace(), key, expectation(), trusted).lastSequence)
+        denied("EFFECT_JOURNAL_PIN_MISMATCH") {
+            DurableEffectRecordJournal.inspectBound(path(), workspace(), key,
+                expectation(), trusted.copy(headMacSha256 = "0".repeat(64)))
+        }
+        denied("EFFECT_JOURNAL_PIN_INVALID") {
+            DurableEffectRecordJournal.inspectBound(path(), workspace(), key,
+                expectation(), trusted.copy(lastSequence = -1L))
+        }
+        val raw = Files.readAllBytes(path())
+        var offset = 7
+        // Keep genesis and complete intent, discard the complete Started frame.
+        repeat(2) {
+            val size = ByteBuffer.wrap(raw, offset, 4).int
+            offset += 36 + size
+        }
+        Files.write(path(), raw.copyOf(offset), StandardOpenOption.TRUNCATE_EXISTING)
+        assertEquals(1L, inspectEffects().lastSequence)
+        denied("EFFECT_JOURNAL_PIN_MISMATCH") {
+            DurableEffectRecordJournal.inspectBound(
+                path(), workspace(), key, expectation(), trusted)
+        }
+        // There is no independent durable pin in the checkpoint schema yet.
+        // The fixture's 'trusted' value stands in for an externally stored pin.
+    }
+
+    @Test fun validUnpinnedExtraFrameMustNotBePromotedToCommittedHead() {
+        lateinit var prior: EffectJournalHeadPin
+        withLease { lease ->
+            open(lease).use { journal ->
+                val first = journal.append(intent())
+                prior = EffectJournalHeadPin(first.sequence, first.hostMacSha256)
+                journal.append(started())
+            }
+        }
+        assertEquals(2L, inspectEffects().lastSequence)
+        denied("EFFECT_JOURNAL_PIN_MISMATCH") {
+            DurableEffectRecordJournal.inspectBound(
+                path(), workspace(), key, expectation(), prior)
+        }
+    }
+
+    @Test fun effectJournalDoesNotBrickCheckpointInspectionFencedSaveOrNextAdmission() {
+        val first = createPreExecutionCheckpoint()
+        SessionResumeAdmission.admit(store(), context(), ledger(), resumeAttestation()).use {
+            lease ->
+            open(lease).use { journal ->
+                journal.append(intent())
+                journal.append(started())
+            }
+            assertEquals(first.sha256, inspect().sha256)
+            val next = SessionCheckpointStore.saveFenced(
+                lease, store(), context(), ledger(),
+                first.snapshot.copy(sequence = 2L, previousSha256 = first.sha256),
+                first.sha256)
+            assertEquals(2L, next.snapshot.sequence)
+            assertEquals(next.sha256, inspect().sha256)
+        }
+        SessionResumeAdmission.admit(
+            store(), context(), ledger(), resumeAttestation(1L)).use {
+            assertEquals(2L, it.generation)
+            it.assertCurrent()
+        }
+        val names = Files.list(store()).use { stream ->
+            stream.map { it.fileName.toString() }.toList()
+        }
+        assertTrue(names.none { it.startsWith("effect-head-") ||
+            it.startsWith(".effect-anchor-") })
+        assertEquals(listOf(intent(), started()), inspectEffects().entries.map { it.record })
+    }
+
+    @Test fun lengthWrittenWithZeroedBodyIsNotAZeroFilledDiagnosticTail() {
+        withLease { lease -> open(lease).use { it.append(intent()) } }
+        // Length was durably written; only the MAC/body are zero. Do NOT
+        // treat this as an all-zero frame and silently accept it as a crash.
+        val partial = ByteBuffer.allocate(4 + 32 + 32).putInt(32).array()
+        Files.write(path(), partial, StandardOpenOption.APPEND)
+        denied("EFFECT_JOURNAL_AUTH_FAILED") { inspectEffects() }
+        denied("EFFECT_JOURNAL_AUTH_FAILED") { inspectDiagnostic() }
+    }
+
+    @Test fun zeroFilledExtendedTailIsDiagnosticOnlyAndKeepsVerifiedPrefix() {
+        withLease { lease -> open(lease).use { it.append(intent()) } }
+        val before = Files.readAllBytes(path())
+        val extra = ByteArray(512)
+        Files.write(path(), extra, StandardOpenOption.APPEND)
+        // Strict verification must NOT silently accept extra zeroed bytes.
+        denied("EFFECT_JOURNAL_RECORD_CORRUPT") { inspectEffects() }
+        val result = inspectDiagnostic()
+        assertEquals(listOf(intent()), result.entries.map { it.record })
+        assertEquals(1L, result.lastSequence)
+        assertEquals(EffectJournalTailKind.ZERO_FILLED, result.tailKind)
+        assertEquals(before.size.toLong(), result.verifiedByteLength)
+        assertEquals(before.size.toLong(), result.tornTailOffset)
+        assertEquals(before.size + extra.size.toLong(), result.byteLength)
+        assertContentEquals(before + extra, Files.readAllBytes(path()))
+    }
+
+    @Test fun malformedExpectedContextFailsBeforeReadingDisk() {
+        withLease { lease -> open(lease).use { } }
+        denied("EFFECT_JOURNAL_EXPECTATION_INVALID") {
+            DurableEffectRecordJournal.inspect(path(), workspace(), key,
+                expectation().copy(toolAuthoritySha256 = "not-a-digest"))
+        }
+        denied("EFFECT_JOURNAL_CONTEXT_MISMATCH") {
+            DurableEffectRecordJournal.inspect(path(), workspace(), key,
+                expectation().copy(toolAuthoritySha256 = "a".repeat(64)))
+        }
     }
 
     @Test fun postFsyncLostAcknowledgementPoisonsWriterWithoutDroppingDiskEvidence() {
