@@ -351,6 +351,12 @@ class DurableEffectRecordJournal private constructor(
                             StandardOpenOption.CREATE_NEW, StandardOpenOption.READ,
                             StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS),
                             PosixFilePermissions.asFileAttribute(filePermissions))
+                        // POSIX creation attributes are masked by the process umask.
+                        // Refuse before genesis publication or any acknowledged append
+                        // if the actual mode is not the required owner-only 0600.
+                        if (Files.getPosixFilePermissions(file, LinkOption.NOFOLLOW_LINKS) !=
+                            filePermissions)
+                            refuse("EFFECT_JOURNAL_UNSAFE_PATH")
                         val genesisPayload = headerPayload(header)
                         val genesisMac = tag(derived, file, ByteArray(32), genesisPayload)
                         val genesisFrame = ByteBuffer.allocate(36 + genesisPayload.size)

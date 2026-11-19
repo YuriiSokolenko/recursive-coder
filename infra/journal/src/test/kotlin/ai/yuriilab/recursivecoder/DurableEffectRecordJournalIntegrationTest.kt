@@ -92,9 +92,24 @@ class DurableEffectRecordJournalIntegrationTest : SessionCheckpointTestFixture()
         assertEquals(code, assertFailsWith<EffectJournalStorageUnconfirmed>(block = action).code)
     }
 
+    @Test fun admittedSessionIdRequiresLiveLeasePublicationMonitor() {
+        withLease { lease ->
+            assertEquals("RESUME_FENCE_MONITOR_REQUIRED",
+                assertFailsWith<SessionResumeUnconfirmed> {
+                    lease.admittedSessionId()
+                }.code)
+            assertEquals(id.sessionId, lease.publishIfCurrent {
+                lease.admittedSessionId()
+            })
+        }
+    }
+
     @Test fun fsyncedIntentStartAndReceiptHaveRealMacsAndCanBeReplayedReadOnly() {
         withLease { lease ->
             open(lease).use { journal ->
+                assertEquals(setOf(PosixFilePermission.OWNER_READ,
+                    PosixFilePermission.OWNER_WRITE),
+                    Files.getPosixFilePermissions(path(), LinkOption.NOFOLLOW_LINKS))
                 val first = journal.append(intent())
                 assertEquals(1L, first.sequence)
                 assertEquals(64, first.hostMacSha256.length)

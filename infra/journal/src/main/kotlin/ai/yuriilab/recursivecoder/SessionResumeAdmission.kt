@@ -302,8 +302,12 @@ class SessionResumeLease internal constructor(
      * Call ONLY from a live publishIfCurrent guard; never trust a caller's
      * claimed session identity to mint effect-journal genesis.
      */
-    internal fun admittedSessionId(): String =
-        ResumeFenceStorage.requireHead(directory, generation, admittedFenceSha256).sessionId
+    internal fun admittedSessionId(): String {
+        if (!Thread.holdsLock(this))
+            throw SessionResumeUnconfirmed("RESUME_FENCE_MONITOR_REQUIRED")
+        return ResumeFenceStorage.requireHead(
+            directory, generation, admittedFenceSha256).sessionId
+    }
 
     /** Required before callbacks or trusted receipt publication. */
     @Synchronized fun assertCurrent() {
