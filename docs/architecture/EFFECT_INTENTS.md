@@ -194,12 +194,52 @@ entire RCEFX1 chain and refuses a missing complete last record, a
 different head, a different sequence, or an additional complete record.
 The HMAC binds the genesis, path and entire ordered record prefix.
 
-**The pin MUST be durably committed by an independently authenticated
-checkpoint/anchor authority, not derived from the sidecar or supplied
-by the model. That publication is NOT implemented in this PR.**
-A pin copied from the file under inspection, or minted from a fresh
-inspection after restart, is no protection against rollback. The
-current `SessionCheckpoint` schema does not retain this pin yet.
+## Canonical checkpoint v2 effect-head pin (next bounded slice)
+
+The trusted host can now call `DurableEffectRecordJournal.headPin()`
+to obtain the **current in-memory acknowledged** (sequence, HMAC) pair,
+including the genesis head at sequence 0. This return value alone is
+NOT an authority, because a future reader could derive it from an
+attacker-rolled-back sidecar.
+
+`SessionCheckpointStore.saveEffectHeadFenced` is a dedicated, host-only,
+pre-execution pin-publication path. It holds the existing live
+`SessionResumeLease.publishIfCurrent` monitor, checks that the journal
+writer is the exact admitted writer under that lease, checks the
+unchanged sidecar inode and physical length, and saves one canonical
+SHA-chained checkpoint generation containing the issuing session,
+fence generation, admitted checkpoint SHA, tool-authority SHA,
+normalized absolute sidecar path SHA, last effect sequence and HMAC
+head **in one authenticated checkpoint payload**. The journal must
+have been fsynced before this checkpoint is persisted. The normal
+`saveFenced` path cannot introduce an effect pin by copying or
+forging fields. Pinned checkpoints cannot silently drop or regress
+the pin; repeated sequence must retain the identical MAC head.
+
+Legacy v1 checkpoint payloads remain byte-for-byte identical.
+A checkpoint containing an effect pin has a distinct exact v2 JSON
+field set and version, is still bounded by the same 512-KiB limit,
+and participates in the existing checkpoint SHA-256 generation
+chain, atomic replacement and directory-fsync publication.
+`SessionCheckpointStore.inspectEffectHeadBound` verifies the latest
+checkpoint, existing fence/ledger anchor, the exact sidecar path and
+the fully authenticated RCEFX1 prefix against the checkpoint's
+pinned expectation. It never creates or repairs missing evidence.
+
+**Pinned checkpoints are always reconciliation-required, including
+genesis-only pins.** They cannot be used for automatic resume, stage
+acceptance, model execution or tool execution. No physical effect
+executor is connected in this PR.
+
+**Important remaining rollback limitation:** the currently admitted
+fence authenticates the checkpoint it *admitted*, not every later
+published checkpoint generation. If an attacker can coherently remove
+the newest checkpoint generation(s) AND the matching sidecar suffix,
+the pre-existing admission root may fail to reveal the rollback.
+Before enabling any external effect, the authoritative root must gain
+an independently retained monotonic latest-pin/checkpoint-head guard
+that cannot be reverted with those files; this PR does NOT claim that
+a checkpoint v2 publication by itself solves whole-root rollback.
 
 ### Required ordering before enabling real effects
 
@@ -217,8 +257,8 @@ A process can crash after sidecar fsync but **before** the trusted pin
 publication. The sidecar may therefore contain a complete *extra* frame.
 If the sidecar differs from the already trusted pin in **either**
 direction, strict `inspectBound` fails with
-`EFFECT_JOURNAL_PIN_MISMATCH`. Operator-only `inspect` and
-`inspectForDiagnostics` can show the observed physical prefix and
+`EFFECT_JOURNAL_PIN_MISMATCH`. Strict `inspect` and
+operator-only `inspectForDiagnostics` can show the observed physical prefix and
 (optional) torn/zero tail for investigation. They do not distinguish a
 crash from malicious rollback, publish a new pin, authorize retry or
 accept a checkpoint. A pin covering `Started` must never be inferred
@@ -238,9 +278,10 @@ The existing checkpoint `pendingEffects` and pre-execution fenced ledger
 have NOT been wired to these new types. The barrier field and
 verifier method are a contract only: this sidecar storage adds real record
 HMAC verification but does **not** provide a physical successor execution
-barrier, independently verified external completion, or a no-start proof. A later PR must durably publish the trusted head pin to an independently
-verified checkpoint/anchor authority root *before any external effect*,
-reconstruct and authenticate the complete session-event projection,
-implement actual external-state confirmation and successor-barrier no-start
-proofs, provide production adapter conformance, and kill/timeout tests
-around every intent-effect-receipt boundary. See #105 for the remaining full P1 acceptance criteria.
+barrier, independently verified external completion, or a no-start proof. A later PR must add an independent, rollback-resistant latest-head
+authority root that survives coherent deletion of checkpoint suffixes,
+then enforce the completed Started pin publication *before executing*
+any external effect. It must also reconstruct the complete session-event
+projection, implement actual external-state confirmation and successor-barrier
+no-start proofs, provide production adapter conformance, and kill/timeout
+tests around every intent-effect-receipt boundary. See #105 for the remaining full P1 acceptance criteria.

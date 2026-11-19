@@ -6,8 +6,35 @@ write, retry or replay. Issue #104 adds a separate pre-execution,
 generation-fenced admission API (see [FENCED_RESUME.md](FENCED_RESUME.md)),
 but automatic restart and external-effect reconciliation remain out of scope
 (#105). The [effect intent and receipt contracts](EFFECT_INTENTS.md) define
-pure classifications only; no checkpoint effect receipts are yet authenticated
-or reconciled by a durable adapter. The default CLI and Session Protocol v1 do not consume these files.
+pure classifications. A bounded host-only checkpoint v2 extension now stores an
+exact RCEFX1 effect-head pin; this is physical evidence only, not independently
+verified external effect completion. The default CLI and Session Protocol v1 do not consume these files.
+
+## Effect journal head checkpoints (opt-in v2)
+
+Legacy checkpoints remain canonical v1 with exactly the original field set.
+Only the dedicated `saveEffectHeadFenced` API may publish a v2 checkpoint,
+which adds `effectJournalHead`: session ID, issuing fence generation,
+admitted checkpoint SHA, tool authority SHA, normalized absolute sidecar
+path SHA, last effect sequence and the host MAC head. This single atomic,
+SHA-chained checkpoint generation binds all fields together; arbitrary
+callers cannot provide one of these pins through ordinary `saveFenced`.
+Both v1 and v2 decoders reject unknown fields and noncanonical payloads.
+
+The head is obtained from the exact live RCEFX1 journal under the existing
+lease monitor. The journal's genesis is pin-able at sequence zero. Every
+v2 checkpoint, including an empty genesis pin, requires operator
+reconciliation and is **not eligible for another resume admission**.
+`inspectEffectHeadBound` checks the latest verified checkpoint, physical
+path binding, and complete journal HMAC prefix against the recorded pin.
+
+**Durability is not the same as an independent rollback-resistant head.**
+The current fence anchors the previously admitted checkpoint, not each
+later checkpoint version. A coherent rollback of newer checkpoint versions
+and matching RCEFX1 tail still needs an independent monotonic authority
+outside that rollback domain. No external effects may be enabled until
+that guard and the pre-execution Started pin barrier are implemented.
+See [EFFECT_INTENTS.md](EFFECT_INTENTS.md).
 
 ## Trusted inputs and snapshot format
 

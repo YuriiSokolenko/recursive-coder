@@ -638,6 +638,44 @@ class DurableEffectRecordJournal private constructor(
      * Close before retiring resume lease. No truncation/repair after an
      * uncertain write; an intact tail alone is not external effect evidence.
      */
+    /**
+     * A value for the trusted host to publish, never a recovery-time trust
+     * source. Includes the HMAC-authenticated genesis head (sequence zero).
+     */
+    @Synchronized fun headPin(): EffectJournalHeadPin {
+        if (closed || poisoned)
+            throw EffectJournalStorageUnconfirmed("EFFECT_JOURNAL_WRITER_UNAVAILABLE")
+        return EffectJournalHeadPin(entries.size.toLong(), previousMac.toHex())
+    }
+
+    /**
+     * Only use inside lease.publishIfCurrent. Bind the live writer, its
+     * admitted genesis identity, exact physical path and current head.
+     * This does not publish or authenticate a checkpoint on its own.
+     */
+    @Synchronized internal fun checkpointHeadUnderLease(
+        currentLease: SessionResumeLease
+    ): CheckpointEffectJournalHead {
+        if (!Thread.holdsLock(currentLease))
+            throw EffectJournalStorageUnconfirmed("EFFECT_JOURNAL_LEASE_MONITOR_REQUIRED")
+        if (currentLease !== lease ||
+            header.sessionId != currentLease.admittedSessionId() ||
+            header.fenceGeneration != currentLease.generation ||
+            header.admittedCheckpointSha256 != currentLease.admittedCheckpointSha256 ||
+            header.toolAuthoritySha256 != currentLease.toolAuthoritySha256)
+            throw EffectJournalStorageUnconfirmed("EFFECT_JOURNAL_CONTEXT_MISMATCH")
+        if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) ||
+            Files.readAttributes(path, BasicFileAttributes::class.java,
+                LinkOption.NOFOLLOW_LINKS).fileKey() != fileKey ||
+            channel.size() != channel.position())
+            throw EffectJournalStorageUnconfirmed("EFFECT_JOURNAL_PATH_CHANGED")
+        val pin = headPin()
+        return CheckpointEffectJournalHead(header.sessionId, header.fenceGeneration,
+            header.admittedCheckpointSha256, header.toolAuthoritySha256,
+            digest(path.toString().toByteArray(StandardCharsets.UTF_8)),
+            pin.lastSequence, pin.headMacSha256)
+    }
+
     @Synchronized override fun close() {
         if (closed) return
         closed = true
