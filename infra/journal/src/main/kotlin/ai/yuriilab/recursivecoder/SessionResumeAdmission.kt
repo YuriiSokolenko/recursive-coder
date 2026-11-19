@@ -267,6 +267,7 @@ internal object ResumeFenceStorage {
  */
 class SessionResumeLease internal constructor(
     val generation: Long,
+    val sessionId: String,
     val admittedCheckpointSha256: String,
     val toolAuthoritySha256: String,
     private val directory: Path,
@@ -286,7 +287,8 @@ class SessionResumeLease internal constructor(
         if (closed || !lock.isValid || directory != expectedDirectory ||
             generation != current.generation ||
             toolAuthoritySha256 != current.toolAuthoritySha256 ||
-            admittedCheckpointSha256 != current.checkpointSha256)
+            admittedCheckpointSha256 != current.checkpointSha256 ||
+            sessionId != current.sessionId)
             throw SessionResumeUnconfirmed("RESUME_FENCE_STALE_WRITER")
     }
 
@@ -310,9 +312,13 @@ class SessionResumeLease internal constructor(
      * Serialize short host-owned state/receipt publications with close(), so
      * a callback cannot pass a check, lose its lease and commit afterward.
      * Never run model calls, external tools or blocking network I/O here.
-     * A single local ledger FileChannel.force(true) during appendFenced is a
-     * deliberate durability exception: it can delay lease retirement, but
-     * must stay inside the same authority-checked publication.
+     * Local durable FileChannel.force(true) operations are deliberate
+     * exceptions for both the fenced session ledger appendFenced and the
+     * isolated host-only effect journal create/append. Effect-journal genesis
+     * creation also persists the parent directory entry within this guard.
+     * These local fsync operations may delay lease retirement; they MUST stay
+     * inside the same authority-checked publication. No model, tool or
+     * network calls may run under this monitor.
      */
     @Synchronized fun <T> publishIfCurrent(publication: () -> T): T {
         assertCurrent()
@@ -522,7 +528,7 @@ object SessionResumeAdmission {
                         fail("RESUME_LEDGER_PATH_CHANGED")
                 }
                 val anchor = preparedAnchor ?: fail("RESUME_FENCE_ANCHOR_UNCONFIRMED")
-                SessionResumeLease(next.generation, next.checkpointSha256,
+                SessionResumeLease(next.generation, next.sessionId, next.checkpointSha256,
                     next.toolAuthoritySha256, checkedDir, ledgerPath, next.sha256,
                     anchor.sha256, ledgerKey, lockPath, acquiredOwner,
                     acquiredLock) { heldLocks.remove(it) }

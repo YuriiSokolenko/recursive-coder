@@ -11,6 +11,7 @@ import java.nio.file.Path
 import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.BasicFileAttributes
 import java.nio.file.attribute.PosixFilePermission
+import java.nio.file.attribute.PosixFilePermissions
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 import javax.crypto.Mac
@@ -30,12 +31,25 @@ import kotlinx.serialization.json.put
 class EffectJournalStorageUnconfirmed(val code: String, cause: Throwable? = null) :
     IllegalStateException(code, cause)
 
+/** Authenticated, immutable genesis identity; NOT independent checkpoint authority. */
+data class EffectJournalHeader(
+    val sessionId: String,
+    val fenceGeneration: Long,
+    val admittedCheckpointSha256: String,
+    val toolAuthoritySha256: String
+)
+
 data class VerifiedEffectRecordJournal(
+    val header: EffectJournalHeader,
     val entries: List<EffectJournalEntry>,
     val lastSequence: Long,
     val headMacSha256: String,
     val fileSha256: String,
-    val byteLength: Long
+    val byteLength: Long,
+    /** Verified prefix end; less than byteLength only for diagnostic torn tails. */
+    val verifiedByteLength: Long,
+    /** Non-null ONLY for inspection diagnostics; never execution/recovery authority. */
+    val tornTailOffset: Long? = null
 )
 
 /** Test-only fault callback; production callers must use append(). */
@@ -51,12 +65,14 @@ class DurableEffectRecordJournal private constructor(
     private val lockChannel: FileChannel,
     private val lock: FileLock,
     private val lease: SessionResumeLease,
-    private val sessionId: String,
+    private val header: EffectJournalHeader,
     private val key: ByteArray,
-    private val fileKey: Any?
+    private val fileKey: Any?,
+    genesisMac: ByteArray
 ) : AutoCloseable {
     private val entries = mutableListOf<EffectJournalEntry>()
-    private var previousMac = ByteArray(32)
+    private val latestByOperation = mutableMapOf<String, EffectRecord>()
+    private var previousMac = genesisMac.copyOf()
     private var poisoned = false
     private var closed = false
 
@@ -96,9 +112,13 @@ class DurableEffectRecordJournal private constructor(
             return file
         }
 
-        private fun checkedKey(key: ByteArray): ByteArray {
-            if (key.size < 32) refuse("EFFECT_JOURNAL_KEY_INVALID")
-            return key.copyOf()
+        /** HMAC-based, protocol-specific subkey: never share raw MAC keys. */
+        private fun checkedKey(hostKey: ByteArray): ByteArray {
+            if (hostKey.size < 32) refuse("EFFECT_JOURNAL_KEY_INVALID")
+            val mac = Mac.getInstance("HmacSHA256")
+            mac.init(SecretKeySpec(hostKey, "HmacSHA256"))
+            return mac.doFinal("recursive-coder/effect-record-journal/v1"
+                .toByteArray(StandardCharsets.US_ASCII))
         }
 
         private fun lockPath(file: Path): Path =
@@ -112,13 +132,14 @@ class DurableEffectRecordJournal private constructor(
                 if (Files.isSymbolicLink(lockFile))
                     refuse("EFFECT_JOURNAL_UNSAFE_LOCK")
                 channel = if (create)
-                    FileChannel.open(lockFile, StandardOpenOption.CREATE,
-                        StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)
+                    FileChannel.open(lockFile, setOf<java.nio.file.OpenOption>(
+                        StandardOpenOption.CREATE, StandardOpenOption.WRITE,
+                        LinkOption.NOFOLLOW_LINKS),
+                        PosixFilePermissions.asFileAttribute(filePermissions))
                 else
                     FileChannel.open(lockFile, StandardOpenOption.WRITE,
                         LinkOption.NOFOLLOW_LINKS)
-                // Never change the inode or reopen this lock while held.
-                if (create) Files.setPosixFilePermissions(lockFile, filePermissions)
+                // Never chmod existing lock inodes: verify their original mode.
                 if (Files.getPosixFilePermissions(lockFile, LinkOption.NOFOLLOW_LINKS) !=
                     filePermissions)
                     refuse("EFFECT_JOURNAL_UNSAFE_LOCK")
@@ -169,11 +190,14 @@ class DurableEffectRecordJournal private constructor(
                 id.fenceGeneration > 0 &&
                 digestPattern.matches(id.inputSha256)
 
+        /** O(1) amortized transition check, also used for authenticated replay. */
         private fun checkedTransition(
-            existing: List<EffectJournalEntry>, record: EffectRecord, sessionId: String
+            latest: Map<String, EffectRecord>, record: EffectRecord,
+            header: EffectJournalHeader
         ) {
             val identity = record.identity
-            if (!validIdentity(identity) || identity.sessionId != sessionId)
+            if (!validIdentity(identity) || identity.sessionId != header.sessionId ||
+                identity.fenceGeneration != header.fenceGeneration)
                 refuse("EFFECT_JOURNAL_INVALID_RECORD")
             if (record is EffectRecord.Committed &&
                 !digestPattern.matches(record.observedStateSha256))
@@ -181,12 +205,9 @@ class DurableEffectRecordJournal private constructor(
             if (record is EffectRecord.Unconfirmed &&
                 !ToolAuthorizationPolicy.validHostIdentifier(record.code))
                 refuse("EFFECT_JOURNAL_INVALID_RECORD")
-            val history = existing.asSequence()
-                .map { it.record }
-                .filter { it.identity.operationId == identity.operationId }.toList()
-            if (history.any { it.identity != identity })
+            val last = latest[identity.operationId]
+            if (last != null && last.identity != identity)
                 refuse("EFFECT_JOURNAL_REUSED_OPERATION")
-            val last = history.lastOrNull()
             val permitted = when (last) {
                 null -> record is EffectRecord.Intent
                 is EffectRecord.Intent -> record is EffectRecord.Started ||
@@ -196,6 +217,46 @@ class DurableEffectRecordJournal private constructor(
                 is EffectRecord.Committed, is EffectRecord.Unconfirmed -> false
             }
             if (!permitted) refuse("EFFECT_JOURNAL_INVALID_ORDER")
+        }
+
+        private fun headerPayload(header: EffectJournalHeader): ByteArray =
+            buildJsonObject {
+                put("type", "genesis")
+                put("sessionId", header.sessionId)
+                put("fenceGeneration", header.fenceGeneration)
+                put("admittedCheckpointSha256", header.admittedCheckpointSha256)
+                put("toolAuthoritySha256", header.toolAuthoritySha256)
+            }.toString().toByteArray(StandardCharsets.UTF_8)
+
+        private fun decodeHeader(bytes: ByteArray): EffectJournalHeader {
+            try {
+                val obj = Json.parseToJsonElement(
+                    bytes.toString(StandardCharsets.UTF_8)) as? JsonObject
+                    ?: refuse("EFFECT_JOURNAL_GENESIS_INVALID")
+                fun string(key: String): String {
+                    val value = obj[key] as? JsonPrimitive
+                        ?: refuse("EFFECT_JOURNAL_GENESIS_INVALID")
+                    if (!value.isString) refuse("EFFECT_JOURNAL_GENESIS_INVALID")
+                    return value.content
+                }
+                if (string("type") != "genesis")
+                    refuse("EFFECT_JOURNAL_GENESIS_INVALID")
+                val generation = (obj["fenceGeneration"] as? JsonPrimitive)
+                    ?.takeUnless { it.isString }?.longOrNull
+                    ?: refuse("EFFECT_JOURNAL_GENESIS_INVALID")
+                val header = EffectJournalHeader(string("sessionId"), generation,
+                    string("admittedCheckpointSha256"), string("toolAuthoritySha256"))
+                if (!ToolAuthorizationPolicy.validHostIdentifier(header.sessionId) ||
+                    header.fenceGeneration <= 0L ||
+                    !digestPattern.matches(header.admittedCheckpointSha256) ||
+                    !digestPattern.matches(header.toolAuthoritySha256) ||
+                    !bytes.contentEquals(headerPayload(header)))
+                    refuse("EFFECT_JOURNAL_GENESIS_INVALID")
+                return header
+            } catch (e: Exception) {
+                if (e is EffectJournalStorageUnconfirmed) throw e
+                throw EffectJournalStorageUnconfirmed("EFFECT_JOURNAL_GENESIS_INVALID", e)
+            }
         }
 
         private fun payload(sequence: Long, record: EffectRecord): ByteArray {
@@ -272,25 +333,35 @@ class DurableEffectRecordJournal private constructor(
             hostKey: ByteArray, lease: SessionResumeLease
         ): DurableEffectRecordJournal {
             val file = checkedPath(path, workspaceRoot)
-            if (!ToolAuthorizationPolicy.validHostIdentifier(sessionId))
-                refuse("EFFECT_JOURNAL_INVALID_RECORD")
-            val copied = checkedKey(hostKey)
+            if (!ToolAuthorizationPolicy.validHostIdentifier(sessionId) ||
+                sessionId != lease.sessionId)
+                refuse("EFFECT_JOURNAL_CONTEXT_MISMATCH")
+            val derived = checkedKey(hostKey)
             try {
                 return lease.publishIfCurrent {
+                    val header = EffectJournalHeader(
+                        lease.sessionId, lease.generation,
+                        lease.admittedCheckpointSha256, lease.toolAuthoritySha256)
                     val (lockChannel, lock) = acquire(file, create = true)
                     var channel: FileChannel? = null
                     try {
-                        channel = FileChannel.open(file, StandardOpenOption.CREATE_NEW,
-                            StandardOpenOption.READ, StandardOpenOption.WRITE,
-                            LinkOption.NOFOLLOW_LINKS)
-                        Files.setPosixFilePermissions(file, filePermissions)
+                        channel = FileChannel.open(file, setOf<java.nio.file.OpenOption>(
+                            StandardOpenOption.CREATE_NEW, StandardOpenOption.READ,
+                            StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS),
+                            PosixFilePermissions.asFileAttribute(filePermissions))
+                        val genesisPayload = headerPayload(header)
+                        val genesisMac = tag(derived, file, ByteArray(32), genesisPayload)
+                        val genesisFrame = ByteBuffer.allocate(36 + genesisPayload.size)
+                            .putInt(genesisPayload.size).put(genesisMac)
+                            .put(genesisPayload).array()
                         writeFully(channel, magic)
+                        writeFully(channel, genesisFrame)
                         channel.force(true)
                         FileChannel.open(file.parent, StandardOpenOption.READ).use { it.force(true) }
                         val inode = Files.readAttributes(file, BasicFileAttributes::class.java,
                             LinkOption.NOFOLLOW_LINKS).fileKey()
                         DurableEffectRecordJournal(file, channel, lockChannel, lock,
-                            lease, sessionId, copied, inode)
+                            lease, header, derived, inode, genesisMac)
                     } catch (e: Exception) {
                         try { channel?.close() } catch (c: Exception) { e.addSuppressed(c) }
                         try { release(file, lockChannel, lock) }
@@ -299,18 +370,45 @@ class DurableEffectRecordJournal private constructor(
                     }
                 }
             } catch (e: Exception) {
-                copied.fill(0)
+                derived.fill(0)
                 if (e is java.nio.file.FileAlreadyExistsException)
                     throw EffectJournalStorageUnconfirmed("EFFECT_JOURNAL_EXISTS", e)
                 throw e
             }
         }
 
-        /** Read-only, full-prefix verification; never creates or truncates files. */
-        fun inspect(path: Path, workspaceRoot: Path, hostKey: ByteArray):
-            VerifiedEffectRecordJournal {
+        /** Strict read-only replay: refuses even a torn final frame. */
+        fun inspect(
+            path: Path, workspaceRoot: Path, hostKey: ByteArray,
+            expectedSessionId: String, expectedFenceGeneration: Long? = null,
+            expectedCheckpointSha256: String? = null,
+            expectedToolAuthoritySha256: String? = null
+        ): VerifiedEffectRecordJournal = inspectInternal(path, workspaceRoot, hostKey,
+            expectedSessionId, expectedFenceGeneration, expectedCheckpointSha256,
+            expectedToolAuthoritySha256, allowTornTail = false)
+
+        /**
+         * Read-only operator diagnostics ONLY. A verified prefix with a torn
+         * final frame is NOT a recovery classification or a writable ledger.
+         * MAC, noncanonical, genesis and identity failures still refuse.
+         */
+        fun inspectForDiagnostics(
+            path: Path, workspaceRoot: Path, hostKey: ByteArray,
+            expectedSessionId: String, expectedFenceGeneration: Long? = null,
+            expectedCheckpointSha256: String? = null,
+            expectedToolAuthoritySha256: String? = null
+        ): VerifiedEffectRecordJournal = inspectInternal(path, workspaceRoot, hostKey,
+            expectedSessionId, expectedFenceGeneration, expectedCheckpointSha256,
+            expectedToolAuthoritySha256, allowTornTail = true)
+
+        private fun inspectInternal(
+            path: Path, workspaceRoot: Path, hostKey: ByteArray,
+            expectedSessionId: String, expectedFenceGeneration: Long?,
+            expectedCheckpointSha256: String?, expectedToolAuthoritySha256: String?,
+            allowTornTail: Boolean
+        ): VerifiedEffectRecordJournal {
             val file = checkedPath(path, workspaceRoot)
-            val copied = checkedKey(hostKey)
+            val derived = checkedKey(hostKey)
             try {
                 val (owner, lock) = acquire(file, create = false)
                 try {
@@ -321,7 +419,7 @@ class DurableEffectRecordJournal private constructor(
                     FileChannel.open(file, StandardOpenOption.READ,
                         LinkOption.NOFOLLOW_LINKS).use { channel ->
                         val size = channel.size()
-                        if (size < magic.size || size > MAX_FILE_BYTES ||
+                        if (size < magic.size + 36 || size > MAX_FILE_BYTES ||
                             size > Int.MAX_VALUE)
                             refuse("EFFECT_JOURNAL_SIZE_INVALID")
                         val all = ByteBuffer.allocate(size.toInt())
@@ -332,39 +430,74 @@ class DurableEffectRecordJournal private constructor(
                         val bytes = all.array()
                         if (!bytes.copyOfRange(0, magic.size).contentEquals(magic))
                             refuse("EFFECT_JOURNAL_VERSION_INVALID")
+
+                        // Genesis is an authenticated mandatory first frame;
+                        // an empty effect stream still has a provable identity.
                         var offset = magic.size
-                        var previous = ByteArray(32)
+                        val genesisLength = ByteBuffer.wrap(bytes, offset, 4).int
+                        if (genesisLength !in 1..MAX_RECORD_BYTES ||
+                            genesisLength > bytes.size - offset - 36)
+                            refuse("EFFECT_JOURNAL_GENESIS_INVALID")
+                        val genesisMac = bytes.copyOfRange(offset + 4, offset + 36)
+                        val genesisBody = bytes.copyOfRange(offset + 36,
+                            offset + 36 + genesisLength)
+                        if (!MessageDigest.isEqual(genesisMac,
+                                tag(derived, file, ByteArray(32), genesisBody)))
+                            refuse("EFFECT_JOURNAL_AUTH_FAILED")
+                        val header = decodeHeader(genesisBody)
+                        if (header.sessionId != expectedSessionId ||
+                            expectedFenceGeneration != null &&
+                                header.fenceGeneration != expectedFenceGeneration ||
+                            expectedCheckpointSha256 != null &&
+                                header.admittedCheckpointSha256 != expectedCheckpointSha256 ||
+                            expectedToolAuthoritySha256 != null &&
+                                header.toolAuthoritySha256 != expectedToolAuthoritySha256)
+                            refuse("EFFECT_JOURNAL_CONTEXT_MISMATCH")
+                        offset += 36 + genesisLength
+
+                        var previous = genesisMac
                         val entries = mutableListOf<EffectJournalEntry>()
-                        var session: String? = null
+                        val latest = mutableMapOf<String, EffectRecord>()
+                        var tornTailOffset: Long? = null
                         while (offset < bytes.size) {
-                            if (entries.size >= MAX_RECORDS ||
-                                bytes.size - offset < 36)
-                                refuse("EFFECT_JOURNAL_TRUNCATED")
+                            if (entries.size >= MAX_RECORDS)
+                                refuse("EFFECT_JOURNAL_SIZE_INVALID")
+                            val remaining = bytes.size - offset
+                            if (remaining < 36) {
+                                tornTailOffset = offset.toLong()
+                                break
+                            }
                             val length = ByteBuffer.wrap(bytes, offset, 4).int
-                            if (length !in 1..MAX_RECORD_BYTES ||
-                                length > bytes.size - offset - 36)
-                                refuse("EFFECT_JOURNAL_TRUNCATED")
+                            if (length !in 1..MAX_RECORD_BYTES)
+                                refuse("EFFECT_JOURNAL_RECORD_CORRUPT")
+                            if (length > remaining - 36) {
+                                tornTailOffset = offset.toLong()
+                                break
+                            }
                             val mac = bytes.copyOfRange(offset + 4, offset + 36)
                             val body = bytes.copyOfRange(offset + 36, offset + 36 + length)
-                            val next = tag(copied, file, previous, body)
+                            val next = tag(derived, file, previous, body)
                             if (!MessageDigest.isEqual(mac, next))
                                 refuse("EFFECT_JOURNAL_AUTH_FAILED")
                             val record = decode(body, entries.size.toLong() + 1L)
-                            if (session == null) session = record.identity.sessionId
-                            checkedTransition(entries, record, session)
+                            checkedTransition(latest, record, header)
                             entries.add(EffectJournalEntry(entries.size.toLong() + 1L,
                                 record, mac.toHex()))
+                            latest[record.identity.operationId] = record
                             previous = next
                             offset += 36 + length
                         }
-                        return VerifiedEffectRecordJournal(entries, entries.size.toLong(),
-                            previous.toHex(), digest(bytes), bytes.size.toLong())
+                        if (tornTailOffset != null && !allowTornTail)
+                            refuse("EFFECT_JOURNAL_TRUNCATED")
+                        return VerifiedEffectRecordJournal(header, entries,
+                            entries.size.toLong(), previous.toHex(), digest(bytes),
+                            bytes.size.toLong(), offset.toLong(), tornTailOffset)
                     }
                 } finally {
                     release(file, owner, lock)
                 }
             } finally {
-                copied.fill(0)
+                derived.fill(0)
             }
         }
     }
@@ -385,7 +518,7 @@ class DurableEffectRecordJournal private constructor(
                 throw EffectJournalStorageUnconfirmed("EFFECT_JOURNAL_WRITER_UNAVAILABLE")
             if (record.identity.fenceGeneration != lease.generation)
                 throw EffectJournalStorageUnconfirmed("EFFECT_JOURNAL_STALE_GENERATION")
-            checkedTransition(entries, record, sessionId)
+            checkedTransition(latestByOperation, record, header)
             if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) ||
                 Files.readAttributes(path, BasicFileAttributes::class.java,
                     LinkOption.NOFOLLOW_LINKS).fileKey() != fileKey ||
@@ -412,7 +545,10 @@ class DurableEffectRecordJournal private constructor(
             }
             previousMac = mac
             return@synchronized EffectJournalEntry(seq, record, mac.toHex())
-                .also { entries.add(it) }
+                .also {
+                    entries.add(it)
+                    latestByOperation[record.identity.operationId] = record
+                }
         }
     }
 

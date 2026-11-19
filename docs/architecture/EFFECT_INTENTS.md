@@ -96,28 +96,58 @@ secret key of at least 32 bytes (never stored with the journal), an exact
 session identity, and a live `SessionResumeLease`. It does **not** grant
 execution; the lease still admits only pre-execution histories.
 
-`create` is `CREATE_NEW` and **never** reopens for append. Each frame is
-`int32 payload length | 32-byte HMAC-SHA256 tag | canonical JSON payload`.
-The HMAC includes a version domain, canonical path, previous tag, and full
-payload; the payload includes record kind, exact operation ID, issuing
-generation, proposed input digest, and any terminal receipt field.
-`Intent -> Started -> Committed` or `Intent [-> Started] -> Unconfirmed`
-are enforced before physical writes, including global same-session
-operation-ID uniqueness. The writer holds the OS journal lock, performs
-lease-held append + `FileChannel.force(true)` before acknowledgement,
+`create` is `CREATE_NEW` and **never** reopens for append. A failed
+create **after CREATE_NEW** leaves the partial journal in place; a later
+attempt returns `EFFECT_JOURNAL_EXISTS` and requires operator inspection,
+not automatic deletion or retry.
+
+After the seven-byte `RCEFX1\n` magic, the **first mandatory frame** is a
+HMAC-authenticated *genesis* JSON payload containing the exact `sessionId`,
+`fenceGeneration` N, `admittedCheckpointSha256`, and
+`toolAuthoritySha256` captured from the live `SessionResumeLease`.
+The provided session ID must match the lease's trusted session. Even an
+empty event stream has a verifiable genesis identity and a keyed head.
+Subsequent frames are effect entries of the same session and issuing
+generation N. `inspect` requires an expected session ID and can additionally
+enforce expected N, checkpoint SHA, and authority SHA. The genesis binds
+identities **inside this file** only; a later adapter still must independently
+verify the issuing fence and checkpoint chain on disk.
+
+Every frame is `int32 payload length | 32-byte HMAC-SHA256 tag |
+canonical JSON payload`. The host supplies a master key of at least 32
+bytes; the journal derives a dedicated HMAC-SHA256 subkey using
+`recursive-coder/effect-record-journal/v1`. The tag includes `RCEFX1\n`,
+the **normalized absolute file path** (`toAbsolutePath().normalize()`,
+not a path canonicalized via `toRealPath()`), previous tag and entire payload.
+The genesis tag starts from 32 zero bytes and becomes the seed for all
+effect tags. Moving or restoring this file under another path invalidates
+its HMAC. `Intent -> Started -> Committed` or
+`Intent [-> Started] -> Unconfirmed` are enforced before physical writes
+with an O(1) average-time last-state map by `operationId`, including
+same-session operation-ID uniqueness. The writer holds the OS journal lock,
+performs lease-held append + `FileChannel.force(true)` before acknowledgement,
 and becomes poisoned after uncertain I/O; it never truncates or guesses
 whether a post-fsync acknowledgement was observed.
 
-`inspect` is **read-only** and fails on an invalid key, broken tag chain,
+`inspect` is **read-only**, and strictly refuses a wrong expected
+session/generation/checkpoint/authority, invalid key, broken tag chain,
 noncanonical record, duplicate ID, unsupported transition, torn tail,
-live writer, missing lock, or unsafe path. It independently verifies the
-entire file under the journal's exclusive OS lock. The returned entry list,
-keyed head, file digest and byte length are **diagnostic physical-file
-evidence only**, NOT the checkpoint-anchored complete session-journal
-projection. In particular, HMAC alone cannot detect deletion of a
-complete suffix or replay of an older valid file by a same-UID actor:
-a separate independently published checkpoint/anchor binding is mandatory
-before effects can be classified after a crash.
+live writer, missing lock or unsafe path. It independently verifies the
+complete file under the journal's exclusive OS lock. A separate
+`inspectForDiagnostics` accepts only an *incomplete final effect frame*
+and reports the authenticated prefix, physical `byteLength`,
+`verifiedByteLength` and `tornTailOffset`. It **never repairs**, truncates,
+allows append or authorizes a not-started / committed classification. A torn
+genesis, MAC mismatch, noncanonical payload or invalid transition still
+refuses even diagnostics. A forged frame length may be indistinguishable
+from truncation, so a diagnostic torn tail is *not proof of a crash*.
+
+The returned authenticated header, entry list, keyed head and file digest
+are **diagnostic physical-file evidence only**, NOT the checkpoint-anchored
+complete session-journal projection. In particular, HMAC alone cannot
+detect deletion of a complete suffix or replay of an older valid file by a
+same-UID actor: a separate independently published checkpoint/anchor
+binding is mandatory before effects can be classified after a crash.
 
 **Still forbidden:** physical tool/CAS execution, signed no-start/commit
 proofs, automatic `ProvenNotStarted` or `ConfirmedCommitted`, history
@@ -128,10 +158,13 @@ or that an authenticated `Committed` has an independently verified external
 result. Key creation/retention/rotation and explicit operator reconciliation
 remain trusted-host responsibilities outside this slice.
 
-`DurableEffectRecordJournalIntegrationTest` exercises fsync, authentic
-replay, wrong key, tampering, torn tails, uncertain post-fsync acknowledgement,
-non-replayed terminal states, duplicate operations, stale generation, live
-lock, missing lock, private directory, path substitution and lease retirement.
+`DurableEffectRecordJournalIntegrationTest` exercises fsync, authenticated
+genesis with empty and full histories, exact expected context, correctly
+MACed noncanonical and foreign-session/generation payloads, forged frame
+length, strict vs diagnostic torn tails, unknown terminal transitions,
+uncertain post-fsync acknowledgement, duplicate operations, stale lease,
+live/missing/symlinked lock, workspace directory safety, path substitution,
+and lease retirement.
 
 ## Deferred work and acceptance
 
@@ -139,9 +172,8 @@ The existing checkpoint `pendingEffects` and pre-execution fenced ledger
 have NOT been wired to these new types. The barrier field and
 verifier method are a contract only: this sidecar storage adds real record
 HMAC verification but does **not** provide a physical successor execution
-barrier, independently verified external completion, or a no-start proof. A later PR must supply canonical
-serialization and physical host MAC verification, crash-safe durable append,
-whole-journal verification, authoritative external-state checks and no-start
-proofs, atomic receipt publication with the current resume lease, adapter
-conformance, and kill/timeout testing around every intent-effect-receipt
-boundary. See #105 for the remaining full P1 acceptance criteria.
+barrier, independently verified external completion, or a no-start proof. A later PR must supply independent checkpoint/anchor binding
+for this physical file (including its authenticated genesis and full head),
+authoritative full-session-journal projection, verified external state and
+no-start proofs, atomic receipt publication, production adapter conformance,
+and kill/timeout tests around every intent-effect-receipt boundary. See #105 for the remaining full P1 acceptance criteria.
