@@ -38,6 +38,10 @@ data class VerifiedEffectRecordJournal(
     val byteLength: Long
 )
 
+/** Test-only fault callback; production callers must use append(). */
+@RequiresOptIn(level = RequiresOptIn.Level.ERROR)
+@Retention(AnnotationRetention.BINARY)
+@Target(AnnotationTarget.FUNCTION)
 internal annotation class EffectJournalFaultInjection
 
 @ResumeOperatorOnlyApi
@@ -369,6 +373,7 @@ class DurableEffectRecordJournal private constructor(
      * Before first physical effect, the host MUST fsync intent and started in
      * this order. This append does not itself grant that effect's execution.
      */
+    @OptIn(EffectJournalFaultInjection::class)
     fun append(record: EffectRecord): EffectJournalEntry =
         appendWithFault(record) { }
 
