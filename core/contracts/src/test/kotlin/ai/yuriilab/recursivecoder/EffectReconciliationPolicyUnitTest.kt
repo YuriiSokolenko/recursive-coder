@@ -32,34 +32,47 @@ class EffectReconciliationPolicyUnitTest {
         var historyValid = true
         var committedVerified = true
         var absentVerified = true
-        var failWithException = false
-        override fun authenticateCompleteJournal(view: EffectJournalView): Boolean {
-            if (failWithException) error("unavailable")
+        var historyThrows = false
+        var commitThrows = false
+        var notStartedThrows = false
+        var lastAuthenticatedGeneration: Long? = null
+        var lastIssuedGeneration: Long? = null
+        override fun authenticateCompleteJournal(
+            view: EffectJournalView, expected: EffectIdentity,
+            currentFenceGeneration: Long
+        ): Boolean {
+            lastAuthenticatedGeneration = currentFenceGeneration
+            lastIssuedGeneration = expected.fenceGeneration
+            if (historyThrows) error("unavailable")
+            // Test-only stand-in: production MUST verify the full persisted
+            // ledger, its exact effect projection and both fence generations.
             return historyValid && view.entries.all { it.hostMacSha256 == "d".repeat(64) }
         }
         override fun independentlyVerifyCommitted(
             intent: EffectRecord.Intent, started: EffectRecord.Started,
             committed: EffectRecord.Committed
         ): Boolean {
-            if (failWithException) error("unavailable")
+            if (commitThrows) error("unavailable")
             return committedVerified
         }
         override fun independentlyVerifyNotStarted(
             intent: EffectRecord.Intent, proof: EffectNotStartedEvidence
         ): Boolean {
-            if (failWithException) error("unavailable")
+            if (notStartedThrows) error("unavailable")
             return absentVerified
         }
     }
 
     private fun recover(
         id: EffectIdentity, history: EffectJournalView,
-        verifier: HostEffectEvidenceVerifier, proof: EffectNotStartedEvidence? = null
+        verifier: HostEffectEvidenceVerifier, proof: EffectNotStartedEvidence? = null,
+        currentGeneration: Long = id.fenceGeneration
     ): EffectRecoveryOutcome =
-        EffectReconciliationPolicy.reconcile(id, id.fenceGeneration, history, verifier, proof)
+        EffectReconciliationPolicy.reconcile(
+            id, currentGeneration, history, verifier, proof)
 
     private fun blocked(result: EffectRecoveryOutcome, code: String) {
-        assertEquals(EffectRecoveryOutcome.Unconfirmed(code), result)
+        assertEquals(EffectRecoveryOutcome.Quarantined(code), result)
     }
 
     @Test fun verifiedCommittedRequiresOrderedIntentStartAndIndependentReceipt() {
@@ -98,8 +111,11 @@ class EffectReconciliationPolicyUnitTest {
     }
 
     @Test fun staleGenerationAndReusedOperationIdCannotChooseAWinningHistory() {
-        blocked(EffectReconciliationPolicy.reconcile(key, 4L,
-            view(intent(), started(), committed()), Verifier()), "EFFECT_STALE_GENERATION")
+        // The issuing fence is in the FUTURE relative to the recovery lease.
+        blocked(recover(key, view(intent(), started(), committed()), Verifier(),
+            currentGeneration = 2L), "EFFECT_STALE_GENERATION")
+        blocked(recover(key, view(intent(), started(), committed()), Verifier(),
+            currentGeneration = 0L), "EFFECT_STALE_GENERATION")
         val stale = key.copy(fenceGeneration = 2)
         blocked(recover(key, view(intent(stale)), Verifier()),
             "EFFECT_STALE_OR_REUSED_OPERATION")
@@ -141,7 +157,7 @@ class EffectReconciliationPolicyUnitTest {
 
     @Test fun malformedMissingOrOutOfOrderEntriesNeverBecomeEvidence() {
         blocked(recover(key, view(), Verifier()),
-            "EFFECT_INVALID_HISTORY")
+            "EFFECT_INTENT_MISSING")
         blocked(recover(key, view(started(), committed()), Verifier()),
             "EFFECT_DUPLICATE_OR_MISSING_INTENT")
         blocked(recover(key, view(committed(), intent()), Verifier()),
@@ -164,11 +180,16 @@ class EffectReconciliationPolicyUnitTest {
         blocked(recover(key, history,
             Verifier().apply { historyValid = false }), "EFFECT_HISTORY_UNVERIFIED")
         blocked(recover(key, history,
-            Verifier().apply { failWithException = true }), "EFFECT_HISTORY_UNVERIFIED")
+            Verifier().apply { historyThrows = true }), "EFFECT_HISTORY_UNVERIFIED")
         val absent = view(intent())
         blocked(recover(key, absent,
-            Verifier().apply { failWithException = true }, proof(history = absent)),
+            Verifier().apply { historyThrows = true }, proof(history = absent)),
             "EFFECT_HISTORY_UNVERIFIED")
+        blocked(recover(key, history,
+            Verifier().apply { commitThrows = true }), "EFFECT_COMMIT_UNVERIFIED")
+        blocked(recover(key, absent,
+            Verifier().apply { notStartedThrows = true }, proof(history = absent)),
+            "EFFECT_NOT_STARTED_UNPROVEN")
     }
 
     @Test fun unrelatedOperationsDoNotHideDuplicateIdsOrCorruptOrdering() {
@@ -188,6 +209,65 @@ class EffectReconciliationPolicyUnitTest {
                 recover(id, view(intent(id), started(id),
                     committed(id)), Verifier()), kind.name)
         }
+    }
+
+    @Test fun crashTailEffectsCanBeClassifiedUnderLaterFenceGeneration() {
+        // The operation is issued under fence 3; generation 4 is the trusted
+        // new recovery lease. The verifier gets BOTH generations to check.
+        val historical = view(intent(), started(), committed())
+        val verifier = Verifier()
+        assertIs<EffectRecoveryOutcome.ConfirmedCommitted>(
+            recover(key, historical, verifier, currentGeneration = 4L))
+        assertEquals(3L, verifier.lastIssuedGeneration)
+        assertEquals(4L, verifier.lastAuthenticatedGeneration)
+
+        val intentOnly = view(intent())
+        assertIs<EffectRecoveryOutcome.ProvenNotStarted>(
+            recover(key, intentOnly, Verifier(), proof(history = intentOnly),
+                currentGeneration = 5L))
+        // Even a valid historical record must not bypass an unavailable
+        // historical fence / current lease verification.
+        blocked(recover(key, historical,
+            Verifier().apply { historyValid = false }, currentGeneration = 4L),
+            "EFFECT_HISTORY_UNVERIFIED")
+    }
+
+    @Test fun projectionAllowsUnrelatedGapsOnlyWithAuthoritativeVerification() {
+        val original = view(intent(), started(), committed())
+        // Records at 1, 9, 12 are legal if the full authenticated session
+        // ledger contains unrelated non-effect events at the skipped sequences.
+        val gapped = original.copy(lastSequence = 15L,
+            entries = original.entries.mapIndexed { index, entry ->
+                entry.copy(sequence = listOf(1L, 9L, 12L)[index])
+            })
+        assertIs<EffectRecoveryOutcome.ConfirmedCommitted>(
+            recover(key, gapped, Verifier()))
+        blocked(recover(key, gapped, Verifier().apply { historyValid = false }),
+            "EFFECT_HISTORY_UNVERIFIED")
+    }
+
+    @Test fun structuralUpperBoundsAndProofHashesAreValidated() {
+        val history = view(intent(), started(), committed())
+        blocked(recover(key, history.copy(lastSequence = 0L), Verifier()),
+            "EFFECT_INVALID_HISTORY")
+        blocked(recover(key, history.copy(lastSequence = 2L), Verifier()),
+            "EFFECT_INVALID_HISTORY")
+        val intentOnly = view(intent())
+        blocked(recover(key, intentOnly, Verifier(),
+            proof(history = intentOnly).copy(observedStateSha256 = "wrong")),
+            "EFFECT_NONSTART_PROOF_MISMATCH")
+        blocked(recover(key, intentOnly, Verifier(),
+            proof(history = intentOnly).copy(hostMacSha256 = "wrong")),
+            "EFFECT_NONSTART_PROOF_MISMATCH")
+    }
+
+    @Test fun longAuthenticatedProjectionsDoNotHitArtificialTenThousandEntryCliff() {
+        val otherRecords = (1..10_001).map { index ->
+            intent(key.copy(operationId = "other-${index}"))
+        }
+        val records = (otherRecords + listOf(intent(), started(), committed())).toTypedArray()
+        assertIs<EffectRecoveryOutcome.ConfirmedCommitted>(
+            recover(key, view(*records), Verifier()))
     }
 
     @Test fun impossibleIdentityAndMalformedTerminalReceiptFailClosed() {

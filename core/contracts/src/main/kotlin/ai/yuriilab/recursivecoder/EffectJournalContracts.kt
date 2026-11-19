@@ -52,7 +52,14 @@ data class EffectJournalEntry(
     val hostMacSha256: String
 )
 
-/** Only the external authenticated ledger may establish that this view is complete. */
+/**
+ * Ordered projection of all effect records from a host-authenticated complete
+ * journal prefix (NOT the full session-event log). Gaps in entry sequences are
+ * legal only for unrelated non-effect events. The host verifier MUST re-read
+ * the complete authoritative ledger pinned by headSha256/lastSequence and
+ * prove that no effect record was omitted, reordered or substituted.
+ * The view itself and its SHA strings are not proof of completeness.
+ */
 data class EffectJournalView(
     val headSha256: String,
     val lastSequence: Long,
@@ -76,9 +83,14 @@ data class EffectNotStartedEvidence(
  * Trusted-host port: never implement it from an agent response or by only
  * checking whether the supplied digest/MAC strings are well formed.
  *
- * authenticateCompleteJournal verifies the complete authoritative, ordered,
- * untampered prefix and authenticates every entry's MAC, not a caller-selected
- * subset. independentlyVerifyCommitted rechecks the actual external result
+ * authenticateCompleteJournal MUST independently read the complete authoritative
+ * on-disk journal prefix at view.headSha256 / view.lastSequence, verify its
+ * continuity and authentication, then prove view.entries is an exact, complete
+ * ordered projection of ALL effect records in that prefix (not caller-selected
+ * entries). It must also authenticate the historical issuing fence generation,
+ * the immutable fence chain up to the current generation and that the caller
+ * owns the current host generation; currentFenceGeneration is not self-authenticating.
+ * independentlyVerifyCommitted rechecks the actual external result
  * against the committed receipt. independentlyVerifyNotStarted must establish
  * that execution was impossible or that exact non-execution is independently
  * proven, and authenticate its head-bound evidence.
@@ -86,7 +98,11 @@ data class EffectNotStartedEvidence(
  * A verifier exception or unavailable external proof fails closed.
  */
 interface HostEffectEvidenceVerifier {
-    fun authenticateCompleteJournal(view: EffectJournalView): Boolean
+    fun authenticateCompleteJournal(
+        view: EffectJournalView,
+        expected: EffectIdentity,
+        currentFenceGeneration: Long
+    ): Boolean
     fun independentlyVerifyCommitted(
         intent: EffectRecord.Intent,
         started: EffectRecord.Started,
@@ -102,18 +118,17 @@ interface HostEffectEvidenceVerifier {
 sealed interface EffectRecoveryOutcome {
     data class ConfirmedCommitted(val receipt: EffectRecord.Committed) : EffectRecoveryOutcome
     data class ProvenNotStarted(val proof: EffectNotStartedEvidence) : EffectRecoveryOutcome
-    data class Unconfirmed(val code: String) : EffectRecoveryOutcome
+    data class Quarantined(val code: String) : EffectRecoveryOutcome
 }
 
 /**
  * I/O-free state machine over host-verified evidence. A missing STARTED or
  * COMMITTED record alone NEVER establishes absence or success. Any conflict,
- * reused operation ID, stale generation, malformed evidence, unsupported
+ * reused operation ID, future issuing generation, malformed evidence, unsupported
  * transition or failed verification remains quarantined.
  */
 object EffectReconciliationPolicy {
     private val sha256 = Regex("[0-9a-f]{64}")
-    private const val MAX_ENTRIES = 10_000
 
     private fun valid(identity: EffectIdentity): Boolean =
         identity.fenceGeneration > 0L &&
@@ -134,12 +149,13 @@ object EffectReconciliationPolicy {
     }
 
     private fun uncertain(code: String): EffectRecoveryOutcome =
-        EffectRecoveryOutcome.Unconfirmed(code)
+        EffectRecoveryOutcome.Quarantined(code)
 
     private fun authenticated(
-        verifier: HostEffectEvidenceVerifier, view: EffectJournalView
+        verifier: HostEffectEvidenceVerifier, view: EffectJournalView,
+        expected: EffectIdentity, currentFenceGeneration: Long
     ): Boolean = try {
-        verifier.authenticateCompleteJournal(view)
+        verifier.authenticateCompleteJournal(view, expected, currentFenceGeneration)
     } catch (_: Exception) {
         false
     }
@@ -152,14 +168,20 @@ object EffectReconciliationPolicy {
         notStartedProof: EffectNotStartedEvidence? = null
     ): EffectRecoveryOutcome {
         if (!valid(expected)) return uncertain("EFFECT_INVALID_IDENTITY")
-        if (currentFenceGeneration <= 0L || expected.fenceGeneration != currentFenceGeneration)
+        // A crash-tail operation was issued under N and may be inspected under
+        // a newly acquired lease N+1. The current lease grants no effect replay.
+        if (currentFenceGeneration <= 0L || expected.fenceGeneration > currentFenceGeneration)
             return uncertain("EFFECT_STALE_GENERATION")
-        if (!sha256.matches(view.headSha256) || view.lastSequence <= 0L ||
-            view.entries.size !in 1..MAX_ENTRIES ||
-            view.entries.any { !valid(it) || it.sequence > view.lastSequence } ||
-            view.entries.zipWithNext().any { (a, b) -> a.sequence >= b.sequence })
+        if (!sha256.matches(view.headSha256) || view.lastSequence <= 0L)
             return uncertain("EFFECT_INVALID_HISTORY")
-        if (!authenticated(verifier, view))
+        var previousSequence = 0L
+        for (entry in view.entries) {
+            if (!valid(entry) || entry.sequence <= previousSequence ||
+                entry.sequence > view.lastSequence)
+                return uncertain("EFFECT_INVALID_HISTORY")
+            previousSequence = entry.sequence
+        }
+        if (!authenticated(verifier, view, expected, currentFenceGeneration))
             return uncertain("EFFECT_HISTORY_UNVERIFIED")
 
         // Operation IDs are unique within a session, even across generations
@@ -168,6 +190,8 @@ object EffectReconciliationPolicy {
             it.record.identity.sessionId == expected.sessionId &&
                 it.record.identity.operationId == expected.operationId
         }
+        // Deliberately conservative: lack of an intent is never, by itself,
+        // proof of non-execution, even when the journal prefix is authentic.
         if (entries.isEmpty()) return uncertain("EFFECT_INTENT_MISSING")
         if (entries.any { it.record.identity != expected })
             return uncertain("EFFECT_STALE_OR_REUSED_OPERATION")
