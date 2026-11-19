@@ -96,9 +96,11 @@ class GenesisEffectReconciliationIntegrationTest : SessionCheckpointTestFixture(
                     advanced(transition), transition.sha256)
                 assertEquals(2L, c4.snapshot.effectJournalHead!!.fenceGeneration)
                 assertEquals(record, c4.snapshot.effectReconciliation)
-                assertEquals(0L, SessionCheckpointStore.inspectEffectHeadBound(
-                    store(), context(), ledger(), path(2L), key).lastSequence)
             }
+            // Physical inspection requires the writer's exclusive lock to
+            // be released; this is intentional, not a concurrent read API.
+            assertEquals(0L, SessionCheckpointStore.inspectEffectHeadBound(
+                store(), context(), ledger(), path(2L), key).lastSequence)
         }
         assertEquals("RESUME_UNSAFE_BOUNDARY",
             assertFailsWith<SessionResumeUnconfirmed> {
@@ -159,6 +161,30 @@ class GenesisEffectReconciliationIntegrationTest : SessionCheckpointTestFixture(
         assertFailsWith<SessionResumeUnconfirmed> {
             reconcile(ready).close()
         }
+        assertEquals(pinned.sha256, inspect().sha256)
+        assertEquals(1L, ResumeFenceStorage.latest(store())!!.generation)
+    }
+
+    @Test fun intentOnlyCannotBeMistakenForProvenNotStarted() {
+        val c1 = createPreExecutionCheckpoint()
+        lateinit var pinned: VerifiedSessionCheckpoint
+        lateinit var mac: String
+        SessionResumeAdmission.admit(store(), context(), ledger(), resumeAttestation())
+            .use { lease ->
+                head(lease).use { journal ->
+                    journal.append(EffectRecord.Intent(EffectIdentity("sess-one",
+                        "effect-one", 1L, EffectKind.TRUSTED_WRITE, "a".repeat(64))))
+                    pinned = SessionCheckpointStore.saveEffectHeadFenced(
+                        lease, store(), context(), ledger(), journal,
+                        advanced(c1), c1.sha256)
+                    mac = journal.headPin().headMacSha256
+                }
+            }
+        val ready = Ready(pinned, ResumeFenceStorage.atGeneration(store(), 1L), mac)
+        assertEquals("RESUME_EFFECT_RECONCILIATION_CONTEXT_MISMATCH",
+            assertFailsWith<SessionResumeUnconfirmed> {
+                reconcile(ready).close()
+            }.code)
         assertEquals(pinned.sha256, inspect().sha256)
         assertEquals(1L, ResumeFenceStorage.latest(store())!!.generation)
     }
@@ -250,8 +276,8 @@ class GenesisEffectReconciliationIntegrationTest : SessionCheckpointTestFixture(
             StandardOpenOption.TRUNCATE_EXISTING)
         // The read-only store authenticates the chain structure, not the
         // operator HMAC: only the explicit host-key admission path does that.
-        assertEquals("RESUME_UNSAFE_BOUNDARY",
-            assertFailsWith<SessionResumeUnconfirmed> {
+        assertEquals("CHECKPOINT_RESUME_FENCE_CHECKPOINT_MISSING",
+            assertFailsWith<CheckpointUnconfirmed> {
                 SessionResumeAdmission.admit(
                     store(), context(), ledger(), resumeAttestation(2L))
             }.code)

@@ -745,6 +745,24 @@ object SessionCheckpointStore {
             result.add(current)
             precedingCheckpointShas.add(current.sha256)
         }
+        // A committed fence cannot refer to an absent or replaced checkpoint.
+        // This also detects a canonical v3 payload rehashed after the next
+        // fence has durably pinned its original SHA.
+        if (latestFence != null) {
+            for (generation in 1L..latestFence.generation) {
+                val fence = fencesByGeneration.getOrPut(generation) {
+                    ResumeFenceStorage.atGeneration(directory, generation)
+                }
+                if (fence.checkpointSha256 !in precedingCheckpointShas)
+                    refuse("CHECKPOINT_RESUME_FENCE_CHECKPOINT_MISSING")
+            }
+        }
+        // A pinned latest checkpoint cannot silently trail a later fence.
+        // Historical heads may be older when a v3 reconciliation follows.
+        result.lastOrNull()?.snapshot?.effectJournalHead?.let { head ->
+            if (head.fenceGeneration != latestFence?.generation)
+                refuse("CHECKPOINT_EFFECT_HEAD_FENCE_MISMATCH")
+        }
         return result
     }
 
