@@ -46,8 +46,14 @@ class DurableEffectRecordJournalIntegrationTest : SessionCheckpointTestFixture()
     private fun open(lease: SessionResumeLease) =
         DurableEffectRecordJournal.create(path(), workspace(), id.sessionId, key, lease)
 
+    private fun expectation(): EffectJournalExpectation =
+        ResumeFenceStorage.atGeneration(store(), 1L).let {
+            EffectJournalExpectation(it.sessionId, it.generation,
+                it.checkpointSha256, it.toolAuthoritySha256)
+        }
+
     private fun inspectEffects() =
-        DurableEffectRecordJournal.inspect(path(), workspace(), key, id.sessionId)
+        DurableEffectRecordJournal.inspect(path(), workspace(), key, expectation())
 
     private fun inspectDiagnostic() =
         DurableEffectRecordJournal.inspectForDiagnostics(
@@ -146,15 +152,17 @@ class DurableEffectRecordJournalIntegrationTest : SessionCheckpointTestFixture()
             assertEquals(64, verified.headMacSha256.length)
             denied("EFFECT_JOURNAL_CONTEXT_MISMATCH") {
                 DurableEffectRecordJournal.inspect(
-                    path(), workspace(), key, "another-session")
+                    path(), workspace(), key,
+                    expectation().copy(sessionId = "another-session"))
             }
             denied("EFFECT_JOURNAL_CONTEXT_MISMATCH") {
                 DurableEffectRecordJournal.inspect(
-                    path(), workspace(), key, id.sessionId, expectedFenceGeneration = 2L)
+                    path(), workspace(), key,
+                    expectation().copy(fenceGeneration = 2L))
             }
             denied("EFFECT_JOURNAL_CONTEXT_MISMATCH") {
                 DurableEffectRecordJournal.inspect(path(), workspace(), key,
-                    id.sessionId, expectedCheckpointSha256 = "0".repeat(64))
+                    expectation().copy(admittedCheckpointSha256 = "0".repeat(64)))
             }
             denied("EFFECT_JOURNAL_CONTEXT_MISMATCH") {
                 DurableEffectRecordJournal.create(path().resolveSibling("other.rcfx"),
@@ -270,7 +278,7 @@ class DurableEffectRecordJournalIntegrationTest : SessionCheckpointTestFixture()
         }
         denied("EFFECT_JOURNAL_AUTH_FAILED") {
             DurableEffectRecordJournal.inspect(
-                path(), workspace(), ByteArray(32) { 42 }, id.sessionId)
+                path(), workspace(), ByteArray(32) { 42 }, expectation())
         }
         val bytes = Files.readAllBytes(path())
         // Derive effect-frame offset from authenticated genesis length.
@@ -296,10 +304,120 @@ class DurableEffectRecordJournalIntegrationTest : SessionCheckpointTestFixture()
         assertEquals(listOf(intent()), diagnostic.entries.map { it.record })
         assertEquals(1L, diagnostic.lastSequence)
         assertNotNull(diagnostic.tornTailOffset)
+        assertEquals(EffectJournalTailKind.SHORT_FRAME, diagnostic.tailKind)
         assertEquals(diagnostic.tornTailOffset, diagnostic.verifiedByteLength)
         assertEquals(bytes.size - 1L, diagnostic.byteLength)
         assertTrue(diagnostic.verifiedByteLength < diagnostic.byteLength)
         assertEquals(bytes.size - 1L, Files.size(path()))
+    }
+
+
+    @Test fun immutableCheckpointDirectoryAnchorsCoverEveryConfirmedHead() {
+        lateinit var pin: EffectJournalHeadPin
+        withLease { lease ->
+            open(lease).use { journal ->
+                val genesis = journal.currentHeadPin()
+                assertEquals(0L, genesis.lastSequence)
+                assertEquals(64, genesis.anchorSha256.length)
+                journal.append(intent())
+                journal.append(started())
+                journal.append(committed())
+                pin = journal.currentHeadPin()
+                assertEquals(3L, pin.lastSequence)
+                assertEquals(64, pin.anchorSha256.length)
+            }
+        }
+        val verified = DurableEffectRecordJournal.inspectBound(
+            path(), workspace(), key, expectation(), store(), pin)
+        assertEquals(3L, verified.lastSequence)
+        assertEquals(pin.headMacSha256, verified.headMacSha256)
+        for (seq in 0L..3L) {
+            val name = "effect-head-000000000001-" +
+                seq.toString().padStart(12, '0') + ".rca"
+            assertTrue(Files.isRegularFile(store().resolve(name), LinkOption.NOFOLLOW_LINKS))
+        }
+        denied("EFFECT_ANCHOR_PIN_MISMATCH") {
+            DurableEffectRecordJournal.inspectBound(path(), workspace(), key,
+                expectation(), store(), pin.copy(anchorSha256 = "0".repeat(64)))
+        }
+    }
+
+    @Test fun removedFullRecordOrAnchorCannotPassExternallyPinnedHead() {
+        lateinit var pin: EffectJournalHeadPin
+        withLease { lease ->
+            open(lease).use { journal ->
+                journal.append(intent())
+                journal.append(started())
+                pin = journal.currentHeadPin()
+            }
+        }
+        val lastAnchor = store().resolve("effect-head-000000000001-000000000002.rca")
+        Files.delete(lastAnchor)
+        denied("EFFECT_ANCHOR_CHAIN_MISMATCH") {
+            DurableEffectRecordJournal.inspectBound(
+                path(), workspace(), key, expectation(), store(), pin)
+        }
+
+        val raw = Files.readAllBytes(path())
+        var offset = 7
+        // Keep only genesis and the complete intent; remove the second effect.
+        repeat(2) {
+            val size = ByteBuffer.wrap(raw, offset, 4).int
+            offset += 36 + size
+        }
+        Files.write(path(), raw.copyOf(offset), StandardOpenOption.TRUNCATE_EXISTING)
+        assertEquals(1L, inspectEffects().lastSequence)
+        denied("EFFECT_ANCHOR_HEAD_MISMATCH") {
+            DurableEffectRecordJournal.inspectBound(
+                path(), workspace(), key, expectation(), store(), pin)
+        }
+    }
+
+    @Test fun changedIndependentAnchorCannotPassPinnedRecoveryInspection() {
+        lateinit var pin: EffectJournalHeadPin
+        withLease { lease ->
+            open(lease).use { journal ->
+                journal.append(intent())
+                pin = journal.currentHeadPin()
+            }
+        }
+        val anchor = store().resolve("effect-head-000000000001-000000000001.rca")
+        val raw = Files.readAllBytes(anchor)
+        raw[10] = (raw[10].toInt() xor 1).toByte()
+        Files.write(anchor, raw, StandardOpenOption.TRUNCATE_EXISTING)
+        denied("EFFECT_ANCHOR_CORRUPT") {
+            DurableEffectRecordJournal.inspectBound(
+                path(), workspace(), key, expectation(), store(), pin)
+        }
+    }
+
+    @Test fun zeroFilledExtendedTailIsDiagnosticOnlyAndKeepsVerifiedPrefix() {
+        withLease { lease -> open(lease).use { it.append(intent()) } }
+        val before = Files.readAllBytes(path())
+        val extra = ByteArray(512)
+        Files.write(path(), extra, StandardOpenOption.APPEND)
+        // Strict verification must NOT silently accept extra zeroed bytes.
+        denied("EFFECT_JOURNAL_RECORD_CORRUPT") { inspectEffects() }
+        val result = inspectDiagnostic()
+        assertEquals(listOf(intent()), result.entries.map { it.record })
+        assertEquals(1L, result.lastSequence)
+        assertEquals(EffectJournalTailKind.ZERO_FILLED, result.tailKind)
+        assertEquals(before.size.toLong(), result.verifiedByteLength)
+        assertEquals(before.size.toLong(), result.tornTailOffset)
+        assertEquals(before.size + extra.size.toLong(), result.byteLength)
+        assertContentEquals(before + extra, Files.readAllBytes(path()))
+    }
+
+    @Test fun malformedExpectedContextFailsBeforeReadingDisk() {
+        withLease { lease -> open(lease).use { } }
+        denied("EFFECT_JOURNAL_EXPECTATION_INVALID") {
+            DurableEffectRecordJournal.inspect(path(), workspace(), key,
+                expectation().copy(toolAuthoritySha256 = "not-a-digest"))
+        }
+        denied("EFFECT_JOURNAL_CONTEXT_MISMATCH") {
+            DurableEffectRecordJournal.inspect(path(), workspace(), key,
+                expectation().copy(toolAuthoritySha256 = "a".repeat(64)))
+        }
     }
 
     @Test fun postFsyncLostAcknowledgementPoisonsWriterWithoutDroppingDiskEvidence() {

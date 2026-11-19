@@ -129,18 +129,23 @@ performs lease-held append + `FileChannel.force(true)` before acknowledgement,
 and becomes poisoned after uncertain I/O; it never truncates or guesses
 whether a post-fsync acknowledgement was observed.
 
-`inspect` is **read-only**, and strictly refuses a wrong expected
-session/generation/checkpoint/authority, invalid key, broken tag chain,
-noncanonical record, duplicate ID, unsupported transition, torn tail,
-live writer, missing lock or unsafe path. It independently verifies the
-complete file under the journal's exclusive OS lock. A separate
-`inspectForDiagnostics` accepts only an *incomplete final effect frame*
-and reports the authenticated prefix, physical `byteLength`,
-`verifiedByteLength` and `tornTailOffset`. It **never repairs**, truncates,
-allows append or authorizes a not-started / committed classification. A torn
-genesis, MAC mismatch, noncanonical payload or invalid transition still
-refuses even diagnostics. A forged frame length may be indistinguishable
-from truncation, so a diagnostic torn tail is *not proof of a crash*.
+`inspect` is **read-only** and requires one mandatory
+`EffectJournalExpectation` with the independently known session ID,
+issuing fence generation, admitted checkpoint SHA and tool-authority SHA.
+The strict path refuses malformed or mismatched expectations, wrong key,
+broken tag chain, noncanonical record, duplicate ID, illegal transition,
+torn tail, live writer, missing lock or unsafe path. It independently
+verifies the complete file under the journal's exclusive OS lock.
+
+A separate `inspectForDiagnostics` permits only two incomplete tail
+classes: `SHORT_FRAME` (insufficient bytes or incomplete declared frame),
+and `ZERO_FILLED` (all remaining bytes from the first incomplete frame are
+`0x00`). It reports `tailKind`, `tornTailOffset`,
+`verifiedByteLength` and physical `byteLength`, retaining the authenticated
+prefix without repairing, truncating or authorizing any operation. **Even
+all-zero bytes could be deliberate tampering, not a proven crash.**
+Strict `inspect` rejects both; a torn genesis, a nonzero MAC mismatch,
+a noncanonical payload or illegal transition rejects even diagnostics.
 
 The returned authenticated header, entry list, keyed head and file digest
 are **diagnostic physical-file evidence only**, NOT the checkpoint-anchored
@@ -166,14 +171,53 @@ uncertain post-fsync acknowledgement, duplicate operations, stale lease,
 live/missing/symlinked lock, workspace directory safety, path substitution,
 and lease retirement.
 
+## Checkpoint-directory effect-head receipts (next bounded slice)
+
+When the host creates an effect journal, it durably publishes an immutable
+genesis head receipt (`effect-head-<generation>-000000000000.rca`) in the
+existing private checkpoint directory. Each subsequently acknowledged effect
+append is fsynced to the sidecar **and then** published as an immutable,
+hash-chained head receipt in the checkpoint directory before the caller gets
+an acknowledgement. The receipt contains the full genesis context,
+normalized absolute sidecar path hash, effect sequence, HMAC head and prior
+receipt SHA-256. Publication uses a forced temporary file, same-directory
+hard link, and parent-directory fsync. An uncertain publication poisons the
+writer; never truncate/repair the sidecar or claim a confirmed effect.
+
+`DurableEffectRecordJournal.inspectBound` checks a strict physical
+journal against a mandatory `EffectJournalExpectation`, a trusted
+`EffectJournalHeadPin` (last sequence, head MAC, head receipt SHA), and the
+complete independent checkpoint-directory receipt chain. A removed complete
+effect record, missing receipt, tampered receipt or mismatched pin fails
+closed. The pinned SHA **MUST** be retrieved from an independently trusted
+durable checkpoint/authority root; deriving the pin from the effect sidecar
+or listing this checkpoint directory is unsafe. Current checkpoint schema
+does not yet record the effect head, so such authority-root integration is
+**not** supplied here. In particular, deleting a complete suffix of both
+sidecar and head receipts cannot be detected without a separately retained
+pin. The receipt files are independent of the sidecar but not a complete
+external anti-rollback guarantee.
+
+**Compatibility:** journals created by the earlier unanchored sidecar
+version have no receipt chain and must fail `inspectBound`; do not synthesize
+missing anchors from an untrusted file. They remain available to strict
+physical inspection and operator diagnostics only.
+
+This slice also does **not** implement `HostEffectEvidenceVerifier`:
+`EffectJournalView` refers to a complete authoritative *session-event*
+ledger projection, not to this separate sidecar. Nor can the adapter
+independently verify a Git CAS or external tool's actual state yet.
+Therefore no `ConfirmedCommitted`, `ProvenNotStarted`, replay or
+automatic accepted stage is authorized by any of these receipts.
+
 ## Deferred work and acceptance
 
 The existing checkpoint `pendingEffects` and pre-execution fenced ledger
 have NOT been wired to these new types. The barrier field and
 verifier method are a contract only: this sidecar storage adds real record
 HMAC verification but does **not** provide a physical successor execution
-barrier, independently verified external completion, or a no-start proof. A later PR must supply independent checkpoint/anchor binding
-for this physical file (including its authenticated genesis and full head),
-authoritative full-session-journal projection, verified external state and
-no-start proofs, atomic receipt publication, production adapter conformance,
-and kill/timeout tests around every intent-effect-receipt boundary. See #105 for the remaining full P1 acceptance criteria.
+barrier, independently verified external completion, or a no-start proof. A later PR must bind the trusted head pin into an independently verified
+checkpoint/anchor authority root, reconstruct and authenticate the complete
+session-event projection, implement actual external-state confirmation and
+successor-barrier no-start proofs, provide production adapter conformance,
+and kill/timeout tests around each intent-effect-receipt boundary. See #105 for the remaining full P1 acceptance criteria.

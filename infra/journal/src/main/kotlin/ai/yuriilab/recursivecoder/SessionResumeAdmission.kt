@@ -309,6 +309,13 @@ class SessionResumeLease internal constructor(
             directory, generation, admittedFenceSha256).sessionId
     }
 
+    /** Only callable inside the live lease monitor; anchor files are host-owned. */
+    internal fun effectHeadAnchorDirectory(): Path {
+        if (!Thread.holdsLock(this))
+            throw SessionResumeUnconfirmed("RESUME_FENCE_MONITOR_REQUIRED")
+        return directory
+    }
+
     /** Required before callbacks or trusted receipt publication. */
     @Synchronized fun assertCurrent() {
         if (closed || !lock.isValid)
@@ -326,6 +333,8 @@ class SessionResumeLease internal constructor(
      * exceptions for both the fenced session ledger appendFenced and the
      * isolated host-only effect journal create/append. Effect-journal genesis
      * creation also persists the parent directory entry within this guard.
+     * Per-effect immutable checkpoint-directory head anchors are forced and
+     * linked under the same guard before any append acknowledgement.
      * These local fsync operations may delay lease retirement; they MUST stay
      * inside the same authority-checked publication. No model, tool or
      * network calls may run under this monitor.
