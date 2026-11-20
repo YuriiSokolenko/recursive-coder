@@ -112,6 +112,20 @@ class EffectEvidenceProjectionUnitTest {
             }, "tool.completed"), physical))
     }
 
+    @Test fun effectEnvelopeInSessionLedgerCannotMatchEmptyPhysicalGenesis() {
+        val genesis = physical()
+        val effectOnlyLedger = listOf(
+            effectEvent(1, 1L, EffectRecord.Intent(expected), "c".repeat(64)))
+        assertEquals(0L, genesis.lastSequence)
+        assertEquals(emptyList(), EffectEvidenceProjection.fromSessionLedger(
+            emptyList(), genesis))
+        assertEquals("PROJECTION_EXTRA_EVENT",
+            assertIs<EffectEvidenceProjection.Result.Denied>(
+                EffectEvidenceProjection.inspect(effectOnlyLedger, genesis)).code)
+        assertNull(EffectEvidenceProjection.fromSessionLedger(
+            effectOnlyLedger, genesis))
+    }
+
     @Test fun unconfirmedAndTornPhysicalHistoriesNeverProjectAsComplete() {
         val intent = EffectRecord.Intent(expected)
         val physical = physical(intent, EffectRecord.Unconfirmed(expected, "HOST_ERROR"))
