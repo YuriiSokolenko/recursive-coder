@@ -191,7 +191,7 @@ cannot coexist with pending effects or unknown consumption.
 
 `SessionPhaseVocabulary` is the intentionally supported, read-only public
 adapter surface for the **currently emitted** v1 session phase wire spellings:
-`wires`, `terminalWires`, `createdWire` and `acceptedWire`. The sets and
+`wires`, `terminalWires`, `createdWire`, `acceptedWire` and `runningWire`. The sets and
 both individual pre-execution spellings derive from the internal
 `SessionPhase` enum; callers cannot mutate the exported sets. Any spelling or membership change
 requires a compatibility review and an explicit update to drift-guard tests.
