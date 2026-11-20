@@ -1500,9 +1500,13 @@ object SessionCheckpointStore {
      */
     internal fun <T> withAdmissionEvidence(
         directory: Path, context: CheckpointHostContext, ledgerPath: Path,
+        fileStoreType: (Path) -> String,
         block: (Path, VerifiedSessionCheckpoint, VerifiedSessionEventLedger) -> T
     ): T {
         val dir = checkedAdmissionDirectory(directory, context)
+        // Diagnostics and ordinary fenced admission share the local-filesystem
+        // requirement, before taking checkpoint.lock or verifying mutable state.
+        ResumeLocalFileStorePolicy.requireSupportedPaths(dir, ledgerPath, fileStoreType)
         return withLease(dir, create = false) {
             val latest = readAll(dir).lastOrNull() ?: refuse("CHECKPOINT_MISSING")
             val ledger = inspectLedger(ledgerPath, context.workspaceRoot)

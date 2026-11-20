@@ -26,8 +26,69 @@ data class ResumeHostAttestation(
     val externalActionsReconciled: Boolean
 )
 
-class SessionResumeUnconfirmed(val code: String, cause: Throwable? = null) :
-    IllegalStateException(code, cause)
+class SessionResumeUnconfirmed(
+    val code: String,
+    cause: Throwable? = null,
+    val detail: String? = null
+) : IllegalStateException(if (detail == null) code else "$code: $detail", cause)
+
+/**
+ * Admission supports only reviewed persistent local Linux filesystems.
+ * A hard-link probe alone cannot establish advisory-lock or fsync semantics.
+ * Reject unknown types and transient/user-space mounts instead of guessing.
+ */
+internal object ResumeLocalFileStorePolicy {
+    /** The only production FileStore.type lookup; fault seams must supply it explicitly. */
+    val systemType: (Path) -> String = { Files.getFileStore(it).type() }
+
+    private val trustedTypes = setOf("ext2", "ext3", "ext4", "xfs",
+        "btrfs", "f2fs", "zfs")
+
+    // Do not expose paths or arbitrary host-controlled strings in errors.
+    private fun shown(type: String?): String = type?.lowercase(Locale.ROOT)
+        ?.takeIf { it.length in 1..64 && it.all { c ->
+            c in 'a'..'z' || c in '0'..'9' || c in "._-"
+        } } ?: "unknown"
+
+    private fun refuse(checkpointType: String?, ledgerType: String?,
+                       cause: Throwable? = null): Nothing =
+        throw SessionResumeUnconfirmed("RESUME_FILESYSTEM_UNSUPPORTED", cause,
+            "checkpoint=${shown(checkpointType)} ledger=${shown(ledgerType)}")
+
+    fun requireSupportedTypes(checkpointType: String, ledgerType: String) {
+        if (checkpointType.lowercase(Locale.ROOT) !in trustedTypes ||
+            ledgerType.lowercase(Locale.ROOT) !in trustedTypes)
+            refuse(checkpointType, ledgerType)
+    }
+
+    private data class Lookup(val type: String?, val failure: Exception? = null)
+
+    fun requireSupportedPaths(directory: Path, ledgerPath: Path,
+                              fileStoreType: (Path) -> String) {
+        val parent = ledgerPath.toAbsolutePath().normalize().parent
+            ?: refuse("unknown", "unknown")
+        fun lookup(path: Path): Lookup =
+            try { Lookup(fileStoreType(path)) }
+            catch (error: Exception) { Lookup(null, error) }
+
+        // Resolve both independent mounts for actionable diagnostics.
+        val checkpoint = lookup(directory)
+        val ledger = lookup(parent)
+        val primaryFailure = checkpoint.failure ?: ledger.failure
+        if (primaryFailure != null) {
+            // The first volume is the primary cause; preserve the other failure
+            // without replacing or obscuring it. Avoid self-suppression if an
+            // injected lookup throws the same Exception instance for both paths.
+            if (checkpoint.failure != null && ledger.failure != null &&
+                ledger.failure !== checkpoint.failure)
+                primaryFailure.addSuppressed(ledger.failure)
+            refuse(if (checkpoint.failure != null) "lookup-failed" else checkpoint.type,
+                if (ledger.failure != null) "lookup-failed" else ledger.type,
+                primaryFailure)
+        }
+        requireSupportedTypes(checkpoint.type ?: "", ledger.type ?: "")
+    }
+}
 
 /**
  * Snapshot constraints remain in infra because SessionCheckpoint is the
@@ -375,8 +436,22 @@ object SessionResumeAdmission {
     }
 
     fun currentGeneration(directory: Path, context: CheckpointHostContext,
-                          ledgerPath: Path): Long = try {
-        SessionCheckpointStore.withAdmissionEvidence(directory, context, ledgerPath) { dir, _, _ ->
+                          ledgerPath: Path): Long =
+        currentGenerationChecked(directory, context, ledgerPath, ResumeLocalFileStorePolicy.systemType)
+
+    /** Deterministic filesystem fault seam; never used by production callers. */
+    @LedgerTestFaultInjection
+    internal fun currentGenerationWithFault(
+        directory: Path, context: CheckpointHostContext, ledgerPath: Path,
+        fileStoreType: (Path) -> String
+    ): Long = currentGenerationChecked(directory, context, ledgerPath, fileStoreType)
+
+    private fun currentGenerationChecked(
+        directory: Path, context: CheckpointHostContext, ledgerPath: Path,
+        fileStoreType: (Path) -> String
+    ): Long = try {
+        SessionCheckpointStore.withAdmissionEvidence(directory, context, ledgerPath,
+            fileStoreType) { dir, _, _ ->
             val head = ResumeFenceStorage.latest(dir)
             ResumeFenceAnchor.verify(ledgerPath, head, dir)
             head?.generation ?: 0L
@@ -394,8 +469,22 @@ object SessionResumeAdmission {
      */
     fun reconciliationStatus(directory: Path, context: CheckpointHostContext,
                              ledgerPath: Path): ResumeReconciliationStatus? =
-        SessionCheckpointStore.withAdmissionEvidence(directory, context, ledgerPath) {
-                checkedDir, verified, _ ->
+        reconciliationStatusChecked(directory, context, ledgerPath, ResumeLocalFileStorePolicy.systemType)
+
+    /** Deterministic filesystem fault seam; never used by production callers. */
+    @LedgerTestFaultInjection
+    internal fun reconciliationStatusWithFault(
+        directory: Path, context: CheckpointHostContext, ledgerPath: Path,
+        fileStoreType: (Path) -> String
+    ): ResumeReconciliationStatus? =
+        reconciliationStatusChecked(directory, context, ledgerPath, fileStoreType)
+
+    private fun reconciliationStatusChecked(
+        directory: Path, context: CheckpointHostContext, ledgerPath: Path,
+        fileStoreType: (Path) -> String
+    ): ResumeReconciliationStatus? =
+        SessionCheckpointStore.withAdmissionEvidence(directory, context, ledgerPath,
+            fileStoreType) { checkedDir, verified, _ ->
             val head = ResumeFenceStorage.latest(checkedDir)
             ResumeFenceAnchor.recoveryStatus(ledgerPath, head, checkedDir, verified.sha256,
                 verified.snapshot.binding.policySha256)
@@ -404,7 +493,8 @@ object SessionResumeAdmission {
     @OptIn(ResumeOperatorOnlyApi::class)
     fun admit(directory: Path, context: CheckpointHostContext, ledgerPath: Path,
               attestation: ResumeHostAttestation): SessionResumeLease =
-        admitChecked(directory, context, ledgerPath, attestation, null) { }
+        admitChecked(directory, context, ledgerPath, attestation, null,
+            fileStoreType = ResumeLocalFileStorePolicy.systemType) { }
 
     /**
      * Narrow, operator-only recovery: GENESIS (sequence zero) is independently
@@ -479,12 +569,14 @@ object SessionResumeAdmission {
         directory: Path, context: CheckpointHostContext, ledgerPath: Path,
         attestation: ResumeHostAttestation, operator: PreparedFenceReconciliation
     ): SessionResumeLease =
-        admitChecked(directory, context, ledgerPath, attestation, operator) { }
+        admitChecked(directory, context, ledgerPath, attestation, operator,
+            fileStoreType = ResumeLocalFileStorePolicy.systemType) { }
 
     /** Integration-test-only fault seam, not an application API or service port.
      * Compiled in production only to support deterministic crash-boundary tests.
      */
-    @ResumeOperatorOnlyApi
+    @LedgerTestFaultInjection
+    @OptIn(ResumeOperatorOnlyApi::class)
     internal fun admitWithFault(
         directory: Path, context: CheckpointHostContext, ledgerPath: Path,
         attestation: ResumeHostAttestation,
@@ -492,21 +584,24 @@ object SessionResumeAdmission {
         hardLinkProbe: (Path, String?) -> Unit = { directory, scope ->
             ResumeImmutablePublication.requireHardLinks(directory, scope)
         },
+        fileStoreType: (Path) -> String = ResumeLocalFileStorePolicy.systemType,
         afterAnchorCommitted: () -> Unit
     ): SessionResumeLease =
         admitChecked(directory, context, ledgerPath, attestation, null,
             beforeInspection = beforeInspection, hardLinkProbe = hardLinkProbe,
-            afterAnchorCommitted = afterAnchorCommitted)
+            fileStoreType = fileStoreType, afterAnchorCommitted = afterAnchorCommitted)
 
     /** Integration-test-only fault seam for a crash after durable operator audit. */
-    @ResumeOperatorOnlyApi
+    @LedgerTestFaultInjection
+    @OptIn(ResumeOperatorOnlyApi::class)
     internal fun reconcilePreparedWithFault(
         directory: Path, context: CheckpointHostContext, ledgerPath: Path,
         attestation: ResumeHostAttestation, operator: PreparedFenceReconciliation,
+        fileStoreType: (Path) -> String = ResumeLocalFileStorePolicy.systemType,
         afterAuditCommitted: () -> Unit
     ): SessionResumeLease =
         admitChecked(directory, context, ledgerPath, attestation, operator,
-            afterAnchorCommitted = afterAuditCommitted)
+            fileStoreType = fileStoreType, afterAnchorCommitted = afterAuditCommitted)
 
     @OptIn(ResumeOperatorOnlyApi::class)
     private fun admitChecked(
@@ -516,6 +611,7 @@ object SessionResumeAdmission {
         hardLinkProbe: (Path, String?) -> Unit = { directory, scope ->
             ResumeImmutablePublication.requireHardLinks(directory, scope)
         },
+        fileStoreType: (Path) -> String = ResumeLocalFileStorePolicy.systemType,
         genesisOperator: GenesisEffectHeadReconciliation? = null,
         genesisSidecar: Path? = null,
         genesisKey: ByteArray? = null,
@@ -538,6 +634,10 @@ object SessionResumeAdmission {
             fail("RESUME_EXTERNAL_EFFECTS_UNCONFIRMED")
         val ledgerKeyBeforeInspect = ledgerFileKey(ledgerPath)
         val dir = SessionCheckpointStore.checkedAdmissionDirectory(directory, context)
+        // This early pre-lock check is intentionally repeated inside
+        // withAdmissionEvidence under resume.lock. Never remove the first one:
+        // unsupported mounts must not cause resume.lock creation or fence changes.
+        ResumeLocalFileStorePolicy.requireSupportedPaths(dir, ledgerPath, fileStoreType)
         val lockPath = dir.resolve("resume.lock")
         if (!heldLocks.add(lockPath)) fail("RESUME_LEASE_HELD")
         var owner: FileChannel? = null
@@ -622,7 +722,7 @@ object SessionResumeAdmission {
             }
             val result = if (genesisOperator == null)
                 SessionCheckpointStore.withAdmissionEvidence(
-                    dir, context, ledgerPath, commit)
+                    dir, context, ledgerPath, fileStoreType, commit)
             else SessionCheckpointStore.withGenesisReconciliationEvidence(
                 dir, context, ledgerPath,
                 genesisSidecar ?: fail("RESUME_EFFECT_RECONCILIATION_INVALID"),

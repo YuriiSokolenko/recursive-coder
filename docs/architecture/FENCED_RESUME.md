@@ -27,6 +27,38 @@ fsync. NFS, SMB, FUSE and other network or userspace-backed mounts are
 unsupported even when the hard-link capability preflight succeeds. That
 preflight does not validate lock reliability or inode stability.
 
+Admission, generation inspection and operator reconciliation additionally
+read `FileStore.type()` for **both** the checkpoint directory and the ledger
+parent before taking a checkpoint or resume lock. Only explicitly reviewed
+Linux filesystem types (`ext2`, `ext3`, `ext4`, `xfs`, `btrfs`, `f2fs`,
+`zfs`) pass the conservative type gate. NFS, SMB/CIFS, FUSE, overlay,
+`tmpfs`, unknown types and lookup failures fail closed with
+`RESUME_FILESYSTEM_UNSUPPORTED`; no new fence is published. The exception
+retains this stable code and includes non-secret diagnostics such as
+`checkpoint=overlay ledger=ext4`. A failed lookup reports
+`lookup-failed` for its respective volume and preserves the original cause.
+
+Mount type classification is only a necessary preflight, **not** proof of
+fsync or lock correctness. For example, `ext4` with disabled write barriers
+(`nobarrier`) or `zfs` with `sync=disabled` may not honor the required
+durability contract. Operators must provision and verify trusted, persistent
+local filesystems and their mount options. In Docker/Podman, an `overlay`
+container root is rejected; put **both** the checkpoint directory and ledger
+parent on appropriate persistent bind-mounted or volume-backed local storage.
+The initial unfenced checkpoint creation may still succeed on `tmpfs`, but
+subsequent fenced admission will refuse; validation of the initial write
+is separate from the filesystem admission gate tracked by issue #104
+and should not be treated as evidence of durability.
+
+**Untrusted-boundary rule for the remaining #104 runtime integration:**
+only the structured `SessionResumeUnconfirmed.code` and sanitized
+`detail` may reach model-visible or protocol-visible outputs. Do not
+serialize, stringify, or forward the exception, `cause`, suppressed
+exceptions, or stack trace; filesystem lookup causes may contain host
+paths. Keep full exceptions in host/operator-only diagnostics. This rule
+must be verified when resume is actually wired into runtime; it is
+**not** enforced by the currently unconnected runtime path.
+
 `SessionResumeAdmission.admit(directory, context, ledgerPath, attestation)`
 requires the same private, Linux/POSIX, effective-UID-owned 0700 checkpoint
 directory and out-of-workspace durable event ledger as issue #103. The host,
