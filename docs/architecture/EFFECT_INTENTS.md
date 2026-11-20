@@ -353,7 +353,8 @@ or model-supplied digest is **not** independent confirmation.
 Every positive `authenticateCompleteJournal` rereads (rather than
 trusting caller-created DTOs): the complete validated RCLDG1 file,
 the canonical SHA-chained checkpoint/fence/anchor chain, the latest
-checkpoint's bound physical v2 head, and the **entire HMAC-authenticated,
+checkpoint's bound physical v2 head (or its exact sealed v3 historical
+genesis transition), and the **entire HMAC-authenticated,
 exact-pin RCEFX1** sidecar with its closed OS writer. It compares the
 RCLDG1 last sequence and head SHA with the checkpoint and supplied
 `EffectJournalView`. It then reconstructs the **entire** RCLDG1 effect
@@ -402,17 +403,32 @@ evidence cannot replace that production path. `independentlyVerifyNotStarted`
 **always returns false**: no independent actual no-start execution
 barrier yet exists.
 
-**Same-generation-only (deliberate):** this adapter authenticates a pin
-issued under the currently live `SessionResumeLease` N. It **cannot**
-positively verify a historical N journal after acquiring a successor
-N+1 lease, even though the abstract `EffectReconciliationPolicy`
-supports that case. The existing checkpoint policy cannot yet persist
-effectful RCLDG1 histories and preserve an independently verifiable
-N→N+1 pin. The new real negative test pins genesis under N, obtains
-N+1 via explicit operator reconciliation and verifies this adapter
-returns false. Supporting historical recovery later requires an
-explicit authenticated fence-chain and execution authority protocol,
-**not** relaxation of the current-generation equality guard.
+**Historical N→N+1, genesis-only read-only verification:** this
+adapter now accepts either (a) a pin issued under the currently live
+`SessionResumeLease` N, or (b) an **empty, historical** N RCEFX1 genesis
+after the exact operator-approved canonical v3 transition has been
+committed under the immediate successor N+1 lease. The second path
+requires a complete validated checkpoint/fence/anchor chain, a
+generation N+1 fence referencing the exact v3 checkpoint admitted by
+the current lease, a matching historical source checkpoint and N
+issuer, an independently checked v3 host-key HMAC seal, and a second
+full physical inspection against the historical RCEFX1 pin and sidecar
+path. A missing/wrong seal, different key/path, uncommitted or later
+lease, non-genesis physical journal, caller-supplied view or identity
+mismatch fails closed. The before/after checkpoint and live-lease
+checks still bracket that inspection.
+
+The real Linux integration test exercises a pinned N genesis, an
+explicit operator-reconciled N+1 lease, **positive authentication of
+that historical empty pin**, and negative cases for key/path/identity/
+view mismatch. It also confirms that an empty history **cannot**
+produce `ConfirmedCommitted`, `ProvenNotStarted`, or a state-probe
+invocation. This is provenance-only: no real effects are reclassified
+or replayed. **Nonempty historical N→N+1 recovery remains unsupported**:
+the pre-execution checkpoint writer cannot publish the effectful
+RCLDG1 record history needed for it, and there is no verified
+execution barrier. Do not widen canonical v3 or bypass the
+pre-execution policy to make a nonempty journal appear authenticated.
 
 **Limits and required future probe acceptance criteria:** an end-to-end
 **positive classification of a nonempty physical effect journal is
@@ -439,8 +455,8 @@ timeout/deadline with unavailable/timeout results quarantined;
 external state, including concurrent mutation and crash tests.
 The narrow probe port in this PR satisfies none of these on its own.
 Also require production `Intent → Started → effect → receipt`
-durability/fencing, independent no-start barriers, historic N→N+1
-authority, and an independently rollback-resistant root.
+durability/fencing, independent no-start barriers, **nonempty** historical
+N→N+1 authority, and an independently rollback-resistant root.
 
 **Fatal failures:** ordinary `Exception` from I/O or the probe is
 quarantined. `Error` (e.g. VM exhaustion or stack overflow) is deliberately
