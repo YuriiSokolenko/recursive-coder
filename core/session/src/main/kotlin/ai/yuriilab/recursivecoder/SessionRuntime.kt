@@ -215,6 +215,32 @@ class DefaultRunSessionUseCase(
         return host.publishCreatedAccepted(request, cancellation, deadline, clock)
     }
 
+    /**
+     * Explicit host-only C2 -> C3 RUNNING marker. Never delegates to invoke(),
+     * never opens workspace/model/runtime outputs, and returns no execution
+     * capability. Admission of C3 for resumed work remains denied by #104.
+     */
+    @TrustedRunningBoundaryApi
+    fun publishTrustedAcceptedRunning(
+        request: SessionRequest,
+        cancellation: Cancellation,
+        host: TrustedSessionRunningHost
+    ): TrustedSessionHandoffReceipt {
+        // Cooperative-only: do not interrupt FileChannels during durable
+        // publication and do not bind this thread beyond the host call.
+        when (val decision = SessionAdmissionPolicy.decide(request.admissionFacts())) {
+            AdmissionDecision.Accepted -> Unit
+            is AdmissionDecision.Denied -> throw Refused(
+                decision.reason.code, decision.reason.category, decision.reason.message)
+        }
+        val now = clock.instant()
+        val deadline = SessionBudgetPolicy.effectiveDeadline(
+            now, request.deadline, request.budgets.longAt("maxWallTimeMs"))
+        SessionInterruptionGate.stopped(cancellation.signals(), now, deadline)
+            ?.let { throw it }
+        return host.publishAcceptedRunning(request, cancellation, deadline, clock)
+    }
+
     override fun invoke(request: SessionRequest, cancellation: Cancellation): SessionExecutionResult {
         cancellation.bind()
         val started = clock.instant()
