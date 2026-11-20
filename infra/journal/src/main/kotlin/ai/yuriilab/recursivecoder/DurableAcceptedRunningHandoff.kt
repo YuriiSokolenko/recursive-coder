@@ -45,6 +45,7 @@ object DurableAcceptedRunningHandoff {
         val proposal = accepted.snapshot
         if (accepted.reconciliationRequired ||
             proposal.phase != "accepted" ||
+            proposal.taskState != "ready" ||
             !PreExecutionSnapshotPolicy.safe(proposal) ||
             proposal.effectJournalHead != null ||
             proposal.effectReconciliation != null ||
