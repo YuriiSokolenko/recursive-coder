@@ -716,10 +716,10 @@ class DurableSessionEventLedger private constructor(
                 (PreExecutionSnapshotPolicy.safe(snapshot) &&
                     PreExecutionPhasePolicy.phaseFromVerifiedHistory(
                         snapshot.phase, anchor.events) == committedPhase) ||
-                (snapshot.phase == "running" && snapshot.taskState == "ready" &&
+                (snapshot.phase == SessionPhaseVocabulary.runningWire && snapshot.taskState == "ready" &&
                     snapshot.effectJournalHead == null &&
                     snapshot.effectReconciliation == null &&
-                    PreExecutionSnapshotPolicy.safe(snapshot.copy(phase = "accepted")) &&
+                    PreExecutionSnapshotPolicy.safe(snapshot.copy(phase = SessionPhaseVocabulary.acceptedWire)) &&
                     TrustedRunningBoundaryPolicy.phaseFromVerifiedHistory(
                         snapshot.phase, anchor.events) == committedPhase)
             ))
