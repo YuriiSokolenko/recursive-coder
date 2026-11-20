@@ -195,9 +195,12 @@ internal object CommittedEffectStatePolicy {
  * - all RCLDG1 effect envelopes, in order, matching ALL RCEFX1 records;
  * - independent actual host state for any Committed classification.
  *
- * ONLY the live issuing generation N is supported. A successor N+1
- * lease must fail closed; authenticating historical N -> N+1 authority
- * is a separate future protocol, not implemented by this verifier.
+ * A nonempty journal is supported ONLY under its live issuing generation N.
+ * An immediate successor N+1 may authenticate a historical GENESIS-ONLY
+ * journal after the independently validated, operator-sealed v3 transition
+ * and a committed successor fence/anchor. This is read-only provenance,
+ * NOT approval to replay or classify an external effect. A later generation,
+ * unsealed transition or nonempty historical journal still fails closed.
  *
  * It does NOT verify an execution/no-start barrier. Consequently
  * independentlyVerifyNotStarted ALWAYS returns false. Current pre-execution
@@ -232,24 +235,62 @@ class CheckpointBoundHostEffectEvidenceVerifier(
         key.fill(0)
     }
 
+    /**
+     * Accept only the current N head or the exact operator-sealed, genesis-only
+     * N -> N+1 transition. inspect() has already checked every checkpoint,
+     * issuing fence, and committed successor fence/anchor chain. The seal is
+     * checked again with the independent host key; source and successor have
+     * identical session/trace/policy by the checkpoint-chain invariant.
+     */
+    private fun authenticatedHead(
+        checkpoint: VerifiedSessionCheckpoint
+    ): CheckpointEffectJournalHead? {
+        val current = checkpoint.snapshot.effectJournalHead
+        if (current != null) {
+            if (lease.generation != current.fenceGeneration ||
+                current.sessionId != boundIdentity.sessionId ||
+                current.fenceGeneration != boundIdentity.fenceGeneration)
+                return null
+            return current
+        }
+        val transition = checkpoint.snapshot.effectReconciliation ?: return null
+        val source = transition.sourceHead
+        if (lease.generation != transition.sourceFenceGeneration + 1L ||
+            lease.admittedCheckpointSha256 != checkpoint.sha256 ||
+            boundIdentity.fenceGeneration != transition.sourceFenceGeneration ||
+            source.fenceGeneration != transition.sourceFenceGeneration ||
+            source.sessionId != boundIdentity.sessionId ||
+            source.lastSequence != 0L)
+            return null
+        GenesisEffectReconciliationSeal.verify(key, transition, checkpoint.snapshot)
+        return source
+    }
+
     @Synchronized private fun recheck(): List<EffectJournalEntry>? {
         if (closed) return null
         return try {
         lease.assertCurrent()
         val checkpoint = SessionCheckpointStore.inspect(directory, context, ledgerPath)
-        val head = checkpoint.snapshot.effectJournalHead ?: return null
-        if (lease.generation != head.fenceGeneration ||
-            head.sessionId != boundIdentity.sessionId ||
-            head.fenceGeneration != boundIdentity.fenceGeneration)
-            return null
+        val head = authenticatedHead(checkpoint) ?: return null
         val sessionEvents = DurableSessionEventLedger.inspect(ledgerPath)
         if (boundView.headSha256 != sessionEvents.headSha256 ||
             boundView.lastSequence != sessionEvents.lastSequence.toLong() ||
             checkpoint.snapshot.journalHeadSha256 != sessionEvents.headSha256 ||
             checkpoint.snapshot.journalSequence.toLong() != sessionEvents.lastSequence.toLong())
             return null
-        val physical = SessionCheckpointStore.inspectEffectHeadBound(
-            directory, context, ledgerPath, sidecarPath, key)
+        val physical = if (checkpoint.snapshot.effectJournalHead != null) {
+            SessionCheckpointStore.inspectEffectHeadBound(
+                directory, context, ledgerPath, sidecarPath, key)
+        } else {
+            // A canonical v3 holds the historical HMAC pin, not a current v2
+            // head. Verify the source path and complete physical genesis with
+            // that sealed pin; never derive expected authority from the sidecar.
+            if (head.sidecarPathSha256 != effectJournalPathSha256(sidecarPath))
+                return null
+            DurableEffectRecordJournal.inspectBound(
+                sidecarPath, context.workspaceRoot, key,
+                head.expectation(), head.pin())
+        }
         val observed = EffectEvidenceProjection.fromSessionLedger(
             sessionEvents.events, physical) ?: return null
         if (observed != boundView.entries) return null
