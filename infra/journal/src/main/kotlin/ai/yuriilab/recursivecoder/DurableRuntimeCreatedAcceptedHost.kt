@@ -37,14 +37,11 @@ class DurableRuntimeCreatedAcceptedHost(
         // Thread.interrupt() is treated as cooperative cancellation here.
         // The host never binds cancellation to this thread.
         val interruptedBefore = Thread.interrupted()
-        val decision = SessionBudgetPolicy.interruption(
+        val stop = SessionInterruptionGate.stopped(
             cancellation.signals(), clock.instant(), deadline)
         val interruptedDuring = Thread.interrupted()
-        when (decision) {
-            SessionEndReason.TIMEOUT -> throw Stopped(true)
-            SessionEndReason.CANCELLATION -> throw Stopped(false)
-            else -> if (interruptedBefore || interruptedDuring) throw Stopped(false)
-        }
+        if (stop != null) throw stop
+        if (interruptedBefore || interruptedDuring) throw Stopped(false)
     }
 
     private fun matchesRequest(request: SessionRequest, context: CheckpointHostContext) {

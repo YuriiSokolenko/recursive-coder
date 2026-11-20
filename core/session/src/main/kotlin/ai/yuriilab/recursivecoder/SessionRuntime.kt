@@ -207,11 +207,8 @@ class DefaultRunSessionUseCase(
         val now = clock.instant()
         val deadline = SessionBudgetPolicy.effectiveDeadline(
             now, request.deadline, request.budgets.longAt("maxWallTimeMs"))
-        when (SessionBudgetPolicy.interruption(cancellation.signals(), now, deadline)) {
-            SessionEndReason.TIMEOUT -> throw Stopped(true)
-            SessionEndReason.CANCELLATION -> throw Stopped(false)
-            else -> Unit
-        }
+        SessionInterruptionGate.stopped(cancellation.signals(), now, deadline)
+            ?.let { throw it }
         // No post-handoff execution or terminal write is permitted here.
         // An exception may mean C2 committed: callers must reconcile read-only.
         // One shared clock avoids competing runtime/host deadline observations.
