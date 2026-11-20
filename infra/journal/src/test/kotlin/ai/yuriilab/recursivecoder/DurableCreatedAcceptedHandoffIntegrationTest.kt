@@ -8,7 +8,8 @@ import kotlin.test.*
 
 /** Real local-fs, ledger and checkpoint code; no model, tools or network. */
 @Tag("integration")
-@OptIn(TrustedPreExecutionHandoff::class, LedgerTestFaultInjection::class)
+@OptIn(TrustedPreExecutionHandoff::class, TrustedRunningBoundaryApi::class,
+    LedgerTestFaultInjection::class)
 class DurableCreatedAcceptedHandoffIntegrationTest : SessionCheckpointTestFixture() {
     private fun publish(
         created: VerifiedSessionCheckpoint,
@@ -187,4 +188,67 @@ class DurableCreatedAcceptedHandoffIntegrationTest : SessionCheckpointTestFixtur
         assertEquals("CHECKPOINT_JOURNAL_MISMATCH", refusal.code)
         assertFalse(Files.exists(store().resolve("resume-000000000002.rcf")))
     }
+    @Test fun runningAppendWithoutC3LeavesUncoveredTailAndCannotResume() {
+        val c2 = publish(createPreExecutionCheckpoint())
+        SessionResumeAdmission.admit(store(), context(), ledger(),
+            resumeAttestation(expected = 1L)).use { lease ->
+            val writer = DurableSessionEventLedger.reopenForAppend(
+                ledger(), workspace(), store(), context(), lease)
+            writer.appendTrustedAcceptedRunning(
+                fencedTransition(3, "accepted", "running"))
+            val failedClose = assertFailsWith<SessionLedgerUnconfirmed> {
+                writer.close()
+            }
+            assertEquals("LEDGER_REOPEN_CHECKPOINT_REQUIRED", failedClose.code)
+        }
+        assertFalse(Files.exists(store().resolve("000000000003.rcp")))
+        assertEquals(3, DurableSessionEventLedger.inspect(ledger()).lastSequence)
+        val rejection = assertFailsWith<CheckpointUnconfirmed> { inspect() }
+        assertEquals("CHECKPOINT_JOURNAL_MISMATCH", rejection.code)
+        val readmission = assertFailsWith<CheckpointUnconfirmed> {
+            SessionResumeAdmission.admit(store(), context(), ledger(),
+                resumeAttestation(expected = 2L))
+        }
+        assertEquals("CHECKPOINT_JOURNAL_MISMATCH", readmission.code)
+        assertFalse(Files.exists(store().resolve("resume-000000000003.rcf")))
+        assertEquals(2L, c2.snapshot.sequence)
+    }
+
+    @Test fun runningCheckpointCannotChangeEvenReadyChildrenAtPublication() {
+        val c2 = publish(createPreExecutionCheckpoint())
+        SessionResumeAdmission.admit(store(), context(), ledger(),
+            resumeAttestation(expected = 1L)).use { lease ->
+            val writer = DurableSessionEventLedger.reopenForAppend(
+                ledger(), workspace(), store(), context(), lease)
+            try {
+                writer.appendTrustedAcceptedRunning(
+                    fencedTransition(3, "accepted", "running"))
+                val anchor = writer.withCommittedCheckpointAnchor { it }
+                val mutated = c2.snapshot.copy(
+                    sequence = 3L, previousSha256 = c2.sha256,
+                    phase = "running",
+                    // Both versions are execution-free, but children MUST
+                    // never change in a metadata-only lifecycle marker.
+                    children = emptyList(),
+                    journalSequence = anchor.lastSequence,
+                    journalHeadSha256 = anchor.headSha256,
+                    journalFileSha256 = anchor.fileSha256,
+                    lastTrustedJournalOffset = anchor.lastTrustedOffset
+                )
+                val refused = assertFailsWith<CheckpointUnconfirmed> {
+                    SessionCheckpointStore.saveFromOpenLedgerFenced(
+                        lease, store(), context(), writer, mutated, c2.sha256)
+                }
+                assertEquals("CHECKPOINT_RUNNING_BOUNDARY_CHANGED", refused.code)
+                assertFalse(Files.exists(store().resolve("000000000003.rcp")))
+            } finally {
+                assertEquals("LEDGER_REOPEN_CHECKPOINT_REQUIRED",
+                    assertFailsWith<SessionLedgerUnconfirmed> {
+                        writer.close()
+                    }.code)
+            }
+        }
+        assertFalse(Files.exists(store().resolve("000000000003.rcp")))
+    }
+
 }
