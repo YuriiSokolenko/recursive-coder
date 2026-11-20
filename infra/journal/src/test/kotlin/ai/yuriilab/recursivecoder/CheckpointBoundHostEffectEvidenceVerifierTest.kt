@@ -209,9 +209,9 @@ class CheckpointBoundHostEffectEvidenceVerifierTest : SessionCheckpointTestFixtu
             // Copy REAL, byte-identical authenticated genesis to another
             // private-path file. The exact rejection code must be the path
             // SHA check, before opening or recomputing the path-bound HMAC.
-            val historicalHead = assertNotNull(
-                SessionCheckpointStore.inspect(store(), context(), ledger())
-                    .snapshot.effectReconciliation).sourceHead
+            val v3ForPin = SessionCheckpointStore.inspect(
+                store(), context(), ledger())
+            assertNotNull(v3ForPin.snapshot.effectReconciliation)
             val wrongPath = path.resolveSibling("different-locator.rcfx")
             Files.copy(path, wrongPath)
             Files.setPosixFilePermissions(wrongPath, setOf(
@@ -219,8 +219,9 @@ class CheckpointBoundHostEffectEvidenceVerifierTest : SessionCheckpointTestFixtu
             assertContentEquals(Files.readAllBytes(path), Files.readAllBytes(wrongPath))
             assertEquals("CHECKPOINT_EFFECT_HEAD_PATH_MISMATCH",
                 assertFailsWith<CheckpointUnconfirmed> {
-                    SessionCheckpointStore.inspectEffectHeadBound(
-                        historicalHead, wrongPath, workspace(), hostKey)
+                    SessionCheckpointStore.inspectEffectHeadForLease(
+                        store(), context(), ledger(), wrongPath, hostKey,
+                        successor, expected, v3ForPin.sha256)
                 }.code)
             CheckpointBoundHostEffectEvidenceVerifier(
                 store(), context(), ledger(), wrongPath,
@@ -245,8 +246,9 @@ class CheckpointBoundHostEffectEvidenceVerifierTest : SessionCheckpointTestFixtu
                 Files.write(path, byteArrayOf(0x55), StandardOpenOption.APPEND)
                 assertEquals("EFFECT_JOURNAL_TRUNCATED",
                     assertFailsWith<EffectJournalStorageUnconfirmed> {
-                        SessionCheckpointStore.inspectEffectHeadBound(
-                            historicalHead, path, workspace(), hostKey)
+                        SessionCheckpointStore.inspectEffectHeadForLease(
+                            store(), context(), ledger(), path, hostKey,
+                            successor, expected, v3ForPin.sha256)
                     }.code)
                 CheckpointBoundHostEffectEvidenceVerifier(
                     store(), context(), ledger(), path, hostKey, successor,
@@ -298,6 +300,93 @@ class CheckpointBoundHostEffectEvidenceVerifierTest : SessionCheckpointTestFixtu
                     view, expected, nPlusTwo.generation))
             }
         }
+    }
+
+    @Test fun validHostMacAppendAfterTransitionCannotBypassSealedGenesisPin() {
+        val original = createPreExecutionCheckpoint()
+        val path = sidecar()
+        lateinit var pinned: VerifiedSessionCheckpoint
+        lateinit var mac: String
+        lateinit var genesisBytes: ByteArray
+        lateinit var validIntentFrame: ByteArray
+
+        // Produce an authentic, fsynced Intent frame with the real N host
+        // key, exact path, genesis chain and live writer. This fixture does
+        // NOT execute an external effect or persist an effectful checkpoint.
+        SessionResumeAdmission.admit(
+            store(), context(), ledger(), resumeAttestation()).use { n ->
+            DurableEffectRecordJournal.create(path, workspace(),
+                "sess-one", hostKey, n).use { writer ->
+                pinned = SessionCheckpointStore.saveEffectHeadFenced(
+                    n, store(), context(), ledger(), writer,
+                    original.snapshot.copy(
+                        sequence = original.snapshot.sequence + 1L,
+                        previousSha256 = original.sha256), original.sha256)
+                mac = writer.headPin().headMacSha256
+                genesisBytes = Files.readAllBytes(path)
+                writer.append(EffectRecord.Intent(expected))
+                val withValidIntent = Files.readAllBytes(path)
+                assertTrue(withValidIntent.size > genesisBytes.size)
+                validIntentFrame = withValidIntent.copyOfRange(
+                    genesisBytes.size, withValidIntent.size)
+                assertTrue(validIntentFrame.size > 36)
+            }
+        }
+        // Recreate the exact pinned, physically empty original before the
+        // operator approves the canonical N -> N+1 genesis reconciliation.
+        Files.write(path, genesisBytes,
+            StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE)
+        val fence = ResumeFenceStorage.atGeneration(store(), 1L)
+        SessionResumeAdmission.reconcileGenesisEffectHead(
+            store(), context(), ledger(), path, hostKey, resumeAttestation(1L),
+            GenesisEffectHeadReconciliation(
+                "operator-one", true, pinned.sha256, 1L, fence.sha256, mac))
+            .use { successor ->
+                val v3 = SessionCheckpointStore.inspect(store(), context(), ledger())
+                val sealedHead = assertNotNull(
+                    v3.snapshot.effectReconciliation).sourceHead
+                assertEquals(0L, sealedHead.lastSequence)
+                val closed = DurableSessionEventLedger.inspect(ledger())
+                val view = EffectJournalView(closed.headSha256,
+                    closed.lastSequence.toLong(), emptyList())
+                CheckpointBoundHostEffectEvidenceVerifier(
+                    store(), context(), ledger(), path, hostKey, successor,
+                    expected, view, IndependentEffectStateProbe {
+                        fail("Historical genesis must never consult external state")
+                    }).use { verifier ->
+                    assertTrue(verifier.authenticateCompleteJournal(
+                        view, expected, successor.generation))
+                    try {
+                        // Simulate a same-key, same-path stale writer after
+                        // transition. The appended frame is structurally
+                        // valid AND independently HMAC-authenticated.
+                        Files.write(path, validIntentFrame, StandardOpenOption.APPEND)
+                        val verifiedPhysical = DurableEffectRecordJournal.inspect(
+                            path, workspace(), hostKey, sealedHead.expectation())
+                        assertEquals(1L, verifiedPhysical.lastSequence)
+                        assertEquals(EffectRecord.Intent(expected),
+                            verifiedPhysical.entries.single().record)
+
+                        // The pinned sequence/MAC comparison must be the
+                        // ONLY remaining obstacle; removing that guard
+                        // makes this precise regression fail.
+                        assertEquals("EFFECT_JOURNAL_PIN_MISMATCH",
+                            assertFailsWith<EffectJournalStorageUnconfirmed> {
+                                SessionCheckpointStore.inspectEffectHeadForLease(
+                                    store(), context(), ledger(), path, hostKey,
+                                    successor, expected, v3.sha256)
+                            }.code)
+                        assertFalse(verifier.authenticateCompleteJournal(
+                            view, expected, successor.generation))
+                    } finally {
+                        Files.write(path, genesisBytes,
+                            StandardOpenOption.TRUNCATE_EXISTING,
+                            StandardOpenOption.WRITE)
+                    }
+                    assertTrue(verifier.authenticateCompleteJournal(
+                        view, expected, successor.generation))
+                }
+            }
     }
 
     @Test fun nPlusTwoCannotAuthenticateHistoricalGenesisWhileV3IsStillTail() {
