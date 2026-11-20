@@ -61,7 +61,7 @@ class CheckpointBoundEffectHeadPolicyUnitTest {
         assertNull(select(checkpoint, identity = id.copy(sessionId = "other-session")))
         assertNull(select(checkpoint.copy(snapshot = checkpoint.snapshot.copy(
             effectReconciliation = checkpoint.snapshot.effectReconciliation!!.copy(
-                sourceHead = historical.copy(lastSequence = 1L)))))
+                sourceHead = historical.copy(lastSequence = 1L))))))
     }
 
     @Test fun wrongSealIsRejectedWithCorrectHostKeyBeforePhysicalInspection() {
