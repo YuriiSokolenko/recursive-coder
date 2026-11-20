@@ -1085,11 +1085,24 @@ object SessionCheckpointStore {
         val verified = inspect(directory, context, ledgerPath)
         val head = verified.snapshot.effectJournalHead
             ?: refuse("CHECKPOINT_EFFECT_HEAD_MISSING")
-        val pathDigest = effectJournalPathSha256(sidecarPath)
-        if (head.sidecarPathSha256 != pathDigest)
+        return inspectEffectHeadBound(head, sidecarPath, context.workspaceRoot, hostKey)
+    }
+
+    /**
+     * Common exact-path and independently HMAC-pinned physical inspection.
+     * Callers MUST first authenticate the supplied head via the complete
+     * checkpoint/fence/anchor chain; this method grants NO recovery authority.
+     * Shared by the current-v2 reader and the historical sealed-v3 verifier.
+     */
+    @OptIn(ResumeOperatorOnlyApi::class)
+    internal fun inspectEffectHeadBound(
+        head: CheckpointEffectJournalHead, sidecarPath: Path,
+        workspaceRoot: Path, hostKey: ByteArray
+    ): VerifiedEffectRecordJournal {
+        if (head.sidecarPathSha256 != effectJournalPathSha256(sidecarPath))
             refuse("CHECKPOINT_EFFECT_HEAD_PATH_MISMATCH")
-        return DurableEffectRecordJournal.inspectBound(sidecarPath,
-            context.workspaceRoot, hostKey, head.expectation(), head.pin())
+        return DurableEffectRecordJournal.inspectBound(
+            sidecarPath, workspaceRoot, hostKey, head.expectation(), head.pin())
     }
 
     fun saveFromOpenLedgerFenced(lease: SessionResumeLease, directory: Path,
