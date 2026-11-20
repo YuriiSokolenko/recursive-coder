@@ -157,6 +157,10 @@ class RuntimeTrustedCreatedAcceptedHandoffIntegrationTest : SessionCheckpointTes
         store(), ledger(), { context() }, { resumeAttestation(expected = expected) }
     )
 
+    private fun runningHost(expected: Long = 1L) = DurableRuntimeAcceptedRunningHost(
+        store(), ledger(), { context() }, { resumeAttestation(expected = expected) }
+    )
+
     private fun assertNoExecutionOrResult() {
         assertEquals(0, modelCalls)
         assertEquals(0, workspaceCalls)
@@ -584,7 +588,7 @@ class RuntimeTrustedCreatedAcceptedHandoffIntegrationTest : SessionCheckpointTes
         val c2 = inspect()
 
         val receipt = runtime.publishTrustedAcceptedRunning(
-            request(), Cancellation(), host(expected = 1L))
+            request(), Cancellation(), runningHost(expected = 1L))
 
         val c3 = inspect()
         assertEquals(c2.sha256, c3.snapshot.previousSha256)
@@ -624,7 +628,7 @@ class RuntimeTrustedCreatedAcceptedHandoffIntegrationTest : SessionCheckpointTes
         val prefix = Files.readAllBytes(ledger())
         val failed = assertFailsWith<SessionResumeUnconfirmed> {
             runtime.publishTrustedAcceptedRunning(
-                request(), Cancellation(), host(expected = 0L))
+                request(), Cancellation(), runningHost(expected = 0L))
         }
         assertEquals("RESUME_FENCE_CAS_FAILED", failed.code)
         assertEquals(c2, inspect())
@@ -638,7 +642,7 @@ class RuntimeTrustedCreatedAcceptedHandoffIntegrationTest : SessionCheckpointTes
         val c1 = createPreExecutionCheckpoint()
         val original = Files.readAllBytes(ledger())
         val denied = assertFailsWith<SessionResumeUnconfirmed> {
-            runtime().publishTrustedAcceptedRunning(request(), Cancellation(), host())
+            runtime().publishTrustedAcceptedRunning(request(), Cancellation(), runningHost(expected = 0L))
         }
         assertEquals("RESUME_UNSAFE_BOUNDARY", denied.code)
         assertEquals(c1, inspect())
@@ -670,6 +674,32 @@ class RuntimeTrustedCreatedAcceptedHandoffIntegrationTest : SessionCheckpointTes
         }
         assertEquals(c2, inspect())
         assertContentEquals(original, Files.readAllBytes(ledger()))
+        assertNoExecutionOrResult()
+    }
+
+    @Test fun secondRunningPublicationRefusesBeforeAnyNewFenceOrLedgerMutation() {
+        createPreExecutionCheckpoint()
+        val runtime = runtime()
+        runtime.publishTrustedCreatedAccepted(request(), Cancellation(), host())
+        runtime.publishTrustedAcceptedRunning(
+            request(), Cancellation(), runningHost(expected = 1L))
+        val durableC3 = inspect()
+        val bytes = Files.readAllBytes(ledger())
+        val allBefore = Files.list(store()).use { stream ->
+            stream.map { it.fileName.toString() }.sorted().toList()
+        }
+
+        val rejected = assertFailsWith<SessionResumeUnconfirmed> {
+            runtime.publishTrustedAcceptedRunning(
+                request(), Cancellation(), runningHost(expected = 2L))
+        }
+        assertEquals("RESUME_UNSAFE_BOUNDARY", rejected.code)
+        assertEquals(durableC3, inspect())
+        assertContentEquals(bytes, Files.readAllBytes(ledger()))
+        assertEquals(allBefore, Files.list(store()).use { stream ->
+            stream.map { it.fileName.toString() }.sorted().toList()
+        })
+        assertFalse(Files.exists(store().resolve("resume-000000000003.rcf")))
         assertNoExecutionOrResult()
     }
 
