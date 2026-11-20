@@ -755,6 +755,7 @@ class DurableSessionEventLedger private constructor(
      * executor. Ordinary appendFenced remains pre-execution-only.
      */
     @TrustedRunningBoundaryApi
+    @OptIn(LedgerTestFaultInjection::class)
     internal fun appendTrustedAcceptedRunning(event: JsonObject) =
         appendFencedWithFault(event, allowRunningBoundary = true) { }
 
