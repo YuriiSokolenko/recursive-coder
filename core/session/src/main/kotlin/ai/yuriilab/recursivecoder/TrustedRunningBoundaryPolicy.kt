@@ -22,8 +22,8 @@ annotation class TrustedRunningBoundaryApi
  * Do not widen PreExecutionPhasePolicy: its accepted prefix must stay stable.
  */
 object TrustedRunningBoundaryPolicy {
-    private val accepted = SessionPhase.ADMITTED.wire
-    private val running = SessionPhase.RUNNING.wire
+    private val accepted = SessionPhaseVocabulary.acceptedWire
+    private val running = SessionPhaseVocabulary.runningWire
 
     /**
      * Only the root, execution-free actor may publish this phase edge.
@@ -39,6 +39,8 @@ object TrustedRunningBoundaryPolicy {
         val id = actor["agentId"] as? JsonPrimitive ?: return null
         val sessionId = (event["sessionId"] as? JsonPrimitive)?.content ?: return null
         if (!id.isString || id.content != "agent-" + sessionId ||
+            actor.keys != setOf("agentId", "parentAgentId", "childAgentId",
+                "toolExecutionId", "childSessionId") ||
             actor.any { (key, value) -> key != "agentId" && value != JsonNull })
             return null
 
