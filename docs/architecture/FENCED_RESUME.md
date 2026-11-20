@@ -8,6 +8,38 @@ See the [effect intent and recovery contracts](EFFECT_INTENTS.md) for the
 pure policy, including the successor-generation non-start barrier requirement;
 no live effect reconciliation adapter is enabled here.
 
+## Trusted accepted-to-running boundary (partial #104)
+
+The trusted `DefaultRunSessionUseCase.publishTrustedAcceptedRunning` entry
+point is **separate from normal `invoke()`**. It requires an already durable,
+host-authenticated accepted checkpoint C2 and a fresh independently provided
+host Git/policy/authority context. It uses a new exclusive resume generation,
+reopens the exact checkpoint-bound ledger, appends one canonical
+`accepted -> running` transition under `appendTrustedAcceptedRunning`, and
+persists C3 with `saveFromOpenLedgerFenced` before the writer and lease close.
+
+This is a **metadata-only, one-way marker, not permission to execute**.
+It preserves task state `ready`, attempt zero, unchanged children/artifacts,
+known-zero usage and zero pending effects; the checkpoint store compares the
+entire C3 candidate against C2 under `checkpoint.lock`. The independent
+`TrustedRunningBoundaryPolicy` permits only the final, root-actor transition
+after the old `PreExecutionPhasePolicy`-authenticated prefix. Ordinary
+`appendFenced` remains pre-execution-only.
+
+**C3 is deliberately not admissible for resume.** The unmodified
+`SessionResumeAdmission` pre-execution policy rejects `running`, even if
+C3 is complete and the ledger is clean. A crash after the running append but
+before C3 leaves an uncovered tail; no automatic repair or retry is allowed.
+No model, workspace tool, child, effect journal, receipt, terminal output or
+ordinary session event sink is opened by either trusted handoff. The CLI
+continues to reject `resume.mode=resume` and normal execution is unchanged.
+
+This milestone does not solve #105 effect authority/reconciliation, long-held
+fsync/shutdown watchdog semantics, kill-boundary subprocess evidence, or the
+true live-fenced runtime `FileStore.type()` sanitized-denial E2E. Those remain
+gates for connecting real execution and for closing #104. Independently
+review the authenticated operator call boundary before production use.
+
 ## Deny-only runtime filesystem preflight (Draft PR #135)
 
 `ResumeRuntimeFilesystemPreflight` is an optional, trusted diagnostic adapter
