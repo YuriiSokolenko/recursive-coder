@@ -430,18 +430,39 @@ lease, advanced checkpoint, non-genesis physical journal, caller-supplied
 view or identity mismatch fails closed. The before/after checkpoint
 and live-lease checks still bracket that inspection.
 
+**Unforgeable pin provenance within the journal module:** the shared
+physical reader accepts only a private, non-copyable
+`SessionCheckpointStore.AuthenticatedEffectHead` capability. It is
+minted inside the store after actual `inspect()` of on-disk
+checkpoint/fence/anchor authority, not from a raw sidecar head or
+caller-created `VerifiedSessionCheckpoint`. For the verifier the store
+also rechecks the live lease, its expected ledger path, the exact
+checkpoint SHA, and the canonical v3 host seal before reading the
+physical journal. The pure `CheckpointBoundEffectHeadPolicy` helper
+returns a candidate only; its caller cannot use that candidate to
+access the private physical reader. A policy mismatch returns
+`null`; an invalid seal throws `SessionResumeUnconfirmed`.
+The verifier catches ordinary `Exception` and denies.
+
 The real Linux integration test exercises a pinned N genesis,
 explicit operator reconciliation to N+1, **positive authentication
 of that historical empty pin**, and typed denial for a byte-identical,
 readable sidecar copied to a different path. Other negatives exercise
 wrong key/identity/view, nonzero physical torn tail, subsequent N+1
-checkpoint and N+2 lease. Internal `@Tag("unit")` tests assert the v3
+checkpoint and N+2 lease. A separate regression creates an authentic,
+fsynced, host-HMAC-signed Intent frame under N, restores pinned genesis
+for operator reconciliation, and later appends that real frame under
+N+1. Physical inspection independently confirms its MAC and framing,
+while the trusted head reader must reject it with precisely
+`EFFECT_JOURNAL_PIN_MISMATCH`; restoration re-enables genesis-only
+authentication. Internal `@Tag("unit")` tests assert the v3
 seal MAC denial code independently of the RCEFX1 HMAC and reject an
 effect envelope projected against physically empty genesis. These
 tests do not fabricate a nonempty end-to-end production checkpoint.
 They also confirm that an empty history **cannot** produce
-`ConfirmedCommitted`, `ProvenNotStarted`, or a state-probe invocation. This is provenance-only: no real effects are reclassified
-or replayed. **Nonempty historical N→N+1 recovery remains unsupported**:
+`ConfirmedCommitted`, `ProvenNotStarted`, or a state-probe
+invocation. This is provenance-only: no real effects are
+reclassified or replayed. **Nonempty historical N→N+1 recovery remains unsupported**:
 the pre-execution checkpoint writer cannot publish the effectful
 RCLDG1 record history needed for it, and there is no verified
 execution barrier. Do not widen canonical v3 or bypass the
