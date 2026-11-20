@@ -18,13 +18,13 @@ import kotlinx.serialization.json.*
  * stops at C2 and never grants the caller permission to enter RUNNING.
  */
 @TrustedPreExecutionHandoff
-@OptIn(TrustedSessionPreExecutionApi::class)
+@OptIn(TrustedSessionPreExecutionApi::class, TrustedRunningBoundaryApi::class)
 class DurableRuntimeCreatedAcceptedHost(
     private val checkpointDirectory: Path,
     private val ledgerPath: Path,
     private val currentContext: () -> CheckpointHostContext,
     private val currentAttestation: () -> ResumeHostAttestation
-) : TrustedSessionPreExecutionHost {
+) : TrustedSessionPreExecutionHost, TrustedSessionRunningHost {
     private fun deny(): Nothing = throw SessionResumeUnconfirmed("RESUME_CONTEXT_CHANGED")
 
     private fun checkBeforePublication(
@@ -120,4 +120,53 @@ class DurableRuntimeCreatedAcceptedHost(
             checkpointDirectory, context, ledgerPath, attestation, created, transition)
         return TrustedSessionHandoffReceipt(accepted.snapshot.sequence, accepted.sha256)
     }
+    /**
+     * A separate opt-in step: C2 is already durable. This does not delegate to
+     * model execution or turn the new C3 into general resume authority.
+     */
+    override fun publishAcceptedRunning(
+        request: SessionRequest,
+        cancellation: Cancellation,
+        deadline: Instant,
+        clock: Clock
+    ): TrustedSessionHandoffReceipt {
+        checkBeforePublication(cancellation, deadline, clock)
+        val context = currentContext()
+        checkBeforePublication(cancellation, deadline, clock)
+        val attestation = currentAttestation()
+        checkBeforePublication(cancellation, deadline, clock)
+        matchesRequest(request, context)
+        checkBeforePublication(cancellation, deadline, clock)
+        val accepted = SessionCheckpointStore.inspect(checkpointDirectory, context, ledgerPath)
+        checkBeforePublication(cancellation, deadline, clock)
+        val c2 = accepted.snapshot
+        val matchesIdentity = try {
+            c2.sessionId == request.sessionId &&
+                c2.traceId == request.traceId &&
+                c2.taskId == request.task.textAt("taskId")
+        } catch (_: Exception) {
+            false
+        }
+        if (!matchesIdentity || c2.journalSequence <= 0 ||
+            c2.journalSequence == Int.MAX_VALUE) deny()
+        val transition = SessionEventJournal.frame(
+            sessionId = c2.sessionId,
+            traceId = c2.traceId,
+            requestId = request.requestId,
+            sequence = c2.journalSequence + 1,
+            timestamp = clock.instant(),
+            type = "session.transition",
+            status = "completed",
+            transition = SessionPhaseVocabulary.acceptedWire to "running",
+            extra = buildJsonObject { put("graphId", c2.binding.graphId) }
+        )
+        // Late cooperative cancellation never interrupts a partially
+        // fsynced physical transition; any exception after this point is
+        // uncertain and requires read-only operator reconciliation.
+        checkBeforePublication(cancellation, deadline, clock)
+        val running = DurableAcceptedRunningHandoff.publish(
+            checkpointDirectory, context, ledgerPath, attestation, accepted, transition)
+        return TrustedSessionHandoffReceipt(running.snapshot.sequence, running.sha256)
+    }
+
 }
