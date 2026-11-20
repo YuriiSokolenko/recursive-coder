@@ -55,6 +55,20 @@ fun interface TrustedSessionPreExecutionHost {
  * Publication of C3 is deliberately terminal for automated admission until
  * #105 proves authenticated execution, receipts and external reconciliation.
  */
+/**
+ * C3-only durable acknowledgement. This type is intentionally incompatible
+ * with C2's TrustedSessionHandoffReceipt; neither grants execution authority.
+ */
+data class TrustedSessionRunningReceipt(
+    val checkpointSequence: Long,
+    val checkpointSha256: String
+) {
+    init {
+        require(checkpointSequence > 2L)
+        require(Regex("[a-f0-9]{64}").matches(checkpointSha256))
+    }
+}
+
 @TrustedRunningBoundaryApi
 fun interface TrustedSessionRunningHost {
     fun publishAcceptedRunning(
@@ -62,5 +76,5 @@ fun interface TrustedSessionRunningHost {
         cancellation: Cancellation,
         deadline: Instant,
         clock: Clock
-    ): TrustedSessionHandoffReceipt
+    ): TrustedSessionRunningReceipt
 }
