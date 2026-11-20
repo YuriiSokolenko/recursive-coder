@@ -17,7 +17,9 @@ tasks.register("verifyRunningHostOptIn") {
     dependsOn(tasks.named("classes"))
     doLast {
         val compilerClasspath = configurations.getByName("kotlinCompilerClasspath").asPath
-        val applicationClasspath = sourceSets["main"].runtimeClasspath.asPath
+        val applicationClasspath = sourceSets["main"].runtimeClasspath.files
+            .filter { it.exists() }
+            .joinToString(System.getProperty("path.separator")) { it.absolutePath }
         val javaBin = file(System.getProperty("java.home") + "/bin/java").absolutePath
 
         fun compile(fixture: String): Pair<Int, String> {
@@ -44,8 +46,12 @@ tasks.register("verifyRunningHostOptIn") {
 
         val negative = compile("PreExecutionOnlyCannotPublishRunning.kt")
         if (negative.first == 0 ||
-            !negative.second.contains("TrustedRunningBoundaryApi") ||
-            !negative.second.contains("publishAcceptedRunning"))
+            !negative.second.contains(
+                "unresolved reference 'publishAcceptedRunning' on receiver of type " +
+                    "'DurableRuntimeCreatedAcceptedHost'") ||
+            !negative.second.contains(
+                "trusted host-only running checkpoint; NOT effect or model execution authority.") ||
+            !negative.second.contains("DurableRuntimeAcceptedRunningHost("))
             throw GradleException("Pre-execution-only caller bypassed C3 compile-time gate " +
                 "or failed for an unrelated reason:\n" + negative.second)
         logger.lifecycle("Verified Kotlin C3 host opt-in: positive compiles, " +
