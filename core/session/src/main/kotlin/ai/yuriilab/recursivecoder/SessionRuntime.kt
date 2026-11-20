@@ -219,13 +219,15 @@ class DefaultRunSessionUseCase(
      * Explicit host-only C2 -> C3 RUNNING marker. Never delegates to invoke(),
      * never opens workspace/model/runtime outputs, and returns no execution
      * capability. Admission of C3 for resumed work remains denied by #104.
+     * The request still binds to the original fresh invocation and fenceGeneration=1;
+     * the independent host attestation controls generation 2.
      */
     @TrustedRunningBoundaryApi
     fun publishTrustedAcceptedRunning(
         request: SessionRequest,
         cancellation: Cancellation,
         host: TrustedSessionRunningHost
-    ): TrustedSessionHandoffReceipt {
+    ): TrustedSessionRunningReceipt {
         // Cooperative-only: do not interrupt FileChannels during durable
         // publication and do not bind this thread beyond the host call.
         when (val decision = SessionAdmissionPolicy.decide(request.admissionFacts())) {
