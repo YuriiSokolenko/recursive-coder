@@ -411,8 +411,8 @@ committed under the immediate successor N+1 lease. The second path
 requires a complete validated checkpoint/fence/anchor chain, a
 generation N+1 fence referencing the exact v3 checkpoint admitted by
 the current lease, a matching historical source checkpoint and N
-issuer, an independently checked v3 host-key HMAC seal, and a second
-full physical inspection against the historical RCEFX1 pin and sidecar
+issuer, an independently checked v3 host-key HMAC seal, and a
+full physical reinspection against the historical RCEFX1 pin and sidecar
 path. A missing/wrong seal, different key/path, uncommitted or later
 lease, non-genesis physical journal, caller-supplied view or identity
 mismatch fails closed. The before/after checkpoint and live-lease
