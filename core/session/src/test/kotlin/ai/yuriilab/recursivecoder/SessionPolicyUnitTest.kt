@@ -156,6 +156,45 @@ class SessionPolicyUnitTest {
         }
     }
 
+    @Test fun resumeProbePreservesProtocolV1PrecedenceAcrossLaterDenials() {
+        val resume = validAdmission().copy(resumeMode = "resume", fenceGeneration = 2)
+        assertNull(SessionResumePreflightPolicy.earlierDenial(resume))
+        for (invalid in listOf(
+            resume.copy(requiredCapabilities = setOf("unknown")),
+            resume.copy(provider = "unsupported"),
+            resume.copy(toolPolicyMode = "write"),
+            resume.copy(maxToolCalls = 0),
+            resume.copy(maxModelRequests = 1)
+        )) {
+            assertEquals(AdmissionDecision.Denied(AdmissionDenial.RESUME),
+                SessionAdmissionPolicy.decide(invalid))
+            assertNull(SessionResumePreflightPolicy.earlierDenial(invalid))
+        }
+        assertEquals(AdmissionDenial.PROTOCOL,
+            SessionResumePreflightPolicy.earlierDenial(resume.copy(supportedProtocol = false)))
+        assertEquals(AdmissionDenial.INVOCATION,
+            SessionResumePreflightPolicy.earlierDenial(resume.copy(attempt = 2)))
+        assertEquals(AdmissionDenial.RESUME,
+            SessionResumePreflightPolicy.earlierDenial(validAdmission().copy(fenceGeneration = 2)))
+    }
+
+    @Test fun resumeFilesystemDetailAcceptsOnlySafeHostVolumeIdentifiers() {
+        assertEquals("RESUME_FILESYSTEM_UNSUPPORTED",
+            SessionResumePreflightDenial.UnsupportedFilesystem(
+                "checkpoint=lookup-failed ledger=ext4").code)
+        val tooLong = "a".repeat(65)
+        for (invalid in listOf(
+            "checkpoint=EXT4 ledger=xfs", "checkpoint=ext4 ledger=some path",
+            "checkpoint=/private ledger=ext4", "checkpoint= ledger=ext4",
+            "checkpoint=ext4 ledger=", "checkpoint=$tooLong ledger=ext4",
+            "checkpoint=ext4 ledger=$tooLong"
+        )) {
+            assertFailsWith<IllegalArgumentException>(invalid) {
+                SessionResumePreflightDenial.UnsupportedFilesystem(invalid)
+            }
+        }
+    }
+
     @Test fun modelRequestReservationAndToolQuotaAreFailClosed() {
         val empty = SessionBudgetState()
         assertEquals(BudgetDecision.Allowed(false), SessionBudgetPolicy.beforeTurn(empty, 2, 0))

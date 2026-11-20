@@ -8,6 +8,50 @@ See the [effect intent and recovery contracts](EFFECT_INTENTS.md) for the
 pure policy, including the successor-generation non-start barrier requirement;
 no live effect reconciliation adapter is enabled here.
 
+## Deny-only runtime filesystem preflight (Draft PR #135)
+
+`ResumeRuntimeFilesystemPreflight` is an optional, trusted diagnostic adapter
+for `DefaultRunSessionUseCase`. It is **not** `SessionResumeAdmission.admit`
+and never acquires `resume.lock`, mints a fence, starts a model/tool, or
+permits execution or effect replay. The production CLI still uses the default
+`UNSUPPORTED_RESUME` behavior. The default bypasses the diagnostic worker
+entirely, so even a stuck opt-in lookup cannot change this code.
+A successful probe also returns `UNSUPPORTED_RESUME`: no success case
+creates resume authority.
+
+The Session Protocol v1 rejection order remains **protocol -> invocation ->
+resume**, before capabilities/model/tool policy/budget. A resume request with
+invalid later fields still returns `UNSUPPORTED_RESUME` on the default
+path. With the opt-in diagnostic enabled, filesystem lookup occurs at the
+original RESUME decision point, **before** validation of later capability,
+model, tool-policy or budget fields. The opt-in diagnostic must not alter
+the preceding protocol/invocation denial order. Host failures cross the
+infra-to-core boundary solely as stable denial codes plus a syntax-constrained
+`checkpoint=... ledger=...` detail. Never expose the raw exception, cause,
+suppressed exceptions or private host paths in a result, event or diagnostics.
+Volume type and lookup success can reveal host configuration, so this optional
+preflight is restricted to operator-trusted callers, not untrusted model input.
+
+The session checks cancellation/deadline immediately before and after probe
+execution. `FileStore.type()` on a hung mount may not be interruptible, so
+the probe is isolated in a `ResumePreflightRunner` provided to the
+`DefaultRunSessionUseCase` constructor. **Each runtime instance owns its
+own bounded daemon worker** (one active task, no queue); test instances
+cannot starve one another. Invocations intentionally sharing the same
+runtime instance share only that instance's diagnostic worker. Its
+configurable `maxProbeMillis` defaults to **500 ms**, and the remaining
+session deadline can shorten the wait. An overrun returns the typed
+`RESUME_ADMISSION_UNCONFIRMED` denial unless cancellation/deadline wins.
+The kernel operation may continue past the wait in that daemon; subsequent
+opt-in requests on the **same runtime** fail closed while its worker is
+occupied. A late result cannot create an event, fence or execution permission.
+`InterruptedException` restores the caller interrupt flag. If that flag then
+causes an interruptible NIO `FileChannel` ledger append/flush to fail, the
+runtime propagates `EventSinkFailure` **without publishing a typed session
+result or diagnostics**; the unconfirmed journal must not be treated as a
+successful denial receipt. Fatal VM errors still propagate through the
+trusted runtime rather than being suppressed.
+
 ## Boundary and trusted inputs
 
 ### Required host filesystem setup

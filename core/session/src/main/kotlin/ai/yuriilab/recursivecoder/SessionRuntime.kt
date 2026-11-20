@@ -8,6 +8,12 @@ import java.time.Clock
 import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.Executors
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.SynchronousQueue
+import java.util.concurrent.ThreadFactory
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.TimeUnit
 import kotlinx.serialization.json.*
 
@@ -67,15 +73,113 @@ private fun SessionRequest.admit(workspaceOpener: WorkspaceOpener,
 }
 
 /**
+ * Deny-only transport across the trusted infra -> core resume preflight.
+ * A successful filesystem lookup MUST NOT become permission to resume:
+ * #104/#105 have not authenticated the executing actor and external effects.
+ * Host exception details, causes and suppressed records never enter
+ * protocol/model output. Fatal VM errors retain ordinary propagation.
+ */
+sealed interface SessionResumePreflightDenial {
+    val code: String
+    val safeDetail: String
+
+    data class UnsupportedFilesystem(override val safeDetail: String) :
+        SessionResumePreflightDenial {
+        init {
+            require(Regex("checkpoint=[a-z0-9._-]{1,64} ledger=[a-z0-9._-]{1,64}")
+                .matches(safeDetail)) { "Invalid filesystem detail" }
+        }
+        override val code: String = "RESUME_FILESYSTEM_UNSUPPORTED"
+    }
+
+    data object NotEnabled : SessionResumePreflightDenial {
+        override val code: String = "UNSUPPORTED_RESUME"
+        override val safeDetail: String = "Resume is not supported"
+    }
+
+    data object Unavailable : SessionResumePreflightDenial {
+        override val code: String = "RESUME_ADMISSION_UNCONFIRMED"
+        override val safeDetail: String = "Resume admission unavailable"
+    }
+}
+
+/** Always returns a denial, never an execution grant or a lease. */
+fun interface SessionResumePreflight {
+    fun deny(request: SessionRequest): SessionResumePreflightDenial
+}
+
+/** Default session behavior: no thread, filesystem lookup or host capability. */
+private object DisabledResumePreflight : SessionResumePreflight {
+    override fun deny(request: SessionRequest): SessionResumePreflightDenial =
+        SessionResumePreflightDenial.NotEnabled
+}
+
+/**
+ * FileStore.type() on an unresponsive mount may not honor interruption.
+ * Keep it off the session thread. Each configured runner owns at most one
+ * daemon worker and no queue. A hung call only starves runtimes sharing that
+ * runner; unrelated runtimes and test instances have independent workers.
+ * The caller's wait is bounded, but the OS call itself may continue. No
+ * late result or timeout can grant fenced execution authority.
+ */
+class ResumePreflightRunner(private val maxProbeMillis: Long = 500L) {
+    init {
+        require(maxProbeMillis in 1L..60_000L) { "Invalid resume probe timeout" }
+    }
+    private val worker = ThreadPoolExecutor(
+        0, 1, 30L, TimeUnit.SECONDS, SynchronousQueue<Runnable>(),
+        ThreadFactory { job ->
+            Thread(job, "session-resume-filesystem-probe").apply { isDaemon = true }
+        },
+        ThreadPoolExecutor.AbortPolicy()
+    )
+
+    fun deny(
+        request: SessionRequest, adapter: SessionResumePreflight,
+        remainingMillis: Long
+    ): SessionResumePreflightDenial {
+        val waitMs = minOf(maxProbeMillis, remainingMillis.coerceAtLeast(1L))
+        val future = try {
+            worker.submit<SessionResumePreflightDenial> { adapter.deny(request) }
+        } catch (_: RejectedExecutionException) {
+            return SessionResumePreflightDenial.Unavailable
+        }
+        try {
+            return future.get(waitMs, TimeUnit.MILLISECONDS)
+        } catch (_: TimeoutException) {
+            return SessionResumePreflightDenial.Unavailable
+        } catch (failure: ExecutionException) {
+            // VM-fatal errors must abort the trusted outer runtime.
+            val cause = failure.cause
+            if (cause is VirtualMachineError) throw cause
+            return SessionResumePreflightDenial.Unavailable
+        } catch (_: InterruptedException) {
+            // Future.get clears the interrupt flag. Preserve the host's
+            // shutdown/cancellation signal even on this deny-only path.
+            Thread.currentThread().interrupt()
+            return SessionResumePreflightDenial.Unavailable
+        } catch (_: Exception) {
+            return SessionResumePreflightDenial.Unavailable
+        } finally {
+            future.cancel(true)
+        }
+    }
+}
+
+/**
  * Session application orchestration: admission precedes workspace/model effects;
  * completion is published only after the journal and result have been verified.
- * All mutable execution state is local to invoke(), never shared between sessions.
+ * Session execution state is local to invoke(). The injected optional
+ * preflight runner has a bounded worker shared only by invocations using
+ * this same DefaultRunSessionUseCase; distinct instances are isolated.
  */
 class DefaultRunSessionUseCase(
     private val model: ModelGateway,
     private val workspaceOpener: WorkspaceOpener,
     private val eventSinkFactory: EventSinkFactory,
-    private val clock: Clock = Clock.systemUTC()
+    private val clock: Clock = Clock.systemUTC(),
+    private val resumePreflight: SessionResumePreflight = DisabledResumePreflight,
+    private val resumePreflightRunner: ResumePreflightRunner = ResumePreflightRunner()
 ) : RunSessionUseCase {
     override fun invoke(request: SessionRequest, cancellation: Cancellation): SessionExecutionResult {
         cancellation.bind()
@@ -148,6 +252,28 @@ class DefaultRunSessionUseCase(
         var executionFailure: Throwable? = null
         try {
             try {
+                // #104: even an opt-in host preflight may only DENY here.
+                // It must not create resume.lock, publish a fence or launch a
+                // model/tool. Runtime execution after fenced admission is gated
+                // on a separately reviewed #105 authenticated effect protocol.
+                if (request.raw.objectAt("resume").textAt("mode") == "resume") {
+                    val earlier = SessionResumePreflightPolicy.earlierDenial(
+                        request.admissionFacts())
+                    if (earlier != null)
+                        throw Refused(earlier.code, earlier.category, earlier.message)
+                    // Check before starting any potentially blocking host probe.
+                    checkActive()
+                    val remaining = Duration.between(
+                        clock.instant(), deadline).toMillis().coerceAtLeast(1L)
+                    // The default path must retain UNSUPPORTED_RESUME even
+                    // while a prior opt-in diagnostic worker is wedged.
+                    val denial = if (resumePreflight === DisabledResumePreflight)
+                        SessionResumePreflightDenial.NotEnabled
+                    else resumePreflightRunner.deny(request, resumePreflight, remaining)
+                    // A cancelled/expired caller wins over a late probe result.
+                    checkActive()
+                    throw Refused(denial.code, "checkpoint", denial.safeDetail)
+                }
                 workspaceManager = request.admit(workspaceOpener,
                     onAudit = { audit ->
                         journal.append(if (audit.permitted) "tool.completed" else "policy.denied",

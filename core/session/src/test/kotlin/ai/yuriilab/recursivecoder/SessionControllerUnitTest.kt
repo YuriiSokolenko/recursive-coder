@@ -198,6 +198,175 @@ class SessionControllerUnitTest {
 
     private fun JsonObject.value(key: String) = getValue(key).jsonPrimitive.content
 
+    private fun resumeRequest(request: SessionRequest): SessionRequest =
+        withField(request, "resume", buildJsonObject {
+            put("mode", "resume")
+            put("fenceGeneration", 2)
+            put("checkpoint", JsonNull)
+        })
+
+    private fun withResumeOutput(request: SessionRequest, name: String): SessionRequest {
+        val root = temp.resolve(name)
+        return withField(request, "outputs", buildJsonObject {
+            put("rootDir", root.toString())
+            put("eventsPath", root.resolve("events.jsonl").toString())
+            put("resultPath", root.resolve("result.json").toString())
+            put("diagnosticsPath", root.resolve("diagnostics.json").toString())
+            put("checkpointDir", root.resolve("checkpoints").toString())
+        })
+    }
+
+    private fun denyResume(
+        request: SessionRequest,
+        adapter: SessionResumePreflight,
+        cancellation: Cancellation = Cancellation(),
+        runner: ResumePreflightRunner = ResumePreflightRunner()
+    ): JsonObject {
+        val model = StubGateway()
+        val result = DefaultRunSessionUseCase(
+            model, WorkspaceOpener { _, _, _ ->
+                error("Workspace must not open while resume is denied")
+            }, eventSinkFactory, resumePreflight = adapter,
+            resumePreflightRunner = runner
+        ).invoke(request, cancellation).protocol
+        assertEquals(0, model.negotiations)
+        assertEquals(0, model.turns)
+        return result
+    }
+
+    @Test fun nonfatalResumeAdapterErrorHasTypedSafeCodeAndNoHostExceptionText() {
+        val request = resumeRequest(fixture())
+        val result = denyResume(request,
+            SessionResumePreflight { throw LinkageError("/private/HOST_LINKAGE_SECRET") })
+        assertEquals("rejected", result.value("status"))
+        val error = result.getValue("error").jsonObject
+        assertEquals("RESUME_ADMISSION_UNCONFIRMED", error.value("code"))
+        assertEquals("checkpoint", error.value("category"))
+        assertEquals("Resume admission unavailable", error.value("safeMessage"))
+        assertFalse(result.toString().contains("HOST_LINKAGE_SECRET"))
+    }
+
+    @Test fun resumeWithUnsupportedCapabilityPreservesOriginalV1DenialCode() {
+        val request = withField(resumeRequest(fixture()), "requiredCapabilities",
+            buildJsonArray { add("unknown-capability") })
+        val result = denyResume(request,
+            SessionResumePreflight { SessionResumePreflightDenial.NotEnabled })
+        assertEquals("UNSUPPORTED_RESUME",
+            result.getValue("error").jsonObject.value("code"))
+    }
+
+    @Test fun unsupportedProtocolWithResumeNeverInvokesFilesystemPreflight() {
+        val request = withField(resumeRequest(fixture()), "version", JsonPrimitive("1.1"))
+        var probes = 0
+        val result = denyResume(request, SessionResumePreflight {
+            probes++
+            SessionResumePreflightDenial.NotEnabled
+        })
+        assertEquals("UNSUPPORTED_PROTOCOL",
+            result.getValue("error").jsonObject.value("code"))
+        assertEquals(0, probes)
+    }
+
+    @Test fun cancelledResumeDoesNotInvokeFilesystemPreflight() {
+        val request = resumeRequest(fixture())
+        val cancelled = Cancellation().also { it.cancel() }
+        var probes = 0
+        val result = denyResume(request, SessionResumePreflight {
+            probes++
+            SessionResumePreflightDenial.NotEnabled
+        }, cancelled)
+        assertEquals("cancelled", result.value("status"))
+        assertEquals("SESSION_CANCELLED",
+            result.getValue("error").jsonObject.value("code"))
+        assertEquals(0, probes)
+    }
+
+    @Test fun uninterruptibleResumeLookupIsBoundedAndFailsClosed() {
+        val request = resumeRequest(fixture())
+        val blocker = java.util.concurrent.CountDownLatch(1)
+        val startedAt = System.nanoTime()
+        try {
+            val result = denyResume(request, SessionResumePreflight {
+                try {
+                    blocker.await(5L, java.util.concurrent.TimeUnit.SECONDS)
+                } catch (_: InterruptedException) {
+                    // Simulate a native lookup that does not honor interrupt.
+                    blocker.await(5L, java.util.concurrent.TimeUnit.SECONDS)
+                }
+                SessionResumePreflightDenial.NotEnabled
+            }, runner = ResumePreflightRunner(120L))
+            assertEquals("RESUME_ADMISSION_UNCONFIRMED",
+                result.getValue("error").jsonObject.value("code"))
+            assertTrue(java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(
+                System.nanoTime() - startedAt) < 2500L)
+        } finally {
+            blocker.countDown()
+        }
+    }
+
+    @Test fun disabledResumePathRetainsV1CodeWhenDiagnosticWorkerIsWedged() {
+        val request = resumeRequest(fixture())
+        val blocker = java.util.concurrent.CountDownLatch(1)
+        val started = java.util.concurrent.CountDownLatch(1)
+        try {
+            val first = denyResume(request, SessionResumePreflight {
+                started.countDown()
+                try {
+                    blocker.await(5L, java.util.concurrent.TimeUnit.SECONDS)
+                } catch (_: InterruptedException) {
+                    blocker.await(5L, java.util.concurrent.TimeUnit.SECONDS)
+                }
+                SessionResumePreflightDenial.NotEnabled
+            })
+            assertEquals("RESUME_ADMISSION_UNCONFIRMED",
+                first.getValue("error").jsonObject.value("code"))
+            assertEquals(0L, started.count)
+
+            // A second opt-in runtime must have its OWN worker even while
+            // the first runtime's noninterruptible lookup is still stuck.
+            val isolated = withResumeOutput(request, "independent-probe-output")
+            val optInResult = denyResume(isolated, SessionResumePreflight {
+                SessionResumePreflightDenial.NotEnabled
+            })
+            assertEquals("UNSUPPORTED_RESUME",
+                optInResult.getValue("error").jsonObject.value("code"))
+
+            val separate = withResumeOutput(request, "default-output")
+            val model = StubGateway()
+            val result = DefaultRunSessionUseCase(
+                model, WorkspaceOpener { _, _, _ -> error("Unexpected workspace access") },
+                eventSinkFactory
+            ).invoke(separate, Cancellation()).protocol
+            assertEquals("UNSUPPORTED_RESUME",
+                result.getValue("error").jsonObject.value("code"))
+            assertEquals(0, model.negotiations)
+            assertEquals(0, model.turns)
+        } finally {
+            blocker.countDown()
+        }
+    }
+
+    @Test fun interruptedHostProbeWaitRestoresTheCallerInterruptFlag() {
+        val request = resumeRequest(fixture())
+        val release = java.util.concurrent.CountDownLatch(1)
+        val runner = ResumePreflightRunner(1000L)
+        try {
+            Thread.currentThread().interrupt()
+            val denial = runner.deny(request, SessionResumePreflight {
+                // Do not let the worker complete before Future.get checks
+                // the calling thread's pre-existing interrupt signal.
+                release.await(5L, java.util.concurrent.TimeUnit.SECONDS)
+                SessionResumePreflightDenial.NotEnabled
+            }, 1000L)
+            assertEquals(SessionResumePreflightDenial.Unavailable, denial)
+            assertTrue(Thread.currentThread().isInterrupted,
+                "Future.get interruption must not be swallowed")
+        } finally {
+            Thread.interrupted() // Clear test thread after verifying flag.
+            release.countDown()
+        }
+    }
+
     @Test fun eachControllerReceivesItsOwnMemoryEventSink() {
         val first = eventSinkFactory.open(temp.resolve("first.jsonl"))
         val second = eventSinkFactory.open(temp.resolve("second.jsonl"))
