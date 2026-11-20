@@ -21,7 +21,8 @@ object DurableAcceptedRunningHandoff {
         if (source.journalSequence == Int.MAX_VALUE) return false
         val next = source.journalSequence + 1
         fun text(name: String) = (event[name] as? JsonPrimitive)?.content
-        return TrustedRunningBoundaryPolicy.step(event, source.phase) == "running" &&
+        return TrustedRunningBoundaryPolicy.step(event, source.phase) ==
+            SessionPhaseVocabulary.runningWire &&
             (event["sequence"] as? JsonPrimitive)?.intOrNull == next &&
             text("sessionId") == source.sessionId &&
             text("traceId") == source.traceId &&
@@ -44,7 +45,7 @@ object DurableAcceptedRunningHandoff {
         // no authority. This only avoids minting a fence for a known bad frame.
         val proposal = accepted.snapshot
         if (accepted.reconciliationRequired ||
-            proposal.phase != "accepted" ||
+            proposal.phase != SessionPhaseVocabulary.acceptedWire ||
             proposal.taskState != "ready" ||
             !PreExecutionSnapshotPolicy.safe(proposal) ||
             proposal.effectJournalHead != null ||
@@ -68,7 +69,7 @@ object DurableAcceptedRunningHandoff {
                     source.copy(
                         sequence = Math.addExact(source.sequence, 1L),
                         previousSha256 = admitted.sha256,
-                        phase = "running",
+                        phase = SessionPhaseVocabulary.runningWire,
                         // No task attempt, agent or child may be started here.
                         taskState = "ready",
                         journalSequence = anchor.lastSequence,
