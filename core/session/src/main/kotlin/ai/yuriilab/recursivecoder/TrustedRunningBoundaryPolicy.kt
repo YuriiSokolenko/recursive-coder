@@ -37,7 +37,8 @@ object TrustedRunningBoundaryPolicy {
 
         val actor = event["actor"] as? JsonObject ?: return null
         val id = actor["agentId"] as? JsonPrimitive ?: return null
-        if (!id.isString || id.content.isBlank() ||
+        val sessionId = (event["sessionId"] as? JsonPrimitive)?.content ?: return null
+        if (!id.isString || id.content != "agent-" + sessionId ||
             actor.any { (key, value) -> key != "agentId" && value != JsonNull })
             return null
 
