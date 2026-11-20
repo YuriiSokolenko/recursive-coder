@@ -154,6 +154,21 @@ internal object SessionAdmissionPolicy {
     }
 }
 
+/**
+ * The protocol v1 order is PROTOCOL -> INVOCATION -> RESUME. Later
+ * capabilities, model, tool and budget checks must not pre-empt RESUME.
+ * No synthetic "fresh" policy decision is allowed for this probe.
+ */
+internal object SessionResumePreflightPolicy {
+    fun earlierDenial(facts: SessionAdmissionFacts): AdmissionDenial? {
+        val decision = SessionAdmissionPolicy.decide(facts)
+        if (decision !is AdmissionDecision.Denied) return null
+        return decision.reason.takeUnless {
+            it == AdmissionDenial.RESUME && facts.resumeMode == "resume"
+        }
+    }
+}
+
 internal enum class BudgetDenial(val code: String, val message: String) {
     MODEL_REQUESTS("MODEL_REQUEST_BUDGET_EXCEEDED", "Model request budget exceeded"),
     TOKENS("TOKEN_BUDGET_EXCEEDED", "Model token budget exceeded"),

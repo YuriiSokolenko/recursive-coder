@@ -73,6 +73,32 @@ repository input or remote endpoint is modified by these tests.
 
 **Scope and existing exceptions:** The rules cover Gradle project dependencies and selected external framework groups, not imports or the implementation of port interfaces. The included `build-logic` build belongs to Gradle tooling, not product modules. `TaskStore` was extracted into `:infra:task-store` in issue #27, with its `TaskRepository` contract in `:core:tasks`; only the CLI composition root selects the filesystem adapter. The physical JSONL event writer is in `:infra:journal` (#29), selected by the CLI EventSinkFactory. Neither case permits core to depend on infrastructure or CLI. The original issue #25 architecture guardrails remain enforced across all modules.
 
+## Deny-only fenced resume boundary (PR #135)
+
+`SessionPolicyUnitTest` (`unit`) pins the original v1 denial precedence for
+resume requests even with later-invalid capability/model/tool/budget fields,
+and the strict safe-detail grammar. `SessionControllerUnitTest`
+(`integration`, historical name) uses in-memory model/workspace ports with
+temporary output files to verify sanitized nonfatal host errors,
+pre-cancelled requests, protocol-before-probe ordering, configured bounded
+handling of an uninterruptible filesystem lookup, restoration of the caller
+interrupt flag, independent diagnostic workers for distinct runtime
+instances, and unaffected default refusal even while another runtime's
+opt-in diagnostic worker is occupied.
+
+`RuntimePreExecutionBoundaryIntegrationTest` (`integration`) tests the real
+`DefaultRunSessionUseCase` and durable session ledger. It verifies an
+injected `FileStore.type()` failure carrying private cause/suppressed
+paths. The regression scans binary ledger bytes via ISO-8859-1 **and**
+authenticated events decoded by `inspect`, along with result and diagnostics;
+it verifies no model/workspace activity and no `resume.lock` or fence.
+An additional durable-ledger regression interrupts the runtime caller while
+`Future.get` is waiting on the opt-in probe, and confirms the later NIO
+journal failure propagates without publishing a typed result or diagnostics. Another test verifies
+that two valid local filesystem types still cannot authorize resume.
+Neither test provides production runtime admission, effect reconciliation,
+or permission to resume writes (#104/#105).
+
 ## Five-role coordinator tests (issue #79)
 
 `FiveRoleWorkflowCoordinatorUnitTest` (`@Tag("unit")`) runs scripted in-memory `FiveRoleStageActions` and `FiveRoleWorkflowHost` ports. It checks invalid plans including forbidden Developer targets, mismatched host snapshots, tentative vs confirmed commits, reconciliation denials, Reviewer stops and final graph attestation failures with exact codes/stages. `FiveRoleFakeModelWorkflowIntegrationTest` (`@Tag("integration")`) invokes the five real stage use cases through an in-memory fake host and fake tool sessions. **These fake-host tests alone do not establish authenticated receipts or Git transition security.** Direct `:infra:workspace`
