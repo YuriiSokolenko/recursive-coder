@@ -1,8 +1,10 @@
 ## #104: trusted-host durable `created → accepted` handoff
 
 `DurableCreatedAcceptedHandoff.publish` is an opt-in, host-only primitive in
-`:infra:journal`, deliberately **not** wired into `DefaultRunSessionUseCase`
-or the CLI. The host supplies an independently verified and already durable
+`:infra:journal`. An explicit, separate `DefaultRunSessionUseCase.publishTrustedCreatedAccepted`
+entry point now reaches it through `DurableRuntimeCreatedAcceptedHost`, but only
+for an operator-owned **handoff-only** invocation, never through the normal
+`invoke()`/CLI/scheduler path. This does not allow runtime execution or resume. The host supplies an independently verified and already durable
 `created` checkpoint (C1), matching trusted `CheckpointHostContext`, a
 read-only `ResumeHostAttestation` with expected fence generation, and the
 single canonical `created → accepted` event from its trusted event emitter.
@@ -72,3 +74,30 @@ hardening remains Draft PR #122.
 See also [fenced resume](FENCED_RESUME.md),
 [checkpoint storage](SESSION_CHECKPOINTS.md) and
 [durable event ledger](DURABLE_EVENT_LEDGER.md).
+
+### Opt-in real runtime boundary (handoff only)
+
+The trusted host must independently create and durably verify C1, derive
+`CheckpointHostContext` from current Git/policy/workspace evidence and
+`ResumeHostAttestation` from host-owned authority. The new
+`DurableRuntimeCreatedAcceptedHost` compares the Session Protocol request
+identity, task, policy digest, Git HEAD, optional branch, workspace and exact
+host-owned checkpoint/ledger paths, then inspects C1 on disk. It emits one
+canonical session transition and delegates to the existing fenced handoff,
+which re-reads the complete authenticated C1 under its lease before C2.
+The boundary intentionally NEVER invokes `WorkspaceOpener`,
+`ModelGateway`, `EventSinkFactory`, or emits a terminal result.
+
+`DefaultRunSessionUseCase.publishTrustedCreatedAccepted` enforces ordinary
+fresh-session admission precedence and checks cancellation/deadline before
+host I/O. It is separately opt-in, not called by `invoke()`, and a receipt
+is only evidence that C2 was durably observed at return. It grants **no**
+runtime, tool, model, child or effect execution permission. No automatic
+retry is allowed when publication throws: an exception may follow a
+committed C2. Normal v1 resume requests remain deny-only and unchanged.
+
+Remaining #104/#105 gates: trustworthy initial C1 producer and current
+authority integration in a production host, actual runtime execution/receipt
+generation fencing, live lease ownership through terminal publication,
+slow/blocked-fsync shutdown and race tests, and crash/kill E2E of that
+execution path. Do not enable auto-resume or side-effect replay.

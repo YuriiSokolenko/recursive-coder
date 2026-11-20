@@ -181,6 +181,39 @@ class DefaultRunSessionUseCase(
     private val resumePreflight: SessionResumePreflight = DisabledResumePreflight,
     private val resumePreflightRunner: ResumePreflightRunner = ResumePreflightRunner()
 ) : RunSessionUseCase {
+
+    /**
+     * Trusted-host, handoff-only entry point. Deliberately separate from invoke():
+     * it MUST NOT open the runtime event sink, workspace or model, emit a
+     * terminal Session Protocol result, or transition into running.
+     * The host must independently authenticate C1 and publish durable C2.
+     * A returned receipt is NOT runtime execution/replay authority.
+     */
+    @TrustedSessionPreExecutionApi
+    fun publishTrustedCreatedAccepted(
+        request: SessionRequest,
+        cancellation: Cancellation,
+        host: TrustedSessionPreExecutionHost
+    ): TrustedSessionHandoffReceipt {
+        cancellation.bind()
+        when (val decision = SessionAdmissionPolicy.decide(request.admissionFacts())) {
+            AdmissionDecision.Accepted -> Unit
+            is AdmissionDecision.Denied -> throw Refused(
+                decision.reason.code, decision.reason.category, decision.reason.message)
+        }
+        val now = clock.instant()
+        val deadline = SessionBudgetPolicy.effectiveDeadline(
+            now, request.deadline, request.budgets.longAt("maxWallTimeMs"))
+        when (SessionBudgetPolicy.interruption(cancellation.signals(), now, deadline)) {
+            SessionEndReason.TIMEOUT -> throw Stopped(true)
+            SessionEndReason.CANCELLATION -> throw Stopped(false)
+            else -> Unit
+        }
+        // No post-handoff execution or terminal write is permitted here.
+        // An exception may mean C2 committed: callers must reconcile read-only.
+        return host.publishCreatedAccepted(request)
+    }
+
     override fun invoke(request: SessionRequest, cancellation: Cancellation): SessionExecutionResult {
         cancellation.bind()
         val started = clock.instant()
