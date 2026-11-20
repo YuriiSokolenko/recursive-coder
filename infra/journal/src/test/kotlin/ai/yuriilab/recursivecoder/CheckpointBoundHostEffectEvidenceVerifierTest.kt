@@ -84,10 +84,12 @@ class CheckpointBoundHostEffectEvidenceVerifierTest : SessionCheckpointTestFixtu
         }
         val real = DurableSessionEventLedger.inspect(ledger())
         assertEquals(4, real.lastSequence)
-        assertEquals(3, EffectEvidenceProjection.fromSessionLedger(
-            real.events, physical)?.size)
+        assertEquals(3, (EffectEvidenceProjection.inspectForDiagnostics(
+            real.events, physical) as? EffectEvidenceProjection.Result.Verified)
+            ?.entries?.size)
         val dropped = real.events.filterIndexed { i, _ -> i != 2 }
-        assertNull(EffectEvidenceProjection.fromSessionLedger(dropped, physical))
+        assertIs<EffectEvidenceProjection.Result.Denied>(
+            EffectEvidenceProjection.inspectForDiagnostics(dropped, physical))
     }
 
     private fun sidecar(): Path = temp.resolve("effect-root").also { dir ->
@@ -366,6 +368,22 @@ class CheckpointBoundHostEffectEvidenceVerifierTest : SessionCheckpointTestFixtu
                         assertEquals(1L, verifiedPhysical.lastSequence)
                         assertEquals(EffectRecord.Intent(expected),
                             verifiedPhysical.entries.single().record)
+                        // An attacker can always invent a pin for that valid
+                        // suffix, but the result is a diagnostic-only type.
+                        val attackerPin = EffectJournalHeadPin(
+                            verifiedPhysical.lastSequence, verifiedPhysical.headMacSha256)
+                        val selfPinned = DurableEffectRecordJournal
+                            .inspectPinnedForDiagnostics(path, workspace(), hostKey,
+                                sealedHead.expectation(), attackerPin)
+                        assertEquals(1L, selfPinned.lastSequence)
+                        assertEquals(attackerPin.headMacSha256, selfPinned.headMacSha256)
+                        // Regression guard: the current verifier always denies
+                        // a claimed commit here. This is NOT evidence supplied
+                        // by the diagnostic result or a tested future probe.
+                        assertFalse(verifier.independentlyVerifyCommitted(
+                            EffectRecord.Intent(expected),
+                            EffectRecord.Started(expected),
+                            EffectRecord.Committed(expected, digestB)))
 
                         // The pinned sequence/MAC comparison must be the
                         // ONLY remaining obstacle; removing that guard
@@ -385,6 +403,20 @@ class CheckpointBoundHostEffectEvidenceVerifierTest : SessionCheckpointTestFixtu
                     }
                     assertTrue(verifier.authenticateCompleteJournal(
                         view, expected, successor.generation))
+                    // This physical success after rolling the valid suffix
+                    // back is NOT a proof the effect never began.
+                    val genesisDiagnostic = DurableEffectRecordJournal
+                        .inspectPinnedForDiagnostics(path, workspace(), hostKey,
+                            sealedHead.expectation(), sealedHead.pin())
+                    assertEquals(0L, genesisDiagnostic.lastSequence)
+                    assertEquals(sealedHead.headMacSha256, genesisDiagnostic.headMacSha256)
+                    // Regression guard for today's always-deny no-start
+                    // verifier; not proof that rollback was detected.
+                    assertFalse(verifier.independentlyVerifyNotStarted(
+                        EffectRecord.Intent(expected),
+                        EffectNotStartedEvidence(expected, view.headSha256,
+                            view.lastSequence, successor.generation, digestB, digestB),
+                        successor.generation))
                 }
             }
     }

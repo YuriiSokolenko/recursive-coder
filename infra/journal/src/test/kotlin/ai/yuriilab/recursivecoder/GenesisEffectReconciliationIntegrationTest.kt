@@ -103,7 +103,7 @@ class GenesisEffectReconciliationIntegrationTest : SessionCheckpointTestFixture(
             // Physical inspection requires the writer's exclusive lock to
             // be released; this is intentional, not a concurrent read API.
             assertEquals(0L, SessionCheckpointStore.inspectEffectHeadBound(
-                store(), context(), ledger(), path(2L), key).lastSequence)
+                store(), context(), ledger(), path(2L), key).physical.lastSequence)
         }
         assertEquals("RESUME_UNSAFE_BOUNDARY",
             assertFailsWith<SessionResumeUnconfirmed> {

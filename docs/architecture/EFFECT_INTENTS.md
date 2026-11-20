@@ -175,7 +175,7 @@ uncertain post-fsync acknowledgement, duplicate operations, stale lease,
 live/missing/symlinked lock, workspace directory safety, path substitution,
 and lease retirement.
 
-## Trusted-head comparison (bounded inspection; no checkpoint integration)
+## Physical pin comparison and checkpoint-bound authentication
 
 The earlier proposal to write one `effect-head-*.rca` file for every
 effect was **removed after PR #127 security review**. It made the
@@ -187,12 +187,22 @@ pin. Ordinary journal creation and append do not write anything into
 the checkpoint directory. Existing checkpoint name validation stays
 strict and unmodified.
 
-`DurableEffectRecordJournal.inspectBound` requires a fully validated
-`EffectJournalExpectation` and an independently trusted
-`EffectJournalHeadPin(lastSequence, headMacSha256)`. It verifies the
+`DurableEffectRecordJournal.inspectPinnedForDiagnostics` requires a validated
+`EffectJournalExpectation` and an **arbitrary caller-provided**
+`EffectJournalHeadPin(lastSequence, headMacSha256)`. It checks the
 entire RCEFX1 chain and refuses a missing complete last record, a
 different head, a different sequence, or an additional complete record.
-The HMAC binds the genesis, path and entire ordered record prefix.
+The HMAC binds the genesis, path and the observed ordered prefix, but
+**not** the provenance of the caller pin. This API returns only an
+`EffectJournalPinDiagnostic` (no entries or recovery authority). A caller
+can self-pin a real post-pin append or a restored genesis; exact physical
+equality does not prove non-execution, commit, or permission to replay.
+The former public `inspectBound(...): VerifiedEffectRecordJournal` entrypoint
+was intentionally **removed** rather than retained as a deprecated alias:
+there is no safe compatibility contract for callers treating arbitrary
+raw pins as authenticated recovery evidence. Migrate diagnostic callers
+to `inspectPinnedForDiagnostics`; checkpoint readers must go through the
+store-minted private head capability.
 
 ## Canonical checkpoint v2 effect-head pin and operator v3 transition
 
@@ -260,6 +270,100 @@ an independently retained monotonic latest-pin/checkpoint-head guard
 that cannot be reverted with those files; this PR does NOT claim that
 a checkpoint v2 publication by itself solves whole-root rollback.
 
+### #133: independent anti-rollback root protocol (design only)
+
+The checkpoint, RCLDG1, fence, anchor, audit and RCEFX1 files currently
+share a rollback domain. After a real, valid-MAC Intent is appended beyond
+a pinned genesis, truncating that suffix restores a byte-identical,
+MAC-valid genesis. Exact pin comparison and even the genesis-only
+operator transition can succeed again. **The absence of an Intent after
+rollback is not proof that the external effect never began.** This PR
+does NOT implement the independent root described below.
+
+**Required root.** Before enabling physical effects, use a separately
+administered, irreversible monotonic register outside the same filesystem,
+snapshot and agent-UID rollback domain: e.g. an authenticated remote
+append-only linearizable CAS register with durable acknowledgements and
+immutable version history, or a hardware-backed monotonic counter paired
+with integrity-bound head data that the agent UID cannot reset or replace.
+The register identity, epoch and trusted bootstrap must themselves survive
+rollback. Another local HMAC file, hash chain or checkpoint generation in
+the same snapshot domain is NOT independent. A counter alone cannot
+authenticate a history without a binding to the exact head data.
+
+Each register version must bind: host/session and register epoch, strictly
+increasing version and previous-version digest, the live issuing fence
+generation and immutable fence/anchor digest, exact checkpoint SHA,
+canonical sidecar path digest, RCEFX1 sequence and head MAC, operation ID,
+and a state such as `START_BARRIER_COMMITTED` or
+`TERMINAL_EVIDENCE_COMMITTED`. The service must reject stale-version CAS,
+reused operation IDs, forks, and non-successor generation transitions.
+Host-key authorization and register-write authorization must be isolated.
+
+**Required write order (future, separately reviewed):**
+
+1. Read and authenticate the independent root, including epoch and exact
+   predecessor, while holding the correct live OS-fenced lease. A missing,
+   reset, unavailable or uncertain root means quarantine.
+2. Force Intent, then Started to RCEFX1 and publish a matching checkpoint
+   head. CAS an independent root version binding the exact Started head;
+   receive an unambiguous *durable* acknowledgement **before any external
+   call**. An ambiguous CAS acknowledgement must not trigger the effect,
+   a new pin, or a positive no-start inference.
+3. After a confirmed outcome, force the terminal receipt, publish its
+   checkpoint head and CAS a new immutable root version. A MAC-valid
+   Committed record alone does not prove `ConfirmedCommitted`: external
+   state verification is separately required.
+4. At **every** restart, admission, fence transition and effect-recovery
+   attempt, read the root afresh and compare epoch, version, fence/anchor,
+   checkpoint and physical sidecar. If the root is ahead of local files,
+   diverges, or is unavailable, quarantine without synthesizing a pin,
+   repairing a missing history, or replaying.
+5. `ProvenNotStarted` additionally requires a separately authenticated
+   *successor* execution barrier and independent evidence that the
+   external operation never began. Neither a pinned genesis nor a
+   surviving Started barrier provides this proof.
+
+**Failure / attacker model:**
+
+| Case | Coverage and required response |
+| --- | --- |
+| Crash during sidecar fsync or root CAS | No external call before durable Started-root acknowledgement; ambiguous state => quarantine |
+| Crash after Started-root commit but before/during effect | Surviving root proves barrier publication, NOT outcome; independent probe required |
+| Same-UID attacker truncates/replaces MAC-valid local suffix or rolls back local checkpoints/fence/anchor | Root outside that UID/snapshot detects disagreement; refuse recovery |
+| Same UID can modify/reset the alleged independent root | Not covered: such a root fails the independence requirement |
+| Host HMAC key compromised, register isolated | MAC records can be forged, but rewind of root is rejected; effect outcome still unproven |
+| Host key and root writer credentials compromised | Forged forward versions or denial remain possible; never claim execution integrity or no-start |
+| Whole local checkpoint/sidecar/fence snapshot restored but independent root survives | Root mismatch => quarantine, including valid pinned genesis |
+| Independent root also reverted, lost, reset or re-bootstrapped with no external anchor | Information-theoretically indistinguishable; fail closed, cannot prove what ran |
+| External effect begins before barrier acknowledgement or bypasses fenced host | Out of scope; must be prevented before any executor is enabled |
+
+The root is **necessary, not sufficient**, for nonempty N→N+1 history
+recovery. There is still no approved barrier/probe/authority protocol;
+physical execution, replay, inferred no-start, confirmed commit and
+nonempty recovery remain disabled and pre-execution guards remain intact.
+
+### #133: physical reader / authority caller audit
+
+| Actual or proposed caller | Trust class and allowed result |
+| --- | --- |
+| `DurableEffectRecordJournal.inspect` / `inspectForDiagnostics` | Physical RCEFX1 only; both return the **entries-bearing** `VerifiedEffectRecordJournal`, which proves MAC/framing but carries **no** checkpoint pin provenance |
+| `DurableEffectRecordJournal.inspectPinnedForDiagnostics` | Physical exact equality to an arbitrary caller self-pin, returns `EffectJournalPinDiagnostic` without entries or authority |
+| `SessionCheckpointStore.inspectEffectHeadBound` | Read-only latest checkpoint/fence/anchor plus private physical pin comparison; returns `CheckpointAuthenticatedEffectJournal`, NOT independent effect authorization |
+| `SessionCheckpointStore.inspectEffectHeadForLease` | Current lease plus freshly inspected checkpoint, issuing fence and sealed historical-v3 constraints; returns `CheckpointAuthenticatedEffectJournal` for fail-closed verifier only |
+| `SessionCheckpointStore.withGenesisReconciliationEvidence` | Locked operator-approved, genesis-only transition; any nonempty physical history denies |
+| Proposed nonempty RCLDG1 projector or external executor | **Forbidden** until independent root, Started barrier and external-state authority are reviewed |
+
+A private, store-minted `AuthenticatedEffectHead` protects **checkpoint
+pin provenance**, and the private `StoreBoundEffectJournal` is the only
+implementation of the public sealed `CheckpointAuthenticatedEffectJournal`
+wrapper. `EffectEvidenceProjection.fromSessionLedger` now requires that
+wrapper. `EffectEvidenceProjection.inspectForDiagnostics` still supports
+raw `VerifiedEffectRecordJournal` for inspection and tests, but cannot
+feed it into the authority projection API. None of these types makes the
+checkpoint/sidecar/fence root rollback-resistant; a diagnostic pin match
+has neither authenticated provenance nor anti-rollback protection.
+
 ### Genesis-only operator reconciliation
 
 The new `reconcileGenesisEffectHead` operator API can explicitly move
@@ -320,10 +424,12 @@ to the verifier.
 
 A process can crash after sidecar fsync but **before** the trusted pin
 publication. The sidecar may therefore contain a complete *extra* frame.
-If the sidecar differs from the already trusted pin in **either**
-direction, strict `inspectBound` fails with
-`EFFECT_JOURNAL_PIN_MISMATCH`. Strict `inspect` and
-operator-only `inspectForDiagnostics` can show the observed physical prefix and
+If the sidecar differs from the store-authenticated pin in **either**
+direction, the private `SessionCheckpointStore.inspectAuthenticatedEffectHead`
+reader fails with `EFFECT_JOURNAL_PIN_MISMATCH`. Public
+`inspectPinnedForDiagnostics` performs the same physical comparison
+against a self-asserted pin, never granting checkpoint authority. Strict
+`inspect` and operator-only `inspectForDiagnostics` show the physical prefix and
 (optional) torn/zero tail for investigation. They do not distinguish a
 crash from malicious rollback, publish a new pin, authorize retry or
 accept a checkpoint. A pin covering `Started` must never be inferred
@@ -430,12 +536,16 @@ lease, advanced checkpoint, non-genesis physical journal, caller-supplied
 view or identity mismatch fails closed. The before/after checkpoint
 and live-lease checks still bracket that inspection.
 
-**Unforgeable pin provenance within the journal module:** the shared
-physical reader accepts only a private, non-copyable
-`SessionCheckpointStore.AuthenticatedEffectHead` capability. It is
-minted inside the store after actual `inspect()` of on-disk
-checkpoint/fence/anchor authority, not from a raw sidecar head or
-caller-created `VerifiedSessionCheckpoint`. For the verifier the store
+**Unforgeable capability only within `SessionCheckpointStore`:** the
+private `inspectAuthenticatedEffectHead` reader requires a non-copyable
+`AuthenticatedEffectHead` and returns a distinct sealed
+`CheckpointAuthenticatedEffectJournal` wrapper, minted after fresh on-disk
+checkpoint/fence/anchor verification (or the locked, checked genesis-only
+operator transition), never from a caller-provided snapshot or sidecar.
+**This claim does not apply to public `DurableEffectRecordJournal` APIs.**
+The raw-pin `inspectPinnedForDiagnostics` returns `EffectJournalPinDiagnostic`
+and cannot promote caller pins into checkpoint authority. For the verifier
+the store
 also rechecks the live lease, its expected ledger path, the exact
 checkpoint SHA, and the canonical v3 host seal before reading the
 physical journal. The pure `CheckpointBoundEffectHeadPolicy` helper

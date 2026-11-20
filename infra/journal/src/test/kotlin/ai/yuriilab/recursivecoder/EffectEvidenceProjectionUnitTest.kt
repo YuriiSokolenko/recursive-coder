@@ -35,6 +35,13 @@ class EffectEvidenceProjectionUnitTest {
             500L, 500L
         )
 
+    /** Exercise physical envelope matching without minting a checkpoint capability. */
+    private fun projectForDiagnostics(
+        events: List<JsonObject>, physical: VerifiedEffectRecordJournal
+    ): List<EffectJournalEntry>? =
+        (EffectEvidenceProjection.inspectForDiagnostics(events, physical)
+            as? EffectEvidenceProjection.Result.Verified)?.entries
+
     private fun effectEvent(eventSequence: Int, physicalSequence: Long,
                             record: EffectRecord, mac: String): JsonObject {
         val state = when (record) {
@@ -67,6 +74,20 @@ class EffectEvidenceProjectionUnitTest {
         })
     }
 
+    @Test fun authorityProjectionCannotAcceptRawOrDiagnosticJournalTypes() {
+        // Signature regression: there is no overload that accepts the public
+        // MAC-valid physical type. Only the checkpoint store mints the input.
+        val methods = EffectEvidenceProjection::class.java.declaredMethods
+            .filter { it.name == "fromSessionLedger" }
+        assertEquals(1, methods.size)
+        assertEquals(CheckpointAuthenticatedEffectJournal::class.java,
+            methods.single().parameterTypes.last())
+        assertFalse(CheckpointAuthenticatedEffectJournal::class.java
+            .isAssignableFrom(VerifiedEffectRecordJournal::class.java))
+        assertFalse(CheckpointAuthenticatedEffectJournal::class.java
+            .isAssignableFrom(EffectJournalPinDiagnostic::class.java))
+    }
+
     @Test fun completeEffectProjectionMatchesEveryPhysicalRecordAndSessionEvent() {
         val records = arrayOf(
             EffectRecord.Intent(expected), EffectRecord.Started(expected),
@@ -83,20 +104,20 @@ class EffectEvidenceProjectionUnitTest {
             effectEvent(4, 2L, records[1], "d".repeat(64)),
             effectEvent(5, 3L, records[2], "e".repeat(64))
         )
-        val result = assertNotNull(EffectEvidenceProjection.fromSessionLedger(history, physical))
+        val result = assertNotNull(projectForDiagnostics(history, physical))
         assertEquals(listOf(2L, 4L, 5L), result.map { it.sequence })
         assertEquals(records.toList(), result.map { it.record })
         assertEquals(listOf("c", "d", "e"), result.map { it.hostMacSha256.take(1) })
         // Missing a single ledger effect does not become an implicit no-op.
-        assertNull(EffectEvidenceProjection.fromSessionLedger(
+        assertNull(projectForDiagnostics(
             history.filterIndexed { i, _ -> i != 3 }, physical))
         // A correct-looking but wrong MAC must not match the physical prefix.
         val wrongMac = history.toMutableList().also {
             it[4] = effectEvent(5, 3L, records[2], "f".repeat(64))
         }
-        assertNull(EffectEvidenceProjection.fromSessionLedger(wrongMac, physical))
+        assertNull(projectForDiagnostics(wrongMac, physical))
         // A second record with the same sequence is not authoritative.
-        assertNull(EffectEvidenceProjection.fromSessionLedger(
+        assertNull(projectForDiagnostics(
             history + effectEvent(6, 3L, records[2], "e".repeat(64)), physical))
         // Invalid metadata must not be silently skipped as a non-effect event.
         val partial = history.toMutableList().also {
@@ -104,9 +125,9 @@ class EffectEvidenceProjectionUnitTest {
                 put("effectOperationId", "effect-one")
             }, "checkpoint.saved")
         }
-        assertNull(EffectEvidenceProjection.fromSessionLedger(partial, physical))
+        assertNull(projectForDiagnostics(partial, physical))
         // Unmarked tool events may be mutating and therefore fail closed.
-        assertNull(EffectEvidenceProjection.fromSessionLedger(
+        assertNull(projectForDiagnostics(
             history + event(6, "req-three", "completed", buildJsonObject {
                 put("graphId", "graph-root")
             }, "tool.completed"), physical))
@@ -117,12 +138,12 @@ class EffectEvidenceProjectionUnitTest {
         val effectOnlyLedger = listOf(
             effectEvent(1, 1L, EffectRecord.Intent(expected), "c".repeat(64)))
         assertEquals(0L, genesis.lastSequence)
-        assertEquals(emptyList(), EffectEvidenceProjection.fromSessionLedger(
+        assertEquals(emptyList(), projectForDiagnostics(
             emptyList(), genesis))
         assertEquals("PROJECTION_EXTRA_EVENT",
             assertIs<EffectEvidenceProjection.Result.Denied>(
-                EffectEvidenceProjection.inspect(effectOnlyLedger, genesis)).code)
-        assertNull(EffectEvidenceProjection.fromSessionLedger(
+                EffectEvidenceProjection.inspectForDiagnostics(effectOnlyLedger, genesis)).code)
+        assertNull(projectForDiagnostics(
             effectOnlyLedger, genesis))
     }
 
@@ -133,13 +154,13 @@ class EffectEvidenceProjectionUnitTest {
             effectEvent(1, 1L, intent, "c".repeat(64)),
             effectEvent(2, 2L, physical.entries.last().record, "d".repeat(64))
         )
-        assertEquals(2, EffectEvidenceProjection.fromSessionLedger(history, physical)?.size)
-        assertNull(EffectEvidenceProjection.fromSessionLedger(
+        assertEquals(2, projectForDiagnostics(history, physical)?.size)
+        assertNull(projectForDiagnostics(
             history, physical.copy(tornTailOffset = 500L,
                 tailKind = EffectJournalTailKind.SHORT_FRAME)))
-        assertNull(EffectEvidenceProjection.fromSessionLedger(
+        assertNull(projectForDiagnostics(
             history, physical.copy(lastSequence = 1L)))
-        assertNull(EffectEvidenceProjection.fromSessionLedger(
+        assertNull(projectForDiagnostics(
             history, physical.copy(entries = physical.entries.take(1))))
     }
 
@@ -152,7 +173,7 @@ class EffectEvidenceProjectionUnitTest {
             effectEvent(1, 1L, intent, "c".repeat(64)),
             effectEvent(2, 2L, started, "d".repeat(64)),
             effectEvent(3, 3L, committed, "e".repeat(64)))
-        assertNotNull(EffectEvidenceProjection.fromSessionLedger(events, physical))
+        assertNotNull(projectForDiagnostics(events, physical))
         fun replaced(index: Int, event: JsonObject): List<JsonObject> =
             events.toMutableList().also { it[index] = event }
         fun field(event: JsonObject, key: String, value: JsonElement): JsonObject =
@@ -162,23 +183,23 @@ class EffectEvidenceProjectionUnitTest {
             return field(event, "metadata",
                 JsonObject(m.toMutableMap().also { it[key] = value }))
         }
-        assertNull(EffectEvidenceProjection.fromSessionLedger(
+        assertNull(projectForDiagnostics(
             replaced(0, field(events[0], "type", JsonPrimitive("checkpoint.saved"))),
             physical))
-        assertNull(EffectEvidenceProjection.fromSessionLedger(
+        assertNull(projectForDiagnostics(
             replaced(2, field(events[2], "status", JsonPrimitive("failed"))),
             physical))
-        assertNull(EffectEvidenceProjection.fromSessionLedger(
+        assertNull(projectForDiagnostics(
             replaced(1, metadata(events[1], "effectFenceGeneration", JsonPrimitive(2L))),
             physical))
-        assertNull(EffectEvidenceProjection.fromSessionLedger(
+        assertNull(projectForDiagnostics(
             replaced(1, metadata(events[1], "effectiveUnrelatedKey", JsonPrimitive("x"))),
             physical))
-        assertNull(EffectEvidenceProjection.fromSessionLedger(
+        assertNull(projectForDiagnostics(
             listOf(events[1], events[0], events[2]), physical))
-        assertNull(EffectEvidenceProjection.fromSessionLedger(
+        assertNull(projectForDiagnostics(
             listOf(events[0], events[2]), physical))
-        assertNull(EffectEvidenceProjection.fromSessionLedger(
+        assertNull(projectForDiagnostics(
             events.reversed(), physical))
     }
 
@@ -192,7 +213,7 @@ class EffectEvidenceProjectionUnitTest {
         fun deny(events: List<JsonObject>,
                  evidence: VerifiedEffectRecordJournal = physical): String =
             assertIs<EffectEvidenceProjection.Result.Denied>(
-                EffectEvidenceProjection.inspect(events, evidence)).code
+                EffectEvidenceProjection.inspectForDiagnostics(events, evidence)).code
         assertEquals("PROJECTION_EXTRA_PHYSICAL", deny(good.take(1)))
         assertEquals("PROJECTION_EXTRA_EVENT", deny(
             good + effectEvent(3, 3L, started, "d".repeat(64))))

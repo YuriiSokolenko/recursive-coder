@@ -19,6 +19,19 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlinx.serialization.json.*
 
 /**
+ * An RCEFX1 journal whose pin was checked against a freshly inspected
+ * checkpoint/fence/anchor root by SessionCheckpointStore. It is NOT an
+ * independent anti-rollback root or permission to execute/replay effects.
+ *
+ * No public constructor or factory: only the private store implementation
+ * can mint this type. Raw MAC-valid journals and diagnostic self-pins do not
+ * implement it, and cannot enter authority-relevant projections.
+ */
+sealed interface CheckpointAuthenticatedEffectJournal {
+    val physical: VerifiedEffectRecordJournal
+}
+
+/**
  * Host-only metadata. No model text, tool responses, file contents, credentials or
  * arbitrary extension map are supported by the checkpoint format.
  */
@@ -1081,7 +1094,7 @@ object SessionCheckpointStore {
     @OptIn(ResumeOperatorOnlyApi::class)
     fun inspectEffectHeadBound(directory: Path, context: CheckpointHostContext,
                    ledgerPath: Path, sidecarPath: Path,
-                   hostKey: ByteArray): VerifiedEffectRecordJournal {
+                   hostKey: ByteArray): CheckpointAuthenticatedEffectJournal {
         val verified = inspect(directory, context, ledgerPath)
         val head = verified.snapshot.effectJournalHead
             ?: refuse("CHECKPOINT_EFFECT_HEAD_MISSING")
@@ -1093,8 +1106,14 @@ object SessionCheckpointStore {
      * A capability local to the trusted checkpoint store. Neither the type
      * nor its constructor is exposed to callers. In particular a caller
      * cannot turn an RCEFX1-derived head into an authenticated pin.
+     * Minted after fresh verification in the two read entrypoints above or
+     * in the locked, operator-approved genesis-only transition below.
      */
     private class AuthenticatedEffectHead(val pinned: CheckpointEffectJournalHead)
+
+    private class StoreBoundEffectJournal(
+        override val physical: VerifiedEffectRecordJournal
+    ) : CheckpointAuthenticatedEffectJournal
 
     /**
      * The only internal historical/current verifier entrypoint. It derives
@@ -1113,7 +1132,7 @@ object SessionCheckpointStore {
         ledgerPath: Path, sidecarPath: Path, hostKey: ByteArray,
         lease: SessionResumeLease, boundIdentity: EffectIdentity,
         expectedCheckpointSha256: String
-    ): VerifiedEffectRecordJournal {
+    ): CheckpointAuthenticatedEffectJournal {
         lease.assertCurrent()
         lease.requireLedgerPath(ledgerPath)
         val verified = inspect(directory, context, ledgerPath)
@@ -1127,20 +1146,25 @@ object SessionCheckpointStore {
     }
 
     /**
-     * One physical reader for current v2 and historical v3. A raw checkpoint
-     * head is not accepted: the private capability is minted only in the two
-     * verified entrypoints above.
+     * One physical reader for current v2 and historical v3. The exact-pin
+     * comparison is owned by the trusted checkpoint store, never the public
+     * diagnostic self-pin API. This is checkpoint provenance, NOT independent
+     * high-watermark/whole-root rollback protection or effect authority.
      */
     @OptIn(ResumeOperatorOnlyApi::class)
     private fun inspectAuthenticatedEffectHead(
         head: AuthenticatedEffectHead, sidecarPath: Path,
         workspaceRoot: Path, hostKey: ByteArray
-    ): VerifiedEffectRecordJournal {
+    ): CheckpointAuthenticatedEffectJournal {
         val pinned = head.pinned
         if (pinned.sidecarPathSha256 != effectJournalPathSha256(sidecarPath))
             refuse("CHECKPOINT_EFFECT_HEAD_PATH_MISMATCH")
-        return DurableEffectRecordJournal.inspectBound(
-            sidecarPath, workspaceRoot, hostKey, pinned.expectation(), pinned.pin())
+        val expectedPin = pinned.pin()
+        DurableEffectRecordJournal.requireValidPin(expectedPin)
+        val physical = DurableEffectRecordJournal.inspect(
+            sidecarPath, workspaceRoot, hostKey, pinned.expectation())
+        DurableEffectRecordJournal.requireExactPin(physical, expectedPin)
+        return StoreBoundEffectJournal(physical)
     }
 
     fun saveFromOpenLedgerFenced(lease: SessionResumeLease, directory: Path,
@@ -1420,8 +1444,11 @@ object SessionCheckpointStore {
                 PreExecutionPhasePolicy.phaseFromVerifiedHistory(
                     latest.snapshot.phase, ledger.events) == null)
                 throw SessionResumeUnconfirmed("RESUME_EFFECT_RECONCILIATION_UNSAFE_BOUNDARY")
-            val physical = DurableEffectRecordJournal.inspectBound(
-                sidecarPath, context.workspaceRoot, hostKey, head.expectation(), head.pin())
+            // This head was read from the immutable checkpoint chain and
+            // checked against the live fence, anchor and ledger above. A
+            // caller-provided diagnostic self-pin cannot enter this path.
+            val physical = inspectAuthenticatedEffectHead(
+                AuthenticatedEffectHead(head), sidecarPath, context.workspaceRoot, hostKey).physical
             if (physical.lastSequence != 0L || physical.entries.isNotEmpty())
                 throw SessionResumeUnconfirmed("RESUME_EFFECT_RECONCILIATION_EFFECT_PRESENT")
 

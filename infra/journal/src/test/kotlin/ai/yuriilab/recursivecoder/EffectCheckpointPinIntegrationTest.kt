@@ -86,7 +86,7 @@ class EffectCheckpointPinIntegrationTest : SessionCheckpointTestFixture() {
         }
         assertEquals(finalPinned.sha256, inspect().sha256)
         assertEquals(2L, SessionCheckpointStore.inspectEffectHeadBound(
-            store(), context(), ledger(), path(), key).lastSequence)
+            store(), context(), ledger(), path(), key).physical.lastSequence)
         val refusal = assertFailsWith<SessionResumeUnconfirmed> {
             SessionResumeAdmission.admit(
                 store(), context(), ledger(), resumeAttestation(1))
