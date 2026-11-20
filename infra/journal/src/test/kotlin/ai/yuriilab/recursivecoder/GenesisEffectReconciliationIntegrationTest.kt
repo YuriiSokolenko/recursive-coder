@@ -146,7 +146,7 @@ class GenesisEffectReconciliationIntegrationTest : SessionCheckpointTestFixture(
                 error("simulated crash after prepared anchor before fence commit")
             }.close()
         }
-        assertEquals("RESUME_FENCE_PUBLISH_UNCONFIRMED", failure.code)
+        assertEquals("RESUME_ADMISSION_UNCONFIRMED", failure.code)
         assertEquals(1L, ResumeFenceStorage.latest(store())!!.generation)
         val status = assertNotNull(SessionResumeAdmission.reconciliationStatus(
             store(), context(), ledger()))
