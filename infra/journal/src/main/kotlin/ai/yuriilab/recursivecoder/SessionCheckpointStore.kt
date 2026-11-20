@@ -1289,14 +1289,14 @@ object SessionCheckpointStore {
             if (fence != null && snapshot.phase == "running") {
                 val source = previous?.snapshot
                     ?: refuse("CHECKPOINT_RUNNING_BOUNDARY_CHANGED")
-                if (source.phase != "accepted" ||
+                if (source.phase != SessionPhaseVocabulary.acceptedWire ||
                     !PreExecutionSnapshotPolicy.safe(source) ||
                     source.effectJournalHead != null ||
                     source.effectReconciliation != null ||
                     snapshot != source.copy(
                         sequence = Math.addExact(source.sequence, 1L),
                         previousSha256 = previous.sha256,
-                        phase = "running",
+                        phase = SessionPhaseVocabulary.runningWire,
                         journalSequence = ledger.lastSequence,
                         journalHeadSha256 = ledger.headSha256,
                         journalFileSha256 = ledger.fileSha256,
