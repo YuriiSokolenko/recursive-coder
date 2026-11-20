@@ -207,8 +207,8 @@ class CheckpointBoundHostEffectEvidenceVerifierTest : SessionCheckpointTestFixtu
                     view, expected, successor.generation))
             }
             // Copy REAL, byte-identical authenticated genesis to another
-            // private-path file. It is readable and HMAC-valid, so only the
-            // path SHA pin (not a file-open failure) may deny this input.
+            // private-path file. The exact rejection code must be the path
+            // SHA check, before opening or recomputing the path-bound HMAC.
             val historicalHead = assertNotNull(
                 SessionCheckpointStore.inspect(store(), context(), ledger())
                     .snapshot.effectReconciliation).sourceHead
@@ -294,6 +294,65 @@ class CheckpointBoundHostEffectEvidenceVerifierTest : SessionCheckpointTestFixtu
             CheckpointBoundHostEffectEvidenceVerifier(
                 store(), context(), ledger(), path, hostKey, nPlusTwo,
                 expected, view, IndependentEffectStateProbe { digestB }).use {
+                assertFalse(it.authenticateCompleteJournal(
+                    view, expected, nPlusTwo.generation))
+            }
+        }
+    }
+
+    @Test fun nPlusTwoCannotAuthenticateHistoricalGenesisWhileV3IsStillTail() {
+        val original = createPreExecutionCheckpoint()
+        val path = sidecar()
+        lateinit var pinned: VerifiedSessionCheckpoint
+        lateinit var mac: String
+        SessionResumeAdmission.admit(
+            store(), context(), ledger(), resumeAttestation()).use { n ->
+            DurableEffectRecordJournal.create(path, workspace(),
+                "sess-one", hostKey, n).use { writer ->
+                pinned = SessionCheckpointStore.saveEffectHeadFenced(
+                    n, store(), context(), ledger(), writer,
+                    original.snapshot.copy(sequence = original.snapshot.sequence + 1L,
+                        previousSha256 = original.sha256), original.sha256)
+                mac = writer.headPin().headMacSha256
+            }
+        }
+        val fence = ResumeFenceStorage.atGeneration(store(), 1L)
+        SessionResumeAdmission.reconcileGenesisEffectHead(
+            store(), context(), ledger(), path, hostKey, resumeAttestation(1L),
+            GenesisEffectHeadReconciliation(
+                "operator-one", true, pinned.sha256, 1L, fence.sha256, mac))
+            .use { nPlusOne ->
+                val ledgerView = DurableSessionEventLedger.inspect(ledger())
+                val view = EffectJournalView(ledgerView.headSha256,
+                    ledgerView.lastSequence.toLong(), emptyList())
+                CheckpointBoundHostEffectEvidenceVerifier(
+                    store(), context(), ledger(), path, hostKey, nPlusOne,
+                    expected, view, IndependentEffectStateProbe {
+                        fail("Empty historical genesis must not probe external state")
+                    }).use {
+                    assertTrue(it.authenticateCompleteJournal(
+                        view, expected, nPlusOne.generation))
+                }
+            }
+        val v3 = SessionCheckpointStore.inspect(store(), context(), ledger())
+        assertNotNull(v3.snapshot.effectReconciliation)
+        assertNull(v3.snapshot.effectJournalHead)
+        SessionResumeAdmission.admit(
+            store(), context(), ledger(), resumeAttestation(2L)).use { nPlusTwo ->
+            assertEquals(3L, nPlusTwo.generation)
+            assertEquals(v3.sha256, nPlusTwo.admittedCheckpointSha256)
+            val ledgerView = DurableSessionEventLedger.inspect(ledger())
+            val view = EffectJournalView(ledgerView.headSha256,
+                ledgerView.lastSequence.toLong(), emptyList())
+            // v3 is STILL the tail, and its physical pin is intact.
+            // Only the immediate-successor generation check can deny.
+            assertEquals(v3.sha256,
+                SessionCheckpointStore.inspect(store(), context(), ledger()).sha256)
+            CheckpointBoundHostEffectEvidenceVerifier(
+                store(), context(), ledger(), path, hostKey, nPlusTwo,
+                expected, view, IndependentEffectStateProbe {
+                    fail("N+2 must never consult external state")
+                }).use {
                 assertFalse(it.authenticateCompleteJournal(
                     view, expected, nPlusTwo.generation))
             }
