@@ -2,6 +2,7 @@ package ai.yuriilab.recursivecoder
 
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.PosixFilePermission
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
@@ -196,15 +197,33 @@ class CheckpointBoundHostEffectEvidenceVerifierTest : SessionCheckpointTestFixtu
                     successor.generation))
             }
             assertEquals(0, probes)
-            // A verifier cannot trust the v3 checksum without its host MAC.
+            // Wrong host key is rejected, independently of which MAC check
+            // fails. The isolated v3 seal policy unit test specifically pins
+            // RESUME_EFFECT_RECONCILIATION_MAC_MISMATCH with a correct host key.
             CheckpointBoundHostEffectEvidenceVerifier(
                 store(), context(), ledger(), path, ByteArray(32), successor,
                 expected, view, IndependentEffectStateProbe { digestB }).use {
                 assertFalse(it.authenticateCompleteJournal(
                     view, expected, successor.generation))
             }
+            // Copy REAL, byte-identical authenticated genesis to another
+            // private-path file. It is readable and HMAC-valid, so only the
+            // path SHA pin (not a file-open failure) may deny this input.
+            val historicalHead = assertNotNull(
+                SessionCheckpointStore.inspect(store(), context(), ledger())
+                    .snapshot.effectReconciliation).sourceHead
+            val wrongPath = path.resolveSibling("different-locator.rcfx")
+            Files.copy(path, wrongPath)
+            Files.setPosixFilePermissions(wrongPath, setOf(
+                PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE))
+            assertContentEquals(Files.readAllBytes(path), Files.readAllBytes(wrongPath))
+            assertEquals("CHECKPOINT_EFFECT_HEAD_PATH_MISMATCH",
+                assertFailsWith<CheckpointUnconfirmed> {
+                    SessionCheckpointStore.inspectEffectHeadBound(
+                        historicalHead, wrongPath, workspace(), hostKey)
+                }.code)
             CheckpointBoundHostEffectEvidenceVerifier(
-                store(), context(), ledger(), path.resolveSibling("wrong.rcfx"),
+                store(), context(), ledger(), wrongPath,
                 hostKey, successor, expected, view,
                 IndependentEffectStateProbe { digestB }).use {
                 assertFalse(it.authenticateCompleteJournal(
@@ -218,6 +237,65 @@ class CheckpointBoundHostEffectEvidenceVerifierTest : SessionCheckpointTestFixtu
                 assertFalse(it.authenticateCompleteJournal(
                     view, expected.copy(fenceGeneration = 2L),
                     successor.generation))
+            }
+            // A physical torn nonzero suffix after the N -> N+1 transition
+            // must be detected by the HMAC-pinned reader, not by v3 metadata.
+            val physicalBytes = Files.readAllBytes(path)
+            try {
+                Files.write(path, byteArrayOf(0x55), StandardOpenOption.APPEND)
+                assertEquals("EFFECT_JOURNAL_TRUNCATED",
+                    assertFailsWith<EffectJournalStorageUnconfirmed> {
+                        SessionCheckpointStore.inspectEffectHeadBound(
+                            historicalHead, path, workspace(), hostKey)
+                    }.code)
+                CheckpointBoundHostEffectEvidenceVerifier(
+                    store(), context(), ledger(), path, hostKey, successor,
+                    expected, view, IndependentEffectStateProbe { digestB }).use {
+                    assertFalse(it.authenticateCompleteJournal(
+                        view, expected, successor.generation))
+                }
+            } finally {
+                Files.write(path, physicalBytes,
+                    StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE)
+            }
+            // Restore the same physical bytes to prove the preceding denial
+            // was caused by tampering rather than an unrelated authority loss.
+            CheckpointBoundHostEffectEvidenceVerifier(
+                store(), context(), ledger(), path, hostKey, successor,
+                expected, view, IndependentEffectStateProbe { digestB }).use {
+                assertTrue(it.authenticateCompleteJournal(
+                    view, expected, successor.generation))
+            }
+            // The historical window ends as soon as v3 ceases to be the
+            // admitted latest checkpoint, even if N+1 still holds its lease.
+            val v3 = SessionCheckpointStore.inspect(store(), context(), ledger())
+            assertNotNull(v3.snapshot.effectReconciliation)
+            val successorCheckpoint = v3.snapshot.copy(
+                sequence = v3.snapshot.sequence + 1L,
+                previousSha256 = v3.sha256,
+                effectJournalHead = null, effectReconciliation = null)
+            SessionCheckpointStore.saveFenced(successor, store(), context(),
+                ledger(), successorCheckpoint, v3.sha256)
+            CheckpointBoundHostEffectEvidenceVerifier(
+                store(), context(), ledger(), path, hostKey, successor,
+                expected, view, IndependentEffectStateProbe { digestB }).use {
+                assertFalse(it.authenticateCompleteJournal(
+                    view, expected, successor.generation))
+            }
+        }
+        // An N+2 lease is never allowed to reinterpret the old N genesis
+        // as directly issued in the generation immediately preceding it.
+        SessionResumeAdmission.admit(store(), context(), ledger(),
+            resumeAttestation(2L)).use { nPlusTwo ->
+            assertEquals(3L, nPlusTwo.generation)
+            val closed = DurableSessionEventLedger.inspect(ledger())
+            val view = EffectJournalView(closed.headSha256,
+                closed.lastSequence.toLong(), emptyList())
+            CheckpointBoundHostEffectEvidenceVerifier(
+                store(), context(), ledger(), path, hostKey, nPlusTwo,
+                expected, view, IndependentEffectStateProbe { digestB }).use {
+                assertFalse(it.authenticateCompleteJournal(
+                    view, expected, nPlusTwo.generation))
             }
         }
     }
