@@ -271,13 +271,32 @@ checkpoint SHA, fence SHA/generation, host key and head MAC; any mismatch
 or uncertainty fails closed.
 
 A canonical checkpoint v3 transition record preserves the original
-pinned head and its issuing fence/checkpoint with a dedicated host-key
-HMAC and operator ID. The record cannot be omitted from future
-checkpoint generations or silently replaced. The verified v3 generation
-is durably published **before** the successor resume fence; normal
-`admit()` continues to refuse all v3 checkpoints, and the recovered
-lease remains read-only/pre-execution. Reconciliation of Intent/Started
-and external states remains deferred to the verifier.
+pinned head and its issuing fence/checkpoint with a dedicated
+`hostSealMacSha256` (domain-separated host-key HMAC), plus an operator
+identifier. It is **not a cryptographic signature of a human operator**:
+the host attests the `operatorApproved` boolean. The seal is required
+when replaying a v3 that was durably committed before its N+1 fence.
+After that fence pins the v3 SHA, the immutable checkpoint chain
+protects its bytes.
+
+The v3 record belongs **only to the transition checkpoint**. Successors
+must omit it and return to canonical v1 or v2; `readAll` verifies their
+immediate v3 predecessor and the committed N+1 fence that pins the
+transition SHA. With an ordinary, unpinned and pre-execution successor,
+normal `admit()` can operate again. A current pinned v2 still blocks
+normal admission. This extends the #128 transition rules only at
+an explicit, independently verified boundary, not by accepting
+arbitrary dropped pins.
+
+The verified v3 generation is durably published **before** the successor
+fence. If a crash leaves an already-PREPARED next anchor, the host must
+call `reconcilePreparedGenesisEffectHead` with **both** the original
+genesis approval and an exact `PreparedFenceReconciliation`. It verifies
+the old host HMAC and physical genesis, the prepared fence SHA/generation,
+and the immutable audit, then publishes the existing prepared fence.
+Plain genesis retry cannot guess that an orphan PREPARE is safe.
+Reconciliation of Intent/Started and external states remains deferred
+to the verifier.
 
 ### Required ordering before enabling real effects
 

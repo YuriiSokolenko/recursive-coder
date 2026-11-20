@@ -109,7 +109,7 @@ internal object ResumeFenceStorage {
     val NAME = Regex("resume-[0-9]{12}\\.rcf")
     val TEMP = Regex("\\.resume-pending-[a-f0-9-]{36}\\.tmp")
     private val SHA = Regex("[0-9a-f]{64}")
-    private const val MAX_FENCES = 256
+    const val MAX_FENCES = 256
     private fun fail(code: String): Nothing = throw SessionResumeUnconfirmed(code)
     private fun digest(bytes: ByteArray) = SessionCheckpointCodec.sha256(bytes)
     private fun name(generation: Long) =
@@ -425,6 +425,38 @@ object SessionResumeAdmission {
             genesisOperator = operator, genesisSidecar = sidecarPath,
             genesisKey = hostKey, afterAnchorCommitted = {})
 
+    /**
+     * Resume after v3 was committed and the next immutable anchor PREPARE
+     * exists, but its fence CAS has not committed. Requires BOTH exact
+     * genesis HMAC evidence and the separate prepared-fence operator audit.
+     * The normal genesis retry never assumes an orphan anchor is approved.
+     */
+    @ResumeOperatorOnlyApi
+    fun reconcilePreparedGenesisEffectHead(
+        directory: Path, context: CheckpointHostContext, ledgerPath: Path,
+        sidecarPath: Path, hostKey: ByteArray,
+        attestation: ResumeHostAttestation,
+        genesis: GenesisEffectHeadReconciliation,
+        prepared: PreparedFenceReconciliation
+    ): SessionResumeLease =
+        admitChecked(directory, context, ledgerPath, attestation, prepared,
+            genesisOperator = genesis, genesisSidecar = sidecarPath,
+            genesisKey = hostKey, afterAnchorCommitted = {})
+
+    /** Test-only fault seam after successor anchor PREPARE, before fence CAS. */
+    @ResumeOperatorOnlyApi
+    @LedgerTestFaultInjection
+    internal fun reconcileGenesisWithAnchorFault(
+        directory: Path, context: CheckpointHostContext, ledgerPath: Path,
+        sidecarPath: Path, hostKey: ByteArray,
+        attestation: ResumeHostAttestation,
+        operator: GenesisEffectHeadReconciliation,
+        afterAnchorCommitted: () -> Unit
+    ): SessionResumeLease =
+        admitChecked(directory, context, ledgerPath, attestation, null,
+            genesisOperator = operator, genesisSidecar = sidecarPath,
+            genesisKey = hostKey, afterAnchorCommitted = afterAnchorCommitted)
+
     /** Test-only simulated crash after committed v3 and before fence PREPARE. */
     @ResumeOperatorOnlyApi
     @LedgerTestFaultInjection
@@ -491,7 +523,8 @@ object SessionResumeAdmission {
         afterAnchorCommitted: () -> Unit
     ): SessionResumeLease {
         if (genesisOperator != null &&
-            (operator != null || genesisSidecar == null || genesisKey == null))
+            (genesisSidecar == null || genesisKey == null ||
+                (operator != null && operator.operatorId != genesisOperator.operatorId)))
             fail("RESUME_EFFECT_RECONCILIATION_INVALID")
         if (attestation.expectedFenceGeneration < 0)
             fail("RESUME_FENCE_EXPECTED_GENERATION_INVALID")
@@ -594,7 +627,7 @@ object SessionResumeAdmission {
                 dir, context, ledgerPath,
                 genesisSidecar ?: fail("RESUME_EFFECT_RECONCILIATION_INVALID"),
                 genesisKey ?: fail("RESUME_EFFECT_RECONCILIATION_INVALID"),
-                genesisOperator, afterGenesisCheckpointCommitted, commit)
+                genesisOperator, operator, afterGenesisCheckpointCommitted, commit)
             transferred = true
             return result
         } catch (error: Exception) {

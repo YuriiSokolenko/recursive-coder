@@ -140,6 +140,9 @@ object SessionCheckpointCodec {
     private fun invalid(): Nothing = throw CheckpointUnconfirmed("CHECKPOINT_PAYLOAD_INVALID")
     private fun validId(id: String) = ToolAuthorizationPolicy.validHostIdentifier(id)
     private fun digest(value: String) = DIGEST.matches(value)
+    private fun preExecutionOnly(s: SessionCheckpoint): Boolean =
+        s.phase in setOf("created", "accepted") &&
+            s.taskAttempt == 0 && s.pendingEffects.isEmpty()
 
     fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")
         .digest(bytes).joinToString("") { "%02x".format(it) }
@@ -207,25 +210,24 @@ object SessionCheckpointCodec {
                     head.sidecarPathSha256, head.headMacSha256).all(::digest) ||
                 head.lastSequence !in 0L..100_000L ||
                 // This slice only pins isolated pre-execution physical evidence.
-                s.phase !in setOf("created", "accepted") ||
-                s.taskAttempt != 0 || s.pendingEffects.isNotEmpty())
+                !preExecutionOnly(s))
                 invalid()
         }
         s.effectReconciliation?.let { rec ->
             val src = rec.sourceHead
             if (!validId(rec.operatorId) ||
                 !listOf(rec.sourceCheckpointSha256, rec.sourceFenceSha256,
-                    rec.approvalMacSha256).all(::digest) ||
-                rec.sourceFenceGeneration !in 1L..256L ||
+                    rec.hostSealMacSha256).all(::digest) ||
+                rec.sourceFenceGeneration !in
+                    1L..ResumeFenceStorage.MAX_FENCES.toLong() ||
                 src.sessionId != s.sessionId || !validId(src.sessionId) ||
                 src.fenceGeneration != rec.sourceFenceGeneration ||
                 src.lastSequence != 0L ||
                 !listOf(src.admittedCheckpointSha256, src.toolAuthoritySha256,
                     src.sidecarPathSha256, src.headMacSha256).all(::digest) ||
-                (s.effectJournalHead != null &&
-                    s.effectJournalHead.fenceGeneration <= rec.sourceFenceGeneration) ||
-                s.phase !in setOf("created", "accepted") ||
-                s.taskAttempt != 0 || s.pendingEffects.isNotEmpty())
+                // Only v3 has a reconciliation record; it never has a
+                // current head. Successor checkpoints use ordinary v1/v2.
+                s.effectJournalHead != null || !preExecutionOnly(s))
                 invalid()
         }
     }
@@ -314,7 +316,7 @@ object SessionCheckpointCodec {
                     put("sourceFenceGeneration", record.sourceFenceGeneration)
                     put("sourceFenceSha256", record.sourceFenceSha256)
                     put("operatorId", record.operatorId)
-                    put("approvalMacSha256", record.approvalMacSha256)
+                    put("hostSealMacSha256", record.hostSealMacSha256)
                     put("sourceHead", buildJsonObject {
                         val head = record.sourceHead
                         put("sessionId", head.sessionId)
@@ -420,12 +422,12 @@ object SessionCheckpointCodec {
             val reconciliation = if (version == 3L) {
                 val rec = fields(obj(o["effectReconciliation"]),
                     "sourceCheckpointSha256", "sourceFenceGeneration",
-                    "sourceFenceSha256", "operatorId", "approvalMacSha256",
+                    "sourceFenceSha256", "operatorId", "hostSealMacSha256",
                     "sourceHead")
                 CheckpointEffectReconciliation(string(rec, "sourceCheckpointSha256"),
                     long(rec, "sourceFenceGeneration"),
                     string(rec, "sourceFenceSha256"), readHead(rec["sourceHead"]),
-                    string(rec, "operatorId"), string(rec, "approvalMacSha256"))
+                    string(rec, "operatorId"), string(rec, "hostSealMacSha256"))
             } else null
             val s = SessionCheckpoint(long(o, "sequence"), nullableString(o, "previousSha256"),
                 binding, string(o, "sessionId"), string(o, "traceId"), string(o, "phase"),
@@ -613,22 +615,27 @@ object SessionCheckpointStore {
         previous: VerifiedSessionCheckpoint?, next: SessionCheckpoint
     ): Boolean {
         val prior = previous?.snapshot ?: return next.effectReconciliation == null
-        val oldRec = prior.effectReconciliation
         val newRec = next.effectReconciliation
-        if (oldRec != null && newRec != oldRec) return false
-        if (oldRec == null && newRec != null) {
-            // Exactly one explicit pinned -> reconciled boundary, never
-            // implicit pin deletion or a forged historical marker.
-            if (prior.effectJournalHead == null ||
-                next.effectJournalHead != null ||
-                newRec.sourceCheckpointSha256 != previous.sha256 ||
-                newRec.sourceHead != prior.effectJournalHead ||
-                newRec.sourceFenceGeneration != prior.effectJournalHead.fenceGeneration)
-                return false
+        if (newRec != null) {
+            // Only the immediate successor of a pinned checkpoint can be v3.
+            // The signed record lives at this boundary, NOT on successors.
+            val oldHead = prior.effectJournalHead
+            return prior.effectReconciliation == null && oldHead != null &&
+                next.effectJournalHead == null &&
+                newRec.sourceCheckpointSha256 == previous.sha256 &&
+                newRec.sourceHead == oldHead &&
+                newRec.sourceFenceGeneration == oldHead.fenceGeneration
+        }
+        prior.effectReconciliation?.let { transition ->
+            // After the v3 boundary, generation N+1 may publish an ordinary
+            // v1 checkpoint, or a new v2 head from its own live writer.
+            // The successor fence must pin the v3 SHA (verified separately).
+            return next.effectJournalHead == null ||
+                next.effectJournalHead.fenceGeneration ==
+                    transition.sourceFenceGeneration + 1L
         }
         val old = prior.effectJournalHead ?: return true
-        val current = next.effectJournalHead ?: return newRec != null &&
-            oldRec == null
+        val current = next.effectJournalHead ?: return false
         if (old.sessionId != current.sessionId ||
             old.fenceGeneration != current.fenceGeneration ||
             old.admittedCheckpointSha256 != current.admittedCheckpointSha256 ||
@@ -636,8 +643,8 @@ object SessionCheckpointStore {
             old.sidecarPathSha256 != current.sidecarPathSha256 ||
             current.lastSequence < old.lastSequence)
             return false
-        // The checkpoint reader has no HMAC key. A higher sequence must be
-        // authenticated against the actual RCEFX1 chain at bound inspection.
+        // Only a physical, HMAC-verified RCEFX1 chain may establish an
+        // increased sequence; SHA-linked checkpoint history alone cannot.
         return current.lastSequence != old.lastSequence ||
             current.headMacSha256 == old.headMacSha256
     }
@@ -699,8 +706,31 @@ object SessionCheckpointStore {
                             s.journalFileSha256 != previous.snapshot.journalFileSha256)) ||
                     !pinnedHeadTransition(previous, s))))
                 refuse("CHECKPOINT_CHAIN_MISMATCH")
+            previous?.snapshot?.effectReconciliation?.let { transition ->
+                // A v3 -> ordinary successor is valid only AFTER generation
+                // N+1 commits a fence to the exact v3 checkpoint SHA.
+                val nextGeneration = transition.sourceFenceGeneration + 1L
+                if (latestFence == null || nextGeneration > latestFence.generation)
+                    refuse("CHECKPOINT_EFFECT_RECONCILIATION_FENCE_MISMATCH")
+                val successor = try {
+                    fencesByGeneration.getOrPut(nextGeneration) {
+                        ResumeFenceStorage.atGeneration(directory, nextGeneration)
+                    }
+                } catch (e: Exception) {
+                    throw CheckpointUnconfirmed(
+                        "CHECKPOINT_EFFECT_RECONCILIATION_FENCE_MISMATCH", e)
+                }
+                if (successor.checkpointSha256 != previous.sha256 ||
+                    successor.generation != nextGeneration ||
+                    successor.sessionId != s.sessionId ||
+                    successor.traceId != s.traceId ||
+                    successor.policySha256 != s.binding.policySha256 ||
+                    (s.effectJournalHead != null &&
+                        s.effectJournalHead.fenceGeneration != nextGeneration))
+                    refuse("CHECKPOINT_EFFECT_RECONCILIATION_FENCE_MISMATCH")
+            }
             s.effectReconciliation?.let { transition ->
-                if (transition.sourceCheckpointSha256 !in precedingCheckpointShas)
+                if (transition.sourceCheckpointSha256 != previous?.sha256)
                     refuse("CHECKPOINT_EFFECT_RECONCILIATION_SOURCE_MISMATCH")
                 val issuer = try {
                     fencesByGeneration.getOrPut(transition.sourceFenceGeneration) {
@@ -1116,11 +1146,17 @@ object SessionCheckpointStore {
             val previous = existing.lastOrNull()
             if (snapshot.effectJournalHead != pinnedHeadEvidence)
                 refuse("CHECKPOINT_EFFECT_HEAD_UNVERIFIED")
-            // An ordinary save may retain an existing operator transition,
-            // but it can never mint, replace, or silently remove one.
-            if (snapshot.effectReconciliation !=
-                    previous?.snapshot?.effectReconciliation)
+            // v3 is a one-shot operator-only boundary. A normal save may
+            // follow it, but cannot mint or copy an operator seal.
+            if (snapshot.effectReconciliation != null)
                 refuse("CHECKPOINT_EFFECT_RECONCILIATION_UNVERIFIED")
+            previous?.snapshot?.effectReconciliation?.let { transition ->
+                val successor = ResumeFenceStorage.latest(dir)
+                    ?: refuse("CHECKPOINT_EFFECT_RECONCILIATION_FENCE_MISMATCH")
+                if (successor.generation != transition.sourceFenceGeneration + 1L ||
+                    successor.checkpointSha256 != previous.sha256)
+                    refuse("CHECKPOINT_EFFECT_RECONCILIATION_FENCE_MISMATCH")
+            }
             if (!pinnedHeadTransition(previous, snapshot))
                 refuse("CHECKPOINT_EFFECT_HEAD_ROLLBACK")
             if (expectedPreviousSha256 != previous?.sha256 ||
@@ -1235,6 +1271,7 @@ object SessionCheckpointStore {
         directory: Path, context: CheckpointHostContext, ledgerPath: Path,
         sidecarPath: Path, hostKey: ByteArray,
         operator: GenesisEffectHeadReconciliation,
+        prepared: PreparedFenceReconciliation? = null,
         afterCheckpointCommitted: () -> Unit = {},
         block: (Path, VerifiedSessionCheckpoint, VerifiedSessionEventLedger) -> T
     ): T {
@@ -1256,7 +1293,27 @@ object SessionCheckpointStore {
                 ?: throw SessionResumeUnconfirmed("RESUME_EFFECT_RECONCILIATION_NO_PIN")
             val fence = ResumeFenceStorage.latest(dir)
                 ?: throw SessionResumeUnconfirmed("RESUME_EFFECT_RECONCILIATION_NO_FENCE")
-            ResumeFenceAnchor.verify(ledgerPath, fence, dir)
+            if (prepared == null) {
+                // A prepared future anchor is NEVER guessed or promoted here.
+                ResumeFenceAnchor.verify(ledgerPath, fence, dir)
+            } else {
+                // The prepared-fence branch is only legal after the v3
+                // checkpoint itself has durably committed. Verify the full
+                // prior anchor/audit chain and the exact prepared head.
+                if (pending == null)
+                    throw SessionResumeUnconfirmed(
+                        "RESUME_EFFECT_RECONCILIATION_NO_PREPARED_TRANSITION")
+                val status = ResumeFenceAnchor.recoveryStatus(
+                    ledgerPath, fence, dir, latest.sha256,
+                    latest.snapshot.binding.policySha256)
+                if (status?.generation != prepared.expectedPreparedGeneration ||
+                    status.fenceSha256 != prepared.expectedPreparedFenceSha256 ||
+                    status.state !in setOf(
+                        ResumeReconciliationState.PREPARED_UNAPPROVED,
+                        ResumeReconciliationState.APPROVED_PENDING))
+                    throw SessionResumeUnconfirmed(
+                        "RESUME_EFFECT_RECONCILIATION_PREPARED_MISMATCH")
+            }
             if (operator.expectedFenceGeneration != fence.generation ||
                 operator.expectedFenceGeneration != head.fenceGeneration ||
                 operator.expectedFenceSha256 != fence.sha256 ||

@@ -20,19 +20,19 @@ data class GenesisEffectHeadReconciliation(
     val expectedHeadMacSha256: String
 )
 
-/** Durable canonical checkpoint v3 transition, never external-effect proof. */
+/** Durable canonical v3 transition with a host-key seal; not human approval proof. */
 data class CheckpointEffectReconciliation(
     val sourceCheckpointSha256: String,
     val sourceFenceGeneration: Long,
     val sourceFenceSha256: String,
     val sourceHead: CheckpointEffectJournalHead,
     val operatorId: String,
-    val approvalMacSha256: String
+    val hostSealMacSha256: String
 )
 
 /**
  * Host key HMAC domain is separate from the physical journal's HMAC subkey.
- * A checksum or host-rehashable checkpoint SHA alone is not an operator seal.
+ * A checksum or host-rehashable checkpoint SHA alone is not a host seal.
  * Verification is REQUIRED at the explicit recovery admission boundary.
  */
 internal object GenesisEffectReconciliationSeal {
@@ -68,14 +68,14 @@ internal object GenesisEffectReconciliationSeal {
 
     fun seal(key: ByteArray, record: CheckpointEffectReconciliation,
              snapshot: SessionCheckpoint): CheckpointEffectReconciliation =
-        record.copy(approvalMacSha256 = hmac(key, canonical(
+        record.copy(hostSealMacSha256 = hmac(key, canonical(
             record, snapshot.sessionId, snapshot.traceId, snapshot.binding.policySha256)))
 
     fun verify(key: ByteArray, record: CheckpointEffectReconciliation,
                snapshot: SessionCheckpoint) {
-        if (!SHA.matches(record.approvalMacSha256) ||
+        if (!SHA.matches(record.hostSealMacSha256) ||
             !MessageDigest.isEqual(
-                record.approvalMacSha256.toByteArray(StandardCharsets.US_ASCII),
+                record.hostSealMacSha256.toByteArray(StandardCharsets.US_ASCII),
                 hmac(key, canonical(record, snapshot.sessionId, snapshot.traceId,
                     snapshot.binding.policySha256))
                     .toByteArray(StandardCharsets.US_ASCII)))

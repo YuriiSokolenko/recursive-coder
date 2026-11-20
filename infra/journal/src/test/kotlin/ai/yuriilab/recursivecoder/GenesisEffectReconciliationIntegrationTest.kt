@@ -34,7 +34,8 @@ class GenesisEffectReconciliationIntegrationTest : SessionCheckpointTestFixture(
             "sess-one", key, lease)
     private fun advanced(previous: VerifiedSessionCheckpoint) =
         previous.snapshot.copy(sequence = previous.snapshot.sequence + 1L,
-            previousSha256 = previous.sha256, effectJournalHead = null)
+            previousSha256 = previous.sha256, effectJournalHead = null,
+            effectReconciliation = null)
     private data class Ready(val pinned: VerifiedSessionCheckpoint,
                              val fence: ResumeFenceRecord,
                              val mac: String)
@@ -82,7 +83,7 @@ class GenesisEffectReconciliationIntegrationTest : SessionCheckpointTestFixture(
             assertEquals(ready.fence.sha256, record.sourceFenceSha256)
             assertEquals(0L, record.sourceHead.lastSequence)
             assertEquals("operator-one", record.operatorId)
-            assertEquals(64, record.approvalMacSha256.length)
+            assertEquals(64, record.hostSealMacSha256.length)
             assertTrue(transition.reconciliationRequired)
             assertTrue(SessionCheckpointCodec.encode(transition.snapshot)
                 .toString(StandardCharsets.UTF_8).contains("\"version\":3"))
@@ -95,7 +96,8 @@ class GenesisEffectReconciliationIntegrationTest : SessionCheckpointTestFixture(
                     lease, store(), context(), ledger(), journal2,
                     advanced(transition), transition.sha256)
                 assertEquals(2L, c4.snapshot.effectJournalHead!!.fenceGeneration)
-                assertEquals(record, c4.snapshot.effectReconciliation)
+                assertNull(c4.snapshot.effectReconciliation)
+                assertTrue(c4.reconciliationRequired)
             }
             // Physical inspection requires the writer's exclusive lock to
             // be released; this is intentional, not a concurrent read API.
@@ -109,6 +111,115 @@ class GenesisEffectReconciliationIntegrationTest : SessionCheckpointTestFixture(
             }.code)
         assertEquals(4L, inspect().snapshot.sequence)
         assertEquals(2L, ResumeFenceStorage.latest(store())!!.generation)
+    }
+
+    @Test fun ordinaryCheckpointAfterV3CanBeAdmittedInNextGeneration() {
+        val ready = pinnedGenesis()
+        lateinit var ordinary: VerifiedSessionCheckpoint
+        reconcile(ready).use { lease ->
+            val transition = inspect()
+            assertNotNull(transition.snapshot.effectReconciliation)
+            ordinary = SessionCheckpointStore.saveFenced(
+                lease, store(), context(), ledger(),
+                advanced(transition), transition.sha256)
+            assertNull(ordinary.snapshot.effectReconciliation)
+            assertNull(ordinary.snapshot.effectJournalHead)
+            assertFalse(ordinary.reconciliationRequired)
+            assertTrue(SessionCheckpointCodec.encode(ordinary.snapshot)
+                .toString(StandardCharsets.UTF_8).contains("\"version\":1"))
+        }
+        SessionResumeAdmission.admit(
+            store(), context(), ledger(), resumeAttestation(2L)).use { lease ->
+            assertEquals(3L, lease.generation)
+            assertEquals(ordinary.sha256, lease.admittedCheckpointSha256)
+        }
+        assertEquals(4L, inspect().snapshot.sequence)
+        assertEquals(3L, ResumeFenceStorage.latest(store())!!.generation)
+    }
+
+    @Test fun preparedAnchorAfterV3RequiresCombinedOperatorApprovalThenRecovers() {
+        val ready = pinnedGenesis()
+        val failure = assertFailsWith<SessionResumeUnconfirmed> {
+            SessionResumeAdmission.reconcileGenesisWithAnchorFault(
+                store(), context(), ledger(), path(), key,
+                resumeAttestation(1L), approval(ready)) {
+                error("simulated crash after prepared anchor before fence commit")
+            }.close()
+        }
+        assertEquals("RESUME_FENCE_PUBLISH_UNCONFIRMED", failure.code)
+        assertEquals(1L, ResumeFenceStorage.latest(store())!!.generation)
+        val status = assertNotNull(SessionResumeAdmission.reconciliationStatus(
+            store(), context(), ledger()))
+        assertEquals(ResumeReconciliationState.PREPARED_UNAPPROVED, status.state)
+        assertEquals(2L, status.generation)
+        assertEquals("RESUME_FENCE_ANCHOR_MISMATCH",
+            assertFailsWith<SessionResumeUnconfirmed> {
+                reconcile(ready).close()
+            }.code)
+        val prepared = PreparedFenceReconciliation(
+            status.generation, status.fenceSha256,
+            "operator-one", operatorApproved = true)
+        assertFailsWith<SessionResumeUnconfirmed> {
+            SessionResumeAdmission.reconcilePreparedGenesisEffectHead(
+                store(), context(), ledger(), path(), key,
+                resumeAttestation(1L), approval(ready),
+                prepared.copy(expectedPreparedFenceSha256 = "b".repeat(64))).close()
+        }
+        assertEquals(1L, ResumeFenceStorage.latest(store())!!.generation)
+
+        SessionResumeAdmission.reconcilePreparedGenesisEffectHead(
+            store(), context(), ledger(), path(), key,
+            resumeAttestation(1L), approval(ready), prepared).use { lease ->
+            assertEquals(2L, lease.generation)
+            assertEquals(3L, inspect().snapshot.sequence)
+        }
+        assertEquals(2L, ResumeFenceStorage.latest(store())!!.generation)
+        assertEquals(ResumeReconciliationState.COMPLETED,
+            SessionResumeAdmission.reconciliationStatus(
+                store(), context(), ledger())?.state)
+    }
+
+    @Test fun existingButNotImmediateSourceCheckpointIsRejected() {
+        val ready = pinnedGenesis()
+        assertFailsWith<SessionResumeUnconfirmed> {
+            SessionResumeAdmission.reconcileGenesisWithFault(
+                store(), context(), ledger(), path(), key,
+                resumeAttestation(1L), approval(ready)) {
+                error("simulated crash after durable v3 before successor fence")
+            }.close()
+        }
+        val transition = inspect()
+        val first = SessionCheckpointStore.inspect(store(), context(), ledger())
+        assertEquals(3L, first.snapshot.sequence)
+        // Checkpoint C1 exists, but transition C3 MUST reference its direct
+        // pinned predecessor C2. An arbitrary historical SHA is invalid.
+        val firstFile = store().resolve("000000000001.rcp")
+        val firstPayload = java.nio.file.Files.readAllBytes(firstFile)
+        val offset = 7 + 4 + 32
+        val c1 = SessionCheckpointCodec.decode(firstPayload.copyOfRange(
+            offset, firstPayload.size))
+        val c1Sha = SessionCheckpointCodec.sha256(
+            SessionCheckpointCodec.encode(c1))
+        val rec = assertNotNull(transition.snapshot.effectReconciliation)
+        rewriteCheckpoint(transition, rec.copy(sourceCheckpointSha256 = c1Sha))
+        assertEquals("CHECKPOINT_CHAIN_MISMATCH",
+            assertFailsWith<CheckpointUnconfirmed> { inspect() }.code)
+    }
+
+    private fun rewriteCheckpoint(
+        original: VerifiedSessionCheckpoint,
+        reconciliation: CheckpointEffectReconciliation
+    ) {
+        val payload = SessionCheckpointCodec.encode(original.snapshot.copy(
+            effectReconciliation = reconciliation))
+        val framed = ByteBuffer.allocate(7 + 4 + 32 + payload.size)
+            .put("RCCHK1\n".toByteArray(StandardCharsets.US_ASCII))
+            .putInt(payload.size)
+            .put(MessageDigest.getInstance("SHA-256").digest(payload))
+            .put(payload).array()
+        Files.write(store().resolve(
+            String.format(java.util.Locale.ROOT, "%012d.rcp", original.snapshot.sequence)),
+            framed, StandardOpenOption.TRUNCATE_EXISTING)
     }
 
     @Test fun mismatchedOrUnapprovedOperatorCannotPublishTransition() {
@@ -245,7 +356,7 @@ class GenesisEffectReconciliationIntegrationTest : SessionCheckpointTestFixture(
         val c3 = inspect()
         val rec = assertNotNull(c3.snapshot.effectReconciliation)
         val payload = SessionCheckpointCodec.encode(c3.snapshot.copy(
-            effectReconciliation = rec.copy(approvalMacSha256 = "f".repeat(64))))
+            effectReconciliation = rec.copy(hostSealMacSha256 = "f".repeat(64))))
         val frame = ByteBuffer.allocate(7 + 4 + 32 + payload.size)
             .put("RCCHK1\n".toByteArray(StandardCharsets.US_ASCII))
             .putInt(payload.size)
@@ -266,7 +377,7 @@ class GenesisEffectReconciliationIntegrationTest : SessionCheckpointTestFixture(
         val c3 = inspect()
         val record = assertNotNull(c3.snapshot.effectReconciliation)
         val payload = SessionCheckpointCodec.encode(c3.snapshot.copy(
-            effectReconciliation = record.copy(approvalMacSha256 = "f".repeat(64))))
+            effectReconciliation = record.copy(hostSealMacSha256 = "f".repeat(64))))
         val framed = ByteBuffer.allocate(7 + 4 + 32 + payload.size)
             .put("RCCHK1\n".toByteArray(StandardCharsets.US_ASCII))
             .putInt(payload.size)
