@@ -65,6 +65,70 @@ class SessionEventJournal(
 
         fun eventId(sessionId: String, sequence: Int): String =
             "evt-" + sessionId + "-" + sequence
+
+        /**
+         * Canonical Session Protocol v1 event frame. Shared by the runtime
+         * event journal and the trusted C1 -> C2 metadata-only emitter.
+         * This is a pure serializer, never authority to append or resume.
+         * Sequence continuity is independently verified by the sink.
+         */
+        fun frame(
+            sessionId: String,
+            traceId: String,
+            requestId: String,
+            sequence: Int,
+            timestamp: Instant,
+            type: String,
+            status: String,
+            transition: Pair<String, String>? = null,
+            toolId: String? = null,
+            started: Instant? = null,
+            extra: JsonObject? = null,
+            actor: SessionEventActor? = null,
+            correlationId: String? = null
+        ): JsonObject {
+            require(sequence > 0)
+            require(correlationId == null ||
+                ToolAuthorizationPolicy.validHostIdentifier(correlationId))
+            return buildJsonObject {
+                put("kind", "session-event"); put("version", SessionProtocol.VERSION)
+                put("sessionId", sessionId); put("traceId", traceId)
+                put("eventId", eventId(sessionId, sequence))
+                put("sequence", sequence)
+                put("timestamp", timestamp.toString())
+                put("type", type); put("status", status)
+                put("correlationId", correlationId ?: requestId)
+                put("causationId", if (sequence == 1) JsonNull else
+                    JsonPrimitive(eventId(sessionId, sequence - 1)))
+                put("actor", buildJsonObject {
+                    put("agentId", actor?.agentId ?: "agent-" + sessionId)
+                    put("parentAgentId",
+                        actor?.parentAgentId?.let(::JsonPrimitive) ?: JsonNull)
+                    put("childAgentId",
+                        actor?.childAgentId?.let(::JsonPrimitive) ?: JsonNull)
+                    put("toolExecutionId",
+                        (actor?.toolExecutionId ?: toolId)?.let(::JsonPrimitive) ?: JsonNull)
+                    put("childSessionId",
+                        actor?.childSessionId?.let(::JsonPrimitive) ?: JsonNull)
+                })
+                transition?.let { (from, to) -> put("transition", buildJsonObject {
+                    put("from", from); put("to", to)
+                }) }
+                started?.let { put("timing", buildJsonObject {
+                    put("startedAt", it.toString())
+                    put("durationMs", Duration.between(started, timestamp)
+                        .toMillis().coerceAtLeast(0))
+                }) }
+                put("redaction", buildJsonObject {
+                    put("mode", "metadata-only")
+                    put("removedFields", buildJsonArray {
+                        listOf("rawPrompt", "rawResponse", "rawToolOutput",
+                            "credentialRef", "authorizationHeader").forEach { add(it) }
+                    })
+                })
+                extra?.let { put("metadata", it) }
+            }
+        }
     }
 
     @Volatile var sequence: Int = 0
@@ -82,36 +146,10 @@ class SessionEventJournal(
         val next = Math.addExact(sequence, 1)
         val eventId = eventId(sessionId, next)
         val now = clock.instant()
-        val event = buildJsonObject {
-            put("kind", "session-event"); put("version", SessionProtocol.VERSION)
-            put("sessionId", sessionId); put("traceId", traceId)
-            put("eventId", eventId); put("sequence", next)
-            put("timestamp", now.toString()); put("type", type); put("status", status)
-            put("correlationId", correlationId ?: requestId)
-            put("causationId", previous?.let(::JsonPrimitive) ?: JsonNull)
-            put("actor", buildJsonObject {
-                put("agentId", actor?.agentId ?: "agent-" + sessionId)
-                put("parentAgentId", actor?.parentAgentId?.let(::JsonPrimitive) ?: JsonNull)
-                put("childAgentId", actor?.childAgentId?.let(::JsonPrimitive) ?: JsonNull)
-                put("toolExecutionId", (actor?.toolExecutionId ?: toolId)?.let(::JsonPrimitive) ?: JsonNull)
-                put("childSessionId", actor?.childSessionId?.let(::JsonPrimitive) ?: JsonNull)
-            })
-            transition?.let { (from, to) -> put("transition", buildJsonObject {
-                put("from", from); put("to", to)
-            }) }
-            started?.let { put("timing", buildJsonObject {
-                put("startedAt", it.toString())
-                put("durationMs", Duration.between(it, now).toMillis().coerceAtLeast(0))
-            }) }
-            put("redaction", buildJsonObject {
-                put("mode", "metadata-only")
-                put("removedFields", buildJsonArray {
-                    listOf("rawPrompt", "rawResponse", "rawToolOutput", "credentialRef", "authorizationHeader")
-                        .forEach { add(it) }
-                })
-            })
-            extra?.let { put("metadata", it) }
-        }
+        check(previous == if (next == 1) null else eventId(sessionId, next - 1))
+        val event = frame(
+            sessionId, traceId, requestId, next, now, type, status,
+            transition, toolId, started, extra, actor, correlationId)
         try {
             sink.append(event)
             sink.flush()

@@ -4,7 +4,8 @@
 `:infra:journal`. An explicit, separate `DefaultRunSessionUseCase.publishTrustedCreatedAccepted`
 entry point now reaches it through `DurableRuntimeCreatedAcceptedHost`, but only
 for an operator-owned **handoff-only** invocation, never through the normal
-`invoke()`/CLI/scheduler path. This does not allow runtime execution or resume. The host supplies an independently verified and already durable
+`invoke()`/CLI/scheduler path. This does not allow runtime execution or
+resume. The host supplies an independently verified and already durable
 `created` checkpoint (C1), matching trusted `CheckpointHostContext`, a
 read-only `ResumeHostAttestation` with expected fence generation, and the
 single canonical `created → accepted` event from its trusted event emitter.
@@ -83,14 +84,19 @@ The trusted host must independently create and durably verify C1, derive
 `DurableRuntimeCreatedAcceptedHost` compares the Session Protocol request
 identity, task, policy digest, Git HEAD, optional branch, workspace and exact
 host-owned checkpoint/ledger paths, then inspects C1 on disk. It emits one
-canonical session transition and delegates to the existing fenced handoff,
+canonical session transition via the shared `SessionEventJournal.frame`
+builder and delegates to the existing fenced handoff,
 which re-reads the complete authenticated C1 under its lease before C2.
 The boundary intentionally NEVER invokes `WorkspaceOpener`,
 `ModelGateway`, `EventSinkFactory`, or emits a terminal result.
 
 `DefaultRunSessionUseCase.publishTrustedCreatedAccepted` enforces ordinary
-fresh-session admission precedence and checks cancellation/deadline before
-host I/O. It is separately opt-in, not called by `invoke()`, and a receipt
+fresh-session admission precedence and passes the same injected clock,
+cancellation and deadline to the host. It checks interruption before host
+I/O and between current-context verification, C1 inspection and final
+fenced publication. A blocked filesystem sync cannot be forcibly rolled
+back: once fenced publication starts, no late cancellation check can
+reinterpret a committed C2 as a safe retry. It is separately opt-in, not called by `invoke()`, and a receipt
 is only evidence that C2 was durably observed at return. It grants **no**
 runtime, tool, model, child or effect execution permission. No automatic
 retry is allowed when publication throws: an exception may follow a

@@ -211,7 +211,8 @@ class DefaultRunSessionUseCase(
         }
         // No post-handoff execution or terminal write is permitted here.
         // An exception may mean C2 committed: callers must reconcile read-only.
-        return host.publishCreatedAccepted(request)
+        // One shared clock avoids competing runtime/host deadline observations.
+        return host.publishCreatedAccepted(request, cancellation, deadline, clock)
     }
 
     override fun invoke(request: SessionRequest, cancellation: Cancellation): SessionExecutionResult {
