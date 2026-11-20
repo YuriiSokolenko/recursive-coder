@@ -365,6 +365,17 @@ class DurableSessionEventLedger private constructor(
             val metadata = event["metadata"] ?: return
             val obj = metadata as? JsonObject
                 ?: throw SessionLedgerUnconfirmed("LEDGER_UNSUPPORTED_METADATA")
+            // Reserve the entire effect* namespace. No producer may durably
+            // append a stray/partial/wrong-event effect envelope. Even a
+            // complete envelope is only metadata, NOT execution authority.
+            if (EffectEvidenceEnvelopePolicy.hasReservedKey(obj)) {
+                val type = (event["type"] as? JsonPrimitive)
+                    ?.takeIf { it.isString }?.content
+                val status = (event["status"] as? JsonPrimitive)
+                    ?.takeIf { it.isString }?.content
+                if (!EffectEvidenceEnvelopePolicy.validForEvent(type, status, obj))
+                    throw SessionLedgerUnconfirmed("LEDGER_EFFECT_ENVELOPE_INVALID")
+            }
             for ((key, value) in obj) {
                 if (!SAFE_KEY.matches(key) ||
                     key !in (NUMBER_KEYS + BOOLEAN_KEYS + SHA_KEYS + ID_KEYS + TEXT_KEYS))

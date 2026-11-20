@@ -45,6 +45,12 @@ sealed interface EffectRecord {
  * A host implementation must authenticate canonical bytes (including sequence,
  * identity, record variant and all payload fields) with a secret unavailable to
  * the model, and verify the full durable journal prefix independently.
+ *
+ * In a derived EffectJournalView, `sequence` names the RCLDG1 session-event
+ * sequence (which may have gaps between effects); `hostMacSha256` binds an
+ * RCEFX1 record at its distinct contiguous physical sequence. The RCLDG1
+ * SHA-chained envelope authenticates the relation between those positions;
+ * the MAC alone does NOT authenticate the RCLDG1 event index.
  */
 data class EffectJournalEntry(
     val sequence: Long,
@@ -103,7 +109,10 @@ data class EffectNotStartedEvidence(
  * actual non-execution. A numeric successor fence alone cannot exclude an
  * effect already in flight or an unfenced external process.
  *
- * A verifier exception or unavailable external proof fails closed.
+ * Ordinary verifier Exceptions/unavailable proof fail closed. VM-fatal
+ * Errors intentionally propagate rather than masking runtime corruption;
+ * the trusted outer host MUST abort and quarantine the whole recovery
+ * attempt on any escaped Throwable (never continue effect execution).
  */
 interface HostEffectEvidenceVerifier {
     fun authenticateCompleteJournal(

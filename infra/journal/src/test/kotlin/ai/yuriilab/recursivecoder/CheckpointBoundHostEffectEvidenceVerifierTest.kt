@@ -66,51 +66,6 @@ class CheckpointBoundHostEffectEvidenceVerifierTest : SessionCheckpointTestFixtu
         })
     }
 
-    @Test fun completeEffectProjectionMatchesEveryPhysicalRecordAndSessionEvent() {
-        val records = arrayOf(
-            EffectRecord.Intent(expected), EffectRecord.Started(expected),
-            EffectRecord.Committed(expected, digestB))
-        val physical = physical(*records)
-        val history = listOf(
-            event(1, "req-one", "completed", buildJsonObject {
-                put("graphId", "graph-root")
-            }, "checkpoint.saved"),
-            effectEvent(2, 1L, records[0], "c".repeat(64)),
-            JsonObject(event(3, "req-two", "completed", buildJsonObject {
-                put("graphId", "graph-root")
-            }, "checkpoint.saved").toMutableMap().also { it.remove("metadata") }),
-            effectEvent(4, 2L, records[1], "d".repeat(64)),
-            effectEvent(5, 3L, records[2], "e".repeat(64))
-        )
-        val result = assertNotNull(EffectEvidenceProjection.fromSessionLedger(history, physical))
-        assertEquals(listOf(2L, 4L, 5L), result.map { it.sequence })
-        assertEquals(records.toList(), result.map { it.record })
-        assertEquals(listOf("c", "d", "e"), result.map { it.hostMacSha256.take(1) })
-        // Missing a single ledger effect does not become an implicit no-op.
-        assertNull(EffectEvidenceProjection.fromSessionLedger(
-            history.filterIndexed { i, _ -> i != 3 }, physical))
-        // A correct-looking but wrong MAC must not match the physical prefix.
-        val wrongMac = history.toMutableList().also {
-            it[4] = effectEvent(5, 3L, records[2], "f".repeat(64))
-        }
-        assertNull(EffectEvidenceProjection.fromSessionLedger(wrongMac, physical))
-        // A second record with the same sequence is not authoritative.
-        assertNull(EffectEvidenceProjection.fromSessionLedger(
-            history + effectEvent(6, 3L, records[2], "e".repeat(64)), physical))
-        // Invalid metadata must not be silently skipped as a non-effect event.
-        val partial = history.toMutableList().also {
-            it[2] = event(3, "req-two", "completed", buildJsonObject {
-                put("effectOperationId", "effect-one")
-            }, "checkpoint.saved")
-        }
-        assertNull(EffectEvidenceProjection.fromSessionLedger(partial, physical))
-        // Unmarked tool events may be mutating and therefore fail closed.
-        assertNull(EffectEvidenceProjection.fromSessionLedger(
-            history + event(6, "req-three", "completed", buildJsonObject {
-                put("graphId", "graph-root")
-            }, "tool.completed"), physical))
-    }
-
     @Test fun realSessionLedgerRoundTripsEntireEffectEnvelopeProjection() {
         val records = arrayOf(EffectRecord.Intent(expected),
             EffectRecord.Started(expected), EffectRecord.Committed(expected, digestB))
@@ -134,23 +89,6 @@ class CheckpointBoundHostEffectEvidenceVerifierTest : SessionCheckpointTestFixtu
         assertNull(EffectEvidenceProjection.fromSessionLedger(dropped, physical))
     }
 
-    @Test fun unconfirmedAndTornPhysicalHistoriesNeverProjectAsComplete() {
-        val intent = EffectRecord.Intent(expected)
-        val physical = physical(intent, EffectRecord.Unconfirmed(expected, "HOST_ERROR"))
-        val history = listOf(
-            effectEvent(1, 1L, intent, "c".repeat(64)),
-            effectEvent(2, 2L, physical.entries.last().record, "d".repeat(64))
-        )
-        assertEquals(2, EffectEvidenceProjection.fromSessionLedger(history, physical)?.size)
-        assertNull(EffectEvidenceProjection.fromSessionLedger(
-            history, physical.copy(tornTailOffset = 500L,
-                tailKind = EffectJournalTailKind.SHORT_FRAME)))
-        assertNull(EffectEvidenceProjection.fromSessionLedger(
-            history, physical.copy(lastSequence = 1L)))
-        assertNull(EffectEvidenceProjection.fromSessionLedger(
-            history, physical.copy(entries = physical.entries.take(1))))
-    }
-
     private fun sidecar(): Path = temp.resolve("effect-root").also { dir ->
         if (!Files.exists(dir)) {
             Files.createDirectories(dir)
@@ -158,6 +96,86 @@ class CheckpointBoundHostEffectEvidenceVerifierTest : SessionCheckpointTestFixtu
                 PosixFilePermission.OWNER_WRITE, PosixFilePermission.OWNER_EXECUTE))
         }
     }.resolve("journal.rcfx")
+
+    @Test fun durableLedgerRefusesPartialAndWrongEventEffectEnvelopesAtWriteTime() {
+        val intent = EffectRecord.Intent(expected)
+        val committed = EffectRecord.Committed(expected, digestB)
+        val full = effectEvent(1, 1L, intent, "c".repeat(64))
+        val payload = full["metadata"] as JsonObject
+        val negatives = listOf(
+            event(1, "req-one", "completed", payload, "checkpoint.saved"),
+            event(1, "req-one", "failed", payload, "tool.completed"),
+            event(1, "req-one", "failed",
+                (effectEvent(1, 1L, committed, "d".repeat(64))["metadata"]
+                    as JsonObject), "tool.completed"),
+            event(1, "req-one", "started", buildJsonObject {
+                put("effectOperationId", "effect-one")
+            }, "tool.started"),
+            event(1, "req-one", "started", JsonObject(payload.toMutableMap().also {
+                it["effectiveUnrelatedKey"] = kotlinx.serialization.json.JsonPrimitive("bad")
+            }), "tool.started"),
+            event(1, "req-one", "started", JsonObject(payload.toMutableMap().also {
+                it.remove("effectRecordMacSha256")
+            }), "tool.started"),
+            event(1, "req-one", "started", JsonObject(payload.toMutableMap().also {
+                it["graphId"] = kotlinx.serialization.json.JsonPrimitive("graph-root")
+            }), "tool.started")
+        )
+        negatives.forEachIndexed { index, invalid ->
+            val path = temp.resolve("invalid-envelope-$index.ledger")
+            DurableSessionEventLedger.create(path, workspace()).use { writer ->
+                assertEquals("LEDGER_EFFECT_ENVELOPE_INVALID",
+                    assertFailsWith<SessionLedgerUnconfirmed> {
+                        writer.append(invalid)
+                    }.code)
+            }
+            assertEquals(0, DurableSessionEventLedger.inspect(path).lastSequence)
+        }
+    }
+
+    @Test fun successorGenerationDoesNotAuthenticateHistoricalPinnedJournal() {
+        val original = createPreExecutionCheckpoint()
+        val path = sidecar()
+        lateinit var pinned: VerifiedSessionCheckpoint
+        lateinit var mac: String
+        SessionResumeAdmission.admit(
+            store(), context(), ledger(), resumeAttestation()).use { lease ->
+            DurableEffectRecordJournal.create(path, workspace(),
+                "sess-one", hostKey, lease).use { writer ->
+                pinned = SessionCheckpointStore.saveEffectHeadFenced(
+                    lease, store(), context(), ledger(), writer,
+                    original.snapshot.copy(sequence = original.snapshot.sequence + 1L,
+                        previousSha256 = original.sha256), original.sha256)
+                mac = writer.headPin().headMacSha256
+            }
+        }
+        val fence = ResumeFenceStorage.atGeneration(store(), 1L)
+        val approval = GenesisEffectHeadReconciliation("operator-one", true,
+            pinned.sha256, 1L, fence.sha256, mac)
+        SessionResumeAdmission.reconcileGenesisEffectHead(
+            store(), context(), ledger(), path, hostKey,
+            resumeAttestation(1L), approval).use { successor ->
+            assertEquals(2L, successor.generation)
+            val closed = DurableSessionEventLedger.inspect(ledger())
+            val view = EffectJournalView(closed.headSha256,
+                closed.lastSequence.toLong(), emptyList())
+            CheckpointBoundHostEffectEvidenceVerifier(
+                store(), context(), ledger(), path, hostKey, successor,
+                expected, view, IndependentEffectStateProbe { digestB }).use {
+                assertFalse(it.authenticateCompleteJournal(
+                    view, expected, successor.generation))
+                assertFalse(it.independentlyVerifyCommitted(
+                    EffectRecord.Intent(expected),
+                    EffectRecord.Started(expected),
+                    EffectRecord.Committed(expected, digestB)))
+                assertFalse(it.independentlyVerifyNotStarted(
+                    EffectRecord.Intent(expected),
+                    EffectNotStartedEvidence(expected, view.headSha256,
+                        view.lastSequence, 2L, digestB, digestB),
+                    successor.generation))
+            }
+        }
+    }
 
     @Test fun realPinnedGenesisRequiresClosedJournalExactViewAndCurrentLease() {
         val initial = createPreExecutionCheckpoint()

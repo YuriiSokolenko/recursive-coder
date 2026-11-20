@@ -9,6 +9,11 @@ import kotlinx.serialization.json.longOrNull
  * A read-only probe of ACTUAL host state, not a receipt or the journal.
  * Implementations belong to trusted, kind-specific host adapters; returning
  * a digest supplied by the model/journal is not independent verification.
+ *
+ * Before production wiring: register per-EffectKind trusted probes, resolve
+ * targets from host-owned content-addressed inputs keyed by inputSha256,
+ * specify a shared versioned canonical observed-state digest, and enforce
+ * a host-side timeout/deadline. This port alone provides NONE of these.
  */
 fun interface IndependentEffectStateProbe {
     fun observedCommittedStateSha256(identity: EffectIdentity): String?
@@ -27,9 +32,6 @@ fun interface IndependentEffectStateProbe {
  * to the durable ledger's allowlist does not allow production effect execution.
  */
 internal object EffectEvidenceProjection {
-    private val base = setOf("effectOperationId", "effectFenceGeneration",
-        "effectKind", "effectInputSha256", "effectRecordSequence",
-        "effectRecordMacSha256", "effectState")
     private val sha = Regex("[0-9a-f]{64}")
     private val toolEvents = setOf("tool.started", "tool.completed")
     private fun value(o: JsonObject, field: String): String? =
@@ -37,99 +39,151 @@ internal object EffectEvidenceProjection {
     private fun number(o: JsonObject, field: String): Long? =
         (o[field] as? JsonPrimitive)?.takeUnless { it.isString }?.longOrNull
 
-    /**
-     * Returns null on any incomplete/ambiguous event, including an effect-like
-     * field on a non-effect event. Only this method constructs the comparison
-     * projection; callers cannot select a subset of authenticated entries.
-     */
+    sealed interface Result {
+        data class Verified(val entries: List<EffectJournalEntry>) : Result
+        /** Stable denial code, with no raw host paths, secrets or operation data. */
+        data class Denied(val code: String) : Result
+    }
+
     fun fromSessionLedger(
         events: List<JsonObject>, physical: VerifiedEffectRecordJournal
-    ): List<EffectJournalEntry>? {
+    ): List<EffectJournalEntry>? =
+        (inspect(events, physical) as? Result.Verified)?.entries
+
+    /**
+     * Diagnostic classification only. An explicit denial code does NOT grant
+     * an operator permission to ignore a failed physical authenticity check.
+     */
+    fun inspect(
+        events: List<JsonObject>, physical: VerifiedEffectRecordJournal
+    ): Result {
+        fun deny(code: String): Result.Denied = Result.Denied(code)
         if (physical.tailKind != null || physical.tornTailOffset != null ||
             physical.entries.size.toLong() != physical.lastSequence)
-            return null
+            return deny("PROJECTION_PHYSICAL_INCOMPLETE")
         val output = mutableListOf<EffectJournalEntry>()
         var previousEventSequence = 0L
         for (event in events) {
-            val type = value(event, "type") ?: return null
-            val status = value(event, "status") ?: return null
+            val type = value(event, "type") ?: return deny("PROJECTION_EVENT_INVALID")
+            val status = value(event, "status") ?: return deny("PROJECTION_EVENT_INVALID")
             val metadata = event["metadata"] as? JsonObject
             if (metadata == null) {
-                // Session Protocol permits omitted metadata for unrelated
-                // events. An explicit non-object metadata or a tool event
-                // without effect identity is not safe to classify.
-                if ("metadata" in event || type in toolEvents) return null
+                if (type in toolEvents) return deny("PROJECTION_UNMARKED_TOOL_EVENT")
+                if ("metadata" in event) return deny("PROJECTION_METADATA_INVALID")
                 continue
             }
-            val effectKeys = metadata.keys.filter { it.startsWith("effect") }
-            if (effectKeys.isEmpty()) {
-                // No tool-effect entry may be silently omitted as an
-                // unmarked tool-start/completion event.
-                if (type in toolEvents) return null
+            if (!EffectEvidenceEnvelopePolicy.hasReservedKey(metadata)) {
+                if (type in toolEvents) return deny("PROJECTION_UNMARKED_TOOL_EVENT")
                 continue
             }
-            val state = value(metadata, "effectState") ?: return null
-            val extras = when (state) {
-                "intent", "started" -> emptySet()
-                "committed" -> setOf("effectObservedStateSha256")
-                "unconfirmed" -> setOf("effectErrorCode")
-                else -> return null
-            }
-            if (metadata.keys != base + extras) return null
-            val expectedType = when (state) {
-                "intent", "started" -> "tool.started"
-                "committed" -> "tool.completed"
-                else -> "session.error"
-            }
-            val expectedStatus = when (state) {
-                "intent", "started" -> "started"
-                "committed" -> "completed"
-                else -> "failed"
-            }
-            if (type != expectedType || status != expectedStatus)
-                return null
-            val sessionId = value(event, "sessionId") ?: return null
-            val eventSequence = number(event, "sequence") ?: return null
-            val physicalSequence = number(metadata, "effectRecordSequence") ?: return null
-            val fence = number(metadata, "effectFenceGeneration") ?: return null
-            val operationId = value(metadata, "effectOperationId") ?: return null
+            if (!EffectEvidenceEnvelopePolicy.validForEvent(type, status, metadata))
+                return deny("PROJECTION_ENVELOPE_INVALID")
+            val state = value(metadata, "effectState")
+                ?: return deny("PROJECTION_ENVELOPE_INVALID")
+            val sessionId = value(event, "sessionId")
+                ?: return deny("PROJECTION_EVENT_INVALID")
+            val eventSequence = number(event, "sequence")
+                ?: return deny("PROJECTION_EVENT_INVALID")
+            val physicalSequence = number(metadata, "effectRecordSequence")
+                ?: return deny("PROJECTION_ENVELOPE_INVALID")
+            val fence = number(metadata, "effectFenceGeneration")
+                ?: return deny("PROJECTION_ENVELOPE_INVALID")
+            val operationId = value(metadata, "effectOperationId")
+                ?: return deny("PROJECTION_ENVELOPE_INVALID")
             val kind = EffectKind.entries.firstOrNull {
                 it.name == value(metadata, "effectKind")
-            } ?: return null
-            val input = value(metadata, "effectInputSha256") ?: return null
-            val mac = value(metadata, "effectRecordMacSha256") ?: return null
+            } ?: return deny("PROJECTION_ENVELOPE_INVALID")
+            val input = value(metadata, "effectInputSha256")
+                ?: return deny("PROJECTION_ENVELOPE_INVALID")
+            val mac = value(metadata, "effectRecordMacSha256")
+                ?: return deny("PROJECTION_ENVELOPE_INVALID")
             if (eventSequence <= previousEventSequence ||
-                physicalSequence != output.size.toLong() + 1L ||
-                !ToolAuthorizationPolicy.validHostIdentifier(sessionId) ||
-                !ToolAuthorizationPolicy.validHostIdentifier(operationId) ||
-                fence <= 0L || !sha.matches(input) || !sha.matches(mac) ||
-                sessionId != physical.header.sessionId ||
+                physicalSequence != output.size.toLong() + 1L)
+                return deny("PROJECTION_SEQUENCE_MISMATCH")
+            if (sessionId != physical.header.sessionId ||
                 fence != physical.header.fenceGeneration)
-                return null
+                return deny("PROJECTION_CONTEXT_MISMATCH")
+            if (!ToolAuthorizationPolicy.validHostIdentifier(sessionId) ||
+                !ToolAuthorizationPolicy.validHostIdentifier(operationId) ||
+                fence <= 0L || !sha.matches(input) || !sha.matches(mac))
+                return deny("PROJECTION_ENVELOPE_INVALID")
             val identity = EffectIdentity(sessionId, operationId, fence, kind, input)
             val record = when (state) {
                 "intent" -> EffectRecord.Intent(identity)
                 "started" -> EffectRecord.Started(identity)
                 "committed" -> {
                     val observed = value(metadata, "effectObservedStateSha256")
-                        ?: return null
-                    if (!sha.matches(observed)) return null
+                        ?: return deny("PROJECTION_ENVELOPE_INVALID")
+                    if (!sha.matches(observed))
+                        return deny("PROJECTION_ENVELOPE_INVALID")
                     EffectRecord.Committed(identity, observed)
                 }
                 else -> {
-                    val code = value(metadata, "effectErrorCode") ?: return null
-                    if (!ToolAuthorizationPolicy.validHostIdentifier(code)) return null
+                    val code = value(metadata, "effectErrorCode")
+                        ?: return deny("PROJECTION_ENVELOPE_INVALID")
+                    if (!ToolAuthorizationPolicy.validHostIdentifier(code))
+                        return deny("PROJECTION_ENVELOPE_INVALID")
                     EffectRecord.Unconfirmed(identity, code)
                 }
             }
-            val next = physical.entries.getOrNull(output.size) ?: return null
-            if (next.sequence != physicalSequence ||
-                next.record != record || next.hostMacSha256 != mac)
-                return null
+            val next = physical.entries.getOrNull(output.size)
+                ?: return deny("PROJECTION_EXTRA_EVENT")
+            if (next.sequence != physicalSequence)
+                return deny("PROJECTION_SEQUENCE_MISMATCH")
+            if (next.hostMacSha256 != mac)
+                return deny("PROJECTION_MAC_MISMATCH")
+            if (next.record != record)
+                return deny("PROJECTION_RECORD_MISMATCH")
+            // Event sequence is bound to RCEFX1 sequence/MAC by RCLDG1 SHA,
+            // NOT by the RCEFX1 MAC alone.
             output.add(EffectJournalEntry(eventSequence, record, mac))
             previousEventSequence = eventSequence
         }
-        return output.takeIf { it.size == physical.entries.size }
+        return if (output.size == physical.entries.size) Result.Verified(output)
+            else deny("PROJECTION_EXTRA_PHYSICAL")
+    }
+}
+
+/**
+ * Post-authentication classification, extracted for deterministic probe tests.
+ * Production MUST supply ::recheck, which reauthenticates complete physical
+ * sources on every invocation. This helper is not a recovery capability.
+ * VM-fatal Errors intentionally escape; the host must abort/quarantine the
+ * entire recovery attempt rather than continuing after one.
+ */
+internal object CommittedEffectStatePolicy {
+    private val sha = Regex("[0-9a-f]{64}")
+
+    fun verify(
+        expected: EffectIdentity,
+        intent: EffectRecord.Intent,
+        started: EffectRecord.Started,
+        committed: EffectRecord.Committed,
+        authenticatedRead: () -> List<EffectJournalEntry>?,
+        probe: IndependentEffectStateProbe
+    ): Boolean {
+        if (intent.identity != expected ||
+            started.identity != expected ||
+            committed.identity != expected ||
+            !sha.matches(committed.observedStateSha256))
+            return false
+        val before = try { authenticatedRead() } catch (_: Exception) { null }
+            ?: return false
+        val records = before.filter {
+            it.record.identity.sessionId == expected.sessionId &&
+                it.record.identity.operationId == expected.operationId
+        }.map { it.record }
+        if (records != listOf(intent, started, committed)) return false
+        val observed = try {
+            probe.observedCommittedStateSha256(expected)
+        } catch (_: Exception) {
+            null
+        }
+        if (observed == null || !sha.matches(observed) ||
+            observed != committed.observedStateSha256)
+            return false
+        val after = try { authenticatedRead() } catch (_: Exception) { null }
+        return after != null && after == before
     }
 }
 
@@ -141,6 +195,10 @@ internal object EffectEvidenceProjection {
  * - all RCLDG1 effect envelopes, in order, matching ALL RCEFX1 records;
  * - independent actual host state for any Committed classification.
  *
+ * ONLY the live issuing generation N is supported. A successor N+1
+ * lease must fail closed; authenticating historical N -> N+1 authority
+ * is a separate future protocol, not implemented by this verifier.
+ *
  * It does NOT verify an execution/no-start barrier. Consequently
  * independentlyVerifyNotStarted ALWAYS returns false. Current pre-execution
  * checkpoint/ledger policies prevent this adapter from being used as a real
@@ -151,6 +209,7 @@ internal object EffectEvidenceProjection {
  * invocation. Each method re-reads the physical sources independently:
  * a prior authenticateCompleteJournal(true) is not a reusable capability.
  * Coherent rollback of all source files remains unsolved.
+ * Caller must zero its original hostKey. Only this adapter's copy is cleared.
  */
 @ResumeOperatorOnlyApi
 class CheckpointBoundHostEffectEvidenceVerifier(
@@ -165,7 +224,6 @@ class CheckpointBoundHostEffectEvidenceVerifier(
     private val stateProbe: IndependentEffectStateProbe
 ) : HostEffectEvidenceVerifier, AutoCloseable {
     private val key = hostKey.copyOf()
-    private val sha = Regex("[0-9a-f]{64}")
     private var closed = false
 
     @Synchronized override fun close() {
@@ -216,28 +274,8 @@ class CheckpointBoundHostEffectEvidenceVerifier(
     override fun independentlyVerifyCommitted(
         intent: EffectRecord.Intent, started: EffectRecord.Started,
         committed: EffectRecord.Committed
-    ): Boolean {
-        if (intent.identity != boundIdentity ||
-            started.identity != boundIdentity ||
-            committed.identity != boundIdentity ||
-            !sha.matches(committed.observedStateSha256))
-            return false
-        val entries = recheck() ?: return false
-        val records = entries.filter {
-            it.record.identity.sessionId == boundIdentity.sessionId &&
-                it.record.identity.operationId == boundIdentity.operationId
-        }.map { it.record }
-        if (records != listOf(intent, started, committed)) return false
-        val actual = try {
-            stateProbe.observedCommittedStateSha256(boundIdentity)
-        } catch (_: Exception) { null }
-        if (actual == null || !sha.matches(actual) ||
-            actual != committed.observedStateSha256)
-            return false
-        // The probe is an independent read, not a durable no-start barrier;
-        // keep the returned result informational only.
-        return recheck() == entries
-    }
+    ): Boolean = CommittedEffectStatePolicy.verify(
+        boundIdentity, intent, started, committed, ::recheck, stateProbe)
 
     override fun independentlyVerifyNotStarted(
         intent: EffectRecord.Intent, proof: EffectNotStartedEvidence,

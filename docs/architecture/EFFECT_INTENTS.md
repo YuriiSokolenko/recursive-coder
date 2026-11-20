@@ -363,8 +363,11 @@ record variant, actual host MAC, and observed digest/error code.
 There is no caller-supplied filtering and no acceptance of a partial
 projection, missing event, duplicate, unmarked tool start/completion,
 torn tail, live writer, stale lease, wrong key, forged MAC or extra sidecar
-frame. Any unavailable evidence returns false; `EffectReconciliationPolicy`
-then quarantines it.
+frame. Every denial returns false to the reconciliation policy; a separate
+internal diagnostic projection reports stable, redacted codes (for example
+`PROJECTION_UNMARKED_TOOL_EVENT`, `PROJECTION_MAC_MISMATCH`,
+`PROJECTION_EXTRA_PHYSICAL`). The codes are **not** authorization to
+skip physical validation or retry a tool.
 
 The canonical RCLDG1 effect envelope uses only whitelisted scalar
 metadata: `effectOperationId`, `effectFenceGeneration`,
@@ -373,9 +376,15 @@ metadata: `effectOperationId`, `effectFenceGeneration`,
 `effectObservedStateSha256` for `committed` or `effectErrorCode`
 for `unconfirmed`. These names have been added to the *host ledger
 safety allowlist*, **not** to the pre-execution admission whitelist.
-Only exact `tool.started/started` (for intent/started),
-`tool.completed/completed` (for committed) or
-`session.error/failed` (for unconfirmed) forms are accepted.
+The physical writer and verifier use the same `EffectEvidenceEnvelopePolicy`:
+any metadata key beginning with `effect` is reserved and must form the
+**complete canonical envelope**, with no extra graph fields, partial
+records, wrong event type or status. Only exact
+`tool.started/started` (intent/started), `tool.completed/completed`
+(committed) and `session.error/failed` (unconfirmed) are accepted.
+Malformed envelopes are refused **before RCLDG1 append** with the stable
+`LEDGER_EFFECT_ENVELOPE_INVALID` code. This does not authorize any
+runtime to publish an effect checkpoint.
 Session events may interleave with non-effect metadata; their sequence
 numbers need not equal RCEFX1 record positions. Each effect envelope
 must name the exact contiguous RCEFX1 sequence and HMAC.
@@ -384,23 +393,62 @@ must name the exact contiguous RCEFX1 sequence and HMAC.
 projection, exact `Intent → Started → Committed` triple for that
 operation, and a fresh external state digest from
 `IndependentEffectStateProbe`. It never accepts the mere presence of
-`Committed` as external proof. `independentlyVerifyNotStarted`
+`Committed` as external proof. The deterministic internal
+`CommittedEffectStatePolicy` tests the successful probe branch,
+incorrect/malformed/null digests, probe exceptions, and re-reading
+changed or unavailable evidence **after** a probe. The real verifier
+always supplies its physical authenticated reader; injected test
+evidence cannot replace that production path. `independentlyVerifyNotStarted`
 **always returns false**: no independent actual no-start execution
-barrier yet exists. The view's historical issuing generation and its
-current fenced lease are not interchangeable.
+barrier yet exists.
 
-**Limits:** the production runtime still cannot emit or checkpoint
-mutating effect events through the pre-execution policy, and no
-effect-kind-specific `IndependentEffectStateProbe` production adapter
-is wired. The present integration tests cover real **genesis** physical
-provenance and fail-closed paths; isolated projection tests cover
-fully matched vs missing/tampered records. This PR does **not** claim
-that end-to-end external effects can be positively classified or safely
-recovered today. Before activation, implement the specific host probes,
-enforce actual production `Intent → Started → effect → receipt` ordering,
-independent no-start barriers and rollback-resistant authority. A
-coherent rollback of the entire checkpoint/fence/anchor/RCEFX1 root
-remains outside the protection of this adapter.
+**Same-generation-only (deliberate):** this adapter authenticates a pin
+issued under the currently live `SessionResumeLease` N. It **cannot**
+positively verify a historical N journal after acquiring a successor
+N+1 lease, even though the abstract `EffectReconciliationPolicy`
+supports that case. The existing checkpoint policy cannot yet persist
+effectful RCLDG1 histories and preserve an independently verifiable
+N→N+1 pin. The new real negative test pins genesis under N, obtains
+N+1 via explicit operator reconciliation and verifies this adapter
+returns false. Supporting historical recovery later requires an
+explicit authenticated fence-chain and execution authority protocol,
+**not** relaxation of the current-generation equality guard.
+
+**Limits and required future probe acceptance criteria:** an end-to-end
+**positive classification of a nonempty physical effect journal is
+currently unreachable**. The existing pre-execution-only checkpoint
+writer refuses RCLDG1 histories containing effect events; therefore
+no full RCEFX1 Intent/Started/Committed history can be pinned in the
+current production runtime. The real integration tests authenticate
+physical **genesis-only** provenance, writer/lease locks, and an actual
+RCLDG1 effect-envelope round-trip with an isolated projection fixture.
+They **do not** physically corrupt/replay nonempty RCEFX1 records.
+Pure unit tests cover one-to-one, order, missing/duplicate, wrong MAC
+and stable denial codes. None of these demonstrate successful external
+recovery in production.
+
+Before wiring any concrete `IndependentEffectStateProbe`, require:
+(a) explicit registration by `EffectKind` rather than a universal callback;
+(b) trusted resolution of targets/expected inputs from a **host-owned,
+content-addressed store** keyed by `inputSha256` — never from model text or
+a claimed receipt;
+(c) a versioned canonical observed-state digest scheme common to both
+the original receipt writer and independent observer; (d) a host-enforced
+timeout/deadline with unavailable/timeout results quarantined;
+(e) effect-kind-specific positive and negative conformance against actual
+external state, including concurrent mutation and crash tests.
+The narrow probe port in this PR satisfies none of these on its own.
+Also require production `Intent → Started → effect → receipt`
+durability/fencing, independent no-start barriers, historic N→N+1
+authority, and an independently rollback-resistant root.
+
+**Fatal failures:** ordinary `Exception` from I/O or the probe is
+quarantined. `Error` (e.g. VM exhaustion or stack overflow) is deliberately
+**not** swallowed by the verifier or `EffectReconciliationPolicy`. The
+trusted host must treat any escaped `Throwable` as a terminal failure
+of the recovery attempt and must never resume effect execution after it.
+Unit tests pin this propagation choice. Coherent rollback of the entire
+checkpoint/fence/anchor/RCEFX1 root remains outside this adapter.
 
 ## Deferred work and acceptance
 
