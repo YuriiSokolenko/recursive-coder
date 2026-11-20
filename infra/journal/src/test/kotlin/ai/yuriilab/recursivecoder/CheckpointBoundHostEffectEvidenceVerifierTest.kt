@@ -133,7 +133,7 @@ class CheckpointBoundHostEffectEvidenceVerifierTest : SessionCheckpointTestFixtu
         }
     }
 
-    @Test fun successorGenerationDoesNotAuthenticateHistoricalPinnedJournal() {
+    @Test fun sealedSuccessorAuthenticatesHistoricalGenesisButNoEffectOutcome() {
         val original = createPreExecutionCheckpoint()
         val path = sidecar()
         lateinit var pinned: VerifiedSessionCheckpoint
@@ -159,19 +159,64 @@ class CheckpointBoundHostEffectEvidenceVerifierTest : SessionCheckpointTestFixtu
             val closed = DurableSessionEventLedger.inspect(ledger())
             val view = EffectJournalView(closed.headSha256,
                 closed.lastSequence.toLong(), emptyList())
+            var probes = 0
             CheckpointBoundHostEffectEvidenceVerifier(
                 store(), context(), ledger(), path, hostKey, successor,
-                expected, view, IndependentEffectStateProbe { digestB }).use {
-                assertFalse(it.authenticateCompleteJournal(
+                expected, view, IndependentEffectStateProbe {
+                    probes++
+                    digestB
+                }).use { verifier ->
+                // The entire v3/fence/anchor/HMAC-bound historical genesis is
+                // now independently authenticated under the N+1 lease.
+                assertTrue(verifier.authenticateCompleteJournal(
                     view, expected, successor.generation))
-                assertFalse(it.independentlyVerifyCommitted(
+                assertFalse(verifier.authenticateCompleteJournal(
+                    view, expected, 1L))
+                assertFalse(verifier.authenticateCompleteJournal(
+                    view.copy(headSha256 = digestB), expected, successor.generation))
+                assertFalse(verifier.authenticateCompleteJournal(
+                    view.copy(entries = listOf(EffectJournalEntry(1L,
+                        EffectRecord.Intent(expected), digestB))),
+                    expected, successor.generation))
+                assertFalse(verifier.authenticateCompleteJournal(
+                    view, expected.copy(fenceGeneration = 2L), successor.generation))
+                // A genesis-only history cannot establish Committed or
+                // actual non-execution; neither branch may consult the probe.
+                assertEquals(EffectRecoveryOutcome.Quarantined("EFFECT_INTENT_MISSING"),
+                    EffectReconciliationPolicy.reconcile(
+                        expected, successor.generation, view, verifier))
+                assertFalse(verifier.independentlyVerifyCommitted(
                     EffectRecord.Intent(expected),
                     EffectRecord.Started(expected),
                     EffectRecord.Committed(expected, digestB)))
-                assertFalse(it.independentlyVerifyNotStarted(
+                assertFalse(verifier.independentlyVerifyNotStarted(
                     EffectRecord.Intent(expected),
                     EffectNotStartedEvidence(expected, view.headSha256,
                         view.lastSequence, 2L, digestB, digestB),
+                    successor.generation))
+            }
+            assertEquals(0, probes)
+            // A verifier cannot trust the v3 checksum without its host MAC.
+            CheckpointBoundHostEffectEvidenceVerifier(
+                store(), context(), ledger(), path, ByteArray(32), successor,
+                expected, view, IndependentEffectStateProbe { digestB }).use {
+                assertFalse(it.authenticateCompleteJournal(
+                    view, expected, successor.generation))
+            }
+            CheckpointBoundHostEffectEvidenceVerifier(
+                store(), context(), ledger(), path.resolveSibling("wrong.rcfx"),
+                hostKey, successor, expected, view,
+                IndependentEffectStateProbe { digestB }).use {
+                assertFalse(it.authenticateCompleteJournal(
+                    view, expected, successor.generation))
+            }
+            // Caller cannot re-label a historical N journal as N+1.
+            CheckpointBoundHostEffectEvidenceVerifier(
+                store(), context(), ledger(), path, hostKey, successor,
+                expected.copy(fenceGeneration = 2L), view,
+                IndependentEffectStateProbe { digestB }).use {
+                assertFalse(it.authenticateCompleteJournal(
+                    view, expected.copy(fenceGeneration = 2L),
                     successor.generation))
             }
         }
