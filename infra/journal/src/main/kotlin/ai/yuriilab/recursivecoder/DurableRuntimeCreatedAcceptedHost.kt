@@ -33,13 +33,13 @@ class DurableRuntimeCreatedAcceptedHost(
         clock: Clock
     ) {
         // A pre-existing thread interrupt closes interruptible FileChannels.
-        // Consume it before any fenced filesystem publication; a plain
-        // Thread.interrupt() is treated as cooperative cancellation here.
+        // Observe, but NEVER clear, the caller's shutdown flag. This gate
+        // refuses before fenced I/O, so clearing and restoring is unnecessary.
         // The host never binds cancellation to this thread.
-        val interruptedBefore = Thread.interrupted()
+        val interruptedBefore = Thread.currentThread().isInterrupted
         val stop = SessionInterruptionGate.stopped(
             cancellation.signals(), clock.instant(), deadline)
-        val interruptedDuring = Thread.interrupted()
+        val interruptedDuring = Thread.currentThread().isInterrupted
         if (stop != null) throw stop
         if (interruptedBefore || interruptedDuring) throw Stopped(false)
     }

@@ -396,7 +396,7 @@ class RuntimeTrustedCreatedAcceptedHandoffIntegrationTest : SessionCheckpointTes
     }
 
 
-    @Test fun interruptInsideAttestationIsConsumedWithoutAnyLedgerMutation() {
+    @Test fun interruptInsideAttestationIsPreservedWithoutAnyLedgerMutation() {
         val c1 = createPreExecutionCheckpoint()
         val original = Files.readAllBytes(ledger())
         val interruptingHost = DurableRuntimeCreatedAcceptedHost(
@@ -411,18 +411,43 @@ class RuntimeTrustedCreatedAcceptedHandoffIntegrationTest : SessionCheckpointTes
                     request(), Cancellation(), interruptingHost)
             }
             assertFalse(stopped.timedOut)
-            assertFalse(Thread.currentThread().isInterrupted,
-                "The host must consume a pre-publication interrupt")
+            assertTrue(Thread.currentThread().isInterrupted,
+                "The host must preserve a pre-publication shutdown interrupt")
         } finally {
-            // Clean the JUnit worker even if an assertion above fails.
+            // JUnit must not inherit the caller's deliberately preserved flag.
             Thread.interrupted()
         }
+        assertFalse(Thread.currentThread().isInterrupted)
         assertEquals(c1, inspect())
         assertContentEquals(original, Files.readAllBytes(ledger()),
             "No uncovered accepted event is permitted without durable C2")
         assertFalse(Files.exists(store().resolve("resume.lock")))
         assertFalse(Files.exists(store().resolve("resume-000000000001.rcf")))
         assertFalse(Files.exists(store().resolve("000000000002.rcp")))
+        assertNoExecutionOrResult()
+    }
+
+    @Test fun expiredDeadlineAndPendingInterruptPreserveTimeoutAndShutdownSignal() {
+        val c1 = createPreExecutionCheckpoint()
+        val original = Files.readAllBytes(ledger())
+        val badDeadline = Instant.now().minusSeconds(5)
+        try {
+            Thread.currentThread().interrupt()
+            val stopped = assertFailsWith<Stopped> {
+                host().publishCreatedAccepted(request(), Cancellation(),
+                    badDeadline, Clock.systemUTC())
+            }
+            assertTrue(stopped.timedOut, "Deadline retains priority over cancellation")
+            assertTrue(Thread.currentThread().isInterrupted,
+                "Even a timeout refusal must preserve the existing interrupt")
+        } finally {
+            Thread.interrupted()
+        }
+        assertFalse(Thread.currentThread().isInterrupted)
+        assertEquals(c1, inspect())
+        assertContentEquals(original, Files.readAllBytes(ledger()))
+        assertFalse(Files.exists(store().resolve("resume.lock")))
+        assertFalse(Files.exists(store().resolve("resume-000000000001.rcf")))
         assertNoExecutionOrResult()
     }
 
@@ -436,9 +461,12 @@ class RuntimeTrustedCreatedAcceptedHandoffIntegrationTest : SessionCheckpointTes
             override fun getZone(): ZoneId = ZoneOffset.UTC
             override fun withZone(zone: ZoneId): Clock = this
             override fun instant(): Instant {
-                // Runtime reads the clock once; host checks five gates and
-                // timestamps its event once. On read #8 the final gate has
-                // already sampled signals, but has not entered fenced I/O.
+                // The ordering here deliberately targets the final gate:
+                // signals() is read before clock.instant(), so cancellation
+                // at this clock read happens after the signal snapshot.
+                // Keep this test in sync if the number of clock reads changes.
+                // A production test hook would add an unnecessary callback
+                // inside the trusted, security-critical publication boundary.
                 if (reads.incrementAndGet() == 8) {
                     val canceller = Thread({ cancellation.cancel() },
                         "handoff-cancellation-race")
