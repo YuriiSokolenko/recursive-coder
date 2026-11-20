@@ -51,9 +51,16 @@ internal object EffectEvidenceProjection {
         val output = mutableListOf<EffectJournalEntry>()
         var previousEventSequence = 0L
         for (event in events) {
-            val metadata = event["metadata"] as? JsonObject ?: return null
             val type = value(event, "type") ?: return null
             val status = value(event, "status") ?: return null
+            val metadata = event["metadata"] as? JsonObject
+            if (metadata == null) {
+                // Session Protocol permits omitted metadata for unrelated
+                // events. An explicit non-object metadata or a tool event
+                // without effect identity is not safe to classify.
+                if ("metadata" in event || type in toolEvents) return null
+                continue
+            }
             val effectKeys = metadata.keys.filter { it.startsWith("effect") }
             if (effectKeys.isEmpty()) {
                 // No tool-effect entry may be silently omitted as an

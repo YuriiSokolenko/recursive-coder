@@ -76,9 +76,9 @@ class CheckpointBoundHostEffectEvidenceVerifierTest : SessionCheckpointTestFixtu
                 put("graphId", "graph-root")
             }, "checkpoint.saved"),
             effectEvent(2, 1L, records[0], "c".repeat(64)),
-            event(3, "req-two", "completed", buildJsonObject {
+            JsonObject(event(3, "req-two", "completed", buildJsonObject {
                 put("graphId", "graph-root")
-            }, "checkpoint.saved"),
+            }, "checkpoint.saved").toMutableMap().also { it.remove("metadata") }),
             effectEvent(4, 2L, records[1], "d".repeat(64)),
             effectEvent(5, 3L, records[2], "e".repeat(64))
         )
