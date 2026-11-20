@@ -32,11 +32,10 @@ class DurableRuntimeCreatedAcceptedHost(
         deadline: Instant,
         clock: Clock
     ) {
-        when (SessionBudgetPolicy.interruption(
-            cancellation.signals(), clock.instant(), deadline)) {
-            SessionEndReason.TIMEOUT -> throw Stopped(true)
-            SessionEndReason.CANCELLATION -> throw Stopped(false)
-            else -> Unit
+        val signals = cancellation.signals()
+        when {
+            signals.expired || !clock.instant().isBefore(deadline) -> throw Stopped(true)
+            signals.requested -> throw Stopped(false)
         }
     }
 
