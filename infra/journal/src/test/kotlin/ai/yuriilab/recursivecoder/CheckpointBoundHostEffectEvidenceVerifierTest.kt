@@ -111,6 +111,29 @@ class CheckpointBoundHostEffectEvidenceVerifierTest : SessionCheckpointTestFixtu
             }, "tool.completed"), physical))
     }
 
+    @Test fun realSessionLedgerRoundTripsEntireEffectEnvelopeProjection() {
+        val records = arrayOf(EffectRecord.Intent(expected),
+            EffectRecord.Started(expected), EffectRecord.Committed(expected, digestB))
+        val physical = physical(*records)
+        DurableSessionEventLedger.create(ledger(), workspace()).use { writer ->
+            writer.append(event(1, "req-one", "completed", buildJsonObject {
+                put("graphId", "graph-root")
+            }, "checkpoint.saved"))
+            writer.flush()
+            records.forEachIndexed { i, record ->
+                writer.append(effectEvent(i + 2, i.toLong() + 1L, record,
+                    physical.entries[i].hostMacSha256))
+                writer.flush()
+            }
+        }
+        val real = DurableSessionEventLedger.inspect(ledger())
+        assertEquals(4, real.lastSequence)
+        assertEquals(3, EffectEvidenceProjection.fromSessionLedger(
+            real.events, physical)?.size)
+        val dropped = real.events.filterIndexed { i, _ -> i != 2 }
+        assertNull(EffectEvidenceProjection.fromSessionLedger(dropped, physical))
+    }
+
     @Test fun unconfirmedAndTornPhysicalHistoriesNeverProjectAsComplete() {
         val intent = EffectRecord.Intent(expected)
         val physical = physical(intent, EffectRecord.Unconfirmed(expected, "HOST_ERROR"))
