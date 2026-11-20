@@ -407,23 +407,40 @@ barrier yet exists.
 adapter now accepts either (a) a pin issued under the currently live
 `SessionResumeLease` N, or (b) an **empty, historical** N RCEFX1 genesis
 after the exact operator-approved canonical v3 transition has been
-committed under the immediate successor N+1 lease. The second path
-requires a complete validated checkpoint/fence/anchor chain, a
-generation N+1 fence referencing the exact v3 checkpoint admitted by
-the current lease, a matching historical source checkpoint and N
-issuer, an independently checked v3 host-key HMAC seal, and a
-full physical reinspection against the historical RCEFX1 pin and sidecar
-path. A missing/wrong seal, different key/path, uncommitted or later
-lease, non-genesis physical journal, caller-supplied view or identity
-mismatch fails closed. The before/after checkpoint and live-lease
-checks still bracket that inspection.
+committed under the immediate successor N+1 lease. This works **only
+while v3 remains the latest checkpoint AND is exactly the checkpoint
+SHA admitted by that live N+1 lease**. Publishing even one ordinary
+successor checkpoint under the same N+1 lease ends this verification
+window; an N+2 lease cannot use it, even if v3 remains the tail.
 
-The real Linux integration test exercises a pinned N genesis, an
-explicit operator-reconciled N+1 lease, **positive authentication of
-that historical empty pin**, and negative cases for key/path/identity/
-view mismatch. It also confirms that an empty history **cannot**
-produce `ConfirmedCommitted`, `ProvenNotStarted`, or a state-probe
-invocation. This is provenance-only: no real effects are reclassified
+The second path requires a complete validated checkpoint/fence/anchor
+chain, a generation N+1 fence referencing that exact v3 checkpoint, a
+matching historical source checkpoint and N issuer, an independently
+checked v3 host-key HMAC seal, and complete physical reinspection
+against the historical RCEFX1 pin and exact sidecar path. The v3 seal
+itself authenticates the historical source head, operator, session,
+trace and policy; it **does not individually bind the successor N+1
+generation**. The independently verified fence and anchor chain,
+together with the exact lease-admitted checkpoint SHA and immediate
+successor rule, establishes that N+1 relationship. A future nonempty
+protocol must not infer successor authority from the seal alone.
+
+A missing/wrong seal, different key/path, uncommitted or later
+lease, advanced checkpoint, non-genesis physical journal, caller-supplied
+view or identity mismatch fails closed. The before/after checkpoint
+and live-lease checks still bracket that inspection.
+
+The real Linux integration test exercises a pinned N genesis,
+explicit operator reconciliation to N+1, **positive authentication
+of that historical empty pin**, and typed denial for a byte-identical,
+readable sidecar copied to a different path. Other negatives exercise
+wrong key/identity/view, nonzero physical torn tail, subsequent N+1
+checkpoint and N+2 lease. Internal `@Tag("unit")` tests assert the v3
+seal MAC denial code independently of the RCEFX1 HMAC and reject an
+effect envelope projected against physically empty genesis. These
+tests do not fabricate a nonempty end-to-end production checkpoint.
+They also confirm that an empty history **cannot** produce
+`ConfirmedCommitted`, `ProvenNotStarted`, or a state-probe invocation. This is provenance-only: no real effects are reclassified
 or replayed. **Nonempty historical N→N+1 recovery remains unsupported**:
 the pre-execution checkpoint writer cannot publish the effectful
 RCLDG1 record history needed for it, and there is no verified
