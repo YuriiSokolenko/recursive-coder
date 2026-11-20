@@ -181,6 +181,40 @@ class DefaultRunSessionUseCase(
     private val resumePreflight: SessionResumePreflight = DisabledResumePreflight,
     private val resumePreflightRunner: ResumePreflightRunner = ResumePreflightRunner()
 ) : RunSessionUseCase {
+
+    /**
+     * Trusted-host, handoff-only entry point. Deliberately separate from invoke():
+     * it MUST NOT open the runtime event sink, workspace or model, emit a
+     * terminal Session Protocol result, or transition into running.
+     * The host must independently authenticate C1 and publish durable C2.
+     * A returned receipt is NOT runtime execution/replay authority.
+     */
+    @TrustedSessionPreExecutionApi
+    fun publishTrustedCreatedAccepted(
+        request: SessionRequest,
+        cancellation: Cancellation,
+        host: TrustedSessionPreExecutionHost
+    ): TrustedSessionHandoffReceipt {
+        // This path uses cooperative cancellation only. Do NOT bind the
+        // caller's thread: Cancellation.cancel()/expire() would interrupt
+        // FileChannel.force/lock between the accepted append and durable C2,
+        // and a retained binding could interrupt unrelated work after return.
+        when (val decision = SessionAdmissionPolicy.decide(request.admissionFacts())) {
+            AdmissionDecision.Accepted -> Unit
+            is AdmissionDecision.Denied -> throw Refused(
+                decision.reason.code, decision.reason.category, decision.reason.message)
+        }
+        val now = clock.instant()
+        val deadline = SessionBudgetPolicy.effectiveDeadline(
+            now, request.deadline, request.budgets.longAt("maxWallTimeMs"))
+        SessionInterruptionGate.stopped(cancellation.signals(), now, deadline)
+            ?.let { throw it }
+        // No post-handoff execution or terminal write is permitted here.
+        // An exception may mean C2 committed: callers must reconcile read-only.
+        // One shared clock avoids competing runtime/host deadline observations.
+        return host.publishCreatedAccepted(request, cancellation, deadline, clock)
+    }
+
     override fun invoke(request: SessionRequest, cancellation: Cancellation): SessionExecutionResult {
         cancellation.bind()
         val started = clock.instant()

@@ -33,6 +33,21 @@ object SessionPhaseVocabulary {
 
 internal enum class SessionEndReason { SUCCESS, REFUSAL, CANCELLATION, TIMEOUT, FAILURE }
 
+/**
+ * Public, host-safe projection of the core session interruption precedence.
+ * Keeps timeout-before-cancel semantics consistent across Kotlin modules
+ * without exposing internal SessionEndReason or session lifecycle state.
+ * This is a pure decision and NEVER interrupts or binds a thread.
+ */
+object SessionInterruptionGate {
+    fun stopped(signals: CancellationSignals, now: Instant, deadline: Instant): Stopped? =
+        when (SessionBudgetPolicy.interruption(signals, now, deadline)) {
+            SessionEndReason.TIMEOUT -> Stopped(true)
+            SessionEndReason.CANCELLATION -> Stopped(false)
+            else -> null
+        }
+}
+
 internal sealed interface PhaseDecision {
     data object Allowed : PhaseDecision
     data object Denied : PhaseDecision

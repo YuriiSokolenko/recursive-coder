@@ -99,6 +99,17 @@ that two valid local filesystem types still cannot authorize resume.
 Neither test provides production runtime admission, effect reconciliation,
 or permission to resume writes (#104/#105).
 
+## Trusted runtime C1 -> C2 handoff-only integration (#104)
+
+`RuntimeTrustedCreatedAcceptedHandoffIntegrationTest` exercises the
+`DefaultRunSessionUseCase.publishTrustedCreatedAccepted` entry with a real
+host-verified C1, physical durable ledger, OS-fenced transition and C2.
+The model, workspace and normal runtime event sink are deliberately
+explosive fakes; the tests assert that none is reached and no Session
+Protocol result is written. Identity/CAS/protocol denial cases are checked
+before execution. This is a host-only metadata boundary, not a test of
+runtime execution fencing, stalled-fsync shutdown or crash-resume.
+
 ## Five-role coordinator tests (issue #79)
 
 `FiveRoleWorkflowCoordinatorUnitTest` (`@Tag("unit")`) runs scripted in-memory `FiveRoleStageActions` and `FiveRoleWorkflowHost` ports. It checks invalid plans including forbidden Developer targets, mismatched host snapshots, tentative vs confirmed commits, reconciliation denials, Reviewer stops and final graph attestation failures with exact codes/stages. `FiveRoleFakeModelWorkflowIntegrationTest` (`@Tag("integration")`) invokes the five real stage use cases through an in-memory fake host and fake tool sessions. **These fake-host tests alone do not establish authenticated receipts or Git transition security.** Direct `:infra:workspace`
