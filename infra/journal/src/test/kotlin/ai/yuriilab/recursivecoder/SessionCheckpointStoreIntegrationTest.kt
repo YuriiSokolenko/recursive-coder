@@ -1332,6 +1332,147 @@ class SessionCheckpointStoreIntegrationTest : SessionCheckpointTestFixture() {
             }.code)
     }
 
+    @Test fun filesystemTypeGatePrecedesAllResumeEntrypointMutations() {
+        createPreExecutionCheckpoint()
+        val checkpointDir = store()
+        val ledgerFile = ledger()
+        val checkpoint = checkpointDir.resolve("000000000001.rcp")
+        val checkpointBytes = Files.readAllBytes(checkpoint)
+        val ledgerBytes = Files.readAllBytes(ledgerFile)
+        fun names(path: Path): List<String> = Files.list(path).use { entries ->
+            entries.map { it.fileName.toString() }.sorted().toList()
+        }
+        val initialStore = names(checkpointDir)
+        val initialLedgerParent = names(ledgerFile.parent)
+        assertNull(ResumeFenceStorage.latest(checkpointDir))
+        assertFalse(Files.exists(checkpointDir.resolve("resume.lock")))
+
+        // These fault-only entrypoints delegate to the same checked paths as
+        // their public counterparts. No process-global filesystem override.
+        val operations = listOf<Pair<String, ((Path) -> String) -> Unit>>(
+            "admit" to { type ->
+                SessionResumeAdmission.admitWithFault(checkpointDir, context(),
+                    ledgerFile, resumeAttestation(), fileStoreType = type) {
+                    error("Admission must not publish an anchor")
+                }.close()
+            },
+            "currentGeneration" to { type ->
+                SessionResumeAdmission.currentGenerationWithFault(
+                    checkpointDir, context(), ledgerFile, type)
+            },
+            "reconciliationStatus" to { type ->
+                SessionResumeAdmission.reconciliationStatusWithFault(
+                    checkpointDir, context(), ledgerFile, type)
+            },
+            "reconcilePreparedAdmission" to { type ->
+                SessionResumeAdmission.reconcilePreparedWithFault(
+                    checkpointDir, context(), ledgerFile, resumeAttestation(),
+                    PreparedFenceReconciliation(1L, "f".repeat(64), "operator-one", true),
+                    fileStoreType = type) {
+                    error("Operator path must not publish an anchor")
+                }.close()
+            }
+        )
+        fun assertUnchanged() {
+            assertEquals(initialStore, names(checkpointDir))
+            assertEquals(initialLedgerParent, names(ledgerFile.parent))
+            assertContentEquals(checkpointBytes, Files.readAllBytes(checkpoint))
+            assertContentEquals(ledgerBytes, Files.readAllBytes(ledgerFile))
+            assertNull(ResumeFenceStorage.latest(checkpointDir))
+            assertFalse(Files.exists(checkpointDir.resolve("resume.lock")))
+            assertFalse(Files.exists(ledgerFile.resolveSibling(
+                "events.ledger.resume-anchor-000000000001.rca")))
+        }
+        for ((name, execute) in operations) {
+            for (rejected in listOf("checkpoint", "ledger")) {
+                val lookedUp = mutableListOf<Path>()
+                val injected: (Path) -> String = { path ->
+                    lookedUp.add(path)
+                    if (path == if (rejected == "checkpoint") checkpointDir
+                        else ledgerFile.parent) "fuse.sshfs" else "ext4"
+                }
+                val error = assertFailsWith<SessionResumeUnconfirmed>(
+                    "$name: $rejected must fail closed") { execute(injected) }
+                assertEquals("RESUME_FILESYSTEM_UNSUPPORTED", error.code)
+                assertEquals("checkpoint=" +
+                    (if (rejected == "checkpoint") "fuse.sshfs" else "ext4") +
+                    " ledger=" +
+                    (if (rejected == "ledger") "fuse.sshfs" else "ext4"),
+                    error.detail)
+                assertEquals(listOf(checkpointDir, ledgerFile.parent), lookedUp,
+                    "$name must inspect both filesystem mounts before locking")
+                assertUnchanged()
+            }
+        }
+    }
+
+    @Test fun filesystemTypeLookupErrorsRetainCauseAndDoNotPublish() {
+        createPreExecutionCheckpoint()
+        val checkpointDir = store()
+        val ledgerFile = ledger()
+        for (failed in listOf("checkpoint", "ledger")) {
+            val cause = java.io.IOException("simulated mount type inspection failure")
+            val error = assertFailsWith<SessionResumeUnconfirmed> {
+                SessionResumeAdmission.admitWithFault(checkpointDir, context(),
+                    ledgerFile, resumeAttestation(), fileStoreType = { path ->
+                        if (path == if (failed == "checkpoint") checkpointDir
+                            else ledgerFile.parent) throw cause
+                        "ext4"
+                    }) { error("Unexpected fence publication") }.close()
+            }
+            assertEquals("RESUME_FILESYSTEM_UNSUPPORTED", error.code)
+            assertSame(cause, error.cause)
+            assertEquals(
+                if (failed == "checkpoint") "checkpoint=lookup-failed ledger=ext4"
+                else "checkpoint=ext4 ledger=lookup-failed", error.detail)
+            assertFalse(Files.exists(checkpointDir.resolve("resume.lock")))
+            assertNull(ResumeFenceStorage.latest(checkpointDir))
+            assertFalse(Files.exists(ledgerFile.resolveSibling(
+                "events.ledger.resume-anchor-000000000001.rca")))
+        }
+    }
+
+    @Test fun filesystemFailuresFromBothVolumesRetainSuppressedCause() {
+        createPreExecutionCheckpoint()
+        val checkpointDir = store()
+        val ledgerFile = ledger()
+        val checkpointFailure = java.nio.file.FileSystemException(
+            checkpointDir.toString(), null, "checkpoint inspection failed")
+        val ledgerFailure = java.nio.file.FileSystemException(
+            ledgerFile.parent.toString(), null, "ledger inspection failed")
+        val rejected = assertFailsWith<SessionResumeUnconfirmed> {
+            SessionResumeAdmission.admitWithFault(checkpointDir, context(),
+                ledgerFile, resumeAttestation(), fileStoreType = { path ->
+                    if (path == checkpointDir) throw checkpointFailure
+                    throw ledgerFailure
+                }) { error("Unexpected fence publication") }.close()
+        }
+        assertEquals("RESUME_FILESYSTEM_UNSUPPORTED", rejected.code)
+        assertEquals("checkpoint=lookup-failed ledger=lookup-failed", rejected.detail)
+        assertSame(checkpointFailure, rejected.cause)
+        assertContentEquals(arrayOf(ledgerFailure), checkpointFailure.suppressed)
+        // Only typed, path-free fields may cross a future model/protocol boundary.
+        assertFalse(rejected.message!!.contains(checkpointDir.toString()))
+        assertFalse(rejected.message!!.contains(ledgerFile.parent.toString()))
+        assertFalse(Files.exists(checkpointDir.resolve("resume.lock")))
+        assertNull(ResumeFenceStorage.latest(checkpointDir))
+
+        // A pathological lookup may throw one shared instance for both paths.
+        // Self-suppression must not obscure the typed fail-closed rejection.
+        val shared = java.io.IOException("same lookup exception")
+        val same = assertFailsWith<SessionResumeUnconfirmed> {
+            SessionResumeAdmission.admitWithFault(checkpointDir, context(),
+                ledgerFile, resumeAttestation(), fileStoreType = { throw shared }) {
+                error("Unexpected fence publication")
+            }.close()
+        }
+        assertSame(shared, same.cause)
+        assertTrue(shared.suppressed.isEmpty())
+        assertEquals("RESUME_FILESYSTEM_UNSUPPORTED", same.code)
+        assertFalse(Files.exists(checkpointDir.resolve("resume.lock")))
+        assertNull(ResumeFenceStorage.latest(checkpointDir))
+    }
+
     @Test fun preflightChecksBothDirectoriesAndFailsClosedOnUnsupportedHardLinks() {
         createPreExecutionCheckpoint()
         // Both directories are independently probed; no shared mount required.
