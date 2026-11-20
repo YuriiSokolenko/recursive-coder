@@ -159,22 +159,27 @@ class DurableSessionEventLedger private constructor(
             "maxOutputTokens", "attempts", "turn", "httpStatus", "modelRequests",
             "evidenceCount", "grantTokens", "grantToolCalls", "spentTokens",
             "spentToolCalls", "delegatedTokens", "delegatedToolCalls",
-            "observedTokens", "observedToolCalls", "accountedTokens", "accountedToolCalls"
+            "observedTokens", "observedToolCalls", "accountedTokens", "accountedToolCalls",
+            // Read-only #105 effect-projection envelope (NOT executor authority).
+            "effectFenceGeneration", "effectRecordSequence"
         )
         private val BOOLEAN_KEYS = setOf(
             "physicalCompleted", "usageUncertain", "requiresReconciliation",
             "schedulerChargeRecorded"
         )
-        private val SHA_KEYS = setOf("sha256", "artifactSha256", "reviewedSha256")
+        private val SHA_KEYS = setOf("sha256", "artifactSha256", "reviewedSha256",
+            "effectInputSha256", "effectRecordMacSha256", "effectObservedStateSha256")
         private val ID_KEYS = setOf(
             "receiptId", "graphId", "parentGraphId", "childGraphId",
-            "stageRunId", "requestId", "artifactId", "budgetScopeGraphId"
+            "stageRunId", "requestId", "artifactId", "budgetScopeGraphId",
+            "effectOperationId"
         )
         private val TEXT_KEYS = setOf(
             "tool", "provider", "features", "deniedCode", "recursiveEvent",
             "roleEvent", "origin", "role", "kind", "stageState",
             "approval", "verdict", "reasonCode", "scope", "code",
-            "childResourceAudit", "recursiveStopCode"
+            "childResourceAudit", "recursiveStopCode",
+            "effectKind", "effectState", "effectErrorCode"
         )
         private val SAFE_EVENT_TYPES = setOf(
             "session.transition", "session.resumed", "agent.started",

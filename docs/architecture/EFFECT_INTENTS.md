@@ -337,6 +337,71 @@ CAS/tool state requires independent verification. Hence this PR enables
 no `ConfirmedCommitted`, `ProvenNotStarted`, automatic replay or stage
 acceptance.
 
+## Checkpoint-bound host evidence verifier (read-only adapter)
+
+`CheckpointBoundHostEffectEvidenceVerifier` implements the existing
+`HostEffectEvidenceVerifier` contract as a **host-only, read-only** adapter.
+It never enables an executor, a resumed write, a stage acceptance, or a
+`ProvenNotStarted` result. The operator/trusted host must construct it with
+a **live OS-fenced `SessionResumeLease`**, the exact checkpoint directory,
+ledger and sidecar paths, an external host secret key, a frozen expected
+`EffectIdentity` and `EffectJournalView`, and an
+`IndependentEffectStateProbe`. A probe must read actual external state
+from the proper trusted, effect-kind-specific host; returning the receipt
+or model-supplied digest is **not** independent confirmation.
+
+Every positive `authenticateCompleteJournal` rereads (rather than
+trusting caller-created DTOs): the complete validated RCLDG1 file,
+the canonical SHA-chained checkpoint/fence/anchor chain, the latest
+checkpoint's bound physical v2 head, and the **entire HMAC-authenticated,
+exact-pin RCEFX1** sidecar with its closed OS writer. It compares the
+RCLDG1 last sequence and head SHA with the checkpoint and supplied
+`EffectJournalView`. It then reconstructs the **entire** RCLDG1 effect
+projection from strict metadata envelopes and requires one-to-one,
+in-order equality of each record identity, physical RCEFX1 sequence,
+record variant, actual host MAC, and observed digest/error code.
+There is no caller-supplied filtering and no acceptance of a partial
+projection, missing event, duplicate, unmarked tool start/completion,
+torn tail, live writer, stale lease, wrong key, forged MAC or extra sidecar
+frame. Any unavailable evidence returns false; `EffectReconciliationPolicy`
+then quarantines it.
+
+The canonical RCLDG1 effect envelope uses only whitelisted scalar
+metadata: `effectOperationId`, `effectFenceGeneration`,
+`effectKind`, `effectInputSha256`, `effectRecordSequence`,
+`effectRecordMacSha256`, `effectState`, plus
+`effectObservedStateSha256` for `committed` or `effectErrorCode`
+for `unconfirmed`. These names have been added to the *host ledger
+safety allowlist*, **not** to the pre-execution admission whitelist.
+Only exact `tool.started/started` (for intent/started),
+`tool.completed/completed` (for committed) or
+`session.error/failed` (for unconfirmed) forms are accepted.
+Session events may interleave with non-effect metadata; their sequence
+numbers need not equal RCEFX1 record positions. Each effect envelope
+must name the exact contiguous RCEFX1 sequence and HMAC.
+
+`independentlyVerifyCommitted` additionally rechecks the full physical
+projection, exact `Intent → Started → Committed` triple for that
+operation, and a fresh external state digest from
+`IndependentEffectStateProbe`. It never accepts the mere presence of
+`Committed` as external proof. `independentlyVerifyNotStarted`
+**always returns false**: no independent actual no-start execution
+barrier yet exists. The view's historical issuing generation and its
+current fenced lease are not interchangeable.
+
+**Limits:** the production runtime still cannot emit or checkpoint
+mutating effect events through the pre-execution policy, and no
+effect-kind-specific `IndependentEffectStateProbe` production adapter
+is wired. The present integration tests cover real **genesis** physical
+provenance and fail-closed paths; isolated projection tests cover
+fully matched vs missing/tampered records. This PR does **not** claim
+that end-to-end external effects can be positively classified or safely
+recovered today. Before activation, implement the specific host probes,
+enforce actual production `Intent → Started → effect → receipt` ordering,
+independent no-start barriers and rollback-resistant authority. A
+coherent rollback of the entire checkpoint/fence/anchor/RCEFX1 root
+remains outside the protection of this adapter.
+
 ## Deferred work and acceptance
 
 The existing checkpoint `pendingEffects` and pre-execution fenced ledger
