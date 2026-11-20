@@ -18,7 +18,7 @@ tasks.register("verifyRunningHostOptIn") {
     doLast {
         val compilerClasspath = configurations.getByName("kotlinCompilerClasspath").asPath
         val applicationClasspath = sourceSets["main"].runtimeClasspath.asPath
-        val javaBin = java.io.File(System.getProperty("java.home"), "bin/java").absolutePath
+        val javaBin = file(System.getProperty("java.home") + "/bin/java").absolutePath
 
         fun compile(fixture: String): Pair<Int, String> {
             val name = fixture.removeSuffix(".kt")
