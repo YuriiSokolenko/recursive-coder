@@ -74,6 +74,18 @@ data class VerifiedEffectRecordJournal(
 )
 
 /**
+ * A physical exact-pin match against a CALLER-SUPPLIED pin, not an
+ * authenticated checkpoint head. Intentionally omits entries and cannot
+ * serve as a recovery/commit/no-start proof or replay authorization.
+ */
+data class EffectJournalPinDiagnostic(
+    val lastSequence: Long,
+    val headMacSha256: String,
+    val fileSha256: String,
+    val byteLength: Long
+)
+
+/**
  * One canonical normalized-absolute sidecar locator fingerprint, shared by
  * the trusted pin publisher and its checkpoint-bound reader.
  */
@@ -451,29 +463,43 @@ class DurableEffectRecordJournal private constructor(
             expectedToolAuthoritySha256, allowTornTail = true)
 
         /**
-         * Require the exact head that the trusted host pinned BEFORE any
-         * external effect. The caller must load that expectation from a
-         * separately authenticated, durable checkpoint/authority root.
-         * This method NEVER derives a pin from the sidecar and cannot prove
-         * that the supplied pin itself was durably committed.
-         *
-         * A valid extra frame (for example, after a crash between sidecar
-         * fsync and checkpoint-pin publication) also fails closed.
-         * The operator diagnostics API may inspect such a frame, but cannot
-         * authorize a retry, reconciliation or checkpoint acceptance.
+         * Diagnostics ONLY: compare the physical journal with a raw, arbitrary
+         * caller-supplied pin. Even an exact match does NOT authenticate pin
+         * provenance or prove that a valid post-pin suffix never existed.
+         * This API deliberately returns no effect entries or authority-bearing
+         * object. Only SessionCheckpointStore may authenticate a pin from the
+         * checkpoint/fence/anchor root, and even that root is not yet
+         * independently rollback-resistant.
          */
-        fun inspectBound(
+        fun inspectPinnedForDiagnostics(
             path: Path, workspaceRoot: Path, hostKey: ByteArray,
-            expected: EffectJournalExpectation, trustedPin: EffectJournalHeadPin
-        ): VerifiedEffectRecordJournal {
-            if (trustedPin.lastSequence < 0L ||
-                !digestPattern.matches(trustedPin.headMacSha256))
-                refuse("EFFECT_JOURNAL_PIN_INVALID")
+            expected: EffectJournalExpectation, callerPin: EffectJournalHeadPin
+        ): EffectJournalPinDiagnostic {
+            requireValidPin(callerPin)
             val journal = inspect(path, workspaceRoot, hostKey, expected)
-            if (journal.lastSequence != trustedPin.lastSequence ||
-                journal.headMacSha256 != trustedPin.headMacSha256)
+            requireExactPin(journal, callerPin)
+            return EffectJournalPinDiagnostic(journal.lastSequence,
+                journal.headMacSha256, journal.fileSha256, journal.byteLength)
+        }
+
+        /**
+         * Physical equality only; NOT a provenance check. Keep both
+         * store-authenticated and diagnostic comparisons identical without
+         * granting any caller a capability or returning a promoted journal.
+         */
+        internal fun requireValidPin(pin: EffectJournalHeadPin) {
+            if (pin.lastSequence < 0L ||
+                !digestPattern.matches(pin.headMacSha256))
+                refuse("EFFECT_JOURNAL_PIN_INVALID")
+        }
+
+        internal fun requireExactPin(
+            physical: VerifiedEffectRecordJournal, pin: EffectJournalHeadPin
+        ) {
+            requireValidPin(pin)
+            if (physical.lastSequence != pin.lastSequence ||
+                physical.headMacSha256 != pin.headMacSha256)
                 refuse("EFFECT_JOURNAL_PIN_MISMATCH")
-            return journal
         }
 
         private fun inspectInternal(

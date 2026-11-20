@@ -45,16 +45,26 @@ internal object EffectEvidenceProjection {
         data class Denied(val code: String) : Result
     }
 
+    /**
+     * Authority-relevant projection ONLY. The physical input must have
+     * passed checkpoint/fence/anchor pin authentication in the store.
+     * This still does not authorize effects, replay, or recovery.
+     */
     fun fromSessionLedger(
-        events: List<JsonObject>, physical: VerifiedEffectRecordJournal
+        events: List<JsonObject>, authenticated: CheckpointAuthenticatedEffectJournal
     ): List<EffectJournalEntry>? =
-        (inspect(events, physical) as? Result.Verified)?.entries
+        (inspectPhysical(events, authenticated.physical) as? Result.Verified)?.entries
 
     /**
-     * Diagnostic classification only. An explicit denial code does NOT grant
-     * an operator permission to ignore a failed physical authenticity check.
+     * Diagnostic classification only. Raw MAC-valid physical journals may
+     * be passed here, but the result is never checkpoint-authenticated
+     * authority and MUST NOT be used by an execution/recovery reader.
      */
-    fun inspect(
+    fun inspectForDiagnostics(
+        events: List<JsonObject>, physical: VerifiedEffectRecordJournal
+    ): Result = inspectPhysical(events, physical)
+
+    private fun inspectPhysical(
         events: List<JsonObject>, physical: VerifiedEffectRecordJournal
     ): Result {
         fun deny(code: String): Result.Denied = Result.Denied(code)

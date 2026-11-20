@@ -321,14 +321,14 @@ class DurableEffectRecordJournalIntegrationTest : SessionCheckpointTestFixture()
                 trusted = EffectJournalHeadPin(receipt.sequence, receipt.hostMacSha256)
             }
         }
-        assertEquals(2L, DurableEffectRecordJournal.inspectBound(
+        assertEquals(2L, DurableEffectRecordJournal.inspectPinnedForDiagnostics(
             path(), workspace(), key, expectation(), trusted).lastSequence)
         denied("EFFECT_JOURNAL_PIN_MISMATCH") {
-            DurableEffectRecordJournal.inspectBound(path(), workspace(), key,
+            DurableEffectRecordJournal.inspectPinnedForDiagnostics(path(), workspace(), key,
                 expectation(), trusted.copy(headMacSha256 = "0".repeat(64)))
         }
         denied("EFFECT_JOURNAL_PIN_INVALID") {
-            DurableEffectRecordJournal.inspectBound(path(), workspace(), key,
+            DurableEffectRecordJournal.inspectPinnedForDiagnostics(path(), workspace(), key,
                 expectation(), trusted.copy(lastSequence = -1L))
         }
         val raw = Files.readAllBytes(path())
@@ -341,11 +341,52 @@ class DurableEffectRecordJournalIntegrationTest : SessionCheckpointTestFixture()
         Files.write(path(), raw.copyOf(offset), StandardOpenOption.TRUNCATE_EXISTING)
         assertEquals(1L, inspectEffects().lastSequence)
         denied("EFFECT_JOURNAL_PIN_MISMATCH") {
-            DurableEffectRecordJournal.inspectBound(
+            DurableEffectRecordJournal.inspectPinnedForDiagnostics(
                 path(), workspace(), key, expectation(), trusted)
         }
-        // There is no independent durable pin in the checkpoint schema yet.
-        // The fixture's 'trusted' value stands in for an externally stored pin.
+        // This fixture checks physical equality to a test-owned pin only.
+        // Production authority instead comes from SessionCheckpointStore,
+        // and its checkpoint root still lacks independent rollback resistance.
+    }
+
+    @Test fun attackerSelfPinMatchesValidSuffixAndRolledBackGenesisButIsOnlyDiagnostic() {
+        lateinit var genesis: ByteArray
+        lateinit var genesisPin: EffectJournalHeadPin
+        withLease { lease ->
+            open(lease).use { journal ->
+                genesis = Files.readAllBytes(path())
+                genesisPin = journal.headPin()
+                journal.append(intent())
+            }
+        }
+        // The writer owns an exclusive lock. An attacker can only inspect
+        // the complete suffix after the writer closes, not during append.
+        val suffix = inspectEffects()
+        val selfPin = EffectJournalHeadPin(suffix.lastSequence, suffix.headMacSha256)
+        // The caller can pin its own observed suffix. A successful physical
+        // check says nothing about checkpoint authority or external effects.
+        val selfPinned = DurableEffectRecordJournal.inspectPinnedForDiagnostics(
+            path(), workspace(), key, expectation(), selfPin)
+        assertEquals(1L, selfPinned.lastSequence)
+        assertEquals(selfPin.headMacSha256, selfPinned.headMacSha256)
+        denied("EFFECT_JOURNAL_PIN_MISMATCH") {
+            DurableEffectRecordJournal.inspectPinnedForDiagnostics(
+                path(), workspace(), key, expectation(), genesisPin)
+        }
+
+        // Coherent, valid-MAC suffix rollback reproduces the pre-existing
+        // indistinguishability gap: the old self-pin matches perfectly.
+        Files.write(path(), genesis, StandardOpenOption.TRUNCATE_EXISTING,
+            StandardOpenOption.WRITE)
+        val rolledBack = DurableEffectRecordJournal.inspectPinnedForDiagnostics(
+            path(), workspace(), key, expectation(), genesisPin)
+        assertEquals(0L, rolledBack.lastSequence)
+        assertEquals(genesisPin.headMacSha256, rolledBack.headMacSha256)
+        denied("EFFECT_JOURNAL_PIN_MISMATCH") {
+            DurableEffectRecordJournal.inspectPinnedForDiagnostics(
+                path(), workspace(), key, expectation(), selfPin)
+        }
+        // Neither diagnostic match may be used as no-start, commit or replay proof.
     }
 
     @Test fun validUnpinnedExtraFrameMustNotBePromotedToCommittedHead() {
@@ -359,7 +400,7 @@ class DurableEffectRecordJournalIntegrationTest : SessionCheckpointTestFixture()
         }
         assertEquals(2L, inspectEffects().lastSequence)
         denied("EFFECT_JOURNAL_PIN_MISMATCH") {
-            DurableEffectRecordJournal.inspectBound(
+            DurableEffectRecordJournal.inspectPinnedForDiagnostics(
                 path(), workspace(), key, expectation(), prior)
         }
     }
