@@ -1085,24 +1085,62 @@ object SessionCheckpointStore {
         val verified = inspect(directory, context, ledgerPath)
         val head = verified.snapshot.effectJournalHead
             ?: refuse("CHECKPOINT_EFFECT_HEAD_MISSING")
-        return inspectEffectHeadBound(head, sidecarPath, context.workspaceRoot, hostKey)
+        return inspectAuthenticatedEffectHead(
+            AuthenticatedEffectHead(head), sidecarPath, context.workspaceRoot, hostKey)
     }
 
     /**
-     * Common exact-path and independently HMAC-pinned physical inspection.
-     * Callers MUST first authenticate the supplied head via the complete
-     * checkpoint/fence/anchor chain; this method grants NO recovery authority.
-     * Shared by the current-v2 reader and the historical sealed-v3 verifier.
+     * A capability local to the trusted checkpoint store. Neither the type
+     * nor its constructor is exposed to callers. In particular a caller
+     * cannot turn an RCEFX1-derived head into an authenticated pin.
+     */
+    private class AuthenticatedEffectHead(val pinned: CheckpointEffectJournalHead)
+
+    /**
+     * The only internal historical/current verifier entrypoint. It derives
+     * the trusted head from fresh on-disk checkpoint/fence/anchor inspection
+     * and the actual current lease, never from a caller-supplied head or
+     * a public VerifiedSessionCheckpoint data class.
+     *
+     * `expectedCheckpointSha256` is a TOCTOU equality check, NOT authority.
+     * A stale lease, a changed checkpoint, a mismatching policy, or an
+     * invalid v3 seal throws; the read-only verifier maps such exceptions
+     * to denial. This does NOT authorize effect execution or replay.
      */
     @OptIn(ResumeOperatorOnlyApi::class)
-    internal fun inspectEffectHeadBound(
-        head: CheckpointEffectJournalHead, sidecarPath: Path,
+    internal fun inspectEffectHeadForLease(
+        directory: Path, context: CheckpointHostContext,
+        ledgerPath: Path, sidecarPath: Path, hostKey: ByteArray,
+        lease: SessionResumeLease, boundIdentity: EffectIdentity,
+        expectedCheckpointSha256: String
+    ): VerifiedEffectRecordJournal {
+        lease.assertCurrent()
+        lease.requireLedgerPath(ledgerPath)
+        val verified = inspect(directory, context, ledgerPath)
+        if (verified.sha256 != expectedCheckpointSha256)
+            refuse("CHECKPOINT_EFFECT_HEAD_CHECKPOINT_CHANGED")
+        val head = CheckpointBoundEffectHeadPolicy.authenticatedHead(
+            verified, lease.generation, lease.admittedCheckpointSha256,
+            boundIdentity, hostKey) ?: refuse("CHECKPOINT_EFFECT_HEAD_UNAUTHENTICATED")
+        return inspectAuthenticatedEffectHead(
+            AuthenticatedEffectHead(head), sidecarPath, context.workspaceRoot, hostKey)
+    }
+
+    /**
+     * One physical reader for current v2 and historical v3. A raw checkpoint
+     * head is not accepted: the private capability is minted only in the two
+     * verified entrypoints above.
+     */
+    @OptIn(ResumeOperatorOnlyApi::class)
+    private fun inspectAuthenticatedEffectHead(
+        head: AuthenticatedEffectHead, sidecarPath: Path,
         workspaceRoot: Path, hostKey: ByteArray
     ): VerifiedEffectRecordJournal {
-        if (head.sidecarPathSha256 != effectJournalPathSha256(sidecarPath))
+        val pinned = head.pinned
+        if (pinned.sidecarPathSha256 != effectJournalPathSha256(sidecarPath))
             refuse("CHECKPOINT_EFFECT_HEAD_PATH_MISMATCH")
         return DurableEffectRecordJournal.inspectBound(
-            sidecarPath, workspaceRoot, hostKey, head.expectation(), head.pin())
+            sidecarPath, workspaceRoot, hostKey, pinned.expectation(), pinned.pin())
     }
 
     fun saveFromOpenLedgerFenced(lease: SessionResumeLease, directory: Path,
