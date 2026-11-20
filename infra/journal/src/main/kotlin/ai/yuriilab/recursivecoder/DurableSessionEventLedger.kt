@@ -712,9 +712,17 @@ class DurableSessionEventLedger private constructor(
             snapshot.journalHeadSha256 != anchor.headSha256 ||
             snapshot.journalFileSha256 != anchor.fileSha256 ||
             snapshot.lastTrustedJournalOffset != anchor.lastTrustedOffset ||
-            !PreExecutionSnapshotPolicy.safe(snapshot) ||
-            PreExecutionPhasePolicy.phaseFromVerifiedHistory(
-                snapshot.phase, anchor.events) != committedPhase)
+            !(
+                (PreExecutionSnapshotPolicy.safe(snapshot) &&
+                    PreExecutionPhasePolicy.phaseFromVerifiedHistory(
+                        snapshot.phase, anchor.events) == committedPhase) ||
+                (snapshot.phase == "running" && snapshot.taskState == "ready" &&
+                    snapshot.effectJournalHead == null &&
+                    snapshot.effectReconciliation == null &&
+                    PreExecutionSnapshotPolicy.safe(snapshot.copy(phase = "accepted")) &&
+                    TrustedRunningBoundaryPolicy.phaseFromVerifiedHistory(
+                        snapshot.phase, anchor.events) == committedPhase)
+            ))
             throw SessionLedgerUnconfirmed("LEDGER_REOPEN_CHECKPOINT_MISMATCH")
     }
 
@@ -743,11 +751,20 @@ class DurableSessionEventLedger private constructor(
     fun appendFenced(event: JsonObject) = appendFencedWithFault(event) { }
 
     /**
+     * Host-authorized one-way metadata transition. This does not activate any
+     * executor. Ordinary appendFenced remains pre-execution-only.
+     */
+    @TrustedRunningBoundaryApi
+    fun appendTrustedAcceptedRunning(event: JsonObject) =
+        appendFencedWithFault(event, allowRunningBoundary = true) { }
+
+    /**
      * Integration-test-only seam. Deliberately internal: production hosts must
      * never execute arbitrary callbacks while owning the resume lease monitor.
      */
     @LedgerTestFaultInjection
-    internal fun appendFencedWithFault(event: JsonObject, afterPhase: (String) -> Unit) {
+    internal fun appendFencedWithFault(event: JsonObject,
+        allowRunningBoundary: Boolean = false, afterPhase: (String) -> Unit) {
         val currentLease = resumeLease
             ?: throw SessionLedgerUnconfirmed("LEDGER_NOT_FENCED")
         try {
@@ -770,7 +787,9 @@ class DurableSessionEventLedger private constructor(
                         throw SessionLedgerUnconfirmed("LEDGER_REOPEN_CHECKPOINT_MISMATCH")
                     }
                     val phase = committedPhase ?: throw FencedPolicyRefusal()
-                    val nextPhase = PreExecutionPhasePolicy.step(event, phase)
+                    val nextPhase = (if (allowRunningBoundary)
+                        TrustedRunningBoundaryPolicy.step(event, phase)
+                    else PreExecutionPhasePolicy.step(event, phase))
                         ?: throw FencedPolicyRefusal()
                     if (!FencedGraphMetadataPolicy.permittedFencedGraphMetadata(
                             event, fencedGraphId ?: throw FencedPolicyRefusal()))
