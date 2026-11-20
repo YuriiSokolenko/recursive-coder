@@ -49,3 +49,18 @@ fun interface TrustedSessionPreExecutionHost {
         clock: Clock
     ): TrustedSessionHandoffReceipt
 }
+
+/**
+ * A separate, trusted-only continuation after physical C2, not a resume API.
+ * Publication of C3 is deliberately terminal for automated admission until
+ * #105 proves authenticated execution, receipts and external reconciliation.
+ */
+@TrustedRunningBoundaryApi
+fun interface TrustedSessionRunningHost {
+    fun publishAcceptedRunning(
+        request: SessionRequest,
+        cancellation: Cancellation,
+        deadline: Instant,
+        clock: Clock
+    ): TrustedSessionHandoffReceipt
+}
