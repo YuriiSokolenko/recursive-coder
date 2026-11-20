@@ -43,6 +43,16 @@ class TrustedRunningBoundaryPolicyUnitTest {
                 put("graphId", "graph-root")
                 put("receiptId", "effect-one")
             })
+        val unknownNullActorKey = JsonObject(root.toMutableMap().also {
+            it["actor"] = JsonObject(root["actor"]!!.jsonObject.toMutableMap().also { fields ->
+                fields["futureActorField"] = JsonNull
+            })
+        })
+        val missingActorKey = JsonObject(root.toMutableMap().also {
+            it["actor"] = JsonObject(root["actor"]!!.jsonObject.toMutableMap().also { fields ->
+                fields.remove("childSessionId")
+            })
+        })
         val withTiming = JsonObject(root.toMutableMap().also {
             it["timing"] = buildJsonObject { put("startedAt", "2026-11-20T12:00:00Z") }
         })
@@ -51,7 +61,8 @@ class TrustedRunningBoundaryPolicyUnitTest {
             frame(3, "session.transition", "accepted" to "accepted"),
             frame(3, "session.transition"),
             frame(3, "tool.started", "accepted" to "running"),
-            child, wrongActor, withReceipt, withTiming
+            child, wrongActor, withReceipt, withTiming,
+            unknownNullActorKey, missingActorKey
         )) assertNull(TrustedRunningBoundaryPolicy.step(invalid, "accepted"))
         assertNull(TrustedRunningBoundaryPolicy.step(root, "created"))
         assertNull(TrustedRunningBoundaryPolicy.step(root, "running"))
