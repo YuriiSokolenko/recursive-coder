@@ -188,13 +188,20 @@ internal object CommittedEffectStatePolicy {
 }
 
 /**
- * Internal selection policy only. This does NOT authenticate any physical
- * evidence: production must first call SessionCheckpointStore.inspect() and
- * afterwards inspectEffectHeadBound() on the returned head.
+ * Pure head-selection policy, NOT a verified-head capability. A public
+ * VerifiedSessionCheckpoint can be constructed by a caller; its presence
+ * here therefore conveys NO authority. Only SessionCheckpointStore can
+ * turn the result into its private AuthenticatedEffectHead, after a fresh
+ * real on-disk inspect() and live-lease check.
  *
- * This pure seam keeps the historical v3 host-MAC check independently
- * testable even though a forged v3 checkpoint would be rejected earlier
- * by the actual on-disk checkpoint chain.
+ * Returns null for ordinary authority mismatches; throws
+ * SessionResumeUnconfirmed for an invalid v3 host-key seal. The trusted
+ * inspection entrypoint propagates both denials as typed failures;
+ * CheckpointBoundHostEffectEvidenceVerifier.recheck() catches Exception
+ * and fails closed without permitting effect execution.
+ *
+ * This pure seam makes the v3 MAC independently unit-testable without
+ * giving fixtures or other callers access to a physical pin inspector.
  */
 internal object CheckpointBoundEffectHeadPolicy {
     fun authenticatedHead(
@@ -286,20 +293,19 @@ class CheckpointBoundHostEffectEvidenceVerifier(
         return try {
         lease.assertCurrent()
         val checkpoint = SessionCheckpointStore.inspect(directory, context, ledgerPath)
-        val head = CheckpointBoundEffectHeadPolicy.authenticatedHead(
-            checkpoint, lease.generation, lease.admittedCheckpointSha256,
-            boundIdentity, key) ?: return null
+
         val sessionEvents = DurableSessionEventLedger.inspect(ledgerPath)
         if (boundView.headSha256 != sessionEvents.headSha256 ||
             boundView.lastSequence != sessionEvents.lastSequence.toLong() ||
             checkpoint.snapshot.journalHeadSha256 != sessionEvents.headSha256 ||
             checkpoint.snapshot.journalSequence.toLong() != sessionEvents.lastSequence.toLong())
             return null
-        // The selected head comes only from an authenticated current v2 or
-        // operator-sealed historical v3. Both use the same exact-path,
-        // complete physical HMAC-pinned reader, never a caller-selected pin.
-        val physical = SessionCheckpointStore.inspectEffectHeadBound(
-            head, sidecarPath, context.workspaceRoot, key)
+        // Reinspect the actual checkpoint and live lease before minting the
+        // private authenticated-head capability. No raw head or sidecar-derived
+        // pin can enter the physical reader from this calling module.
+        val physical = SessionCheckpointStore.inspectEffectHeadForLease(
+            directory, context, ledgerPath, sidecarPath, key,
+            lease, boundIdentity, checkpoint.sha256)
         val observed = EffectEvidenceProjection.fromSessionLedger(
             sessionEvents.events, physical) ?: return null
         if (observed != boundView.entries) return null
