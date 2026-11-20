@@ -64,13 +64,21 @@ fixed record ancestry, but does not have the HMAC key and **cannot**
 authenticate a host seal on its own. The seal is load-bearing at the
 reconciliation entry and especially in the **v3-committed / N+1-fence-
 uncommitted** crash window. After N+1 fence publication, that fence
-binds the immutable v3 bytes. While v3 is the latest checkpoint it
-remains `reconciliationRequired = true` and regular `admit()` refuses.
-After N+1's active lease publishes an ordinary unpinned pre-execution
-checkpoint, that latest snapshot may again be admitted normally; the
-historical v3 stays in the checked chain. The lease alone is still not
-permission to retry effects, run tools, classify a `Committed` receipt
-or accept a stage.
+binds the immutable v3 bytes. While v3 is the latest checkpoint **and the first successor fence
+N+1 is not committed**, it remains `reconciliationRequired = true`;
+a merely PREPARED anchor or an uncommitted fence does not clear that
+flag. Once the verified N+1 fence binds **the exact v3 SHA**, `readAll`
+can report the latest v3 as reconciliation-complete (unless there is
+independent unknown usage or another pending effect). Ordinary
+`admit()` may then create a subsequent read-only pre-execution lease
+(e.g. N+2) directly from v3, **even if the host crashed before N+1
+could publish its first ordinary checkpoint**. Later ordinary v1
+or newly pinned v2 checkpoints require that N+1 fence to exist; their
+physical effect head must also be issued by its own currently fenced
+generation, which may be N+2 or later, not necessarily N+1.
+All SHA-linked historical v3 evidence remains present and verified.
+No lease is permission to retry effects, run tools, classify a
+`Committed` receipt or accept a stage.
 
 Checkpoint and fence validation remains O(fence generations) in the
 read path (bounded by the shared `ResumeFenceStorage.MAX_FENCES = 256`).

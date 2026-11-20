@@ -282,9 +282,17 @@ protects its bytes.
 The v3 record belongs **only to the transition checkpoint**. Successors
 must omit it and return to canonical v1 or v2; `readAll` verifies their
 immediate v3 predecessor and the committed N+1 fence that pins the
-transition SHA. With an ordinary, unpinned and pre-execution successor,
-normal `admit()` can operate again. A current pinned v2 still blocks
-normal admission. This extends the #128 transition rules only at
+transition SHA. Even **without** a successor checkpoint, once fence
+N+1 is durably committed and pins the exact v3 SHA, the latest v3 no
+longer requires another operator reconciliation: ordinary `admit()`
+may acquire a pre-execution lease N+2. This survives a host crash after
+the N+1 fence but before the first checkpoint under its lease.
+An N+1 anchor at PREPARE alone is *not* sufficient. Later ordinary
+or newly pinned checkpoints are accepted only if the N+1 fence pins
+the v3 SHA, and a new v2 head is issued by its **own** existing fence
+(N+2 or later), never inferred from the historical pin.
+A current pinned v2 still blocks normal admission. This extends the
+#128 transition rules only at
 an explicit, independently verified boundary, not by accepting
 arbitrary dropped pins.
 

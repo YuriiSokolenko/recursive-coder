@@ -84,7 +84,8 @@ class GenesisEffectReconciliationIntegrationTest : SessionCheckpointTestFixture(
             assertEquals(0L, record.sourceHead.lastSequence)
             assertEquals("operator-one", record.operatorId)
             assertEquals(64, record.hostSealMacSha256.length)
-            assertTrue(transition.reconciliationRequired)
+            // The committed N+1 fence pins the transition bytes.
+            assertFalse(transition.reconciliationRequired)
             assertTrue(SessionCheckpointCodec.encode(transition.snapshot)
                 .toString(StandardCharsets.UTF_8).contains("\"version\":3"))
             assertEquals(transition.snapshot,
@@ -111,6 +112,64 @@ class GenesisEffectReconciliationIntegrationTest : SessionCheckpointTestFixture(
             }.code)
         assertEquals(4L, inspect().snapshot.sequence)
         assertEquals(2L, ResumeFenceStorage.latest(store())!!.generation)
+    }
+
+    @Test fun committedSuccessorFenceAllowsNPlusTwoAdmissionWithoutIntermediateCheckpoint() {
+        val ready = pinnedGenesis()
+        reconcile(ready).use { lease ->
+            assertEquals(2L, lease.generation)
+            assertFalse(inspect().reconciliationRequired)
+        }
+        // Simulate a host disappearing immediately after it receives lease
+        // N+1, without ever publishing the first ordinary checkpoint.
+        assertEquals(3L, inspect().snapshot.sequence)
+        assertEquals(2L, ResumeFenceStorage.latest(store())!!.generation)
+        lateinit var c4: VerifiedSessionCheckpoint
+        SessionResumeAdmission.admit(
+            store(), context(), ledger(), resumeAttestation(2L)).use { lease ->
+            assertEquals(3L, lease.generation)
+            val c3 = inspect()
+            assertNotNull(c3.snapshot.effectReconciliation)
+            assertFalse(c3.reconciliationRequired)
+            c4 = SessionCheckpointStore.saveFenced(lease, store(), context(),
+                ledger(), advanced(c3), c3.sha256)
+            assertEquals(4L, c4.snapshot.sequence)
+            assertNull(c4.snapshot.effectReconciliation)
+            assertNull(c4.snapshot.effectJournalHead)
+            assertFalse(c4.reconciliationRequired)
+        }
+        // The first fence after v3 remains N+1, but current fence is N+2:
+        // both the normal writer and readAll must accept this history.
+        assertEquals(c4.sha256, inspect().sha256)
+        SessionResumeAdmission.admit(
+            store(), context(), ledger(), resumeAttestation(3L)).use { lease ->
+            assertEquals(4L, lease.generation)
+            assertEquals(c4.sha256, lease.admittedCheckpointSha256)
+        }
+    }
+
+    @Test fun laterGenerationCanCreateFirstNewPhysicalPinDirectlyAfterV3() {
+        val ready = pinnedGenesis()
+        reconcile(ready).use { lease -> assertEquals(2L, lease.generation) }
+        SessionResumeAdmission.admit(
+            store(), context(), ledger(), resumeAttestation(2L)).use { lease ->
+            assertEquals(3L, lease.generation)
+            val c3 = inspect()
+            head(lease).use { journal ->
+                val c4 = SessionCheckpointStore.saveEffectHeadFenced(
+                    lease, store(), context(), ledger(), journal,
+                    advanced(c3), c3.sha256)
+                assertEquals(3L, c4.snapshot.effectJournalHead!!.fenceGeneration)
+                assertNull(c4.snapshot.effectReconciliation)
+            }
+        }
+        assertEquals(3L, inspect().snapshot.effectJournalHead!!.fenceGeneration)
+        assertTrue(inspect().reconciliationRequired)
+        assertEquals("RESUME_UNSAFE_BOUNDARY",
+            assertFailsWith<SessionResumeUnconfirmed> {
+                SessionResumeAdmission.admit(
+                    store(), context(), ledger(), resumeAttestation(3L))
+            }.code)
     }
 
     @Test fun ordinaryCheckpointAfterV3CanBeAdmittedInNextGeneration() {
@@ -159,6 +218,14 @@ class GenesisEffectReconciliationIntegrationTest : SessionCheckpointTestFixture(
         val prepared = PreparedFenceReconciliation(
             status.generation, status.fenceSha256,
             "operator-one", operatorApproved = true)
+        // Prepared-fence reconciliation alone must not bless an uncommitted
+        // genesis v3; both the host seal and physical sidecar are required.
+        assertEquals("RESUME_UNSAFE_BOUNDARY",
+            assertFailsWith<SessionResumeUnconfirmed> {
+                SessionResumeAdmission.reconcilePreparedAdmission(
+                    store(), context(), ledger(), resumeAttestation(1L),
+                    prepared).close()
+            }.code)
         assertFailsWith<SessionResumeUnconfirmed> {
             SessionResumeAdmission.reconcilePreparedGenesisEffectHead(
                 store(), context(), ledger(), path(), key,
@@ -334,6 +401,7 @@ class GenesisEffectReconciliationIntegrationTest : SessionCheckpointTestFixture(
         assertEquals("RESUME_ADMISSION_UNCONFIRMED", failure.code)
         val durable = inspect()
         assertEquals(3L, durable.snapshot.sequence)
+        assertTrue(durable.reconciliationRequired)
         assertNull(durable.snapshot.effectJournalHead)
         assertNotNull(durable.snapshot.effectReconciliation)
         assertEquals(1L, ResumeFenceStorage.latest(store())!!.generation)

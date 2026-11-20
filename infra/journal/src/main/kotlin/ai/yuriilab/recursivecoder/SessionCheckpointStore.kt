@@ -627,12 +627,12 @@ object SessionCheckpointStore {
                 newRec.sourceFenceGeneration == oldHead.fenceGeneration
         }
         prior.effectReconciliation?.let { transition ->
-            // After the v3 boundary, generation N+1 may publish an ordinary
-            // v1 checkpoint, or a new v2 head from its own live writer.
-            // The successor fence must pin the v3 SHA (verified separately).
+            // The one-shot v3 may be followed after any later admitted fence.
+            // Generation N+1 MUST have committed the exact v3 SHA; a later
+            // v2 head must be issued by its own (possibly N+2+) fence.
             return next.effectJournalHead == null ||
-                next.effectJournalHead.fenceGeneration ==
-                    transition.sourceFenceGeneration + 1L
+                next.effectJournalHead.fenceGeneration >
+                    transition.sourceFenceGeneration
         }
         val old = prior.effectJournalHead ?: return true
         val current = next.effectJournalHead ?: return false
@@ -726,7 +726,8 @@ object SessionCheckpointStore {
                     successor.traceId != s.traceId ||
                     successor.policySha256 != s.binding.policySha256 ||
                     (s.effectJournalHead != null &&
-                        s.effectJournalHead.fenceGeneration != nextGeneration))
+                        s.effectJournalHead.fenceGeneration <=
+                            transition.sourceFenceGeneration))
                     refuse("CHECKPOINT_EFFECT_RECONCILIATION_FENCE_MISMATCH")
             }
             s.effectReconciliation?.let { transition ->
@@ -792,6 +793,35 @@ object SessionCheckpointStore {
         result.lastOrNull()?.snapshot?.effectJournalHead?.let { head ->
             if (head.fenceGeneration != latestFence?.generation)
                 refuse("CHECKPOINT_EFFECT_HEAD_FENCE_MISMATCH")
+        }
+        // readOne() cannot decide whether v3 needs operator reconciliation:
+        // that is a property of the independently committed fence history.
+        // A prepared (uncommitted) N+1 anchor must NOT clear this flag.
+        result.lastOrNull()?.let { tail ->
+            val transition = tail.snapshot.effectReconciliation
+            if (transition != null && latestFence != null &&
+                latestFence.generation > transition.sourceFenceGeneration) {
+                val generation = transition.sourceFenceGeneration + 1L
+                val committed = try {
+                    fencesByGeneration.getOrPut(generation) {
+                        ResumeFenceStorage.atGeneration(directory, generation)
+                    }
+                } catch (e: Exception) {
+                    throw CheckpointUnconfirmed(
+                        "CHECKPOINT_EFFECT_RECONCILIATION_FENCE_MISMATCH", e)
+                }
+                if (committed.generation != generation ||
+                    committed.checkpointSha256 != tail.sha256 ||
+                    committed.sessionId != tail.snapshot.sessionId ||
+                    committed.traceId != tail.snapshot.traceId ||
+                    committed.policySha256 != tail.snapshot.binding.policySha256)
+                    refuse("CHECKPOINT_EFFECT_RECONCILIATION_FENCE_MISMATCH")
+                result[result.lastIndex] = tail.copy(
+                    reconciliationRequired =
+                        tail.snapshot.hostAssertedUsage.any {
+                            it.certainty == "unknown"
+                        } || tail.snapshot.pendingEffects.isNotEmpty())
+            }
         }
         return result
     }
@@ -1151,9 +1181,16 @@ object SessionCheckpointStore {
             if (snapshot.effectReconciliation != null)
                 refuse("CHECKPOINT_EFFECT_RECONCILIATION_UNVERIFIED")
             previous?.snapshot?.effectReconciliation?.let { transition ->
-                val successor = ResumeFenceStorage.latest(dir)
-                    ?: refuse("CHECKPOINT_EFFECT_RECONCILIATION_FENCE_MISMATCH")
-                if (successor.generation != transition.sourceFenceGeneration + 1L ||
+                // The invariant concerns the first fence after v3, not the
+                // latest fence: a later N+2 lease may be the first to save.
+                val generation = transition.sourceFenceGeneration + 1L
+                val successor = try {
+                    ResumeFenceStorage.atGeneration(dir, generation)
+                } catch (e: Exception) {
+                    throw CheckpointUnconfirmed(
+                        "CHECKPOINT_EFFECT_RECONCILIATION_FENCE_MISMATCH", e)
+                }
+                if (successor.generation != generation ||
                     successor.checkpointSha256 != previous.sha256)
                     refuse("CHECKPOINT_EFFECT_RECONCILIATION_FENCE_MISMATCH")
             }
