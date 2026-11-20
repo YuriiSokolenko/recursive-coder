@@ -194,7 +194,7 @@ entire RCEFX1 chain and refuses a missing complete last record, a
 different head, a different sequence, or an additional complete record.
 The HMAC binds the genesis, path and entire ordered record prefix.
 
-## Canonical checkpoint v2 effect-head pin (next bounded slice)
+## Canonical checkpoint v2 effect-head pin and operator v3 transition
 
 The trusted host can now call `DurableEffectRecordJournal.headPin()`
 to obtain the **current in-memory acknowledged** (sequence, HMAC) pair,
@@ -259,6 +259,52 @@ Before enabling any external effect, the authoritative root must gain
 an independently retained monotonic latest-pin/checkpoint-head guard
 that cannot be reverted with those files; this PR does NOT claim that
 a checkpoint v2 publication by itself solves whole-root rollback.
+
+### Genesis-only operator reconciliation
+
+The new `reconcileGenesisEffectHead` operator API can explicitly move
+from a pinned checkpoint in generation N to a new, pre-execution lease in
+generation N+1 **only when the entire HMAC-authenticated sidecar has no
+effect records (genesis-only, sequence 0)**. An operator approval alone
+cannot settle a `Started` effect. The caller must supply the exact old
+checkpoint SHA, fence SHA/generation, host key and head MAC; any mismatch
+or uncertainty fails closed.
+
+A canonical checkpoint v3 transition record preserves the original
+pinned head and its issuing fence/checkpoint with a dedicated
+`hostSealMacSha256` (domain-separated host-key HMAC), plus an operator
+identifier. It is **not a cryptographic signature of a human operator**:
+the host attests the `operatorApproved` boolean. The seal is required
+when replaying a v3 that was durably committed before its N+1 fence.
+After that fence pins the v3 SHA, the immutable checkpoint chain
+protects its bytes.
+
+The v3 record belongs **only to the transition checkpoint**. Successors
+must omit it and return to canonical v1 or v2; `readAll` verifies their
+immediate v3 predecessor and the committed N+1 fence that pins the
+transition SHA. Even **without** a successor checkpoint, once fence
+N+1 is durably committed and pins the exact v3 SHA, the latest v3 no
+longer requires another operator reconciliation: ordinary `admit()`
+may acquire a pre-execution lease N+2. This survives a host crash after
+the N+1 fence but before the first checkpoint under its lease.
+An N+1 anchor at PREPARE alone is *not* sufficient. Later ordinary
+or newly pinned checkpoints are accepted only if the N+1 fence pins
+the v3 SHA, and a new v2 head is issued by its **own** existing fence
+(N+2 or later), never inferred from the historical pin.
+A current pinned v2 still blocks normal admission. This extends the
+#128 transition rules only at
+an explicit, independently verified boundary, not by accepting
+arbitrary dropped pins.
+
+The verified v3 generation is durably published **before** the successor
+fence. If a crash leaves an already-PREPARED next anchor, the host must
+call `reconcilePreparedGenesisEffectHead` with **both** the original
+genesis approval and an exact `PreparedFenceReconciliation`. It verifies
+the old host HMAC and physical genesis, the prepared fence SHA/generation,
+and the immutable audit, then publishes the existing prepared fence.
+Plain genesis retry cannot guess that an orphan PREPARE is safe.
+Reconciliation of Intent/Started and external states remains deferred
+to the verifier.
 
 ### Required ordering before enabling real effects
 
