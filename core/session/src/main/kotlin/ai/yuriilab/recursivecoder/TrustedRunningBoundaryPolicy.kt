@@ -4,6 +4,14 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
+@RequiresOptIn(
+    message = "Trusted host-only running checkpoint; NOT effect or model execution authority.",
+    level = RequiresOptIn.Level.ERROR
+)
+@Retention(AnnotationRetention.BINARY)
+@Target(AnnotationTarget.CLASS, AnnotationTarget.FUNCTION)
+annotation class TrustedRunningBoundaryApi
+
 /**
  * Deliberately one-way, metadata-only RUNNING checkpoint boundary (#104).
  *
