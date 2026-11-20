@@ -7,6 +7,7 @@ import java.time.Clock
 import java.time.Instant
 import java.time.ZoneId
 import java.time.ZoneOffset
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.serialization.json.*
 import org.junit.jupiter.api.Tag
@@ -32,6 +33,7 @@ class RuntimeTrustedCreatedAcceptedHandoffIntegrationTest : SessionCheckpointTes
         headSha: String = "b".repeat(40),
         requestedRoot: Path = workspace(),
         requestedBranch: String? = "dev",
+        explicitNullBranch: Boolean = false,
         checkpointDir: Path = store(),
         eventsPath: Path = ledger(),
         fenceGeneration: Long = 1L,
@@ -60,7 +62,10 @@ class RuntimeTrustedCreatedAcceptedHandoffIntegrationTest : SessionCheckpointTes
                 put("rootPath", requestedRoot.toString())
                 put("baselineSha", "c".repeat(40))
                 put("headSha", headSha)
-                if (requestedBranch != null) put("branch", requestedBranch)
+                when {
+                    explicitNullBranch -> put("branch", JsonNull)
+                    requestedBranch != null -> put("branch", requestedBranch)
+                }
             })
             put("task", buildJsonObject {
                 put("stage", "sample")
@@ -306,15 +311,12 @@ class RuntimeTrustedCreatedAcceptedHandoffIntegrationTest : SessionCheckpointTes
         }
         val cancelled = Cancellation()
         cancelled.cancel()
-        try {
-            val stopped = assertFailsWith<Stopped> {
-                runtime().publishTrustedCreatedAccepted(request(), cancelled, spy)
-            }
-            assertFalse(stopped.timedOut)
-        } finally {
-            // Cancellation.bind() interrupts this JUnit worker; clear it.
-            Thread.interrupted()
+        val stopped = assertFailsWith<Stopped> {
+            runtime().publishTrustedCreatedAccepted(request(), cancelled, spy)
         }
+        assertFalse(stopped.timedOut)
+        assertFalse(Thread.currentThread().isInterrupted,
+            "Cooperative cancellation must not interrupt the test/caller thread")
         val expired = assertFailsWith<Stopped> {
             runtime().publishTrustedCreatedAccepted(
                 request(deadlineAt = Instant.now().minusSeconds(5)),
@@ -344,15 +346,13 @@ class RuntimeTrustedCreatedAcceptedHandoffIntegrationTest : SessionCheckpointTes
                 resumeAttestation()
             }
         )
-        try {
-            val stopped = assertFailsWith<Stopped> {
-                runtime().publishTrustedCreatedAccepted(
-                    request(), cancellation, cancellingHost)
-            }
-            assertFalse(stopped.timedOut)
-        } finally {
-            Thread.interrupted()
+        val stopped = assertFailsWith<Stopped> {
+            runtime().publishTrustedCreatedAccepted(
+                request(), cancellation, cancellingHost)
         }
+        assertFalse(stopped.timedOut)
+        assertFalse(Thread.currentThread().isInterrupted,
+            "A callback cancellation must not bind or interrupt this thread")
         assertEquals(0, attestationCalls)
         assertEquals(c1, inspect())
         assertContentEquals(original, Files.readAllBytes(ledger()))
@@ -392,6 +392,116 @@ class RuntimeTrustedCreatedAcceptedHandoffIntegrationTest : SessionCheckpointTes
         assertEquals(c1, inspect())
         assertContentEquals(original, Files.readAllBytes(ledger()))
         assertFalse(Files.exists(store().resolve("resume.lock")))
+        assertNoExecutionOrResult()
+    }
+
+
+    @Test fun interruptInsideAttestationIsConsumedWithoutAnyLedgerMutation() {
+        val c1 = createPreExecutionCheckpoint()
+        val original = Files.readAllBytes(ledger())
+        val interruptingHost = DurableRuntimeCreatedAcceptedHost(
+            store(), ledger(), { context() }, {
+                Thread.currentThread().interrupt()
+                resumeAttestation()
+            }
+        )
+        try {
+            val stopped = assertFailsWith<Stopped> {
+                runtime().publishTrustedCreatedAccepted(
+                    request(), Cancellation(), interruptingHost)
+            }
+            assertFalse(stopped.timedOut)
+            assertFalse(Thread.currentThread().isInterrupted,
+                "The host must consume a pre-publication interrupt")
+        } finally {
+            // Clean the JUnit worker even if an assertion above fails.
+            Thread.interrupted()
+        }
+        assertEquals(c1, inspect())
+        assertContentEquals(original, Files.readAllBytes(ledger()),
+            "No uncovered accepted event is permitted without durable C2")
+        assertFalse(Files.exists(store().resolve("resume.lock")))
+        assertFalse(Files.exists(store().resolve("resume-000000000001.rcf")))
+        assertFalse(Files.exists(store().resolve("000000000002.rcp")))
+        assertNoExecutionOrResult()
+    }
+
+    @Test fun crossThreadCancelAtFinalGateCannotInterruptC2Publication() {
+        createPreExecutionCheckpoint()
+        val cancellation = Cancellation()
+        val instant = Instant.parse("2026-11-20T12:00:00Z")
+        val reads = AtomicInteger(0)
+        val cancellationDelivered = AtomicReference(false)
+        val raceClock = object : Clock() {
+            override fun getZone(): ZoneId = ZoneOffset.UTC
+            override fun withZone(zone: ZoneId): Clock = this
+            override fun instant(): Instant {
+                // Runtime reads the clock once; host checks five gates and
+                // timestamps its event once. On read #8 the final gate has
+                // already sampled signals, but has not entered fenced I/O.
+                if (reads.incrementAndGet() == 8) {
+                    val canceller = Thread({ cancellation.cancel() },
+                        "handoff-cancellation-race")
+                    canceller.start()
+                    canceller.join(5000)
+                    assertFalse(canceller.isAlive, "Cancel thread must finish")
+                    cancellationDelivered.set(true)
+                }
+                return instant
+            }
+        }
+        val receipt = runtime(raceClock).publishTrustedCreatedAccepted(
+            request(deadlineAt = instant.plusSeconds(120)), cancellation, host())
+        assertTrue(cancellationDelivered.get())
+        assertEquals(8, reads.get(), "The cancellation must hit the final gate")
+        assertTrue(cancellation.signals().requested)
+        assertFalse(Thread.currentThread().isInterrupted,
+            "A late cancellation must not interrupt the durable FileChannels")
+        val c2 = inspect()
+        assertEquals(c2.sha256, receipt.checkpointSha256)
+        assertEquals("accepted", c2.snapshot.phase)
+        assertEquals(2L, c2.snapshot.sequence)
+        assertEquals(2, DurableSessionEventLedger.inspect(ledger()).lastSequence)
+        assertTrue(Files.exists(store().resolve("000000000002.rcp")))
+        assertNoExecutionOrResult()
+    }
+
+    @Test fun cancellingAfterHandoffReturnsDoesNotInterruptCallerThread() {
+        createPreExecutionCheckpoint()
+        val cancellation = Cancellation()
+        val receipt = runtime().publishTrustedCreatedAccepted(
+            request(), cancellation, host())
+        assertEquals(2L, receipt.checkpointSequence)
+        val canceller = Thread({ cancellation.cancel() },
+            "post-handoff-cancellation")
+        canceller.start()
+        canceller.join(5000)
+        assertFalse(canceller.isAlive)
+        assertTrue(cancellation.signals().requested)
+        assertFalse(Thread.currentThread().isInterrupted,
+            "A completed host-only invocation must never leave a bound worker")
+        assertEquals("accepted", inspect().snapshot.phase)
+        assertEquals(2, DurableSessionEventLedger.inspect(ledger()).lastSequence)
+        assertNoExecutionOrResult()
+    }
+
+    @Test fun missingBranchUsesTrustedHostContextButExplicitNullIsInvalid() {
+        val c1 = createPreExecutionCheckpoint()
+        val original = Files.readAllBytes(ledger())
+        val invalid = assertFailsWith<Refused> {
+            request(explicitNullBranch = true)
+        }
+        assertEquals("INVALID_SESSION_REQUEST", invalid.code)
+        assertContentEquals(original, Files.readAllBytes(ledger()))
+        assertFalse(Files.exists(store().resolve("resume.lock")))
+
+        // An absent branch is legal: trusted context owns the actual branch.
+        val receipt = runtime().publishTrustedCreatedAccepted(
+            request(requestedBranch = null), Cancellation(), host())
+        assertEquals(2L, receipt.checkpointSequence)
+        assertEquals(c1.sha256, inspect().snapshot.previousSha256)
+        assertEquals("accepted", inspect().snapshot.phase)
+        assertEquals(2, DurableSessionEventLedger.inspect(ledger()).lastSequence)
         assertNoExecutionOrResult()
     }
 

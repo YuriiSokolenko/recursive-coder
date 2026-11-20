@@ -32,10 +32,18 @@ class DurableRuntimeCreatedAcceptedHost(
         deadline: Instant,
         clock: Clock
     ) {
-        val signals = cancellation.signals()
-        when {
-            signals.expired || !clock.instant().isBefore(deadline) -> throw Stopped(true)
-            signals.requested -> throw Stopped(false)
+        // A pre-existing thread interrupt closes interruptible FileChannels.
+        // Consume it before any fenced filesystem publication; a plain
+        // Thread.interrupt() is treated as cooperative cancellation here.
+        // The host never binds cancellation to this thread.
+        val interruptedBefore = Thread.interrupted()
+        val decision = SessionBudgetPolicy.interruption(
+            cancellation.signals(), clock.instant(), deadline)
+        val interruptedDuring = Thread.interrupted()
+        when (decision) {
+            SessionEndReason.TIMEOUT -> throw Stopped(true)
+            SessionEndReason.CANCELLATION -> throw Stopped(false)
+            else -> if (interruptedBefore || interruptedDuring) throw Stopped(false)
         }
     }
 
@@ -103,9 +111,10 @@ class DurableRuntimeCreatedAcceptedHost(
                 SessionPhaseVocabulary.acceptedWire,
             extra = buildJsonObject { put("graphId", c1.binding.graphId) }
         )
-        // Final cancellable gate. From this point through C2 publication and
-        // lease retirement, cancellation/deadline cannot safely imply rollback.
-        // Never check again and misreport a successful C2 as definitely absent.
+        // Last cooperative gate. A later Cancellation.cancel()/expire()
+        // only updates signals, never interrupts the caller's FileChannels.
+        // External Thread.interrupt(), IO failures and process death still
+        // require read-only reconciliation if publication becomes uncertain.
         checkBeforePublication(cancellation, deadline, clock)
         // publish() re-reads the WHOLE disk-authenticated C1 under its new
         // OS lease, then appends the only legal edge and saves C2 on the

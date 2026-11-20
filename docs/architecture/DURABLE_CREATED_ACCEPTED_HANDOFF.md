@@ -94,10 +94,15 @@ The boundary intentionally NEVER invokes `WorkspaceOpener`,
 fresh-session admission precedence and passes the same injected clock,
 cancellation and deadline to the host. It checks interruption before host
 I/O and between current-context verification, C1 inspection and final
-fenced publication. A blocked filesystem sync cannot be forcibly rolled
-back: once fenced publication starts, no late cancellation check can
-reinterpret a committed C2 as a safe retry. It is separately opt-in, not called by `invoke()`, and a receipt
-is only evidence that C2 was durably observed at return. It grants **no**
+fenced publication. This opt-in path never binds the caller thread to
+`Cancellation`: a late `cancel()` or `expire()` only updates signals
+and cannot itself interrupt the `FileChannel` publication. Pre-existing
+thread interrupts are consumed and refused at the host gates before C2.
+A blocked filesystem sync cannot be forcibly rolled back; an unrelated
+external `Thread.interrupt()`, I/O failure or crash can still leave an
+uncertain durable tail requiring read-only operator reconciliation.
+The entry point is not called by `invoke()`; its receipt is evidence
+that C2 was durably observed at return, not an execution grant. It grants **no**
 runtime, tool, model, child or effect execution permission. No automatic
 retry is allowed when publication throws: an exception may follow a
 committed C2. Normal v1 resume requests remain deny-only and unchanged.

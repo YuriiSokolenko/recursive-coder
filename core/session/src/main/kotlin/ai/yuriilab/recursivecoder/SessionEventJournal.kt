@@ -142,7 +142,7 @@ class SessionEventJournal(
                actor: SessionEventActor? = null, correlationId: String? = null) {
         check(!closed) { "Session event journal is already closed" }
         writeFailure?.let { throw it }
-        require(correlationId == null || ToolAuthorizationPolicy.validHostIdentifier(correlationId))
+        // frame() performs the canonical correlationId validation.
         val next = Math.addExact(sequence, 1)
         val eventId = eventId(sessionId, next)
         val now = clock.instant()

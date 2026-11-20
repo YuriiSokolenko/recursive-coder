@@ -195,7 +195,10 @@ class DefaultRunSessionUseCase(
         cancellation: Cancellation,
         host: TrustedSessionPreExecutionHost
     ): TrustedSessionHandoffReceipt {
-        cancellation.bind()
+        // This path uses cooperative cancellation only. Do NOT bind the
+        // caller's thread: Cancellation.cancel()/expire() would interrupt
+        // FileChannel.force/lock between the accepted append and durable C2,
+        // and a retained binding could interrupt unrelated work after return.
         when (val decision = SessionAdmissionPolicy.decide(request.admissionFacts())) {
             AdmissionDecision.Accepted -> Unit
             is AdmissionDecision.Denied -> throw Refused(
