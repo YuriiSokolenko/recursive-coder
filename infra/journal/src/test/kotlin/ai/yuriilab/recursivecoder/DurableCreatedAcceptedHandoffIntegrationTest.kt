@@ -202,7 +202,15 @@ class DurableCreatedAcceptedHandoffIntegrationTest : SessionCheckpointTestFixtur
             assertEquals("LEDGER_REOPEN_CHECKPOINT_REQUIRED", failedClose.code)
         }
         assertFalse(Files.exists(store().resolve("000000000003.rcp")))
-        assertEquals(3, DurableSessionEventLedger.inspect(ledger()).lastSequence)
+        val physical = DurableSessionEventLedger.inspect(ledger())
+        assertEquals(3, physical.lastSequence)
+        assertEquals(SessionPhaseVocabulary.runningWire,
+            TrustedRunningBoundaryPolicy.phaseFromVerifiedHistory(
+                SessionPhaseVocabulary.runningWire, physical.events),
+            "Read-only physical evidence identifies the canonical running tail")
+        assertNull(PreExecutionPhasePolicy.phaseFromVerifiedHistory(
+            SessionPhaseVocabulary.acceptedWire, physical.events),
+            "The same tail can never be accepted as resume evidence")
         val rejection = assertFailsWith<CheckpointUnconfirmed> { inspect() }
         assertEquals("CHECKPOINT_JOURNAL_MISMATCH", rejection.code)
         val readmission = assertFailsWith<CheckpointUnconfirmed> {
