@@ -123,7 +123,7 @@ object TrustedRunningOptInPolicy {
     // files cannot launder the marker through @OptIn, imports or typealiases.
     // Each occurrence must be the bare annotation or its declaration.
     private val reviewedMarkerLine = Regex(
-        """\\s*(?:@TrustedRunningBoundaryApi|annotation\\s+class\\s+TrustedRunningBoundaryApi)\\s*""",
+        """\s*(?:@TrustedRunningBoundaryApi|annotation\s+class\s+TrustedRunningBoundaryApi)\s*""",
     )
 
     fun forbiddenInProduction(source: String, sourcePath: String): Boolean {
