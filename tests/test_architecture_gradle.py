@@ -277,11 +277,11 @@ class ArchitectureBoundaryTest(_GradleOutputAssertions):
 
     def test_import_alias_typealias_and_multiline_comment_are_rejected(self):
         cases = {
-            "import-alias": "import ai.yuriilab.recursivecoder.TrustedRunningBoundaryApi as T\\n",
-            "typealias": "typealias C3 = TrustedRunningBoundaryApi\\n",
+            "import-alias": "import ai.yuriilab.recursivecoder.TrustedRunningBoundaryApi as T\n",
+            "typealias": "typealias C3 = TrustedRunningBoundaryApi\n",
             "comment-before-marker": (
-                "@OptIn(Other::class, /* ) */\\n"
-                "  TrustedRunningBoundaryApi::class)\\n"
+                "@OptIn(Other::class, /* ) */\n"
+                "  TrustedRunningBoundaryApi::class)\n"
             ),
         }
         with tempfile.TemporaryDirectory(prefix="architecture-token-") as directory:
@@ -307,14 +307,14 @@ class ArchitectureBoundaryTest(_GradleOutputAssertions):
         cases = (
             ("core/tasks/build.gradle.kts",
              'tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach { '
-             f'compilerOptions.optIn.add("{marker}") }}\\n'),
+             f'compilerOptions.optIn.add("{marker}") }}\n'),
             ("core/tasks/build.gradle.kts",
              'tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach { '
-             f'compilerOptions.freeCompilerArgs.add("-opt-in={marker}") }}\\n'),
+             f'compilerOptions.freeCompilerArgs.add("-opt-in={marker}") }}\n'),
             ("core/tasks/build.gradle.kts",
-             f'kotlin.sourceSets.all {{ languageSettings.optIn("{marker}") }}\\n'),
+             f'kotlin.sourceSets.all {{ languageSettings.optIn("{marker}") }}\n'),
             ("build-logic/src/main/kotlin/recursivecoder.jvm.gradle.kts",
-             f'// compilerOptions.optIn.add("{marker}")\\n'),
+             f'// compilerOptions.optIn.add("{marker}")\n'),
         )
         with tempfile.TemporaryDirectory(prefix="architecture-gradle-optin-") as directory:
             fixture = Path(directory)
@@ -323,7 +323,7 @@ class ArchitectureBoundaryTest(_GradleOutputAssertions):
                 path = fixture / relative
                 original = path.read_text(encoding="utf-8")
                 with self.subTest(relative=relative, index=index):
-                    path.write_text(original + "\\n" + injection, encoding="utf-8")
+                    path.write_text(original + "\n" + injection, encoding="utf-8")
                     try:
                         result = run_logged_gradle(
                             [str(ROOT / "gradlew"), "--no-daemon", "--offline",
@@ -348,8 +348,8 @@ class ArchitectureBoundaryTest(_GradleOutputAssertions):
             )
             reviewed.parent.mkdir(parents=True, exist_ok=True)
             reviewed.write_text(
-                "package ai.yuriilab.recursivecoder\\n"
-                "annotation class TrustedRunningBoundaryApi\\n",
+                "package ai.yuriilab.recursivecoder\n"
+                "annotation class TrustedRunningBoundaryApi\n",
                 encoding="utf-8",
             )
             result = run_logged_gradle(
@@ -553,7 +553,7 @@ class ArchitectureConfigurationCacheRegressionTest(_GradleOutputAssertions):
             injected = fixture / "core/tasks/src/main/kotlin/NewRunningOptIn.kt"
             injected.parent.mkdir(parents=True, exist_ok=True)
             injected.write_text(
-                "import ai.yuriilab.recursivecoder.TrustedRunningBoundaryApi as X\\n",
+                "import ai.yuriilab.recursivecoder.TrustedRunningBoundaryApi as X\n",
                 encoding="utf-8",
             )
             try:
@@ -569,7 +569,7 @@ class ArchitectureConfigurationCacheRegressionTest(_GradleOutputAssertions):
             # read by the task, even when its file tree was snapshotted earlier.
             script = fixture / "core/tasks/new-c3-guard.gradle.kts"
             script.write_text(
-                '// compilerOptions.optIn.add("TrustedRunningBoundaryApi")\\n',
+                '// compilerOptions.optIn.add("TrustedRunningBoundaryApi")\n',
                 encoding="utf-8",
             )
             try:
@@ -594,7 +594,7 @@ class ArchitectureConfigurationCacheRegressionTest(_GradleOutputAssertions):
             original = script.read_text(encoding="utf-8")
             try:
                 script.write_text(
-                    original + '\\n// compilerOptions.optIn.add("TrustedRunningBoundaryApi")\\n',
+                    original + '\n// compilerOptions.optIn.add("TrustedRunningBoundaryApi")\n',
                     encoding="utf-8",
                 )
                 self.assert_cache_invalidated(
@@ -840,7 +840,7 @@ class LoggedGradleSubprocessTest(unittest.TestCase):
             result = run_logged_gradle(
                 [
                     sys.executable, "-u", "-c",
-                    "import sys; sys.stdout.buffer.write(b'bad: \\xff\\n'); "
+                    "import sys; sys.stdout.buffer.write(b'bad: \\xff\n'); "
                     "sys.stdout.buffer.flush()",
                 ],
                 cwd=ROOT, scenario="invalid UTF-8",
