@@ -361,6 +361,36 @@ class ArchitectureBoundaryTest(_GradleOutputAssertions):
             self.assertEqual(0, result.returncode, result.stdout)
             self.assert_gradle_contains("Architecture boundaries verified", result.stdout)
 
+    def test_reviewed_c3_file_cannot_launder_an_opt_in(self):
+        with tempfile.TemporaryDirectory(prefix="architecture-reviewed-c3-") as directory:
+            fixture = Path(directory)
+            ArchitectureConfigurationCacheRegressionTest.copy_fixture(fixture)
+            reviewed = fixture / (
+                "infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/"
+                "DurableSessionEventLedger.kt"
+            )
+            reviewed.parent.mkdir(parents=True, exist_ok=True)
+            reviewed.write_text(
+                "@TrustedRunningBoundaryApi\ninternal fun reviewedHost() {}\n"
+                "@OptIn(TrustedRunningBoundaryApi::class)\n"
+                "fun forbiddenWrapper() {}\n",
+                encoding="utf-8",
+            )
+            run = run_logged_gradle(
+                [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                 "--console=plain", "checkArchitecture"],
+                cwd=fixture,
+                scenario="reviewed production file cannot launder opt-in",
+                phase="architecture-source-rejection",
+                sequence=1,
+                timeout=180,
+            )
+            self.assertNotEqual(0, run.returncode)
+            self.assert_gradle_contains(
+                "Unauthorized TrustedRunningBoundaryApi reference in production Kotlin source",
+                run.stdout,
+            )
+
     def run_with_edge(self, source: str, target: str, configuration: str) -> str:
         init_script = (
             "gradle.projectsEvaluated {\n"
