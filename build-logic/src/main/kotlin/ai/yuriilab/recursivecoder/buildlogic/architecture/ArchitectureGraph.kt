@@ -106,7 +106,7 @@ object ArchitectureGraph {
  * Fail-closed token allowlist for the host-only C3 marker. A raw token check
  * catches Kotlin import aliases, typealiases, multiline/comment tricks and
  * qualified/file-level opt-ins without trusting a regex to parse annotations.
- * Only the reviewed C3 declaration/usage files may refer to this marker.
+ * Only the reviewed C3 declaration/usage files may carry the bare annotation\n * or declare the marker; no @OptIn wrappers are permitted even within them.
  */
 object TrustedRunningOptInPolicy {
     private const val marker = "TrustedRunningBoundaryApi"
@@ -119,17 +119,28 @@ object TrustedRunningOptInPolicy {
         "infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/DurableSessionEventLedger.kt",
     )
 
+    // The allowlist selects locations, not permissions: even reviewed source
+    // files cannot launder the marker through @OptIn, imports or typealiases.
+    // Each occurrence must be the bare annotation or its declaration.
+    private val reviewedMarkerLine = Regex(
+        """\\s*(?:@TrustedRunningBoundaryApi|annotation\\s+class\\s+TrustedRunningBoundaryApi)\\s*""",
+    )
+
     fun forbiddenInProduction(source: String, sourcePath: String): Boolean {
         if (!source.contains(marker)) return false
         val normalized = sourcePath.replace('\\', '/')
-        return allowedProductionPaths.none { normalized == it || normalized.endsWith("/$it") }
+        if (allowedProductionPaths.none { normalized == it || normalized.endsWith("/$it") })
+            return true
+        return source.lineSequence().any { line ->
+            line.contains(marker) && !reviewedMarkerLine.matches(line)
+        }
     }
 
     /**
      * Inspect root/module build scripts and build-logic convention plugins.
      * A marker reference plus any compiler-wide opt-in configuration is denied,
      * including aliases or values assigned before the compiler option is set.
-     * This intentionally errs toward rejection of unusual build script wiring.
+     * This intentionally errs toward rejection of unusual build script wiring.\n     * Best-effort defence-in-depth only: dynamically composed marker names and\n     * compiler settings outside the scanned Gradle scripts require separate review.
      */
     fun forbiddenCompilerOptIn(script: String): Boolean =
         script.contains(marker) && (
