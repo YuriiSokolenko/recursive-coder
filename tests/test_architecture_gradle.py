@@ -271,9 +271,95 @@ class ArchitectureBoundaryTest(_GradleOutputAssertions):
             )
             self.assertNotEqual(0, run.returncode)
             self.assert_gradle_contains(
-                "Forbidden TrustedRunningBoundaryApi opt-in in production Kotlin source",
+                "Unauthorized TrustedRunningBoundaryApi reference in production Kotlin source",
                 run.stdout,
             )
+
+    def test_import_alias_typealias_and_multiline_comment_are_rejected(self):
+        cases = {
+            "import-alias": "import ai.yuriilab.recursivecoder.TrustedRunningBoundaryApi as T\\n",
+            "typealias": "typealias C3 = TrustedRunningBoundaryApi\\n",
+            "comment-before-marker": (
+                "@OptIn(Other::class, /* ) */\\n"
+                "  TrustedRunningBoundaryApi::class)\\n"
+            ),
+        }
+        with tempfile.TemporaryDirectory(prefix="architecture-token-") as directory:
+            fixture = Path(directory)
+            ArchitectureConfigurationCacheRegressionTest.copy_fixture(fixture)
+            injected = fixture / "core/tasks/src/main/kotlin/Unreviewed.kt"
+            injected.parent.mkdir(parents=True, exist_ok=True)
+            for name, content in cases.items():
+                with self.subTest(name=name):
+                    injected.write_text(content, encoding="utf-8")
+                    result = run_logged_gradle(
+                        [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                         "--console=plain", "checkArchitecture"],
+                        cwd=fixture, scenario=name,
+                        phase="token-negative", sequence=1, timeout=180,
+                    )
+                    self.assertNotEqual(0, result.returncode)
+                    self.assert_gradle_contains(
+                        "Unauthorized TrustedRunningBoundaryApi reference", result.stdout)
+
+    def test_compiler_wide_module_opt_in_and_convention_plugin_are_rejected(self):
+        marker = "ai.yuriilab.recursivecoder.TrustedRunningBoundaryApi"
+        cases = (
+            ("core/tasks/build.gradle.kts",
+             'tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach { '
+             f'compilerOptions.optIn.add("{marker}") }}\\n'),
+            ("core/tasks/build.gradle.kts",
+             'tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach { '
+             f'compilerOptions.freeCompilerArgs.add("-opt-in={marker}") }}\\n'),
+            ("core/tasks/build.gradle.kts",
+             f'kotlin.sourceSets.all {{ languageSettings.optIn("{marker}") }}\\n'),
+            ("build-logic/src/main/kotlin/recursivecoder.jvm.gradle.kts",
+             f'// compilerOptions.optIn.add("{marker}")\\n'),
+        )
+        with tempfile.TemporaryDirectory(prefix="architecture-gradle-optin-") as directory:
+            fixture = Path(directory)
+            ArchitectureConfigurationCacheRegressionTest.copy_fixture(fixture)
+            for index, (relative, injection) in enumerate(cases):
+                path = fixture / relative
+                original = path.read_text(encoding="utf-8")
+                with self.subTest(relative=relative, index=index):
+                    path.write_text(original + "\\n" + injection, encoding="utf-8")
+                    try:
+                        result = run_logged_gradle(
+                            [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                             "--console=plain", "checkArchitecture"],
+                            cwd=fixture, scenario=f"{relative} compiler opt-in",
+                            phase="script-negative", sequence=index + 1, timeout=180,
+                        )
+                        self.assertNotEqual(0, result.returncode)
+                        self.assert_gradle_contains(
+                            "Forbidden compiler-wide TrustedRunningBoundaryApi opt-in",
+                            result.stdout)
+                    finally:
+                        path.write_text(original, encoding="utf-8")
+
+    def test_reviewed_marker_declaration_is_allowed(self):
+        with tempfile.TemporaryDirectory(prefix="architecture-allowed-c3-") as directory:
+            fixture = Path(directory)
+            ArchitectureConfigurationCacheRegressionTest.copy_fixture(fixture)
+            reviewed = fixture / (
+                "core/session/src/main/kotlin/ai/yuriilab/recursivecoder/"
+                "TrustedRunningBoundaryPolicy.kt"
+            )
+            reviewed.parent.mkdir(parents=True, exist_ok=True)
+            reviewed.write_text(
+                "package ai.yuriilab.recursivecoder\\n"
+                "annotation class TrustedRunningBoundaryApi\\n",
+                encoding="utf-8",
+            )
+            result = run_logged_gradle(
+                [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                 "--console=plain", "checkArchitecture"],
+                cwd=fixture, scenario="allowed marker declaration",
+                phase="source-regression", sequence=1, timeout=180,
+            )
+            self.assertEqual(0, result.returncode, result.stdout)
+            self.assert_gradle_contains("Architecture boundaries verified", result.stdout)
 
     def run_with_edge(self, source: str, target: str, configuration: str) -> str:
         init_script = (
@@ -454,6 +540,72 @@ class ArchitectureConfigurationCacheRegressionTest(_GradleOutputAssertions):
             r"Calculating task graph as configuration cache cannot be reused because [^\n]*"
             + input_pattern,
         )
+
+    def test_running_marker_new_source_and_script_are_checked_after_cache_hit(self):
+        with tempfile.TemporaryDirectory(prefix="running-optin-cache-") as directory:
+            fixture = Path(directory)
+            self.copy_fixture(fixture)
+            first = self.check_architecture(
+                fixture, scenario="running marker baseline", phase="cold-warmup")
+            self.assert_valid(first)
+            self.assert_cache_hit(fixture, scenario="running marker baseline")
+
+            injected = fixture / "core/tasks/src/main/kotlin/NewRunningOptIn.kt"
+            injected.parent.mkdir(parents=True, exist_ok=True)
+            injected.write_text(
+                "import ai.yuriilab.recursivecoder.TrustedRunningBoundaryApi as X\\n",
+                encoding="utf-8",
+            )
+            try:
+                refusal = self.check_architecture(
+                    fixture, scenario="new source after cache hit", phase="negative")
+                self.assertNotEqual(0, refusal.returncode)
+                self.assert_gradle_contains(
+                    "Unauthorized TrustedRunningBoundaryApi reference", refusal.stdout)
+            finally:
+                injected.unlink()
+
+            # A newly created standalone Gradle Kotlin script must also be
+            # read by the task, even when its file tree was snapshotted earlier.
+            script = fixture / "core/tasks/new-c3-guard.gradle.kts"
+            script.write_text(
+                '// compilerOptions.optIn.add("TrustedRunningBoundaryApi")\\n',
+                encoding="utf-8",
+            )
+            try:
+                refusal = self.check_architecture(
+                    fixture, scenario="new Gradle script after cache hit", phase="negative")
+                self.assertNotEqual(0, refusal.returncode)
+                self.assert_gradle_contains(
+                    "Forbidden compiler-wide TrustedRunningBoundaryApi opt-in",
+                    refusal.stdout)
+            finally:
+                script.unlink()
+            self.assert_restored_cache_ready(fixture, scenario="running marker restored")
+
+    def test_modified_gradle_script_invalidates_warm_cache_and_denies_marker(self):
+        with tempfile.TemporaryDirectory(prefix="running-optin-script-cache-") as directory:
+            fixture = Path(directory)
+            self.copy_fixture(fixture)
+            self.assert_valid(self.check_architecture(
+                fixture, scenario="module opt-in", phase="cold-warmup"))
+            self.assert_cache_hit(fixture, scenario="module opt-in")
+            script = fixture / "core/tasks/build.gradle.kts"
+            original = script.read_text(encoding="utf-8")
+            try:
+                script.write_text(
+                    original + '\\n// compilerOptions.optIn.add("TrustedRunningBoundaryApi")\\n',
+                    encoding="utf-8",
+                )
+                self.assert_cache_invalidated(
+                    fixture,
+                    "Forbidden compiler-wide TrustedRunningBoundaryApi opt-in",
+                    r"core/tasks/build\\.gradle\\.kts|build.gradle.kts",
+                    scenario="changed module compiler opt-in",
+                )
+            finally:
+                script.write_text(original, encoding="utf-8")
+            self.assert_restored_cache_ready(fixture, scenario="module opt-in restored")
 
     def test_changed_build_script_invalidates_cache_for_production_and_test_edges(self):
         with tempfile.TemporaryDirectory(prefix="architecture-cache-") as temporary:
