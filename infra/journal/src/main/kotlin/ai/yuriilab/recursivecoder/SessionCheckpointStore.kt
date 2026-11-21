@@ -1370,6 +1370,9 @@ object SessionCheckpointStore {
                     refuse("CHECKPOINT_STALE_GENERATION")
                 Files.move(temporary, destination, StandardCopyOption.ATOMIC_MOVE)
                 afterPhase("renamed")
+                // Fault-injection boundary: a crash or directory fsync failure
+                // after rename can leave an intact but unacknowledged C3.
+                afterPhase("before-directory-fsync")
                 FileChannel.open(dir, StandardOpenOption.READ).use { it.force(true) }
             } catch (e: Exception) {
                 val mapped = if (e is CheckpointUnconfirmed) e
