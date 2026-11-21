@@ -840,7 +840,7 @@ class LoggedGradleSubprocessTest(unittest.TestCase):
             result = run_logged_gradle(
                 [
                     sys.executable, "-u", "-c",
-                    "import sys; sys.stdout.buffer.write(b'bad: \\xff\n'); "
+                    "import sys; sys.stdout.buffer.write(b'bad: \\xff\\n'); "
                     "sys.stdout.buffer.flush()",
                 ],
                 cwd=ROOT, scenario="invalid UTF-8",
