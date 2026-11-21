@@ -9,7 +9,7 @@ import kotlinx.serialization.json.put
 /**
  * Separate, explicitly marked C2 -> C3 adapter. Possessing the
  * @TrustedPreExecutionHandoff host MUST NOT expose this API. Both construction
- * and direct method access require TrustedRunningBoundaryApi opt-in.
+ * and direct method access require explicit trusted running opt-in.
  *
  * The request remains a FRESH invocation identity (resume.mode=fresh,
  * fenceGeneration=1); the independently verified attestation, NOT request
