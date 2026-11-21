@@ -23,6 +23,9 @@ abstract class CheckArchitectureTask : DefaultTask() {
     @get:InputFiles
     @get:PathSensitive(PathSensitivity.RELATIVE)
     abstract val productionKotlinSources: ConfigurableFileCollection
+    @get:InputFiles
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val productionGradleScripts: ConfigurableFileCollection
 
     @TaskAction
     fun verify() {
@@ -35,9 +38,15 @@ abstract class CheckArchitectureTask : DefaultTask() {
             forbiddenGroups = forbiddenFrameworkGroups.get(),
         ).toMutableList()
         productionKotlinSources.files.sortedBy { it.path }.forEach { source ->
-            if (TrustedRunningOptInPolicy.forbiddenInProduction(source.readText())) {
-                problems += "Forbidden TrustedRunningBoundaryApi opt-in in production Kotlin source: " +
+            if (TrustedRunningOptInPolicy.forbiddenInProduction(source.readText(), source.path)) {
+                problems += "Unauthorized TrustedRunningBoundaryApi reference in production Kotlin source: " +
                     source.path
+            }
+        }
+        productionGradleScripts.files.sortedBy { it.path }.forEach { script ->
+            if (TrustedRunningOptInPolicy.forbiddenCompilerOptIn(script.readText())) {
+                problems += "Forbidden compiler-wide TrustedRunningBoundaryApi opt-in in Gradle script: " +
+                    script.path
             }
         }
         if (problems.isNotEmpty()) {

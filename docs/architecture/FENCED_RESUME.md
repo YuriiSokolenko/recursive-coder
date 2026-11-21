@@ -45,10 +45,17 @@ same session in #104. Do not truncate, edit, delete, or replay journal frames,
 checkpoints, lease generations, anchors or signed effect evidence to work
 around the refusal.
 
-The currently surfaced read-only error for this state is the generic
+The generation-2 resume fence and the immutable anchor pinned to C2 were
+**already durably published before the C3 ledger append began**. Their presence,
+absence or apparent duplication is not evidence that repairing a checkpoint or
+minting another fence is safe. Preserve both as immutable audit evidence.
+
+A complete but uncovered running tail normally surfaces as
 `CHECKPOINT_JOURNAL_MISMATCH` (the last accepted C2 does not cover the
-physical RCLDG1 tail). **That code alone is not proof of this specific crash
-window**; it also covers corruption or other unexpected drift. For triage,
+physical RCLDG1 tail). A torn or otherwise unacknowledged physical tail can
+instead surface as `CHECKPOINT_JOURNAL_UNCONFIRMED`; these are different
+diagnostics, and neither authorizes repair. **Neither code alone proves this
+specific crash window**; both can represent corruption or unexpected drift. For triage,
 preserve a read-only copy of the entire store/ledger, independently inspect
 the physical journal, and verify that a trusted C2 is the last checkpoint
 while the ledger has exactly one trailing canonical
@@ -60,6 +67,14 @@ workspace/policy authority; any external effects must be assessed under #105
 before starting new work. A future *separately reviewed operator reconciliation
 design* must explicitly authenticate this tail if in-place recovery is ever
 proposed. Neither #104 nor #105 currently implements that path.
+
+If the crash occurred **after C3's atomic rename**, a completely valid C3
+may already exist, even if its publisher did not return an acknowledgement.
+Read-only `SessionCheckpointStore.inspect` may accept that exact C3 and its
+fully authenticated RCLDG1 history. This is still not execution authority:
+`SessionResumeAdmission.admit` refuses `RESUME_UNSAFE_BOUNDARY` for C3.
+Never blindly retry publication or treat a successful `inspect` as approval
+to resume model/tool work.
 
 This milestone does not solve #105 effect authority/reconciliation, long-held
 fsync/shutdown watchdog semantics, kill-boundary subprocess evidence, or the

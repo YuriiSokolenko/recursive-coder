@@ -55,7 +55,7 @@ tasks.register("verifyRunningHostOptIn") {
             .substringAfter("message = \"", "")
             .substringBefore("\"", "")
             .takeIf { it.isNotEmpty() }
-            ?: throw GradleException("Cannot locate TrustedRunningBoundaryApi marker message")
+            ?: throw GradleException("Cannot locate trusted running host marker message")
 
         // Exactly three failures, at the expected source lines: one missing
         // method and two running-boundary opt-in refusals. Extra errors fail
