@@ -45,21 +45,42 @@ tasks.register("verifyRunningHostOptIn") {
                 positive.second)
 
         val negative = compile("PreExecutionOnlyCannotPublishRunning.kt")
-        // Match the two independent compiler failures by meaning, not the
-        // compiler version's exact quotation/receiver formatting.
+        // Obtain the opt-in diagnostic from the annotation itself, rather
+        // than duplicating its message in this build script.
+        val runningBoundarySource = project(":core:session").file(
+            "src/main/kotlin/ai/yuriilab/recursivecoder/TrustedRunningBoundaryPolicy.kt"
+        ).readText()
+        val markerMessage = Regex(
+            """@RequiresOptIn\\(\\s*message\\s*=\\s*"([^"]+)""""
+        ).find(runningBoundarySource)?.groupValues?.get(1)
+            ?: throw GradleException("Cannot locate TrustedRunningBoundaryApi marker message")
+
+        // Exactly three failures, at the expected source lines: one missing
+        // method and two running-boundary opt-in refusals. Extra errors fail
+        // closed, even if the intended errors are also present.
         val errors = negative.second.lineSequence()
-            .filter { it.startsWith("e: ") || it.contains(" error: ") }
+            .filter { it.contains("error:", ignoreCase = true) }
             .toList()
-        val absentC2Method = errors.any {
+        fun errorAt(line: Int, matches: (String) -> Boolean): Boolean {
+            val location = Regex(
+                """PreExecutionOnlyCannotPublishRunning\\.kt:$line:\\d+:\\s*error:""",
+                RegexOption.IGNORE_CASE
+            )
+            return errors.singleOrNull { location.containsMatchIn(it) }
+                ?.let(matches) ?: false
+        }
+        val absentC2Method = errorAt(23) {
             it.contains("unresolved reference", ignoreCase = true) &&
                 it.contains("publishAcceptedRunning")
         }
-        val missingC3OptIn = errors.any {
-            it.contains("opt-in", ignoreCase = true) &&
-                (it.contains("TrustedRunningBoundaryApi") ||
-                    it.contains("trusted host-only running checkpoint", ignoreCase = true))
+        val deniedC3Construction = errorAt(25) {
+            it.contains(markerMessage, ignoreCase = true)
         }
-        if (negative.first == 0 || !absentC2Method || !missingC3OptIn)
+        val deniedC3Invocation = errorAt(27) {
+            it.contains(markerMessage, ignoreCase = true)
+        }
+        if (negative.first == 0 || errors.size != 3 || !absentC2Method ||
+            !deniedC3Construction || !deniedC3Invocation)
             throw GradleException("Pre-execution-only caller bypassed C3 compile-time gate " +
                 "or failed for an unrelated reason:\n" + negative.second)
         logger.lifecycle("Verified Kotlin C3 host opt-in: positive compiles, " +
