@@ -50,9 +50,11 @@ tasks.register("verifyRunningHostOptIn") {
         val runningBoundarySource = project(":core:session").file(
             "src/main/kotlin/ai/yuriilab/recursivecoder/TrustedRunningBoundaryPolicy.kt"
         ).readText()
-        val markerMessage = Regex(
-            """@RequiresOptIn\\(\\s*message\\s*=\\s*"([^"]+)""""
-        ).find(runningBoundarySource)?.groupValues?.get(1)
+        val markerMessage = runningBoundarySource
+            .substringAfter("@RequiresOptIn(", "")
+            .substringAfter("message = \"", "")
+            .substringBefore("\"", "")
+            .takeIf { it.isNotEmpty() }
             ?: throw GradleException("Cannot locate TrustedRunningBoundaryApi marker message")
 
         // Exactly three failures, at the expected source lines: one missing
@@ -63,7 +65,7 @@ tasks.register("verifyRunningHostOptIn") {
             .toList()
         fun errorAt(line: Int, matches: (String) -> Boolean): Boolean {
             val location = Regex(
-                """PreExecutionOnlyCannotPublishRunning\\.kt:$line:\\d+:\\s*error:""",
+                """PreExecutionOnlyCannotPublishRunning\.kt:$line:\d+:\s*error:""",
                 RegexOption.IGNORE_CASE
             )
             return errors.singleOrNull { location.containsMatchIn(it) }
