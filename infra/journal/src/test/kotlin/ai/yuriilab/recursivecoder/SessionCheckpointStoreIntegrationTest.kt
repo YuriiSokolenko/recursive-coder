@@ -234,6 +234,19 @@ abstract class SessionCheckpointTestFixture {
         ReadPolicyFacts("read-only", allowed, writablePathsPresent = false,
             immutableInputsPresent = false), externalActionsReconciled = true)
     /** Extra v1 transition data supplied by the host, never inferred from the ledger. */
+    /** Canonical root-actor C3 frame, not the abbreviated C1/C2 test envelope. */
+    protected fun trustedRunningTransition(sequence: Int = 3): JsonObject =
+        SessionEventJournal.frame(
+            sessionId = "sess-one", traceId = "trace-one",
+            requestId = "req-transition-$sequence",
+            sequence = sequence,
+            timestamp = java.time.Instant.parse("2026-11-20T12:00:00Z"),
+            type = "session.transition", status = "completed",
+            transition = SessionPhaseVocabulary.acceptedWire to
+                SessionPhaseVocabulary.runningWire,
+            extra = buildJsonObject { put("graphId", "graph-root") }
+        )
+
     protected fun fencedTransition(sequence: Int, from: String, to: String): JsonObject {
         val base = event(sequence, "req-transition-$sequence", "completed",
             buildJsonObject { put("graphId", "graph-root") }, "session.transition")

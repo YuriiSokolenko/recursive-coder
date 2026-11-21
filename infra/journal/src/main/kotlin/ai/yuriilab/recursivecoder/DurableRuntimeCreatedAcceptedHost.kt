@@ -6,28 +6,14 @@ import java.time.Instant
 import kotlinx.serialization.json.*
 
 /**
- * Opt-in, trusted-host adapter for the real DefaultRunSessionUseCase.
- *
- * The host supplies CURRENT independent Git/policy/authority facts. It must
- * create a durable C1 with authenticated ledger evidence before calling this
- * adapter. Neither a request nor a checkpoint proves its own authority.
- * On any failure, including an apparent post-write failure, operator-only
- * read-only reconciliation is required; no automatic C1 -> C2 retry.
- *
- * No model, workspace tool, child or runtime event sink is used. Publication
- * stops at C2 and never grants the caller permission to enter RUNNING.
+ * Shared read-only request/host checks for the two distinct opt-in adapters.
+ * This helper never obtains a lease, appends a frame or publishes a checkpoint.
+ * Its visibility does not grant either handoff capability.
  */
-@TrustedPreExecutionHandoff
-@OptIn(TrustedSessionPreExecutionApi::class)
-class DurableRuntimeCreatedAcceptedHost(
-    private val checkpointDirectory: Path,
-    private val ledgerPath: Path,
-    private val currentContext: () -> CheckpointHostContext,
-    private val currentAttestation: () -> ResumeHostAttestation
-) : TrustedSessionPreExecutionHost {
-    private fun deny(): Nothing = throw SessionResumeUnconfirmed("RESUME_CONTEXT_CHANGED")
+internal object RuntimeTrustedHandoffChecks {
+    fun deny(): Nothing = throw SessionResumeUnconfirmed("RESUME_CONTEXT_CHANGED")
 
-    private fun checkBeforePublication(
+    fun checkBeforePublication(
         cancellation: Cancellation,
         deadline: Instant,
         clock: Clock
@@ -44,7 +30,8 @@ class DurableRuntimeCreatedAcceptedHost(
         if (interruptedBefore || interruptedDuring) throw Stopped(false)
     }
 
-    private fun matchesRequest(request: SessionRequest, context: CheckpointHostContext) {
+    fun matchesRequest(request: SessionRequest, context: CheckpointHostContext,
+        checkpointDirectory: Path, ledgerPath: Path) {
         // Untrusted paths can only be compared, never passed to the publisher.
         // Missing paths, invalid fields and IO failures have the same sanitized
         // code. Never attach the cause: it can contain an absolute host path.
@@ -69,23 +56,45 @@ class DurableRuntimeCreatedAcceptedHost(
         }
         if (!matches) deny()
     }
+}
 
+/**
+ * Opt-in, trusted-host adapter for the real DefaultRunSessionUseCase.
+ *
+ * The host supplies CURRENT independent Git/policy/authority facts. It must
+ * create a durable C1 with authenticated ledger evidence before calling this
+ * adapter. Neither a request nor a checkpoint proves its own authority.
+ * On any failure, including an apparent post-write failure, operator-only
+ * read-only reconciliation is required; no automatic C1 -> C2 retry.
+ *
+ * No model, workspace tool, child or runtime event sink is used. Publication
+ * stops at C2 and never grants the caller permission to enter RUNNING.
+ */
+@TrustedPreExecutionHandoff
+@OptIn(TrustedSessionPreExecutionApi::class)
+class DurableRuntimeCreatedAcceptedHost(
+    private val checkpointDirectory: Path,
+    private val ledgerPath: Path,
+    private val currentContext: () -> CheckpointHostContext,
+    private val currentAttestation: () -> ResumeHostAttestation
+) : TrustedSessionPreExecutionHost {
     override fun publishCreatedAccepted(
         request: SessionRequest,
         cancellation: Cancellation,
         deadline: Instant,
         clock: Clock
     ): TrustedSessionHandoffReceipt {
-        checkBeforePublication(cancellation, deadline, clock)
+        RuntimeTrustedHandoffChecks.checkBeforePublication(cancellation, deadline, clock)
         val context = currentContext()
-        checkBeforePublication(cancellation, deadline, clock)
+        RuntimeTrustedHandoffChecks.checkBeforePublication(cancellation, deadline, clock)
         val attestation = currentAttestation()
-        checkBeforePublication(cancellation, deadline, clock)
-        matchesRequest(request, context)
-        checkBeforePublication(cancellation, deadline, clock)
+        RuntimeTrustedHandoffChecks.checkBeforePublication(cancellation, deadline, clock)
+        RuntimeTrustedHandoffChecks.matchesRequest(
+            request, context, checkpointDirectory, ledgerPath)
+        RuntimeTrustedHandoffChecks.checkBeforePublication(cancellation, deadline, clock)
         // Inspect physical C1; a forged request/checkpoint is never authority.
         val created = SessionCheckpointStore.inspect(checkpointDirectory, context, ledgerPath)
-        checkBeforePublication(cancellation, deadline, clock)
+        RuntimeTrustedHandoffChecks.checkBeforePublication(cancellation, deadline, clock)
         val c1 = created.snapshot
         val matchesIdentity = try {
             c1.sessionId == request.sessionId &&
@@ -95,7 +104,7 @@ class DurableRuntimeCreatedAcceptedHost(
             false
         }
         if (!matchesIdentity || c1.journalSequence <= 0 ||
-            c1.journalSequence == Int.MAX_VALUE) deny()
+            c1.journalSequence == Int.MAX_VALUE) RuntimeTrustedHandoffChecks.deny()
         val transition = SessionEventJournal.frame(
             sessionId = c1.sessionId,
             traceId = c1.traceId,
@@ -112,7 +121,7 @@ class DurableRuntimeCreatedAcceptedHost(
         // only updates signals, never interrupts the caller's FileChannels.
         // External Thread.interrupt(), IO failures and process death still
         // require read-only reconciliation if publication becomes uncertain.
-        checkBeforePublication(cancellation, deadline, clock)
+        RuntimeTrustedHandoffChecks.checkBeforePublication(cancellation, deadline, clock)
         // publish() re-reads the WHOLE disk-authenticated C1 under its new
         // OS lease, then appends the only legal edge and saves C2 on the
         // same writer. It closes writer before retiring the lease.

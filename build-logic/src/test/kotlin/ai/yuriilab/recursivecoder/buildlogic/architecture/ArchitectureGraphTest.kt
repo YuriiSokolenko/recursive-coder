@@ -7,6 +7,27 @@ import org.junit.jupiter.api.Test
 
 class ArchitectureGraphTest {
     @Test
+    fun rejectsTrustedRunningOptInLaundering() {
+        val forbidden = listOf(
+            "@OptIn(TrustedRunningBoundaryApi::class) class Wrapper",
+            "@file:OptIn(TrustedRunningBoundaryApi::class)",
+            "@OptIn(OtherMarker::class,\n    ai.yuriilab.recursivecoder.TrustedRunningBoundaryApi::class)",
+            "@kotlin.OptIn(TrustedRunningBoundaryApi::class)",
+        )
+        forbidden.forEach { source ->
+            assertTrue(TrustedRunningOptInPolicy.forbiddenInProduction(source), source)
+        }
+        val allowed = listOf(
+            "@TrustedRunningBoundaryApi class TrustedAdapter",
+            "@RequiresOptIn(message = \"Trusted host-only running checkpoint\")",
+            "@OptIn(OtherMarker::class) class Unrelated",
+        )
+        allowed.forEach { source ->
+            assertFalse(TrustedRunningOptInPolicy.forbiddenInProduction(source), source)
+        }
+    }
+
+    @Test
     fun acceptsAllowedProductionAndTestEdges() {
         val violations = ArchitectureGraph.violations(
             modules = ArchitectureGraph.allowedProjectDependencies.keys,

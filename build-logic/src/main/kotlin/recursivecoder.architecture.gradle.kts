@@ -14,6 +14,11 @@ tasks.register<CheckArchitectureTask>("checkArchitecture") {
         it != rootProject && (it.childProjects.isEmpty() || it.buildFile.isFile)
     }.sortedBy { it.path }
     modulePaths.set(modules.map { it.path })
+    // Track src/main Kotlin inputs so configuration-cache reuse cannot hide
+    // an added production opt-in wrapper.
+    productionKotlinSources.from(modules.map { module ->
+        module.fileTree("src/main").apply { include("**/*.kt") }
+    })
     allowedModuleDependencies.set(
         ArchitectureGraph.allowedProjectDependencies.mapValues { (_, targets) -> targets.sorted() },
     )

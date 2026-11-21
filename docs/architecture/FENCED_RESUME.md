@@ -8,6 +8,65 @@ See the [effect intent and recovery contracts](EFFECT_INTENTS.md) for the
 pure policy, including the successor-generation non-start barrier requirement;
 no live effect reconciliation adapter is enabled here.
 
+## Trusted accepted-to-running boundary (partial #104)
+
+The trusted `DefaultRunSessionUseCase.publishTrustedAcceptedRunning` entry
+point is **separate from normal `invoke()`**. It requires an already durable,
+host-authenticated accepted checkpoint C2 and a fresh independently provided
+host Git/policy/authority context. It uses a new exclusive resume generation,
+reopens the exact checkpoint-bound ledger, appends one canonical
+`accepted -> running` transition under `appendTrustedAcceptedRunning`, and
+persists C3 with `saveFromOpenLedgerFenced` before the writer and lease close.
+
+This is a **metadata-only, one-way marker, not permission to execute**.
+It preserves task state `ready`, attempt zero, unchanged children/artifacts,
+known-zero usage and zero pending effects; the checkpoint store compares the
+entire C3 candidate against C2 under `checkpoint.lock`. The independent
+`TrustedRunningBoundaryPolicy` permits only the final, root-actor transition
+after the old `PreExecutionPhasePolicy`-authenticated prefix. Ordinary
+`appendFenced` remains pre-execution-only.
+
+**C3 is deliberately not admissible for resume.** The unmodified
+`SessionResumeAdmission` pre-execution policy rejects `running`, even if
+C3 is complete and the ledger is clean. A crash after the running append but
+before C3 leaves an uncovered tail; no automatic repair or retry is allowed.
+No model, workspace tool, child, effect journal, receipt, terminal output or
+ordinary session event sink is opened by either trusted handoff. The CLI
+continues to reject `resume.mode=resume` and normal execution is unchanged.
+
+### Crash-tail operator runbook (current contract)
+
+A crash after `accepted -> running` was durably appended but before C3 was
+published creates a **permanently blocked session under the current APIs**.
+Neither automatic resume, the genesis-only operator reconciliation path, nor
+`SessionCheckpointStore.inspect` can recover or bless the uncovered tail.
+The failure is fail-closed, and there is **no manual repair endpoint** for that
+same session in #104. Do not truncate, edit, delete, or replay journal frames,
+checkpoints, lease generations, anchors or signed effect evidence to work
+around the refusal.
+
+The currently surfaced read-only error for this state is the generic
+`CHECKPOINT_JOURNAL_MISMATCH` (the last accepted C2 does not cover the
+physical RCLDG1 tail). **That code alone is not proof of this specific crash
+window**; it also covers corruption or other unexpected drift. For triage,
+preserve a read-only copy of the entire store/ledger, independently inspect
+the physical journal, and verify that a trusted C2 is the last checkpoint
+while the ledger has exactly one trailing canonical
+`accepted -> running` event with no C3. If any additional or unrecognized
+frames are present, treat evidence as unconfirmed, not a recoverable case.
+Escalate both outcomes to the operator; do not attempt to mutate or resume
+the old session. Create a new session from freshly verified inputs and
+workspace/policy authority; any external effects must be assessed under #105
+before starting new work. A future *separately reviewed operator reconciliation
+design* must explicitly authenticate this tail if in-place recovery is ever
+proposed. Neither #104 nor #105 currently implements that path.
+
+This milestone does not solve #105 effect authority/reconciliation, long-held
+fsync/shutdown watchdog semantics, kill-boundary subprocess evidence, or the
+true live-fenced runtime `FileStore.type()` sanitized-denial E2E. Those remain
+gates for connecting real execution and for closing #104. Independently
+review the authenticated operator call boundary before production use.
+
 ## Deny-only runtime filesystem preflight (Draft PR #135)
 
 `ResumeRuntimeFilesystemPreflight` is an optional, trusted diagnostic adapter

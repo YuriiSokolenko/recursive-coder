@@ -8,7 +8,8 @@ import kotlin.test.*
 
 /** Real local-fs, ledger and checkpoint code; no model, tools or network. */
 @Tag("integration")
-@OptIn(TrustedPreExecutionHandoff::class, LedgerTestFaultInjection::class)
+@OptIn(TrustedPreExecutionHandoff::class, TrustedRunningBoundaryApi::class,
+    LedgerTestFaultInjection::class)
 class DurableCreatedAcceptedHandoffIntegrationTest : SessionCheckpointTestFixture() {
     private fun publish(
         created: VerifiedSessionCheckpoint,
@@ -186,5 +187,177 @@ class DurableCreatedAcceptedHandoffIntegrationTest : SessionCheckpointTestFixtur
         }
         assertEquals("CHECKPOINT_JOURNAL_MISMATCH", refusal.code)
         assertFalse(Files.exists(store().resolve("resume-000000000002.rcf")))
+    }
+    @Test fun runningAppendWithoutC3LeavesUncoveredTailAndCannotResume() {
+        val c2 = publish(createPreExecutionCheckpoint())
+        SessionResumeAdmission.admit(store(), context(), ledger(),
+            resumeAttestation(expected = 1L)).use { lease ->
+            val writer = DurableSessionEventLedger.reopenForAppend(
+                ledger(), workspace(), store(), context(), lease)
+            writer.appendTrustedAcceptedRunning(
+                trustedRunningTransition())
+            val failedClose = assertFailsWith<SessionLedgerUnconfirmed> {
+                writer.close()
+            }
+            assertEquals("LEDGER_REOPEN_CHECKPOINT_REQUIRED", failedClose.code)
+        }
+        assertFalse(Files.exists(store().resolve("000000000003.rcp")))
+        val physical = DurableSessionEventLedger.inspect(ledger())
+        assertEquals(3, physical.lastSequence)
+        assertEquals(SessionPhaseVocabulary.runningWire,
+            TrustedRunningBoundaryPolicy.phaseFromVerifiedHistory(
+                SessionPhaseVocabulary.runningWire, physical.events),
+            "Read-only physical evidence identifies the canonical running tail")
+        assertNull(PreExecutionPhasePolicy.phaseFromVerifiedHistory(
+            SessionPhaseVocabulary.acceptedWire, physical.events),
+            "The same tail can never be accepted as resume evidence")
+        val rejection = assertFailsWith<CheckpointUnconfirmed> { inspect() }
+        assertEquals("CHECKPOINT_JOURNAL_MISMATCH", rejection.code)
+        val readmission = assertFailsWith<CheckpointUnconfirmed> {
+            SessionResumeAdmission.admit(store(), context(), ledger(),
+                resumeAttestation(expected = 2L))
+        }
+        assertEquals("CHECKPOINT_JOURNAL_MISMATCH", readmission.code)
+        assertFalse(Files.exists(store().resolve("resume-000000000003.rcf")))
+        assertEquals(2L, c2.snapshot.sequence)
+    }
+
+    @Test fun runningCheckpointCannotChangeEvenReadyChildrenAtPublication() {
+        val c2 = publish(createPreExecutionCheckpoint())
+        SessionResumeAdmission.admit(store(), context(), ledger(),
+            resumeAttestation(expected = 1L)).use { lease ->
+            val writer = DurableSessionEventLedger.reopenForAppend(
+                ledger(), workspace(), store(), context(), lease)
+            try {
+                writer.appendTrustedAcceptedRunning(
+                    trustedRunningTransition())
+                val anchor = writer.withCommittedCheckpointAnchor { it }
+                val mutated = c2.snapshot.copy(
+                    sequence = 3L, previousSha256 = c2.sha256,
+                    phase = "running",
+                    // Both versions are execution-free, but children MUST
+                    // never change in a metadata-only lifecycle marker.
+                    children = emptyList(),
+                    journalSequence = anchor.lastSequence,
+                    journalHeadSha256 = anchor.headSha256,
+                    journalFileSha256 = anchor.fileSha256,
+                    lastTrustedJournalOffset = anchor.lastTrustedOffset
+                )
+                val refused = assertFailsWith<CheckpointUnconfirmed> {
+                    SessionCheckpointStore.saveFromOpenLedgerFenced(
+                        lease, store(), context(), writer, mutated, c2.sha256)
+                }
+                assertEquals("CHECKPOINT_RUNNING_BOUNDARY_CHANGED", refused.code)
+                assertFalse(Files.exists(store().resolve("000000000003.rcp")))
+            } finally {
+                assertEquals("LEDGER_REOPEN_CHECKPOINT_REQUIRED",
+                    assertFailsWith<SessionLedgerUnconfirmed> {
+                        writer.close()
+                    }.code)
+            }
+        }
+        assertFalse(Files.exists(store().resolve("000000000003.rcp")))
+    }
+
+    @Test fun closedSecondGenerationLeaseDeniesRunningAppendAndCheckpointWithoutMutation() {
+        val c2 = publish(createPreExecutionCheckpoint())
+        val before = Files.readAllBytes(ledger())
+        val lease = SessionResumeAdmission.admit(store(), context(), ledger(),
+            resumeAttestation(expected = 1L))
+        val writer = DurableSessionEventLedger.reopenForAppend(
+            ledger(), workspace(), store(), context(), lease)
+        lease.close()
+
+        try {
+            assertEquals("RESUME_FENCE_STALE_WRITER",
+                assertFailsWith<SessionResumeUnconfirmed> {
+                    writer.appendTrustedAcceptedRunning(trustedRunningTransition())
+                }.code)
+            val proposed = c2.snapshot.copy(
+                sequence = 3L, previousSha256 = c2.sha256,
+                phase = SessionPhaseVocabulary.runningWire)
+            assertEquals("RESUME_FENCE_STALE_WRITER",
+                assertFailsWith<SessionResumeUnconfirmed> {
+                    SessionCheckpointStore.saveFromOpenLedgerFenced(
+                        lease, store(), context(), writer, proposed, c2.sha256)
+                }.code)
+            assertContentEquals(before, Files.readAllBytes(ledger()))
+            assertFalse(Files.exists(store().resolve("000000000003.rcp")))
+        } finally {
+            assertEquals("LEDGER_REOPEN_WRITER_POISONED",
+                assertFailsWith<SessionLedgerUnconfirmed> { writer.close() }.code)
+        }
+        assertEquals(c2, inspect())
+        assertFalse(Files.exists(store().resolve("000000000003.rcp")))
+    }
+
+    @Test fun c3CannotMintGenerationTwoWhileTheC2WriterStillOwnsGenerationOne() {
+        val c1 = createPreExecutionCheckpoint()
+        val generationOne = SessionResumeAdmission.admit(
+            store(), context(), ledger(), resumeAttestation(expected = 0L))
+        var c2: VerifiedSessionCheckpoint? = null
+        try {
+            DurableSessionEventLedger.reopenForAppend(
+                ledger(), workspace(), store(), context(), generationOne
+            ).use { writer ->
+                writer.appendFenced(fencedTransition(2, "created", "accepted"))
+                val anchor = writer.withCommittedCheckpointAnchor { it }
+                val accepted = c1.snapshot.copy(
+                    sequence = 2L, previousSha256 = c1.sha256,
+                    phase = SessionPhaseVocabulary.acceptedWire, taskState = "ready",
+                    journalSequence = anchor.lastSequence,
+                    journalHeadSha256 = anchor.headSha256,
+                    journalFileSha256 = anchor.fileSha256,
+                    lastTrustedJournalOffset = anchor.lastTrustedOffset
+                )
+                c2 = SessionCheckpointStore.saveFromOpenLedgerFenced(
+                    generationOne, store(), context(), writer, accepted, c1.sha256)
+                val exactC2 = c2!!
+                val before = Files.readAllBytes(ledger())
+                val denied = assertFailsWith<SessionResumeUnconfirmed> {
+                    DurableAcceptedRunningHandoff.publish(
+                        store(), context(), ledger(),
+                        resumeAttestation(expected = 1L),
+                        exactC2, trustedRunningTransition())
+                }
+                assertEquals("RESUME_LEASE_HELD", denied.code)
+                assertContentEquals(before, Files.readAllBytes(ledger()))
+                assertFalse(Files.exists(store().resolve("resume-000000000002.rcf")))
+                assertFalse(Files.exists(store().resolve("000000000003.rcp")))
+            }
+        } finally {
+            generationOne.close()
+        }
+        assertEquals(c2, inspect())
+        assertEquals(1L, SessionResumeAdmission.currentGeneration(
+            store(), context(), ledger()))
+    }
+
+    @Test fun retiredSecondGenerationThenWrongCasCannotAppendC3() {
+        val c2 = publish(createPreExecutionCheckpoint())
+        SessionResumeAdmission.admit(store(), context(), ledger(),
+            resumeAttestation(expected = 1L)).use { generationTwo ->
+            assertEquals(2L, generationTwo.generation)
+        }
+        val before = Files.readAllBytes(ledger())
+        val result = assertFailsWith<SessionResumeUnconfirmed> {
+            DurableAcceptedRunningHandoff.publish(
+                store(), context(), ledger(), resumeAttestation(expected = 1L),
+                c2, trustedRunningTransition())
+        }
+        assertEquals("RESUME_FENCE_CAS_FAILED", result.code)
+        assertContentEquals(before, Files.readAllBytes(ledger()))
+        assertEquals(c2, inspect())
+        assertFalse(Files.exists(store().resolve("000000000003.rcp")))
+        assertFalse(Files.exists(store().resolve("resume-000000000003.rcf")))
+
+        // The true next-generation CAS can still publish exactly one C3.
+        val c3 = DurableAcceptedRunningHandoff.publish(
+            store(), context(), ledger(), resumeAttestation(expected = 2L),
+            c2, trustedRunningTransition())
+        assertEquals(3L, c3.snapshot.sequence)
+        assertEquals(SessionPhaseVocabulary.runningWire, inspect().snapshot.phase)
+        assertEquals(3L, SessionResumeAdmission.currentGeneration(
+            store(), context(), ledger()))
     }
 }

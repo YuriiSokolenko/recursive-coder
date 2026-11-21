@@ -24,6 +24,7 @@ object SessionPhaseVocabulary {
     val createdWire: String = SessionPhase.CREATED.wire
     // Runtime ADMITTED is serialized as "accepted" in Session Protocol v1.
     val acceptedWire: String = SessionPhase.ADMITTED.wire
+    val runningWire: String = SessionPhase.RUNNING.wire
     val wires: Set<String> = Collections.unmodifiableSet(
         SessionPhase.entries.mapTo(linkedSetOf()) { it.wire })
     val terminalWires: Set<String> = Collections.unmodifiableSet(

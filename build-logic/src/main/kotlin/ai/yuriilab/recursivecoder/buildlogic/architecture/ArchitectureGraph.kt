@@ -103,6 +103,19 @@ object ArchitectureGraph {
 }
 
 /**
+ * No production source may launder the C3 opt-in behind an unmarked wrapper.
+ * Includes qualified and file-level annotation forms.
+ */
+object TrustedRunningOptInPolicy {
+    private val bypass = Regex(
+        """@\s*(?:file\s*:\s*)?(?:kotlin\.)?OptIn\s*\([^)]*\b(?:\w+\.)*TrustedRunningBoundaryApi\s*::\s*class\b""",
+        RegexOption.DOT_MATCHES_ALL,
+    )
+
+    fun forbiddenInProduction(source: String): Boolean = bypass.containsMatchIn(source)
+}
+
+/**
  * NUL cannot occur in Gradle project/configuration/dependency names. Encoding records
  * as primitive strings keeps Gradle task inputs portable and configuration-cache safe.
  */

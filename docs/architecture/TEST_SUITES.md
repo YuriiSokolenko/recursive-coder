@@ -110,6 +110,40 @@ Protocol result is written. Identity/CAS/protocol denial cases are checked
 before execution. This is a host-only metadata boundary, not a test of
 runtime execution fencing, stalled-fsync shutdown or crash-resume.
 
+## Trusted runtime C2 -> C3 running-only boundary (#104, no effects)
+
+`TrustedRunningBoundaryPolicyUnitTest` (`@Tag("unit")`) proves that only
+one final, exact-envelope root actor `accepted -> running` event follows
+an authenticated pre-execution prefix. Unknown-null actor keys, missing
+actor keys, execution-shaped metadata, repeated edges and pre-existing
+tool events fail closed without a physical writer.
+
+`RuntimeTrustedCreatedAcceptedHandoffIntegrationTest`
+(`@Tag("integration")`) exercises the distinct, explicitly opted-in
+`DurableRuntimeAcceptedRunningHost` through
+`DefaultRunSessionUseCase.publishTrustedAcceptedRunning`. It proves
+durable C3 with no model/workspace/event-sink activity, incorrect CAS,
+created -> running shortcut and repeated C3 denial without new generation,
+checkpoint or journal mutation.
+
+`DurableCreatedAcceptedHandoffIntegrationTest` (`@Tag("integration")`)
+provides physical-fs coverage for C3 without a checkpoint (unrecoverable
+journal tail), C3 attempts while generation-one lease is held, retired
+generation-two writer append/save refusal, mismatched CAS after generation
+two, and byte-identical journal/no-C3 guarantees. C3 is intentionally
+**not an admissible resume boundary**.
+
+The dedicated `:infra:journal:verifyRunningHostOptIn` Gradle task executes
+the project's Kotlin compiler against **positive and negative** out-of-source
+fixtures in `infra/journal/src/optInFixtures/`. CI must observe that a
+caller opted into `TrustedPreExecutionHandoff` alone cannot call
+`publishAcceptedRunning` on the C2 class *and* cannot instantiate the
+`@TrustedRunningBoundaryApi` C3 host, whereas a caller explicitly opted
+into both compiles. This is compiler-enforced API isolation, not a source
+grep or runtime/JUnit-only assertion. CI invokes the task in its architecture
+job. See [fenced resume and crash-tail runbook](FENCED_RESUME.md). No test
+here authorizes actual effects, general runtime resume or #105 recovery.
+
 ## Five-role coordinator tests (issue #79)
 
 `FiveRoleWorkflowCoordinatorUnitTest` (`@Tag("unit")`) runs scripted in-memory `FiveRoleStageActions` and `FiveRoleWorkflowHost` ports. It checks invalid plans including forbidden Developer targets, mismatched host snapshots, tentative vs confirmed commits, reconciliation denials, Reviewer stops and final graph attestation failures with exact codes/stages. `FiveRoleFakeModelWorkflowIntegrationTest` (`@Tag("integration")`) invokes the five real stage use cases through an in-memory fake host and fake tool sessions. **These fake-host tests alone do not establish authenticated receipts or Git transition security.** Direct `:infra:workspace`

@@ -40,6 +40,8 @@ jobs:
           python3 --version
       - name: Verify architecture and run pure unit tests
         run: ./gradlew --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g checkArchitecture checkTestTiers unitTest --stacktrace
+      - name: Prove trusted running host opt-in at the Kotlin compiler boundary
+        run: ./gradlew --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g :infra:journal:verifyRunningHostOptIn --stacktrace
       - name: Test independent architecture graph verifier
         run: ./gradlew --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g -p build-logic test --stacktrace
       - name: Prove fresh and reused Gradle configuration cache

@@ -1281,6 +1281,29 @@ object SessionCheckpointStore {
                     throw CheckpointUnconfirmed("CHECKPOINT_RESUME_ANCHOR_UNCONFIRMED", e)
                 throw e
             }
+            // RUNNING is a one-way execution-denied marker, not a normal
+            // checkpoint save. Verify the entire unchanged metadata-only C2
+            // source under checkpoint.lock; the only legal differences are
+            // checkpoint generation, physical ledger anchor and phase.
+            // Source and destination must both remain effect-free.
+            if (fence != null && snapshot.phase == SessionPhaseVocabulary.runningWire) {
+                val source = previous?.snapshot
+                    ?: refuse("CHECKPOINT_RUNNING_BOUNDARY_CHANGED")
+                if (source.phase != SessionPhaseVocabulary.acceptedWire ||
+                    !PreExecutionSnapshotPolicy.safe(source) ||
+                    source.effectJournalHead != null ||
+                    source.effectReconciliation != null ||
+                    snapshot != source.copy(
+                        sequence = Math.addExact(source.sequence, 1L),
+                        previousSha256 = previous.sha256,
+                        phase = SessionPhaseVocabulary.runningWire,
+                        journalSequence = ledger.lastSequence,
+                        journalHeadSha256 = ledger.headSha256,
+                        journalFileSha256 = ledger.fileSha256,
+                        lastTrustedJournalOffset = ledger.lastTrustedOffset
+                    ))
+                    refuse("CHECKPOINT_RUNNING_BOUNDARY_CHANGED")
+            }
             if (requireCoveredPreExecutionPrefix) {
                 // Both fenced checkpoint APIs must use the exact same
                 // pre-execution snapshot and verified phase-history contract.
