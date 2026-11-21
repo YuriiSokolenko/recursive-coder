@@ -16,7 +16,7 @@ import kotlinx.serialization.json.intOrNull
  * reconciliation, never a blind retry.
  */
 @TrustedRunningBoundaryApi
-object DurableAcceptedRunningHandoff {
+internal object DurableAcceptedRunningHandoff {
     private fun validProposal(source: SessionCheckpoint, event: JsonObject): Boolean {
         if (source.journalSequence == Int.MAX_VALUE) return false
         val next = source.journalSequence + 1

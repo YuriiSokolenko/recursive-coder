@@ -250,6 +250,31 @@ class _GradleOutputAssertions(unittest.TestCase):
 
 
 class ArchitectureBoundaryTest(_GradleOutputAssertions):
+    def test_production_file_opt_in_is_rejected(self):
+        with tempfile.TemporaryDirectory(prefix="trusted-running-optin-") as directory:
+            fixture = Path(directory)
+            ArchitectureConfigurationCacheRegressionTest.copy_fixture(fixture)
+            injected = fixture / "core/session/src/main/kotlin/ForbiddenRunningOptIn.kt"
+            injected.parent.mkdir(parents=True, exist_ok=True)
+            injected.write_text(
+                "@file:OptIn(TrustedRunningBoundaryApi::class)\n",
+                encoding="utf-8",
+            )
+            run = run_logged_gradle(
+                [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                 "--console=plain", "checkArchitecture"],
+                cwd=fixture,
+                scenario="production file-level trusted running opt-in",
+                phase="architecture-source-rejection",
+                sequence=1,
+                timeout=180,
+            )
+            self.assertNotEqual(0, run.returncode)
+            self.assert_gradle_contains(
+                "Forbidden TrustedRunningBoundaryApi opt-in in production Kotlin source",
+                run.stdout,
+            )
+
     def run_with_edge(self, source: str, target: str, configuration: str) -> str:
         init_script = (
             "gradle.projectsEvaluated {\n"

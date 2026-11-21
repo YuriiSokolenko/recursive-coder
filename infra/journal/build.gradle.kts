@@ -85,7 +85,61 @@ tasks.register("verifyRunningHostOptIn") {
             !deniedC3Construction || !deniedC3Invocation)
             throw GradleException("Pre-execution-only caller bypassed C3 compile-time gate " +
                 "or failed for an unrelated reason:\n" + negative.second)
+        // These are standalone cross-module compilations, not friend modules.
+        // A publisher that loses 'internal' must fail this gate even if it
+        // retains @TrustedRunningBoundaryApi.
+        fun negativeErrors(fixture: String): List<String> {
+            val (exit, output) = compile(fixture)
+            val errors = output.lineSequence()
+                .filter { it.contains("error:", ignoreCase = true) }.toList()
+            if (exit == 0 || errors.isEmpty())
+                throw GradleException("$fixture unexpectedly compiled or emitted no errors:\n" +
+                    output)
+            return errors
+        }
+        fun errorAtSource(fixture: String, marker: String, diagnostic: String): Boolean {
+            val line = file("src/optInFixtures/$fixture").readLines()
+                .indexOfFirst { it.contains(marker) } + 1
+            if (line <= 0) throw GradleException("Missing fixture marker $marker in $fixture")
+            return diagnostic.contains("$fixture:$line:") &&
+                diagnostic.contains("error:", ignoreCase = true)
+        }
+
+        val hiddenFixture = "HiddenRunningPublisherCannotCompile.kt"
+        val hiddenErrors = negativeErrors(hiddenFixture)
+        val hiddenPublisher = hiddenErrors.any {
+            errorAtSource(hiddenFixture, "DurableAcceptedRunningHandoff.publish(", it) &&
+                it.contains("DurableAcceptedRunningHandoff") &&
+                (it.contains("internal", ignoreCase = true) ||
+                    it.contains("invisible", ignoreCase = true) ||
+                    it.contains("cannot access", ignoreCase = true))
+        }
+        if (!hiddenPublisher || hiddenErrors.any {
+            !it.contains("$hiddenFixture:") ||
+                (!it.contains("DurableAcceptedRunningHandoff") &&
+                    !it.contains(markerMessage, ignoreCase = true))
+        }) throw GradleException("C3 publisher externally accessible or unrelated errors:\n" +
+            hiddenErrors.joinToString("\n"))
+
+        val portFixture = "RunningPortCannotCompile.kt"
+        val portErrors = negativeErrors(portFixture)
+        if (portErrors.any {
+            !it.contains("$portFixture:") || !it.contains(markerMessage, ignoreCase = true)
+        } || portErrors.none {
+            errorAtSource(portFixture, "host: TrustedSessionRunningHost", it)
+        }) throw GradleException("C3 port opt-in gate failed:\n" +
+            portErrors.joinToString("\n"))
+
+        val methodFixture = "RunningUseCaseCannotCompile.kt"
+        val methodErrors = negativeErrors(methodFixture)
+        if (methodErrors.any {
+            !it.contains("$methodFixture:") || !it.contains(markerMessage, ignoreCase = true)
+        } || methodErrors.none {
+            errorAtSource(methodFixture, "runtime.publishTrustedAcceptedRunning(", it)
+        }) throw GradleException("C3 runtime method opt-in gate failed:\n" +
+            methodErrors.joinToString("\n"))
+
         logger.lifecycle("Verified Kotlin C3 host opt-in: positive compiles, " +
-            "preexecution-only negative fails on the method and marker")
+            "negative host, internal publisher, port and runtime gates all refuse")
     }
 }
