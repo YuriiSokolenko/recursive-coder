@@ -141,7 +141,9 @@ object TrustedRunningOptInPolicy {
      * Inspect root/module build scripts and build-logic convention plugins.
      * A marker reference plus any compiler-wide opt-in configuration is denied,
      * including aliases or values assigned before the compiler option is set.
-     * This intentionally errs toward rejection of unusual build script wiring.\n     * Best-effort defence-in-depth only: dynamically composed marker names and\n     * compiler settings outside the scanned Gradle scripts require separate review.
+     * This intentionally errs toward rejection of unusual build script wiring.
+     * Best-effort defence-in-depth only: dynamically composed marker names and
+     * compiler settings outside the scanned Gradle scripts require separate review.
      */
     fun forbiddenCompilerOptIn(script: String): Boolean =
         script.contains(marker) && (
