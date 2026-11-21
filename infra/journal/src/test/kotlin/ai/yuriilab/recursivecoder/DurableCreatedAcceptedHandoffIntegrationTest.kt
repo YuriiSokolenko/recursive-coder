@@ -447,23 +447,26 @@ class DurableCreatedAcceptedHandoffIntegrationTest : SessionCheckpointTestFixtur
                     journalFileSha256 = anchor.fileSha256,
                     lastTrustedJournalOffset = anchor.lastTrustedOffset)
                 val invalid = listOf(
-                    "taskState" to proposed.copy(taskState = "running"),
-                    "taskAttempt" to proposed.copy(taskAttempt = 1),
-                    "hostAssertedUsage" to proposed.copy(hostAssertedUsage = listOf(
+                    Triple("taskState", proposed.copy(taskState = "running"),
+                        "CHECKPOINT_JOURNAL_UNCONFIRMED"),
+                    Triple("taskAttempt", proposed.copy(taskAttempt = 1),
+                        "CHECKPOINT_JOURNAL_UNCONFIRMED"),
+                    Triple("hostAssertedUsage", proposed.copy(hostAssertedUsage = listOf(
                         HostAssertedCheckpointUsage("task-one", "model", "known", 1L))),
-                    "pendingEffects" to proposed.copy(pendingEffects = listOf(
+                        "CHECKPOINT_JOURNAL_UNCONFIRMED"),
+                    Triple("pendingEffects", proposed.copy(pendingEffects = listOf(
                         CheckpointEffect("effect-one", "req-transition-3", "unknown"))),
-                    "previousSha256" to proposed.copy(previousSha256 = "f".repeat(64))
+                        "CHECKPOINT_JOURNAL_UNCONFIRMED"),
+                    Triple("previousSha256", proposed.copy(previousSha256 = "f".repeat(64)),
+                        "CHECKPOINT_STALE_GENERATION")
                 )
                 val physical = Files.readAllBytes(ledger())
-                invalid.forEach { (name, candidate) ->
+                invalid.forEach { (name, candidate, expectedCode) ->
                     val refused = assertFailsWith<CheckpointUnconfirmed>(name) {
                         SessionCheckpointStore.saveFromOpenLedgerFenced(
                             lease, store(), context(), writer, candidate, c2.sha256)
                     }
-                    assertEquals(
-                        if (name == "previousSha256") "CHECKPOINT_STALE_GENERATION"
-                        else "CHECKPOINT_JOURNAL_UNCONFIRMED", refused.code, name)
+                    assertEquals(expectedCode, refused.code, name)
                     assertFalse(Files.exists(store().resolve("000000000003.rcp")), name)
                     assertContentEquals(physical, Files.readAllBytes(ledger()), name)
                 }
@@ -496,6 +499,8 @@ class DurableCreatedAcceptedHandoffIntegrationTest : SessionCheckpointTestFixtur
                     PreparedFenceReconciliation(3L, "f".repeat(64), "operator-one", true))
                     .close()
             }.code)
+        // Genesis checks an earlier missing-pin precondition; this assertion
+        // guarantees fail-closed only, not rejection at the C3-specific gate.
         assertEquals("RESUME_EFFECT_RECONCILIATION_NO_PIN",
             assertFailsWith<SessionResumeUnconfirmed> {
                 SessionResumeAdmission.reconcileGenesisEffectHead(
@@ -605,7 +610,7 @@ class DurableCreatedAcceptedHandoffIntegrationTest : SessionCheckpointTestFixtur
     @Test fun c3RenamedCrashRequiresInspectionNotRetry() =
         assertC3PublicationCrashWindow("renamed")
 
-    @Test fun c3DirectoryFsyncFailureRequiresInspectionNotRetry() =
+    @Test fun c3CrashBeforeDirectoryFsyncRequiresInspectionNotRetry() =
         assertC3PublicationCrashWindow("before-directory-fsync")
 
 }
