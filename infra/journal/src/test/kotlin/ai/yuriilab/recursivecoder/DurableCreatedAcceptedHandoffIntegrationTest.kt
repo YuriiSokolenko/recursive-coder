@@ -361,6 +361,53 @@ class DurableCreatedAcceptedHandoffIntegrationTest : SessionCheckpointTestFixtur
             store(), context(), ledger()))
     }
 
+    @Test fun runningOnlyFaultSeamPoisonedBeforeWriteCannotBeRetried() {
+        publish(createPreExecutionCheckpoint())
+        val baseline = Files.readAllBytes(ledger())
+        SessionResumeAdmission.admit(store(), context(), ledger(),
+            resumeAttestation(expected = 1L)).use { lease ->
+            val writer = DurableSessionEventLedger.reopenForAppend(
+                ledger(), workspace(), store(), context(), lease)
+            assertEquals("simulated C3 before-write crash",
+                assertFailsWith<IllegalStateException> {
+                    writer.appendTrustedRunningWithFault(trustedRunningTransition()) { phase ->
+                        if (phase == "before-record-write")
+                            throw IllegalStateException("simulated C3 before-write crash")
+                    }
+                }.message)
+            assertEquals("LEDGER_REOPEN_WRITER_POISONED",
+                assertFailsWith<SessionLedgerUnconfirmed> {
+                    writer.appendTrustedAcceptedRunning(trustedRunningTransition())
+                }.code)
+            assertEquals("LEDGER_REOPEN_WRITER_POISONED",
+                assertFailsWith<SessionLedgerUnconfirmed> { writer.close() }.code)
+        }
+        assertContentEquals(baseline, Files.readAllBytes(ledger()))
+        assertFalse(Files.exists(store().resolve("000000000003.rcp")))
+    }
+
+    @Test fun runningOnlyFaultSeamAfterForceLeavesUnconfirmedTail() {
+        publish(createPreExecutionCheckpoint())
+        SessionResumeAdmission.admit(store(), context(), ledger(),
+            resumeAttestation(expected = 1L)).use { lease ->
+            val writer = DurableSessionEventLedger.reopenForAppend(
+                ledger(), workspace(), store(), context(), lease)
+            assertEquals("LEDGER_SYNC_UNCONFIRMED",
+                assertFailsWith<SessionLedgerUnconfirmed> {
+                    writer.appendTrustedRunningWithFault(trustedRunningTransition()) { phase ->
+                        if (phase == "forced-before-ack")
+                            throw IllegalStateException("C3 force acknowledgement lost")
+                    }
+                }.code)
+            assertEquals("LEDGER_UNACKNOWLEDGED_APPEND",
+                assertFailsWith<SessionLedgerUnconfirmed> { writer.close() }.code)
+        }
+        assertEquals(3, DurableSessionEventLedger.inspect(ledger()).lastSequence)
+        assertFalse(Files.exists(store().resolve("000000000003.rcp")))
+        assertEquals("CHECKPOINT_JOURNAL_MISMATCH",
+            assertFailsWith<CheckpointUnconfirmed> { inspect() }.code)
+    }
+
     @Test fun nonOptedRunningSnapshotWithoutC3EventIsNotPublishable() {
         val c2 = publish(createPreExecutionCheckpoint())
         val baseline = Files.readAllBytes(ledger())
