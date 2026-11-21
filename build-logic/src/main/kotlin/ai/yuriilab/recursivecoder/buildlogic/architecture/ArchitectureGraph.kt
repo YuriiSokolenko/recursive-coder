@@ -106,7 +106,8 @@ object ArchitectureGraph {
  * Fail-closed token allowlist for the host-only C3 marker. A raw token check
  * catches Kotlin import aliases, typealiases, multiline/comment tricks and
  * qualified/file-level opt-ins without trusting a regex to parse annotations.
- * Only the reviewed C3 declaration/usage files may carry the bare annotation\n * or declare the marker; no @OptIn wrappers are permitted even within them.
+ * Only the reviewed C3 declaration/usage files may carry the bare annotation
+ * or declare the marker; no @OptIn wrappers are permitted even within them.
  */
 object TrustedRunningOptInPolicy {
     private const val marker = "TrustedRunningBoundaryApi"
