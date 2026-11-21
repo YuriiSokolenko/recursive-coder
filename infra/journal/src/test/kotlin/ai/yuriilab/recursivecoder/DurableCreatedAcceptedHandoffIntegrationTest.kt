@@ -9,7 +9,7 @@ import kotlin.test.*
 /** Real local-fs, ledger and checkpoint code; no model, tools or network. */
 @Tag("integration")
 @OptIn(TrustedPreExecutionHandoff::class, TrustedRunningBoundaryApi::class,
-    LedgerTestFaultInjection::class)
+    LedgerTestFaultInjection::class, ResumeOperatorOnlyApi::class)
 class DurableCreatedAcceptedHandoffIntegrationTest : SessionCheckpointTestFixture() {
     private fun publish(
         created: VerifiedSessionCheckpoint,
