@@ -45,13 +45,21 @@ tasks.register("verifyRunningHostOptIn") {
                 positive.second)
 
         val negative = compile("PreExecutionOnlyCannotPublishRunning.kt")
-        if (negative.first == 0 ||
-            !negative.second.contains(
-                "unresolved reference 'publishAcceptedRunning' on receiver of type " +
-                    "'DurableRuntimeCreatedAcceptedHost'") ||
-            !negative.second.contains(
-                "trusted host-only running checkpoint; NOT effect or model execution authority.") ||
-            !negative.second.contains("DurableRuntimeAcceptedRunningHost("))
+        // Match the two independent compiler failures by meaning, not the
+        // compiler version's exact quotation/receiver formatting.
+        val errors = negative.second.lineSequence()
+            .filter { it.startsWith("e: ") || it.contains(" error: ") }
+            .toList()
+        val absentC2Method = errors.any {
+            it.contains("unresolved reference", ignoreCase = true) &&
+                it.contains("publishAcceptedRunning")
+        }
+        val missingC3OptIn = errors.any {
+            it.contains("opt-in", ignoreCase = true) &&
+                (it.contains("TrustedRunningBoundaryApi") ||
+                    it.contains("trusted host-only running checkpoint", ignoreCase = true))
+        }
+        if (negative.first == 0 || !absentC2Method || !missingC3OptIn)
             throw GradleException("Pre-execution-only caller bypassed C3 compile-time gate " +
                 "or failed for an unrelated reason:\n" + negative.second)
         logger.lifecycle("Verified Kotlin C3 host opt-in: positive compiles, " +

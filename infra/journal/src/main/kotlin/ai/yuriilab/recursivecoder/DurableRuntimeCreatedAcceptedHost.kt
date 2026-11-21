@@ -56,8 +56,6 @@ internal object RuntimeTrustedHandoffChecks {
         }
         if (!matches) deny()
     }
-
-
 }
 
 /**
@@ -131,5 +129,4 @@ class DurableRuntimeCreatedAcceptedHost(
             checkpointDirectory, context, ledgerPath, attestation, created, transition)
         return TrustedSessionHandoffReceipt(accepted.snapshot.sequence, accepted.sha256)
     }
-
 }

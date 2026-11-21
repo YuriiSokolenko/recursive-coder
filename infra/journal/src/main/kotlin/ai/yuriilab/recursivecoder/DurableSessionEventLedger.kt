@@ -218,7 +218,6 @@ class DurableSessionEventLedger private constructor(
         private fun leasePath(path: Path): Path =
             path.resolveSibling(path.fileName.toString() + ".lock")
 
-
         /**
          * FileChannel/POSIX locks are process-scoped on Linux. Closing ANY
          * second channel to the same inode can drop the live owner's lock.

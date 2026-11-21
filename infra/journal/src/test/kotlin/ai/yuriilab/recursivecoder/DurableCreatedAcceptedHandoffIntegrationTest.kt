@@ -283,11 +283,11 @@ class DurableCreatedAcceptedHandoffIntegrationTest : SessionCheckpointTestFixtur
                 }.code)
             assertContentEquals(before, Files.readAllBytes(ledger()))
             assertFalse(Files.exists(store().resolve("000000000003.rcp")))
-            assertEquals(c2, inspect())
         } finally {
             assertEquals("LEDGER_REOPEN_WRITER_POISONED",
                 assertFailsWith<SessionLedgerUnconfirmed> { writer.close() }.code)
         }
+        assertEquals(c2, inspect())
         assertFalse(Files.exists(store().resolve("000000000003.rcp")))
     }
 
@@ -360,5 +360,4 @@ class DurableCreatedAcceptedHandoffIntegrationTest : SessionCheckpointTestFixtur
         assertEquals(3L, SessionResumeAdmission.currentGeneration(
             store(), context(), ledger()))
     }
-
 }

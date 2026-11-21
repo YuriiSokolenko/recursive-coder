@@ -1286,7 +1286,7 @@ object SessionCheckpointStore {
             // source under checkpoint.lock; the only legal differences are
             // checkpoint generation, physical ledger anchor and phase.
             // Source and destination must both remain effect-free.
-            if (fence != null && snapshot.phase == "running") {
+            if (fence != null && snapshot.phase == SessionPhaseVocabulary.runningWire) {
                 val source = previous?.snapshot
                     ?: refuse("CHECKPOINT_RUNNING_BOUNDARY_CHANGED")
                 if (source.phase != SessionPhaseVocabulary.acceptedWire ||
