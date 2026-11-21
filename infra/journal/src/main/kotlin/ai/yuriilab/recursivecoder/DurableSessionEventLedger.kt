@@ -756,15 +756,28 @@ class DurableSessionEventLedger private constructor(
     @TrustedRunningBoundaryApi
     @OptIn(LedgerTestFaultInjection::class)
     internal fun appendTrustedAcceptedRunning(event: JsonObject) =
-        appendFencedWithFault(event, allowRunningBoundary = true) { }
+        appendTrustedRunningWithFault(event) { }
 
-    /**
-     * Integration-test-only seam. Deliberately internal: production hosts must
-     * never execute arbitrary callbacks while owning the resume lease monitor.
+    /** Running-specific test seam: BOTH internal visibility and the trusted C3
+     * opt-in are required. This grants no effect execution or replay authority.
      */
+    @TrustedRunningBoundaryApi
     @LedgerTestFaultInjection
-    internal fun appendFencedWithFault(event: JsonObject,
-        allowRunningBoundary: Boolean = false, afterPhase: (String) -> Unit) {
+    internal fun appendTrustedRunningWithFault(
+        event: JsonObject, afterPhase: (String) -> Unit
+    ) = appendFencedImpl(event, allowRunningBoundary = true, afterPhase)
+
+    /** Unprivileged test seam cannot request a running transition. */
+    @LedgerTestFaultInjection
+    internal fun appendFencedWithFault(
+        event: JsonObject, afterPhase: (String) -> Unit
+    ) = appendFencedImpl(event, allowRunningBoundary = false, afterPhase)
+
+    /** Shared private writer implementation; privileged flag never crosses a
+     * test seam or an externally reachable API boundary.
+     */
+    private fun appendFencedImpl(event: JsonObject,
+        allowRunningBoundary: Boolean, afterPhase: (String) -> Unit) {
         val currentLease = resumeLease
             ?: throw SessionLedgerUnconfirmed("LEDGER_NOT_FENCED")
         try {
