@@ -19,6 +19,13 @@ tasks.register<CheckArchitectureTask>("checkArchitecture") {
     productionKotlinSources.from(modules.map { module ->
         module.fileTree("src/main").apply { include("**/*.kt") }
     })
+    // Include root and module scripts plus precompiled convention plugins.
+    // FileTree snapshots both changed scripts and newly added *.gradle.kts
+    // on fresh and reused Gradle configuration-cache runs.
+    productionGradleScripts.from(rootProject.fileTree(rootProject.rootDir).apply {
+        include("**/*.gradle.kts")
+        exclude("**/build/**", "**/.gradle/**")
+    })
     allowedModuleDependencies.set(
         ArchitectureGraph.allowedProjectDependencies.mapValues { (_, targets) -> targets.sorted() },
     )

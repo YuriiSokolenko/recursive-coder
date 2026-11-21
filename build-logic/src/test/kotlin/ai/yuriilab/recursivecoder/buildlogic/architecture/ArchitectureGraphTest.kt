@@ -7,24 +7,79 @@ import org.junit.jupiter.api.Test
 
 class ArchitectureGraphTest {
     @Test
-    fun rejectsTrustedRunningOptInLaundering() {
+    fun rejectsUnreviewedTrustedRunningTokensEvenBehindAliasesOrComments() {
+        val unreviewed = "core/tasks/src/main/kotlin/Unreviewed.kt"
         val forbidden = listOf(
             "@OptIn(TrustedRunningBoundaryApi::class) class Wrapper",
             "@file:OptIn(TrustedRunningBoundaryApi::class)",
-            "@OptIn(OtherMarker::class,\n    ai.yuriilab.recursivecoder.TrustedRunningBoundaryApi::class)",
-            "@kotlin.OptIn(TrustedRunningBoundaryApi::class)",
+            "@OptIn(OtherMarker::class, /* ) */\n TrustedRunningBoundaryApi::class)",
+            "@kotlin.OptIn(ai.yuriilab.recursivecoder.TrustedRunningBoundaryApi::class)",
+            "import ai.yuriilab.recursivecoder.TrustedRunningBoundaryApi as T",
+            "typealias RunningAlias = TrustedRunningBoundaryApi",
+            "import ai.yuriilab.recursivecoder.TrustedRunningBoundaryApi",
         )
         forbidden.forEach { source ->
-            assertTrue(TrustedRunningOptInPolicy.forbiddenInProduction(source), source)
+            assertTrue(TrustedRunningOptInPolicy.forbiddenInProduction(source, unreviewed), source)
         }
-        val allowed = listOf(
-            "@TrustedRunningBoundaryApi class TrustedAdapter",
-            "@RequiresOptIn(message = \"Trusted host-only running checkpoint\")",
-            "@OptIn(OtherMarker::class) class Unrelated",
+        assertFalse(TrustedRunningOptInPolicy.forbiddenInProduction(
+            "@OptIn(OtherMarker::class) class Unrelated", unreviewed))
+    }
+
+    @Test
+    fun reviewedDeclarationsRemainAllowedButUnreviewedNewFilesDoNot() {
+        val reviewed = mapOf(
+            "core/session/src/main/kotlin/ai/yuriilab/recursivecoder/TrustedRunningBoundaryPolicy.kt"
+                to "annotation class TrustedRunningBoundaryApi",
+            "infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/DurableAcceptedRunningHandoff.kt"
+                to "@TrustedRunningBoundaryApi\ninternal object TrustedHandoff",
         )
-        allowed.forEach { source ->
-            assertFalse(TrustedRunningOptInPolicy.forbiddenInProduction(source), source)
+        reviewed.forEach { (path, source) ->
+            assertFalse(TrustedRunningOptInPolicy.forbiddenInProduction(source, path), path)
         }
+        assertTrue(TrustedRunningOptInPolicy.forbiddenInProduction(
+            "@TrustedRunningBoundaryApi class Unreviewed",
+            "infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/NewFile.kt"))
+    }
+
+    @Test
+    fun reviewedSourceFilesCannotLaunderTrustedRunningOptIn() {
+        val reviewed = "infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/DurableSessionEventLedger.kt"
+        val permitted = "@TrustedRunningBoundaryApi\ninternal fun hostOnly() {}"
+        assertFalse(TrustedRunningOptInPolicy.forbiddenInProduction(permitted, reviewed))
+
+        val bypasses = listOf(
+            "@OptIn(TrustedRunningBoundaryApi::class) fun wrapper() {}",
+            "@file:OptIn(TrustedRunningBoundaryApi::class)",
+            "@kotlin.OptIn(TrustedRunningBoundaryApi::class) fun wrapper() {}",
+            "import ai.yuriilab.recursivecoder.TrustedRunningBoundaryApi as Trusted",
+            "import ai.yuriilab.recursivecoder.TrustedRunningBoundaryApi",
+            "typealias UnsafeAlias = TrustedRunningBoundaryApi",
+            "@TrustedRunningBoundaryApi internal fun unreviewedInline() {}",
+        )
+        bypasses.forEach { bypass ->
+            assertTrue(TrustedRunningOptInPolicy.forbiddenInProduction(
+                permitted + "\n" + bypass, reviewed,
+            ), bypass)
+        }
+    }
+
+    @Test
+    fun rejectsCompilerWideGradleOptInAndAllowsUnrelatedCompilerSettings() {
+        val forbidden = listOf(
+            """kotlin { compilerOptions.optIn.add("ai.yuriilab.recursivecoder.TrustedRunningBoundaryApi") }""",
+            """kotlin { compilerOptions { optIn.add("TrustedRunningBoundaryApi") } }""",
+            """kotlin { freeCompilerArgs.add("-opt-in=ai.yuriilab.recursivecoder.TrustedRunningBoundaryApi") }""",
+            """kotlin { sourceSets.main { languageSettings.optIn("TrustedRunningBoundaryApi") } }""",
+            """val marker = "TrustedRunningBoundaryApi"
+                compilerOptions.optIn.add(marker)""",
+        )
+        forbidden.forEach { script ->
+            assertTrue(TrustedRunningOptInPolicy.forbiddenCompilerOptIn(script), script)
+        }
+        assertFalse(TrustedRunningOptInPolicy.forbiddenCompilerOptIn(
+            """tasks.register("verify") { println("TrustedRunningBoundaryApi marker") }"""))
+        assertFalse(TrustedRunningOptInPolicy.forbiddenCompilerOptIn(
+            """kotlin { compilerOptions.optIn.add("com.example.Unrelated") }"""))
     }
 
     @Test

@@ -9,7 +9,7 @@ import kotlin.test.*
 /** Real local-fs, ledger and checkpoint code; no model, tools or network. */
 @Tag("integration")
 @OptIn(TrustedPreExecutionHandoff::class, TrustedRunningBoundaryApi::class,
-    LedgerTestFaultInjection::class)
+    LedgerTestFaultInjection::class, ResumeOperatorOnlyApi::class)
 class DurableCreatedAcceptedHandoffIntegrationTest : SessionCheckpointTestFixture() {
     private fun publish(
         created: VerifiedSessionCheckpoint,
@@ -360,4 +360,257 @@ class DurableCreatedAcceptedHandoffIntegrationTest : SessionCheckpointTestFixtur
         assertEquals(3L, SessionResumeAdmission.currentGeneration(
             store(), context(), ledger()))
     }
+
+    @Test fun runningOnlyFaultSeamPoisonedBeforeWriteCannotBeRetried() {
+        publish(createPreExecutionCheckpoint())
+        val baseline = Files.readAllBytes(ledger())
+        SessionResumeAdmission.admit(store(), context(), ledger(),
+            resumeAttestation(expected = 1L)).use { lease ->
+            val writer = DurableSessionEventLedger.reopenForAppend(
+                ledger(), workspace(), store(), context(), lease)
+            assertEquals("simulated C3 before-write crash",
+                assertFailsWith<IllegalStateException> {
+                    writer.appendTrustedRunningWithFault(trustedRunningTransition()) { phase ->
+                        if (phase == "before-record-write")
+                            throw IllegalStateException("simulated C3 before-write crash")
+                    }
+                }.message)
+            assertEquals("LEDGER_REOPEN_WRITER_POISONED",
+                assertFailsWith<SessionLedgerUnconfirmed> {
+                    writer.appendTrustedAcceptedRunning(trustedRunningTransition())
+                }.code)
+            assertEquals("LEDGER_REOPEN_WRITER_POISONED",
+                assertFailsWith<SessionLedgerUnconfirmed> { writer.close() }.code)
+        }
+        assertContentEquals(baseline, Files.readAllBytes(ledger()))
+        assertFalse(Files.exists(store().resolve("000000000003.rcp")))
+    }
+
+    @Test fun runningOnlyFaultSeamAfterForceLeavesUnconfirmedTail() {
+        publish(createPreExecutionCheckpoint())
+        SessionResumeAdmission.admit(store(), context(), ledger(),
+            resumeAttestation(expected = 1L)).use { lease ->
+            val writer = DurableSessionEventLedger.reopenForAppend(
+                ledger(), workspace(), store(), context(), lease)
+            assertEquals("LEDGER_SYNC_UNCONFIRMED",
+                assertFailsWith<SessionLedgerUnconfirmed> {
+                    writer.appendTrustedRunningWithFault(trustedRunningTransition()) { phase ->
+                        if (phase == "forced-before-ack")
+                            throw IllegalStateException("C3 force acknowledgement lost")
+                    }
+                }.code)
+            assertEquals("LEDGER_UNACKNOWLEDGED_APPEND",
+                assertFailsWith<SessionLedgerUnconfirmed> { writer.close() }.code)
+        }
+        assertEquals(3, DurableSessionEventLedger.inspect(ledger()).lastSequence)
+        assertFalse(Files.exists(store().resolve("000000000003.rcp")))
+        assertEquals("CHECKPOINT_JOURNAL_MISMATCH",
+            assertFailsWith<CheckpointUnconfirmed> { inspect() }.code)
+    }
+
+    @Test fun nonOptedRunningSnapshotWithoutC3EventIsNotPublishable() {
+        val c2 = publish(createPreExecutionCheckpoint())
+        val baseline = Files.readAllBytes(ledger())
+        SessionResumeAdmission.admit(store(), context(), ledger(),
+            resumeAttestation(expected = 1L)).use { lease ->
+            DurableSessionEventLedger.reopenForAppend(
+                ledger(), workspace(), store(), context(), lease).use { writer ->
+                val candidate = c2.snapshot.copy(
+                    sequence = 3L, previousSha256 = c2.sha256,
+                    phase = SessionPhaseVocabulary.runningWire)
+                val refusal = assertFailsWith<CheckpointUnconfirmed> {
+                    SessionCheckpointStore.saveFromOpenLedgerFenced(
+                        lease, store(), context(), writer, candidate, c2.sha256)
+                }
+                assertEquals("CHECKPOINT_JOURNAL_UNCONFIRMED", refusal.code)
+                assertFalse(Files.exists(store().resolve("000000000003.rcp")))
+                assertContentEquals(baseline, Files.readAllBytes(ledger()))
+            }
+        }
+        assertEquals(c2, inspect())
+    }
+
+    @Test fun c3CannotMutateAttemptStateUsageEffectsOrPreviousHash() {
+        val c2 = publish(createPreExecutionCheckpoint())
+        SessionResumeAdmission.admit(store(), context(), ledger(),
+            resumeAttestation(expected = 1L)).use { lease ->
+            val writer = DurableSessionEventLedger.reopenForAppend(
+                ledger(), workspace(), store(), context(), lease)
+            try {
+                writer.appendTrustedAcceptedRunning(trustedRunningTransition())
+                val anchor = writer.withCommittedCheckpointAnchor { it }
+                val proposed = c2.snapshot.copy(
+                    sequence = 3L, previousSha256 = c2.sha256,
+                    phase = SessionPhaseVocabulary.runningWire,
+                    journalSequence = anchor.lastSequence,
+                    journalHeadSha256 = anchor.headSha256,
+                    journalFileSha256 = anchor.fileSha256,
+                    lastTrustedJournalOffset = anchor.lastTrustedOffset)
+                val invalid = listOf(
+                    Triple("taskState", proposed.copy(taskState = "running"),
+                        "CHECKPOINT_JOURNAL_UNCONFIRMED"),
+                    Triple("taskAttempt", proposed.copy(taskAttempt = 1),
+                        "CHECKPOINT_JOURNAL_UNCONFIRMED"),
+                    Triple("hostAssertedUsage", proposed.copy(hostAssertedUsage = listOf(
+                        HostAssertedCheckpointUsage("task-one", "model", "known", 1L))),
+                        "CHECKPOINT_JOURNAL_UNCONFIRMED"),
+                    Triple("pendingEffects", proposed.copy(pendingEffects = listOf(
+                        CheckpointEffect("effect-one", "req-transition-3", "unknown"))),
+                        "CHECKPOINT_JOURNAL_UNCONFIRMED"),
+                    Triple("previousSha256", proposed.copy(previousSha256 = "f".repeat(64)),
+                        "CHECKPOINT_STALE_GENERATION")
+                )
+                val physical = Files.readAllBytes(ledger())
+                invalid.forEach { (name, candidate, expectedCode) ->
+                    val refused = assertFailsWith<CheckpointUnconfirmed>(name) {
+                        SessionCheckpointStore.saveFromOpenLedgerFenced(
+                            lease, store(), context(), writer, candidate, c2.sha256)
+                    }
+                    assertEquals(expectedCode, refused.code, name)
+                    assertFalse(Files.exists(store().resolve("000000000003.rcp")), name)
+                    assertContentEquals(physical, Files.readAllBytes(ledger()), name)
+                }
+            } finally {
+                assertEquals("LEDGER_REOPEN_CHECKPOINT_REQUIRED",
+                    assertFailsWith<SessionLedgerUnconfirmed> { writer.close() }.code)
+            }
+        }
+        assertEquals("CHECKPOINT_JOURNAL_MISMATCH",
+            assertFailsWith<CheckpointUnconfirmed> { inspect() }.code)
+    }
+
+    @Test fun operatorPathsRefuseCompleteC3WithNoEffectAuthority() {
+        val c2 = publish(createPreExecutionCheckpoint())
+        val c3 = DurableAcceptedRunningHandoff.publish(
+            store(), context(), ledger(), resumeAttestation(expected = 1L),
+            c2, trustedRunningTransition())
+        assertEquals(c3, inspect(), "Complete C3 is valid read-only evidence")
+        val ledgerBytes = Files.readAllBytes(ledger())
+        val latestFence = ResumeFenceStorage.atGeneration(store(), 2L)
+        assertEquals("RESUME_UNSAFE_BOUNDARY",
+            assertFailsWith<SessionResumeUnconfirmed> {
+                SessionResumeAdmission.admit(
+                    store(), context(), ledger(), resumeAttestation(expected = 2L)).close()
+            }.code)
+        assertEquals("RESUME_UNSAFE_BOUNDARY",
+            assertFailsWith<SessionResumeUnconfirmed> {
+                SessionResumeAdmission.reconcilePreparedAdmission(
+                    store(), context(), ledger(), resumeAttestation(expected = 2L),
+                    PreparedFenceReconciliation(3L, "f".repeat(64), "operator-one", true))
+                    .close()
+            }.code)
+        // Genesis checks an earlier missing-pin precondition; this assertion
+        // guarantees fail-closed only, not rejection at the C3-specific gate.
+        assertEquals("RESUME_EFFECT_RECONCILIATION_NO_PIN",
+            assertFailsWith<SessionResumeUnconfirmed> {
+                SessionResumeAdmission.reconcileGenesisEffectHead(
+                    store(), context(), ledger(), ledger().resolveSibling("effects.journal"),
+                    ByteArray(32) { 7 }, resumeAttestation(expected = 2L),
+                    GenesisEffectHeadReconciliation(
+                        "operator-one", true, c3.sha256, 2L,
+                        latestFence.sha256, "f".repeat(64))).close()
+            }.code)
+        assertContentEquals(ledgerBytes, Files.readAllBytes(ledger()))
+        assertEquals(c3, inspect())
+        assertFalse(Files.exists(store().resolve("resume-000000000003.rcf")))
+    }
+
+    @Test fun operatorPathsRefuseUncoveredRunningTail() {
+        val c2 = publish(createPreExecutionCheckpoint())
+        SessionResumeAdmission.admit(store(), context(), ledger(),
+            resumeAttestation(expected = 1L)).use { lease ->
+            val writer = DurableSessionEventLedger.reopenForAppend(
+                ledger(), workspace(), store(), context(), lease)
+            writer.appendTrustedAcceptedRunning(trustedRunningTransition())
+            assertEquals("LEDGER_REOPEN_CHECKPOINT_REQUIRED",
+                assertFailsWith<SessionLedgerUnconfirmed> { writer.close() }.code)
+        }
+        val physical = Files.readAllBytes(ledger())
+        assertEquals("CHECKPOINT_JOURNAL_MISMATCH",
+            assertFailsWith<CheckpointUnconfirmed> {
+                SessionResumeAdmission.reconcilePreparedAdmission(
+                    store(), context(), ledger(), resumeAttestation(expected = 2L),
+                    PreparedFenceReconciliation(3L, "f".repeat(64), "operator-one", true))
+                    .close()
+            }.code)
+        val fence = ResumeFenceStorage.atGeneration(store(), 2L)
+        assertEquals("RESUME_EFFECT_RECONCILIATION_NO_PIN",
+            assertFailsWith<SessionResumeUnconfirmed> {
+                SessionResumeAdmission.reconcileGenesisEffectHead(
+                    store(), context(), ledger(), ledger().resolveSibling("effects.journal"),
+                    ByteArray(32) { 7 }, resumeAttestation(expected = 2L),
+                    GenesisEffectHeadReconciliation(
+                        "operator-one", true, c2.sha256, 2L,
+                        fence.sha256, "f".repeat(64))).close()
+            }.code)
+        assertContentEquals(physical, Files.readAllBytes(ledger()))
+        assertFalse(Files.exists(store().resolve("000000000003.rcp")))
+        assertFalse(Files.exists(store().resolve("resume-000000000003.rcf")))
+    }
+
+    private fun assertC3PublicationCrashWindow(phase: String) {
+        val c2 = publish(createPreExecutionCheckpoint())
+        SessionResumeAdmission.admit(store(), context(), ledger(),
+            resumeAttestation(expected = 1L)).use { lease ->
+            val writer = DurableSessionEventLedger.reopenForAppend(
+                ledger(), workspace(), store(), context(), lease)
+            try {
+                writer.appendTrustedAcceptedRunning(trustedRunningTransition())
+                val anchor = writer.withCommittedCheckpointAnchor { it }
+                val c3 = c2.snapshot.copy(
+                    sequence = 3L, previousSha256 = c2.sha256,
+                    phase = SessionPhaseVocabulary.runningWire,
+                    journalSequence = anchor.lastSequence,
+                    journalHeadSha256 = anchor.headSha256,
+                    journalFileSha256 = anchor.fileSha256,
+                    lastTrustedJournalOffset = anchor.lastTrustedOffset)
+                val refusal = assertFailsWith<CheckpointUnconfirmed> {
+                    SessionCheckpointStore.saveFromOpenLedgerFencedWithFault(
+                        lease, store(), context(), writer, c3, c2.sha256
+                    ) { observed ->
+                        if (observed == phase)
+                            throw IllegalStateException("simulated C3 crash at " + phase)
+                    }
+                }
+                assertEquals("CHECKPOINT_WRITE_UNCONFIRMED", refusal.code)
+                assertEquals("CHECKPOINT_WRITE_UNCONFIRMED",
+                    assertFailsWith<CheckpointUnconfirmed> {
+                        SessionCheckpointStore.saveFromOpenLedgerFenced(
+                            lease, store(), context(), writer, c3, c2.sha256)
+                    }.code, "No blind C3 checkpoint retry")
+                assertEquals("LEDGER_REOPEN_CHECKPOINT_UNCONFIRMED",
+                    assertFailsWith<SessionLedgerUnconfirmed> {
+                        writer.appendTrustedAcceptedRunning(trustedRunningTransition(4))
+                    }.code, "No append after uncertain C3 publication")
+            } finally {
+                assertEquals("LEDGER_REOPEN_CHECKPOINT_UNCONFIRMED",
+                    assertFailsWith<SessionLedgerUnconfirmed> { writer.close() }.code)
+            }
+        }
+        val renamed = phase != "temp-synced"
+        assertEquals(renamed, Files.exists(store().resolve("000000000003.rcp")))
+        assertEquals(3, DurableSessionEventLedger.inspect(ledger()).lastSequence)
+        if (renamed) {
+            assertEquals(SessionPhaseVocabulary.runningWire, inspect().snapshot.phase)
+            assertEquals("RESUME_UNSAFE_BOUNDARY",
+                assertFailsWith<SessionResumeUnconfirmed> {
+                    SessionResumeAdmission.admit(store(), context(), ledger(),
+                        resumeAttestation(expected = 2L)).close()
+                }.code)
+        } else {
+            assertEquals("CHECKPOINT_JOURNAL_MISMATCH",
+                assertFailsWith<CheckpointUnconfirmed> { inspect() }.code)
+        }
+        assertFalse(Files.exists(store().resolve("resume-000000000003.rcf")))
+    }
+
+    @Test fun c3TempSyncedCrashNeverPublishesOrRecovers() =
+        assertC3PublicationCrashWindow("temp-synced")
+
+    @Test fun c3RenamedCrashRequiresInspectionNotRetry() =
+        assertC3PublicationCrashWindow("renamed")
+
+    @Test fun c3CrashBeforeDirectoryFsyncRequiresInspectionNotRetry() =
+        assertC3PublicationCrashWindow("before-directory-fsync")
+
 }

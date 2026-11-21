@@ -103,16 +103,52 @@ object ArchitectureGraph {
 }
 
 /**
- * No production source may launder the C3 opt-in behind an unmarked wrapper.
- * Includes qualified and file-level annotation forms.
+ * Fail-closed token allowlist for the host-only C3 marker. A raw token check
+ * catches Kotlin import aliases, typealiases, multiline/comment tricks and
+ * qualified/file-level opt-ins without trusting a regex to parse annotations.
+ * Only the reviewed C3 declaration/usage files may carry the bare annotation
+ * or declare the marker; no @OptIn wrappers are permitted even within them.
  */
 object TrustedRunningOptInPolicy {
-    private val bypass = Regex(
-        """@\s*(?:file\s*:\s*)?(?:kotlin\.)?OptIn\s*\([^)]*\b(?:\w+\.)*TrustedRunningBoundaryApi\s*::\s*class\b""",
-        RegexOption.DOT_MATCHES_ALL,
+    private const val marker = "TrustedRunningBoundaryApi"
+    private val allowedProductionPaths = setOf(
+        "core/session/src/main/kotlin/ai/yuriilab/recursivecoder/SessionRuntime.kt",
+        "core/session/src/main/kotlin/ai/yuriilab/recursivecoder/TrustedRunningBoundaryPolicy.kt",
+        "core/session/src/main/kotlin/ai/yuriilab/recursivecoder/TrustedSessionPreExecutionHost.kt",
+        "infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/DurableAcceptedRunningHandoff.kt",
+        "infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/DurableRuntimeAcceptedRunningHost.kt",
+        "infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/DurableSessionEventLedger.kt",
     )
 
-    fun forbiddenInProduction(source: String): Boolean = bypass.containsMatchIn(source)
+    // The allowlist selects locations, not permissions: even reviewed source
+    // files cannot launder the marker through @OptIn, imports or typealiases.
+    // Each occurrence must be the bare annotation or its declaration.
+    private val reviewedMarkerLine = Regex(
+        """\s*(?:@TrustedRunningBoundaryApi|annotation\s+class\s+TrustedRunningBoundaryApi)\s*""",
+    )
+
+    fun forbiddenInProduction(source: String, sourcePath: String): Boolean {
+        if (!source.contains(marker)) return false
+        val normalized = sourcePath.replace('\\', '/')
+        if (allowedProductionPaths.none { normalized == it || normalized.endsWith("/$it") })
+            return true
+        return source.lineSequence().any { line ->
+            line.contains(marker) && !reviewedMarkerLine.matches(line)
+        }
+    }
+
+    /**
+     * Inspect root/module build scripts and build-logic convention plugins.
+     * A marker reference plus any compiler-wide opt-in configuration is denied,
+     * including aliases or values assigned before the compiler option is set.
+     * This intentionally errs toward rejection of unusual build script wiring.\n     * Best-effort defence-in-depth only: dynamically composed marker names and\n     * compiler settings outside the scanned Gradle scripts require separate review.
+     */
+    fun forbiddenCompilerOptIn(script: String): Boolean =
+        script.contains(marker) && (
+            Regex("""\b(?:compilerOptions|languageSettings|freeCompilerArgs)\b""")
+                .containsMatchIn(script) ||
+            script.contains("-opt-in")
+        )
 }
 
 /**
