@@ -765,13 +765,13 @@ class DurableSessionEventLedger private constructor(
     @LedgerTestFaultInjection
     internal fun appendTrustedRunningWithFault(
         event: JsonObject, afterPhase: (String) -> Unit
-    ) = appendFencedImpl(event, allowRunningBoundary = true, afterPhase)
+    ) = appendFencedImpl(event, allowRunningBoundary = true, afterPhase = afterPhase)
 
     /** Unprivileged test seam cannot request a running transition. */
     @LedgerTestFaultInjection
     internal fun appendFencedWithFault(
         event: JsonObject, afterPhase: (String) -> Unit
-    ) = appendFencedImpl(event, allowRunningBoundary = false, afterPhase)
+    ) = appendFencedImpl(event, allowRunningBoundary = false, afterPhase = afterPhase)
 
     /** Shared private writer implementation; privileged flag never crosses a
      * test seam or an externally reachable API boundary.
