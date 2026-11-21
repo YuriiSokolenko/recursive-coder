@@ -31,7 +31,7 @@ class ArchitectureGraphTest {
             "core/session/src/main/kotlin/ai/yuriilab/recursivecoder/TrustedRunningBoundaryPolicy.kt"
                 to "annotation class TrustedRunningBoundaryApi",
             "infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/DurableAcceptedRunningHandoff.kt"
-                to "@TrustedRunningBoundaryApi internal object TrustedHandoff",
+                to "@TrustedRunningBoundaryApi\ninternal object TrustedHandoff",
         )
         reviewed.forEach { (path, source) ->
             assertFalse(TrustedRunningOptInPolicy.forbiddenInProduction(source, path), path)
@@ -39,6 +39,28 @@ class ArchitectureGraphTest {
         assertTrue(TrustedRunningOptInPolicy.forbiddenInProduction(
             "@TrustedRunningBoundaryApi class Unreviewed",
             "infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/NewFile.kt"))
+    }
+
+    @Test
+    fun reviewedSourceFilesCannotLaunderTrustedRunningOptIn() {
+        val reviewed = "infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/DurableSessionEventLedger.kt"
+        val permitted = "@TrustedRunningBoundaryApi\ninternal fun hostOnly() {}"
+        assertFalse(TrustedRunningOptInPolicy.forbiddenInProduction(permitted, reviewed))
+
+        val bypasses = listOf(
+            "@OptIn(TrustedRunningBoundaryApi::class) fun wrapper() {}",
+            "@file:OptIn(TrustedRunningBoundaryApi::class)",
+            "@kotlin.OptIn(TrustedRunningBoundaryApi::class) fun wrapper() {}",
+            "import ai.yuriilab.recursivecoder.TrustedRunningBoundaryApi as Trusted",
+            "import ai.yuriilab.recursivecoder.TrustedRunningBoundaryApi",
+            "typealias UnsafeAlias = TrustedRunningBoundaryApi",
+            "@TrustedRunningBoundaryApi internal fun unreviewedInline() {}",
+        )
+        bypasses.forEach { bypass ->
+            assertTrue(TrustedRunningOptInPolicy.forbiddenInProduction(
+                permitted + "\n" + bypass, reviewed,
+            ), bypass)
+        }
     }
 
     @Test
