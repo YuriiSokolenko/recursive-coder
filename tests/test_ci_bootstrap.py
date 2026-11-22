@@ -88,7 +88,7 @@ class CiBootstrapTrustTest(unittest.TestCase):
     def test_ci_launcher_rejects_local_gradle_path_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:
             fake_gradle = Path(tmp) / "gradle"
-            fake_gradle.write_text("#!/bin/sh\\nexit 0\\n", encoding="utf-8")
+            fake_gradle.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             fake_gradle.chmod(0o755)
             env = os.environ.copy()
             env["CI"] = "true"
