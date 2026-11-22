@@ -29,6 +29,8 @@ jobs:
           distribution: temurin
           java-version: '21'
       # The pre-release ./gradlew delegates to an installed Gradle executable.
+      # The explicit --dependency-verification strict flags are defense in depth;
+      # settings.gradle.kts is the authoritative guard against off/lenient modes.
       - name: Set up Gradle 9.8.1
         uses: gradle/actions/setup-gradle@v6
         with:
@@ -39,18 +41,20 @@ jobs:
           java -version
           gradle --version | grep -F 'Gradle 9.8.1'
           python3 --version
+      - name: Require locked root and standalone build-logic dependencies
+        run: python3 -I tools/check_dependency_verification.py
       - name: Verify architecture and run pure unit tests
-        run: ./gradlew --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g checkArchitecture checkTestTiers unitTest --stacktrace
+        run: ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g checkArchitecture checkTestTiers unitTest --stacktrace
       - name: Prove trusted running host opt-in at the Kotlin compiler boundary
-        run: ./gradlew --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g :infra:journal:verifyRunningHostOptIn --stacktrace
+        run: ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g :infra:journal:verifyRunningHostOptIn --stacktrace
       - name: Test independent architecture graph verifier
-        run: ./gradlew --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g -p build-logic test --stacktrace
+        run: ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g -p build-logic test --stacktrace
       - name: Prove fresh and reused Gradle configuration cache
         run: |
           rm -rf .gradle/configuration-cache
-          ./gradlew --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --offline --console=plain --configuration-cache checkArchitecture | tee /tmp/architecture-cache-first.log
+          ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --offline --console=plain --configuration-cache checkArchitecture | tee /tmp/architecture-cache-first.log
           grep -F 'Configuration cache entry stored.' /tmp/architecture-cache-first.log
-          ./gradlew --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --offline --console=plain --configuration-cache checkArchitecture | tee /tmp/architecture-cache-second.log
+          ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --offline --console=plain --configuration-cache checkArchitecture | tee /tmp/architecture-cache-second.log
           grep -F 'Reusing configuration cache.' /tmp/architecture-cache-second.log
       - name: Reject illegal edges, cycles and stale configuration-cache snapshots
         run: python3 -m unittest discover -s tests -p 'test_architecture_gradle.py' -v
@@ -114,6 +118,8 @@ jobs:
         with:
           gradle-version: '9.8.1'
           cache-provider: basic
+      - name: Enforce SHA-256 dependency trust and test negative cache fixtures
+        run: python3 -I tools/check_dependency_verification.py --negative-fixtures
       - name: Preflight bytecode guard and fixtures
         run: |
           python3 -I -m py_compile tools/check_production_bytecode.py tools/check_test_tiers.py
@@ -121,7 +127,7 @@ jobs:
       - name: Compile and install production artifacts without test execution
         env:
           CI: 'true'
-        run: ./gradlew --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache clean installDist :app:cli:writeRuntimeClasspathManifest --stacktrace
+        run: ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache clean installDist :app:cli:writeRuntimeClasspathManifest --stacktrace
       - name: Bundle compiled production inputs
         run: |
           python3 -I - <<'PY'
@@ -303,7 +309,7 @@ jobs:
       - name: Run full JVM and sandbox tests only after the bytecode gate
         env:
           CI: 'true'
-        run: ./gradlew --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache test integrationTest e2eTest checkPreparationHostConformance --stacktrace
+        run: ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache test integrationTest e2eTest checkPreparationHostConformance --stacktrace
       - name: Confirm sandbox integration test was not skipped
         run: |
           python3 - <<'PY'
