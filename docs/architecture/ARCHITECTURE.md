@@ -1,6 +1,6 @@
 # Recursive Coder — Standalone Architecture
 
-> **Status:** target architecture, RFC 0.3; implementation includes Koog single-role execution (#73), opt-in host tools (#74), recursive child integration (#79 part 1), the in-process five-role coordinator and the opt-in fake-only writable CLI (#79 CLI slice); two-origin nested execution remains open as of 2026-11-14  
+> **Status:** target architecture, RFC 0.3; implementation includes Koog single-role execution (#73), opt-in host tools (#74), the in-process five-role coordinator, recursive child integration and the opt-in fake-only writable CLI with two-origin child execution (#79, closed); live-model execution and crash-resume remain open as of 2026-11-23  
 > **Technology:** Kotlin/JVM; isolated opt-in Koog single-role execution; configurable local/compatible LLM APIs  
 > **Core principle:** Recursive Coder must own the complete coding-agent lifecycle. No external workflow, repository, or service may be a mandatory coordinator.
 
@@ -33,7 +33,7 @@ This project is not a plugin for another orchestration platform. Cloud providers
        Event Journal / Checkpoints (opt-in verified snapshots; no resume)
 ```
 
-The opt-in [checkpoint layer](SESSION_CHECKPOINTS.md) (#103) stores immutable journal-bound metadata snapshots. Separate [fenced resume admission](FENCED_RESUME.md) (#104, Draft PR #113) supports a narrow pre-execution boundary with an independently anchored fence head. Inspection alone cannot authorize replay. An opt-in [trusted durable created-to-accepted handoff](DURABLE_CREATED_ACCEPTED_HANDOFF.md) publishes an independently verified C2 checkpoint, but still does **not** authorize runtime/model/tool execution. CLI crash-resume and authenticated execution remain future milestones.
+The opt-in [checkpoint layer](SESSION_CHECKPOINTS.md) (#103) stores immutable journal-bound metadata snapshots. Separate [fenced resume admission](FENCED_RESUME.md) (#104, merged PR #113) supports a narrow pre-execution boundary with an independently anchored fence head. Inspection alone cannot authorize replay. An opt-in [trusted durable created-to-accepted handoff](DURABLE_CREATED_ACCEPTED_HANDOFF.md) publishes an independently verified C2 checkpoint, but still does **not** authorize runtime/model/tool execution. CLI crash-resume and authenticated execution remain future milestones.
 
 ### Current Gradle module boundaries
 
@@ -47,7 +47,9 @@ Owns the local task queue, dependencies, priorities, readiness, pause/resume, ca
 
 A task can have one or more session attempts. The controller owns `sessionId`, deadlines, token and tool budgets, capabilities, child-agent state, terminal outcomes, and checkpoint lifecycle.
 
-The canonical protocol represents transitions such as `created → accepted → running`, `running → checkpointing → running|paused`, and `paused → resuming → running`. Success, failure, cancellation, rejection, and timeout are terminal conditions. Status must be derived from verified runtime state, **not** from a model's final words.
+The canonical protocol represents transitions such as `created → accepted → running`, `running → checkpointing → running|paused`, and `paused → resuming → running`. Success, failure, cancellation, rejection, and timeout are terminal **outcomes**. Status must be derived from verified runtime state, **not** from a model's final words.
+
+In Session Protocol v1 as emitted today, lifecycle *phases* and terminal *outcomes* differ ([issue #159](https://github.com/YuriiSokolenko/recursive-coder/issues/159)): a cancelled running session emits the non-terminal phase `cancelled` followed by `failed`, with terminal outcome `cancelled`; a timeout emits `failed` (outcome `timed_out`) and never the `timed_out` phase; a cancellation or timeout before admission ends in phase `rejected`. Clients must read the terminal outcome, not the last lifecycle phase. Aligning the emitted phases is a protocol compatibility change and requires a separately reviewed revision.
 
 The read-only session engine supports FakeModel or a strict OpenAI-compatible provider, validated admission, lifecycle decisions, budgets and physical JSONL events. Standalone in-memory nested stage dispatch is implemented by #78, but it is not yet connected to production CLI sessions or durable recovery; the schema includes more states than the fresh-session CLI can execute.
 
@@ -77,7 +79,7 @@ Model selection is configured by Recursive Coder rather than by a hardcoded home
 
 ### Event Journal and durable recovery
 
-**Implemented:** Session event envelopes and a physical `:infra:journal` JSONL sink with flush/close/checksum failure handling. **Planned:** persistent checkpoints, resume fencing, replay and side-effect reconciliation ([#10](https://github.com/YuriiSokolenko/recursive-coder/issues/10)).
+**Implemented:** Session event envelopes, a physical `:infra:journal` JSONL sink with flush/close/checksum failure handling and, opt-in, an fsynced durable event ledger, atomic checkpoints and pre-execution fence admission (#102–#104, #114). **Planned:** runnable crash-resume, replay and uncertain side-effect reconciliation ([#10](https://github.com/YuriiSokolenko/recursive-coder/issues/10)).
 
 Model, tool, policy, resource-usage, recursion, and state events have structured identifiers and parent/child correlations. Events are append-only and versioned; secret or private content is redacted before persistence.
 
@@ -115,19 +117,19 @@ Git-host integrations (PR creation, reviews, webhooks), IDE extensions, and task
 - Prompts, model output, and retrieved context are untrusted data.
 - Every shell command, path, and network destination requires independent authorization and appropriate sandboxing.
 - A model-supplied tool result is **not** equivalent to a trusted workspace mutation receipt.
-- Accepting a coding result requires independently verified checks and a permissible final diff.
+- Accepting a coding result requires independently verified checks and a permissible final diff. What current checks prove is deliberately narrow; see [what checks do and do not prove](TRUSTED_WRITES.md#what-checks-do-and-do-not-prove).
 - Checkpoints and terminal receipts are tied to the exact session, policy, baseline, and fence generation.
 - Hardware or provider failures must produce an explicit terminal/error state with available diagnostic evidence; crashes may require safe later reconciliation.
 
 ## 6. Independent CI and quality
 
-GitHub Actions is used **solely for this repository's CI**, not as an external agent dispatcher. Since merged [PR #71](https://github.com/YuriiSokolenko/recursive-coder/pull/71), all three jobs run on fresh GitHub-hosted `ubuntu-24.04` VMs. The legacy N150 KVM runner is not selected, and fork PRs run without exposing private hardware. JDK 21, Gradle 9.8.2, Python 3.12 and Node.js 22 are provisioned per job. The restricted `bwrap-userns-restrict` AppArmor profile permits bubblewrap's private-network namespace without disabling AppArmor; real isolation and required E2E must succeed.
+GitHub Actions is used **solely for this repository's CI**, not as an external agent dispatcher. Since merged [PR #71](https://github.com/YuriiSokolenko/recursive-coder/pull/71), all jobs run on fresh GitHub-hosted `ubuntu-24.04` VMs; the workflow now has six jobs (`bytecode-build`, `bytecode-verifier`, `architecture`, `kotlin`, `cli-e2e`, `contracts`). The legacy N150 KVM runner is not selected, and fork PRs run without exposing private hardware. JDK 21, Gradle 9.8.2, Python 3.12 and Node.js 22 are provisioned per job. The restricted `bwrap-userns-restrict` AppArmor profile permits bubblewrap's private-network namespace without disabling AppArmor; real isolation and required E2E must succeed.
 
 - **Architecture boundaries and pure unit tests:** Gradle dependency and test-tier policies, configuration-cache regressions and pure Kotlin tests.
 - **Full JVM integration and sandbox E2E:** module builds, local Git/filesystem and mock HTTP fixtures, mandatory real bubblewrap case, installed CLI and JUnit artifacts.
 - **Versioned session contracts:** English-language documentation guard, JSON Schema Draft 2020-12, negative fixtures and Node compatibility tests.
 
-The [CI migration run](https://github.com/YuriiSokolenko/recursive-coder/actions/runs/43120760211) on 2026-11-11 passed all three jobs, including non-skipped sandbox E2E. Tests do not call a live inference provider. Real-model evaluation and release packaging remain planned.
+The [CI migration run](https://github.com/YuriiSokolenko/recursive-coder/actions/runs/43120760211) on 2026-11-11 passed the three jobs that existed then, including non-skipped sandbox E2E. Tests do not call a live inference provider. Real-model evaluation and release packaging remain planned.
 
 Every new engine module must ship with relevant tests. Live model behavior does not replace security, sandbox, or recovery proofs; model benchmark scores do not demonstrate authorization correctness.
 
@@ -142,4 +144,4 @@ Every new engine module must ship with relevant tests. Live model behavior does 
 | Durability | Event Journal, checkpoints, fenced resume, and fail-closed recovery |
 | Product | First-party task scheduling, optional daemon/API and integrations, diagnostics UI, and releases |
 
-**Implementation status (2026-11-12, PR #82):** nine Gradle product modules, first-party Task Manager, Task/Session Use Cases with CLI-local Koin, pure policies, read-only sessions, strict Model Gateway, physical event journal and an **independent Linux-only trusted write/check runtime** with an **opt-in host-only stage tool port** exist. The port is not exposed to Koog or ordinary CLI routes; the CLI remains read-only. An opt-in fake-only Koog stage adapter exists, but Koog five-stage execution, recursion, crash recovery, releases and optional daemon/API are planned. This target design is not evidence that planned components are executable.
+**Implementation status (2026-11-23):** nine Gradle product modules, first-party Task Manager, Task/Session Use Cases with CLI-local Koin, pure policies, read-only sessions, strict Model Gateway, physical event journal and opt-in durable ledger/checkpoints, and an **independent Linux-only trusted write/check runtime** with an **opt-in host-only stage tool port** exist. The port is not exposed to Koog or ordinary `run` / `tasks` routes. The five-role coordinator and bounded recursion run only through the gated fake-only `workflow` command. Live-model five-stage execution, crash-resume, releases and optional daemon/API are planned. This target design is not evidence that planned components are executable.

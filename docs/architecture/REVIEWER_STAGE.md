@@ -45,6 +45,19 @@ frozen inputs, or silently replace independent host approval. `REJECT` is
 reserved for implementation-only correction; any required change to an
 approved spec or test is `NEEDS_HUMAN`, not a Developer bypass.
 
+The reviewer disposition is stored as the stage-graph verdict with a
+non-obvious mapping: `ACCEPT → ACCEPT`, `REJECT → REQUEST_CHANGES` (repairable
+by the Developer) and `NEEDS_HUMAN → REJECT` (not repairable without a human).
+
+**Limits of independence (#158).** The evidence gate is a *completeness*
+check: the prompt itself lists the trusted check and write IDs, so echoing
+them proves nothing about the model's reasoning. Independence is enforced
+for actor identities (an AgentId may never act for two stage kinds anywhere in
+the graph, including superseded history, and repair never reuses a historical
+actor). Model independence is a host decision: `FiveRoleWorkflowPlan.reviewerModel`
+defaults to the Developer's `model`; a host that needs a distinct reviewer
+model or provider must select it explicitly.
+
 `ReviewerStageFinishPolicy` checks that only the Reviewer node changed,
 the verdict matches the pinned Developer manifest and independent actors,
 and no accepted ID or artifact was mutated. The authoritative host must
@@ -57,7 +70,8 @@ reconciliation; it is never reported as success.
 `ReviewerRepairPlanner.plan` accepts only an independently host-verified
 `REJECT / IMPLEMENTATION_ONLY` decision on an active rejected Reviewer.
 It produces a **new** Developer stage and a **new** Reviewer stage with
-fresh host-issued correlations and agents; the old terminal nodes and
+fresh host-issued correlations and agents that never appeared in the graph
+before (`INVALID_RETRY_IDENTITIES` otherwise); the old terminal nodes and
 manifests are kept as superseded history. Attempts are capped by
 `maxDeveloperRetries` (additional attempts after the first).
 Exhaustion, invalid identities and requests affecting frozen specs or

@@ -86,7 +86,11 @@ features fail closed.
 with a response size cap. SSE events are currently assembled **after the
 bounded body is read in full**; there are no incremental progress callbacks.
 `usage_metadata` requires token-usage data on
-each response; otherwise usage remains explicitly `unknown` for the run.
+each response. Session admission **requires** `usage_metadata` for the
+`openai-compatible` provider (`UNSUPPORTED_MODEL` otherwise, #155): without
+reported usage the engine could not enforce `budgets.maxTokens`. Usage
+completeness is still reported as `unknown` if a fake or future adapter
+returns none.
 `error_metadata` can be negotiated, but provider errors are normalized to
 safe codes rather than persisting arbitrary error bodies.
 

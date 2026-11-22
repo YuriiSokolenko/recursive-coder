@@ -49,9 +49,17 @@ manifest output or write authority.
   ambiguous path ownership fails with DUPLICATE_ARTIFACT_PATH. A retry that
   emits a new artifact ID must use a new path; editing the original frozen
   path requires the original owner and its approved revision process.
+  Stage inputs are pinned by artifact ID, not by revision, so a revision is
+  denied with DOWNSTREAM_CONSUMER_ACTIVE while any non-superseded consumer of
+  the artifact is RUNNING or ACCEPTED (#157); consumers must be superseded
+  first so their replacements re-admit against the revised bytes.
   The existing ToolAuthorizationPolicy still denies protected paths,
   role escalation and unapproved writes. Actual workspace revalidation and
   physical effect remain exclusively in the trusted write runtime.
+- An AgentId may act for one stage kind only, across the whole graph including
+  superseded history (SHARED_ROLE_ACTOR, #158): a former Developer can never
+  become the Reviewer of a later attempt. AgentIds are host-issued labels;
+  they do not by themselves make two roles use different models.
 - Stage state edges are CREATED → READY → RUNNING → ACCEPTED/REJECTED/FAILED/
   CANCELLED (early CANCELLED is allowed); terminal states are immutable.
   A retry creates a **new StageRunId**, and the terminal predecessor points to

@@ -120,3 +120,43 @@ immutable tests/specs, schema rejection, a tracked symlink directory that
 reaches the NOFOLLOW guard, ignored Git paths, case-insensitive aliases,
 NUL input, reversible edits and no-ops, Git staging/renames, external
 untracked changes, stale/forged receipts and isolated external checks.
+
+## What checks do and do not prove
+
+The runtime proves that the *selected* checks ran in its sandbox against the
+exact accepted bytes. It does not prove that those checks are meaningful. The
+following limits are known and tracked:
+
+- **Path ownership is not test integrity** ([#152](https://github.com/YuriiSokolenko/recursive-coder/issues/152)).
+  Main resources are on the test classpath of common JVM builds, so a Developer
+  could change test *outcomes* without editing a frozen test (for example
+  `junit.platform.execution.dryRun.enabled=true`). `ToolAuthorizationPolicy`
+  therefore denies Developer writes to known test-framework configuration files
+  (`junit-platform.properties`, `testng.xml`, `kotest.properties`, `pytest.ini`,
+  `tox.ini`, `setup.cfg`, `pyproject.toml`, `sitecustomize.py`, `phpunit.xml`,
+  `jest.config.*`, `vitest.config.*`, `.mocharc*`, `karma.conf.*`, ...) and to
+  every `META-INF/services/` registration, and protects `build.gradle`,
+  `settings.gradle`, `pom.xml` and `package.json` for every role. This denylist
+  is defense in depth; any code under `src/main` can still observe that it runs
+  under test. Independent review remains necessary.
+- **No red-to-green evidence** ([#153](https://github.com/YuriiSokolenko/recursive-coder/issues/153)).
+  The installed workflow gates SDD, ATDD, TDD and Developer with the same
+  required check set, so tests produced before the implementation must already
+  pass. Preparation-stage checks are validators of the produced artifact; they
+  are not evidence that a test failed on the pre-implementation baseline, and a
+  passing Developer check does not prove that the implementation caused it.
+  Nothing binds the operator's check to the ATDD/TDD artifact paths. Per-role
+  check sets and an authenticated failing baseline receipt (distinguishable
+  from sandbox unavailability) are a planned design.
+- **The sandbox cannot run most build tools** ([#154](https://github.com/YuriiSokolenko/recursive-coder/issues/154)).
+  Checks run with a read-only workspace bind, no network, an empty tmpfs `HOME`
+  and only `/usr`, `/bin` and `/lib*`. Gradle, Maven, npm and most test runners
+  write build output into the workspace and need dependency caches, so they do
+  not work here; current fixtures use small read-only commands. A disposable
+  writable overlay of the checkout plus a read-only, digest-pinned dependency
+  cache and toolchain are a planned design; the post-check `verifyState()` fence
+  must stay unchanged.
+- **Receipt HMACs are in-process integrity checks.** The runtime and the Linux
+  workflow host keep their HMAC keys in the same JVM. The MACs detect forged or
+  stale values passed between components; they are not a trust boundary against
+  code running in that process.
