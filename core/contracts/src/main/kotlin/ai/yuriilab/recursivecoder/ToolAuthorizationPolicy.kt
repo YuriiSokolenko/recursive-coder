@@ -88,9 +88,10 @@ object ToolAuthorizationPolicy {
 
     private fun developerTestConfiguration(parts: List<String>): Boolean {
         val name = parts.last()
-        // ServiceLoader registrations can auto-install test-framework extensions.
-        val serviceLoader = parts.windowed(2).any { (a, b) -> a == "meta-inf" && b == "services" }
-        return serviceLoader || name in developerTestConfigFiles ||
+        // JVM service registrations under META-INF/services can auto-install
+        // test-framework extensions.
+        val serviceRegistration = parts.windowed(2).any { (a, b) -> a == "meta-inf" && b == "services" }
+        return serviceRegistration || name in developerTestConfigFiles ||
             developerTestConfigPrefixes.any { name.startsWith(it) }
     }
     private val hostIdentifierPattern = Regex("[A-Za-z0-9][A-Za-z0-9._:-]{0,159}")
