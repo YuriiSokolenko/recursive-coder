@@ -24,6 +24,27 @@ class CiBootstrapTrustTest(unittest.TestCase):
     def test_reviewed_action_pins_and_six_ci_jobs(self):
         bootstrap.audit_repository()
 
+    def test_repository_audit_requires_tracked_gradlew_executable_mode(self):
+        """Exercise the repository entry point, not just the isolated mode guard."""
+        tracked_sha = "a" * 40
+        command = ["git", "ls-files", "--stage", "--", "gradlew"]
+        for mode in ("100644", "100755"):
+            with self.subTest(tracked_mode=mode), mock.patch.object(
+                bootstrap.subprocess, "run",
+                return_value=subprocess.CompletedProcess(
+                    args=command, returncode=0,
+                    stdout=f"{mode} {tracked_sha} 0\tgradlew\n",
+                ),
+            ) as inspect_index:
+                if mode == "100644":
+                    with self.assertRaisesRegex(AssertionError, "Git mode 100755"):
+                        bootstrap.audit_repository()
+                else:
+                    bootstrap.audit_repository()
+                inspect_index.assert_called_once_with(
+                    command, cwd=ROOT, check=True, capture_output=True, text=True,
+                )
+
     def test_gradlew_without_tracked_executable_bit_rejected(self):
         tracked_sha = "a" * 40
         for entry in (
