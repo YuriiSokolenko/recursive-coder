@@ -95,11 +95,29 @@ def audit_workflow(source: str) -> None:
         raise AssertionError("All CI jobs must audit pinned actions and Gradle bootstrap")
 
 
+def audit_gradlew_executable_mode() -> None:
+    """Require the tracked launcher to retain its Git executable bit.
+
+    Inspect the Git index, not just the local filesystem: GitHub checkout
+    restores tracked file modes from the committed tree.
+    """
+    result = subprocess.run(
+        ["git", "ls-files", "--stage", "--", "gradlew"],
+        cwd=ROOT, check=True, capture_output=True, text=True,
+    )
+    if re.fullmatch(r"100755 [0-9a-f]{40} 0\tgradlew\n?", result.stdout) is None:
+        raise AssertionError(
+            "gradlew must be tracked with Git mode 100755 (executable); "
+            "restore its executable bit before running CI"
+        )
+
+
 def audit_repository() -> None:
     workflows = sorted((ROOT / ".github/workflows").glob("*.yml"))
     workflows += sorted((ROOT / ".github/workflows").glob("*.yaml"))
     if len(workflows) != 1 or workflows[0].name != "ci.yml":
         raise AssertionError("Unexpected additional/reusable workflow; review and pin before accepting")
+    audit_gradlew_executable_mode()
     audit_workflow(workflows[0].read_text(encoding="utf-8"))
     print("PASS: six hosted CI jobs and 21 immutable reviewed action references")
 

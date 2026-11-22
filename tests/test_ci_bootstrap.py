@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -22,6 +23,33 @@ class CiBootstrapTrustTest(unittest.TestCase):
 
     def test_reviewed_action_pins_and_six_ci_jobs(self):
         bootstrap.audit_repository()
+
+    def test_gradlew_without_tracked_executable_bit_rejected(self):
+        tracked_sha = "a" * 40
+        for entry in (
+            f"100644 {tracked_sha} 0\tgradlew\n",
+            "",
+            f"100755 {tracked_sha} 0\tgradlew\n100755 {tracked_sha} 0\tother\n",
+        ):
+            with self.subTest(index_entry=entry), mock.patch.object(
+                bootstrap.subprocess, "run",
+                return_value=subprocess.CompletedProcess(
+                    args=["git", "ls-files"], returncode=0, stdout=entry,
+                ),
+            ) as check_git:
+                with self.assertRaisesRegex(AssertionError, "Git mode 100755"):
+                    bootstrap.audit_gradlew_executable_mode()
+                check_git.assert_called_once()
+
+    def test_gradlew_with_tracked_executable_bit_accepted(self):
+        with mock.patch.object(
+            bootstrap.subprocess, "run",
+            return_value=subprocess.CompletedProcess(
+                args=["git", "ls-files"], returncode=0,
+                stdout="100755 " + "a" * 40 + " 0\tgradlew\n",
+            ),
+        ):
+            bootstrap.audit_gradlew_executable_mode()
 
     def test_changed_action_commit_rejected(self):
         mutated = self.workflow.replace(
@@ -104,7 +132,10 @@ class CiBootstrapTrustTest(unittest.TestCase):
         )
         self.assertIn("'Gradle 9.8.2'", self.workflow)
         self.assertIn("Generate trusted Gradle 9.8.2 launcher templates", self.workflow)
-        self.assertNotIn("9.8." + "1", self.workflow)
+        self.assertEqual(
+            set(re.findall(r"\bGradle (\d+\.\d+\.\d+)\b", self.workflow)),
+            {bootstrap.VERSION},
+        )
 
     def test_bad_download_is_deleted_before_extraction_or_path_publication(self):
         with tempfile.TemporaryDirectory() as tmp:

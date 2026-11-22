@@ -15,10 +15,11 @@ The dependency SHA-256 manifests apply only after Gradle itself is authenticated
 ## Why 9.8.2, not 9.9.x (issue #147)
 
 Gradle 9.8.2 is a **patch update within the already reviewed 9.8 line**. It
-fixes the virtual-platform alignment warning reported in Gradle 9.8 and
-retains the security fixes delivered by 9.8.1. The binary-only ZIP SHA-256
+fixes the [false virtual-platform alignment warning](https://github.com/gradle/gradle/issues/39454)
+listed in the [9.8.2 release notes](https://docs.gradle.org/9.8.2/release-notes.html),
+and includes the security fixes from 9.8.1. The binary-only ZIP SHA-256
 was independently checked against [Gradle's official release checksums](https://gradle.org/release-checksums/)
-before updating the trusted manifest; see the [9.8.2 release notes](https://docs.gradle.org/9.8.2/release-notes.html).
+before updating the trusted manifest.
 This change does not silently move the project to Gradle 9.9.x, whose
 new minor-version behavior and plugin compatibility require a separate
 reviewed upgrade, not a broadened bootstrap patch.
@@ -29,15 +30,13 @@ production launcher/bytecode verifier. All six GitHub-hosted jobs must pass
 against the new authenticated distribution before a squash merge to `dev`.
 The ZIP is hashed **before** any extraction or execution, and negative
 fixtures explicitly reject a tampered download without invoking `unzip`.
-Nothing in this patch changes C3, resume, tool, model, or side-effect authority.
-
 ## Remaining hosted-runner and JDK trust boundary
 
 We trust GitHub's runner image, execution and artifact services, hosted-machine isolation, implementation bytes at the pinned action commit SHAs, and GitHub file-command machinery. The workflow still trusts the Temurin JDK 21 selected by the pinned `actions/setup-java` (and Python 3.12 / Node 22 installers where used). JDK, Python and Node *versions* are selected, not independently authenticated byte-for-byte by a reviewed toolchain-archive hash: action pinning is not toolchain archive attestation. HTTPS and Gradle's upstream distribution infrastructure are still required for availability, while the pinned Gradle digest ensures content integrity. No C3, tool, model, resume or side-effect authority changes are included.
 
 ## Code-review policy and maintenance
 
-As checked on 2026-11-22, [the active `dev` ruleset](https://github.com/YuriiSokolenko/recursive-coder/rules/27857731) requires all six CI checks and a PR but currently sets `required_approving_review_count: 0` and `require_code_owner_review: false`. The `main` branch is not covered by that default-branch-only rule. Therefore CODEOWNERS currently **does not enforce security-owner approval** on either branch. Enabling independent code-owner review for `dev` and `main` is tracked in [#146](https://github.com/YuriiSokolenko/recursive-coder/issues/146); this PR cannot establish that control by editing in-repository scripts.
+As checked on 2026-11-22, [the active `dev` ruleset](https://github.com/YuriiSokolenko/recursive-coder/rules/27857731) requires all six CI checks and a PR but currently sets `required_approving_review_count: 0` and `require_code_owner_review: false`. The separate [staged `main` ruleset](https://github.com/YuriiSokolenko/recursive-coder/rules/27859663) is also active, but has not enabled required approvals and still lists the older two-job checks. Therefore CODEOWNERS currently **does not enforce security-owner approval** on either branch. Enabling independent code-owner review for `dev` and `main` is tracked in [#146](https://github.com/YuriiSokolenko/recursive-coder/issues/146); this PR cannot establish that control by editing in-repository scripts.
 
 Every checkout must set `persist-credentials: false`, enforced by an offline negative-tested drift check. The audit deliberately rejects alternative/flow-style `uses:` references: reviewers must inspect any new action shape or reusable workflow before adapting the checker. Major-version action comments are human-readable hints, not authority; updating an action pin requires verifying the target GitHub commit, changing the workflow SHA and version comment, updating `APPROVED_ACTIONS` and exercising the negative tests. The audit accepts `# v7` or `# v7.0.1`-style comments but compares them against the explicitly reviewed value in its allowlist, so dependency bots cannot silently authorize a new version.
 
