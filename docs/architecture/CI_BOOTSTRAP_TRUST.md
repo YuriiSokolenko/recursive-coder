@@ -30,6 +30,7 @@ production launcher/bytecode verifier. All six GitHub-hosted jobs must pass
 against the new authenticated distribution before a squash merge to `dev`.
 The ZIP is hashed **before** any extraction or execution, and negative
 fixtures explicitly reject a tampered download without invoking `unzip`.
+
 ## Remaining hosted-runner and JDK trust boundary
 
 We trust GitHub's runner image, execution and artifact services, hosted-machine isolation, implementation bytes at the pinned action commit SHAs, and GitHub file-command machinery. The workflow still trusts the Temurin JDK 21 selected by the pinned `actions/setup-java` (and Python 3.12 / Node 22 installers where used). JDK, Python and Node *versions* are selected, not independently authenticated byte-for-byte by a reviewed toolchain-archive hash: action pinning is not toolchain archive attestation. HTTPS and Gradle's upstream distribution infrastructure are still required for availability, while the pinned Gradle digest ensures content integrity. No C3, tool, model, resume or side-effect authority changes are included.
