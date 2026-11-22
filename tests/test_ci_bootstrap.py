@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
@@ -86,15 +87,53 @@ class CiBootstrapTrustTest(unittest.TestCase):
             bootstrap.audit_workflow(mutated)
 
     def test_reviewed_official_gradle_checksum(self):
-        self.assertEqual(bootstrap.VERSION, "9.8.1")
+        self.assertEqual(bootstrap.VERSION, "9.8.2")
         self.assertEqual(
             bootstrap.GRADLE_SHA256,
-            "dce76f55f8e251a3a1f130eb120f30b3d271de2b76c9b0729d316b5a1b6dc01f",
+            "21bd5da2de49b642904077f38c0efdc7778e92b3ed0889392dca61b97e389607",
         )
         self.assertEqual(
             bootstrap.GRADLE_URL,
-            "https://services.gradle.org/distributions/gradle-9.8.1-bin.zip",
+            "https://services.gradle.org/distributions/gradle-9.8.2-bin.zip",
         )
+
+    def test_ci_jobs_and_verifier_reference_same_reviewed_gradle(self):
+        self.assertEqual(
+            self.workflow.count("Install SHA-256-verified Gradle 9.8.2"),
+            len(bootstrap.GRADLE_JOBS),
+        )
+        self.assertIn("'Gradle 9.8.2'", self.workflow)
+        self.assertIn("Generate trusted Gradle 9.8.2 launcher templates", self.workflow)
+        self.assertNotIn("9.8." + "1", self.workflow)
+
+    def test_bad_download_is_deleted_before_extraction_or_path_publication(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            temp = Path(tmp)
+            env_file = temp / "github-env"
+            path_file = temp / "github-path"
+
+            def fake_download(argv, **kwargs):
+                self.assertEqual(argv[0], "curl")
+                archive = Path(argv[argv.index("--output") + 1])
+                archive.write_bytes(b"malicious Gradle ZIP")
+                return subprocess.CompletedProcess(argv, 0)
+
+            with mock.patch.dict(os.environ, {
+                "CI": "true",
+                "RUNNER_TEMP": tmp,
+                "GITHUB_ENV": str(env_file),
+                "GITHUB_PATH": str(path_file),
+            }), mock.patch.object(
+                bootstrap.subprocess, "run", side_effect=fake_download
+            ) as commands:
+                with self.assertRaisesRegex(AssertionError, "SHA-256 mismatch"):
+                    bootstrap.install_gradle()
+
+            self.assertEqual(commands.call_count, 1)
+            self.assertEqual(commands.call_args.args[0][0], "curl")
+            self.assertEqual(list(temp.rglob("gradle-9.8.2-bin.zip")), [])
+            self.assertFalse(env_file.exists())
+            self.assertFalse(path_file.exists())
 
     def test_altered_gradle_archive_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:

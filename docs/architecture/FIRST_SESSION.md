@@ -4,7 +4,7 @@
 
 The standalone pre-release CLI accepts one **SessionRequest v1** JSON file:
 
-1. Install JDK 21 and Gradle 9.8.1.
+1. Install JDK 21 and Gradle 9.8.2.
 2. Run `./gradlew test installDist`.
 3. Run `build/install/recursive-coder/bin/recursive-coder run /absolute/path/request.json`.
 
@@ -53,5 +53,5 @@ finish a terminal result; durable recovery is deferred to issue #10.
 
 The bootstrap still has a fully offline fake-model path and is **not** full Koog agent execution.
 Issue #6 **implemented** the injectable HTTP Model Gateway with fail-closed capability discovery; Koog agent orchestration remains a separate milestone. Trusted read-only workspace tools and descriptor-based containment were implemented in issue #5; see [Workspace Manager](WORKSPACE.md). The separate trusted write/check runtime from #8 is documented in [Trusted writes](TRUSTED_WRITES.md) and has **not** been integrated into `run`. The `gradlew` executable is
-a temporary delegate to an installed Gradle 9.8.1, not a downloaded
+a temporary delegate to an installed Gradle 9.8.2, not a downloaded
 self-contained wrapper; complete packaging is part of issue #12.

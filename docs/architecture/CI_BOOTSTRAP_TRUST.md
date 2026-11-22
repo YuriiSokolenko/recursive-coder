@@ -4,13 +4,32 @@ The six required CI jobs run on GitHub-hosted `ubuntu-24.04`. Workflow actions u
 
 ## Authenticated Gradle executable
 
-The four Gradle-consuming jobs no longer rely on `gradle/actions/setup-gradle`. Each downloads `gradle-9.8.1-bin.zip` over HTTPS to a fresh runner temporary directory, validates the ZIP against the independently reviewed SHA-256 below, and only then unpacks/executes the distribution:
+The four Gradle-consuming jobs no longer rely on `gradle/actions/setup-gradle`. Each downloads `gradle-9.8.2-bin.zip` over HTTPS to a fresh runner temporary directory, validates the ZIP against the independently reviewed SHA-256 below, and only then unpacks/executes the distribution:
 
-`dce76f55f8e251a3a1f130eb120f30b3d271de2b76c9b0729d316b5a1b6dc01f`
+`21bd5da2de49b642904077f38c0efdc7778e92b3ed0889392dca61b97e389607`
 
-Source: [official Gradle 9.8.1 release checksums](https://gradle.org/release-checksums/), binary-only distribution. The trust root is committed; the code never accepts the downloaded adjacent `.sha256` file as an authority. When `CI=true` or `GITHUB_ACTIONS=true`, `./gradlew` requires the `RECURSIVE_VERIFIED_GRADLE` absolute executable path and refuses a locally installed or cached Gradle fallback. `CI=false` without `GITHUB_ACTIONS=true` uses the normal local launcher. Third-party CI must independently install and verify the distribution and supply `RECURSIVE_VERIFIED_GRADLE`; the bundled `--install-gradle` provisioning is GitHub Actions-specific. The shell launcher checks that the path exists and is executable, while the trusted GitHub bootstrap step supplies that path after verifying the archive (the launcher does not rehash it). The same verified directory is prepended to later steps' PATH for standalone Gradle fixture tools; the isolated production verifier calls the binary by absolute path. Local developer builds continue using the pre-release system-Gradle launcher; a self-contained Wrapper is tracked separately in #12.
+Source: [official Gradle 9.8.2 release checksums](https://gradle.org/release-checksums/), binary-only distribution. The trust root is committed; the code never accepts the downloaded adjacent `.sha256` file as an authority. When `CI=true` or `GITHUB_ACTIONS=true`, `./gradlew` requires the `RECURSIVE_VERIFIED_GRADLE` absolute executable path and refuses a locally installed or cached Gradle fallback. `CI=false` without `GITHUB_ACTIONS=true` uses the normal local launcher. Third-party CI must independently install and verify the distribution and supply `RECURSIVE_VERIFIED_GRADLE`; the bundled `--install-gradle` provisioning is GitHub Actions-specific. The shell launcher checks that the path exists and is executable, while the trusted GitHub bootstrap step supplies that path after verifying the archive (the launcher does not rehash it). The same verified directory is prepended to later steps' PATH for standalone Gradle fixture tools; the isolated production verifier calls the binary by absolute path. Local developer builds continue using the pre-release system-Gradle launcher; a self-contained Wrapper is tracked separately in #12.
 
 The dependency SHA-256 manifests apply only after Gradle itself is authenticated. This change leaves all six CI job names and the independent production distribution verifier intact.
+
+## Why 9.8.2, not 9.9.x (issue #147)
+
+Gradle 9.8.2 is a **patch update within the already reviewed 9.8 line**. It
+fixes the virtual-platform alignment warning reported in Gradle 9.8 and
+retains the security fixes delivered by 9.8.1. The binary-only ZIP SHA-256
+was independently checked against [Gradle's official release checksums](https://gradle.org/release-checksums/)
+before updating the trusted manifest; see the [9.8.2 release notes](https://docs.gradle.org/9.8.2/release-notes.html).
+This change does not silently move the project to Gradle 9.9.x, whose
+new minor-version behavior and plugin compatibility require a separate
+reviewed upgrade, not a broadened bootstrap patch.
+
+The compatibility gate remains JDK 21, Kotlin 2.4.21, strict dependency
+verification, Gradle configuration-cache regressions, and the isolated
+production launcher/bytecode verifier. All six GitHub-hosted jobs must pass
+against the new authenticated distribution before a squash merge to `dev`.
+The ZIP is hashed **before** any extraction or execution, and negative
+fixtures explicitly reject a tampered download without invoking `unzip`.
+Nothing in this patch changes C3, resume, tool, model, or side-effect authority.
 
 ## Remaining hosted-runner and JDK trust boundary
 

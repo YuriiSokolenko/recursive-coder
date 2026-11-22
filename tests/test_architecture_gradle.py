@@ -1332,7 +1332,7 @@ class ArchitectureConfigurationCacheRegressionTest(_GradleOutputAssertions):
                     encoding="utf-8",
                 )
                 try:
-                    # Gradle 9.8.1 names the invalidated compile task input,
+                    # Gradle 9.8.2 names the invalidated compile task input,
                     # rather than the Kotlin source file, in its cache reason.
                     self.assertIn(
                         '":core:tasks" to emptySet(),',

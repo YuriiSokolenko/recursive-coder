@@ -121,7 +121,7 @@ Git-host integrations (PR creation, reviews, webhooks), IDE extensions, and task
 
 ## 6. Independent CI and quality
 
-GitHub Actions is used **solely for this repository's CI**, not as an external agent dispatcher. Since merged [PR #71](https://github.com/YuriiSokolenko/recursive-coder/pull/71), all three jobs run on fresh GitHub-hosted `ubuntu-24.04` VMs. The legacy N150 KVM runner is not selected, and fork PRs run without exposing private hardware. JDK 21, Gradle 9.8.1, Python 3.12 and Node.js 22 are provisioned per job. The restricted `bwrap-userns-restrict` AppArmor profile permits bubblewrap's private-network namespace without disabling AppArmor; real isolation and required E2E must succeed.
+GitHub Actions is used **solely for this repository's CI**, not as an external agent dispatcher. Since merged [PR #71](https://github.com/YuriiSokolenko/recursive-coder/pull/71), all three jobs run on fresh GitHub-hosted `ubuntu-24.04` VMs. The legacy N150 KVM runner is not selected, and fork PRs run without exposing private hardware. JDK 21, Gradle 9.8.2, Python 3.12 and Node.js 22 are provisioned per job. The restricted `bwrap-userns-restrict` AppArmor profile permits bubblewrap's private-network namespace without disabling AppArmor; real isolation and required E2E must succeed.
 
 - **Architecture boundaries and pure unit tests:** Gradle dependency and test-tier policies, configuration-cache regressions and pure Kotlin tests.
 - **Full JVM integration and sandbox E2E:** module builds, local Git/filesystem and mock HTTP fixtures, mandatory real bubblewrap case, installed CLI and JUnit artifacts.
