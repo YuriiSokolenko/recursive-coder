@@ -43,7 +43,7 @@ tasks.register<CheckArchitectureTask>("checkArchitecture") {
             // All reviewed production dependencies resolve via settings Maven Central.
             invalidRepositories += "${project.path}:${repository.name}"
         }
-        // Gradle 9.8.1 injects two immutable plugin-resolution repository
+        // Gradle 9.8.2 injects two immutable plugin-resolution repository
         // proxies per project (including root), not MavenArtifactRepository
         // objects. Their origins are authenticated by settings.gradle.kts,
         // where the effective pluginManagement HTTPS URLs are checked.

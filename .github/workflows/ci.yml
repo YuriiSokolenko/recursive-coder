@@ -35,13 +35,13 @@ jobs:
       # CI ./gradlew requires the verified Gradle executable, not a PATH fallback.
       # The explicit --dependency-verification strict flags are defense in depth;
       # settings.gradle.kts is the authoritative guard against off/lenient modes.
-      - name: Install SHA-256-verified Gradle 9.8.1
+      - name: Install SHA-256-verified Gradle 9.8.2
         run: python3 -I tools/check_ci_bootstrap.py --install-gradle
       - name: Verify public-runner toolchain
         run: |
           java -version
           test "$(command -v gradle)" = "$RECURSIVE_VERIFIED_GRADLE"
-          "$RECURSIVE_VERIFIED_GRADLE" --version | grep -F 'Gradle 9.8.1'
+          "$RECURSIVE_VERIFIED_GRADLE" --version | grep -F 'Gradle 9.8.2'
           python3 --version
       - name: Require locked root and standalone build-logic dependencies
         run: python3 -I tools/check_dependency_verification.py
@@ -117,7 +117,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
-      - name: Install SHA-256-verified Gradle 9.8.1
+      - name: Install SHA-256-verified Gradle 9.8.2
         run: python3 -I tools/check_ci_bootstrap.py --install-gradle
       - name: Enforce SHA-256 dependency trust and test negative cache fixtures
         run: python3 -I tools/check_dependency_verification.py --negative-fixtures
@@ -176,7 +176,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
-      - name: Install SHA-256-verified Gradle 9.8.1
+      - name: Install SHA-256-verified Gradle 9.8.2
         run: python3 -I tools/check_ci_bootstrap.py --install-gradle
       - name: Set up Python 3.12
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -214,7 +214,7 @@ jobs:
                       raise SystemExit(f"Untrusted artifact entry: {name}")
               archive.extractall(root, members=members, filter="data")
           PY
-      - name: Generate trusted Gradle 9.8.1 launcher templates
+      - name: Generate trusted Gradle 9.8.2 launcher templates
         env:
           VERIFIED_DISTRIBUTION_LIB: ${{ github.workspace }}/build/install/recursive-coder/lib
         run: |
@@ -275,7 +275,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
-      - name: Install SHA-256-verified Gradle 9.8.1
+      - name: Install SHA-256-verified Gradle 9.8.2
         run: python3 -I tools/check_ci_bootstrap.py --install-gradle
       - name: Set up Python 3.12
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6

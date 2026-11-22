@@ -30,7 +30,7 @@ Recursive Coder itself owns its tasks and sessions. Git can manage source worksp
 
 ## Build and test
 
-The current foundation uses Kotlin 2.4.21, JDK 21, Gradle 9.8.1, Koin 4.2.2 (CLI composition root only), and Session Protocol `1.0`. Core modules do not depend on Koog, HTTP adapters or Koin.
+The current foundation uses Kotlin 2.4.21, JDK 21, Gradle 9.8.2, Koin 4.2.2 (CLI composition root only), and Session Protocol `1.0`. Core modules do not depend on Koog, HTTP adapters or Koin.
 
 The Gradle build has **nine product modules**: `:agent:runtime`, `:core:contracts`, `:core:session`, `:core:tasks`, `:infra:model`, `:infra:workspace`, `:infra:task-store`, `:infra:journal`, and the only executable module, `:app:cli`. `build-logic` is an included build, not a product module. See [Gradle module ownership](docs/architecture/MODULES.md). For changes to Gradle plugins or dependencies, follow the [SHA-256 verification and manual checksum review procedure](docs/dependency-verification.md).
 
@@ -38,13 +38,13 @@ The installed distribution remains at `build/install/recursive-coder/bin/recursi
 
 The project includes an offline deterministic fake-model CLI, durable task queue/scheduler, trusted read-only workspace, optional configured HTTP model adapter, and physical JSONL event sink. The Linux trusted write/check runtime also has a host-only stage tool port. A **separate, explicitly gated fake-only `workflow` CLI** can now orchestrate five trusted roles in a dedicated checkout; default SessionRequest v1 and native task commands remain read-only. See [First executable session](docs/architecture/FIRST_SESSION.md), [Trusted writes](docs/architecture/TRUSTED_WRITES.md) and [Writable CLI](docs/architecture/WRITABLE_CLI.md).
 
-With Gradle 9.8.1 and JDK 21 installed:
+With Gradle 9.8.2 and JDK 21 installed:
 
 ```bash
 ./gradlew test installDist
 ```
 
-[GitHub Actions CI](.github/workflows/ci.yml) runs on **GitHub-hosted `ubuntu-24.04` runners** after merged [PR #71](https://github.com/YuriiSokolenko/recursive-coder/pull/71). The six jobs use fresh VMs, including for fork PRs, with JDK 21, SHA-256-verified Gradle 9.8.1, Python 3.12 and Node.js 22 provisioned as required. They cover architecture/pure unit tests, isolated production builds, independent distribution verification, full JVM/integration/mandatory sandbox E2E, installed CLI E2E, and versioned contracts. Restricted AppArmor integration enables bubblewrap's private network namespace without disabling system protection; sandbox E2E and the no-skip assertion remain mandatory. The [CI migration run](https://github.com/YuriiSokolenko/recursive-coder/actions/runs/43120760211) passed all three jobs on 2026-11-11, including the sandbox E2E. Tests require no live model provider. See [Testing architecture](docs/architecture/TEST_SUITES.md) and [CI bootstrap trust and action SHA policy](docs/architecture/CI_BOOTSTRAP_TRUST.md).
+[GitHub Actions CI](.github/workflows/ci.yml) runs on **GitHub-hosted `ubuntu-24.04` runners** after merged [PR #71](https://github.com/YuriiSokolenko/recursive-coder/pull/71). The six jobs use fresh VMs, including for fork PRs, with JDK 21, SHA-256-verified Gradle 9.8.2, Python 3.12 and Node.js 22 provisioned as required. They cover architecture/pure unit tests, isolated production builds, independent distribution verification, full JVM/integration/mandatory sandbox E2E, installed CLI E2E, and versioned contracts. Restricted AppArmor integration enables bubblewrap's private network namespace without disabling system protection; sandbox E2E and the no-skip assertion remain mandatory. The [CI migration run](https://github.com/YuriiSokolenko/recursive-coder/actions/runs/43120760211) passed all three jobs on 2026-11-11, including the sandbox E2E. Tests require no live model provider. See [Testing architecture](docs/architecture/TEST_SUITES.md) and [CI bootstrap trust and action SHA policy](docs/architecture/CI_BOOTSTRAP_TRUST.md).
 
 ## Documentation
 

@@ -15,9 +15,9 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "9.8.1"
+VERSION = "9.8.2"
 GRADLE_URL = f"https://services.gradle.org/distributions/gradle-{VERSION}-bin.zip"
-GRADLE_SHA256 = "dce76f55f8e251a3a1f130eb120f30b3d271de2b76c9b0729d316b5a1b6dc01f"
+GRADLE_SHA256 = "21bd5da2de49b642904077f38c0efdc7778e92b3ed0889392dca61b97e389607"
 
 # Compared to the official GitHub git/ref/tags endpoints on 2026-11-22.
 # The trailing versions are documentation only; commit SHAs are the authority.
@@ -95,11 +95,29 @@ def audit_workflow(source: str) -> None:
         raise AssertionError("All CI jobs must audit pinned actions and Gradle bootstrap")
 
 
+def audit_gradlew_executable_mode() -> None:
+    """Require the tracked launcher to retain its Git executable bit.
+
+    Inspect the Git index, not just the local filesystem: GitHub checkout
+    restores tracked file modes from the committed tree.
+    """
+    result = subprocess.run(
+        ["git", "ls-files", "--stage", "--", "gradlew"],
+        cwd=ROOT, check=True, capture_output=True, text=True,
+    )
+    if re.fullmatch(r"100755 [0-9a-f]{40} 0\tgradlew\n?", result.stdout) is None:
+        raise AssertionError(
+            "gradlew must be tracked with Git mode 100755 (executable); "
+            "restore its executable bit before running CI"
+        )
+
+
 def audit_repository() -> None:
     workflows = sorted((ROOT / ".github/workflows").glob("*.yml"))
     workflows += sorted((ROOT / ".github/workflows").glob("*.yaml"))
     if len(workflows) != 1 or workflows[0].name != "ci.yml":
         raise AssertionError("Unexpected additional/reusable workflow; review and pin before accepting")
+    audit_gradlew_executable_mode()
     audit_workflow(workflows[0].read_text(encoding="utf-8"))
     print("PASS: six hosted CI jobs and 21 immutable reviewed action references")
 
@@ -125,8 +143,8 @@ def install_gradle() -> None:
     github_path = os.environ.get("GITHUB_PATH")
     if os.environ.get("CI") != "true" or not all((runner_temp, github_env, github_path)):
         raise RuntimeError("Authenticated Gradle installation is supported only in GitHub CI")
-    install_root = Path(tempfile.mkdtemp(prefix="verified-gradle-9.8.1-", dir=runner_temp))
-    archive = install_root / "gradle-9.8.1-bin.zip"
+    install_root = Path(tempfile.mkdtemp(prefix=f"verified-gradle-{VERSION}-", dir=runner_temp))
+    archive = install_root / f"gradle-{VERSION}-bin.zip"
     subprocess.run([
         "curl", "--fail", "--location", "--silent", "--show-error",
         "--proto", "=https", "--proto-redir", "=https",

@@ -4,7 +4,7 @@ Issue #25 makes the accepted architecture direction executable without modifying
 
 ## Dependency graph verification
 
-Run `./gradlew checkArchitecture` or `./gradlew checkArchitecture --configuration-cache` (Gradle 9.8.1). The first configuration-cache run stores the task graph; the second reuses it. CI verifies both messages explicitly. This inspects every declared Gradle project dependency across production and test configurations, including future test fixtures. It rejects project dependency cycles even when an edge is declared only in `testImplementation`.
+Run `./gradlew checkArchitecture` or `./gradlew checkArchitecture --configuration-cache` (Gradle 9.8.2). The first configuration-cache run stores the task graph; the second reuses it. CI verifies both messages explicitly. This inspects every declared Gradle project dependency across production and test configurations, including future test fixtures. It rejects project dependency cycles even when an edge is declared only in `testImplementation`.
 
 | Consumer module | Allowed project dependencies |
 | --- | --- |
@@ -23,7 +23,7 @@ The checker also rejects unclassified new modules and direct core dependencies o
 
 A cache hit is not a permanent architecture approval. The Python regression in
 `tests/test_architecture_gradle.py` copies only Gradle build inputs and the local
-`build-logic` into an isolated temporary project. On Gradle 9.8.1 it first runs
+`build-logic` into an isolated temporary project. On Gradle 9.8.2 it first runs
 `checkArchitecture --configuration-cache` on a valid graph, then proves that
 the second run **reuses** the cache. After the cache hit, it changes a copied
 module `build.gradle.kts` to add an illegal `implementation` edge and,
@@ -36,11 +36,11 @@ valid graph to pass again. The restored run may either reuse a matching valid
 entry or reconfigure; an invalidated entry is **not** expected to be reused.
 The fixture never modifies the checkout, resolves dependencies, or calls a
 model service. CI runs it together with the other architecture regressions
-using the pinned Gradle 9.8.1 installation.
+using the pinned Gradle 9.8.2 installation.
 
 ### Non-module configuration-cache inputs (issue #45)
 
-The same isolated Gradle 9.8.1 regression suite additionally proves invalidation
+The same isolated Gradle 9.8.2 regression suite additionally proves invalidation
 after three changes **outside product module build scripts**. It starts with a
 valid graph and an explicitly reused configuration-cache entry. Each mutation
 follows a confirmed cache hit and is followed by restoring the changed input
@@ -53,7 +53,7 @@ The three input changes are:
 - **Build logic:** removing `:core:contracts` from the `:core:tasks` allowlist
   in the copied `ArchitectureGraph.kt` causes the existing
   `:core:tasks:implementation -> :core:contracts` edge to be rejected.
-  Gradle 9.8.1 reports the invalidation as a changed input to
+  Gradle 9.8.2 reports the invalidation as a changed input to
   `:build-logic:compileKotlin`, not as an `ArchitectureGraph.kt` path;
   the fixture separately confirms the source edit.
 - **Settings:** including a temporary `:architectureUnclassified` project
@@ -278,7 +278,7 @@ node --test contracts/v1/session-v1.test.mjs
 
 `test` **still runs all existing tests** regardless of their tags; `./gradlew test installDist` is backward-compatible. An untagged future test is therefore still included in the full JVM CI, not silently dropped. New tests **must** have an effective tier tag or `checkTestTiers` fails, even though they still execute under `test`. Do not classify a test as pure just because it has fake model/workspace interfaces if its fixture writes files or launches a process.
 
-CI has six independent jobs with explicit dependencies: architecture/tier-validation/pure-unit with cold/reused Gradle 9.8.1 configuration-cache checks; production-only `installDist` compilation and artifact upload; a **separate clean checkout and isolated Python verifier** that checks compiled outputs and standard Gradle launchers and publishes the approved artifact; full JVM `test`, `integrationTest`, `e2eTest`, mandatory sandbox JUnit XML/no-skip assertion and published JUnit results (blocked until the verifier passes); **separately isolated installed CLI E2E** on a fresh VM (only after verification, with no preceding Gradle/Kotlin test execution, SHA-256 verification and `python3 -I`); and protocol conformance with the English-only documentation guard. Since merged [PR #71](https://github.com/YuriiSokolenko/recursive-coder/pull/71), these jobs use GitHub-hosted `ubuntu-24.04` VMs with JDK 21, Gradle 9.8.1 where needed, Python 3.12 and Node.js 22 as required. Bubblewrap and the restricted `bwrap-userns-restrict` AppArmor profile are installed independently in both the JVM job and the isolated CLI E2E job before their real isolation probes, without disabling system-wide AppArmor or sharing the host network. Fork PRs run on disposable GitHub VMs, not N150. Tests need neither live inference nor credentials. The [CI migration run](https://github.com/YuriiSokolenko/recursive-coder/actions/runs/43120760211) passed the three original jobs on 2026-11-11, including mandatory sandbox E2E (0 skips). Sandbox E2E may be skipped on unsupported local hosts, but **must run and pass on Linux CI**.
+CI has six independent jobs with explicit dependencies: architecture/tier-validation/pure-unit with cold/reused Gradle 9.8.2 configuration-cache checks; production-only `installDist` compilation and artifact upload; a **separate clean checkout and isolated Python verifier** that checks compiled outputs and standard Gradle launchers and publishes the approved artifact; full JVM `test`, `integrationTest`, `e2eTest`, mandatory sandbox JUnit XML/no-skip assertion and published JUnit results (blocked until the verifier passes); **separately isolated installed CLI E2E** on a fresh VM (only after verification, with no preceding Gradle/Kotlin test execution, SHA-256 verification and `python3 -I`); and protocol conformance with the English-only documentation guard. Since merged [PR #71](https://github.com/YuriiSokolenko/recursive-coder/pull/71), these jobs use GitHub-hosted `ubuntu-24.04` VMs with JDK 21, Gradle 9.8.2 where needed, Python 3.12 and Node.js 22 as required. Bubblewrap and the restricted `bwrap-userns-restrict` AppArmor profile are installed independently in both the JVM job and the isolated CLI E2E job before their real isolation probes, without disabling system-wide AppArmor or sharing the host network. Fork PRs run on disposable GitHub VMs, not N150. Tests need neither live inference nor credentials. The [CI migration run](https://github.com/YuriiSokolenko/recursive-coder/actions/runs/43120760211) passed the three original jobs on 2026-11-11, including mandatory sandbox E2E (0 skips). Sandbox E2E may be skipped on unsupported local hosts, but **must run and pass on Linux CI**.
 
 ## Mandatory preparation host conformance (#119)
 
@@ -313,7 +313,7 @@ manifests must not add a `Class-Path` or agent entry (including CR-only line
 endings). The **entire installed tree** is restricted to two launchers and flat
 `lib/*.jar` files; extra files, symlinks and directories fail closed. Both
 launchers are byte-compared, apart from validated CLASSPATH order, to trusted
-`startScripts` outputs generated by Gradle 9.8.1 from a minimal application
+`startScripts` outputs generated by Gradle 9.8.2 from a minimal application
 project **in the separate verification job**. All shipped JARs must match
 compiler-produced module JARs or the exact resolved application
 `:app:cli:runtimeClasspath` SHA-256 inventory. This manifest constrains

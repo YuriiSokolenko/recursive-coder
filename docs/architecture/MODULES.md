@@ -103,7 +103,7 @@ lifetime, immutable artifacts, sandboxing and E2E guarantees.
 
 ## Build and test
 
-With JDK 21 and Gradle 9.8.1 installed, run from the repository root:
+With JDK 21 and Gradle 9.8.2 installed, run from the repository root:
 
 ```sh
 ./gradlew clean test installDist
