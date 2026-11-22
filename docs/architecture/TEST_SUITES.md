@@ -216,6 +216,52 @@ A test with no effective tier, including a typo such as `@Tag("unti")`, fails th
 
 **Purity guard and limits:** For `unit` tests the bytecode validator rejects references to selected filesystem, Git/JGit, socket, HTTP, subprocess and Koog APIs, plus JUnit `@TempDir` fixtures. It scans the test class, nested helper classes, locally compiled base types, and enclosing fixtures of JUnit `@Nested` test classes, including outer `@BeforeEach` methods and `@TempDir` fields even when the outer class has no tests of its own. This intentionally conservative static boundary can flag an unused I/O helper in a mixed class; separate pure and integration suites if that happens. It allows in-memory fakes, but does **not** prove freedom from all side effects: reflective calls, third-party helpers outside the compiled test classes, dynamic code loading and runtime delegates can evade inspection. Review remains required. Run `python3 -m unittest discover -s tests -p 'test_test_tiers.py' -v` for independent compiled positive and negative fixtures; these do not download JUnit or run a model.
 
+## Trusted C3 compile-input guard (#140)
+
+`checkArchitecture` validates compiled production Kotlin and Java sources,
+including extra and generated roots. Production Java is denied until a separate
+C3 Java policy has been reviewed. The effective Kotlin compiler options and
+source-set language settings are checked for compiler-wide C3 opt-ins;
+`@argfile` entries are denied to prevent flags being read from untracked files.
+In production, `@Suppress` accepts only literal, unescaped `UNCHECKED_CAST`
+and `UNUSED_PARAMETER` diagnostics; other strings, concatenation, constants,
+aliases and unrecognized suppression syntax fail closed even if the trusted
+marker is never mentioned. The guard also refuses `SuppressWarnings`, which
+could name an alias of the Kotlin suppression annotation. Tests and test fixtures remain separate.
+
+Additional production-bytecode controls reject non-Kotlin/Java JVM compiler
+tasks, any compiler-plugin classpath outside the exact seven built-in KGP 2.4.21
+Maven module coordinates/versions and option IDs, and `-Xplugin`/`-P` flags,
+file-based dependencies on production configurations, and explicitly registered
+`SourceSetOutput.output.dir` directories. Dynamic reflection/class-loading
+entry points are conservatively denied in production Kotlin source; JNI and
+other dynamic or generated execution paths still require separate review.
+
+All six trusted C3 implementation/source files have exact SHA-256 content pins
+in `TrustedRunningOptInPolicy`. Any change, even without a changed annotation,
+fails `checkArchitecture` until reviewed and the pinned hash is explicitly
+updated. `.github/CODEOWNERS` documents required owners; mandatory approvals
+require repository branch-protection/ruleset configuration and must be
+verified separately.
+
+**Limit:** this verifier checks the compile configuration as seen by
+`checkArchitecture`. Mutations made in later `KotlinCompile.doFirst`
+actions or dynamically executed plugins are *not proven safe* by this gate.
+The removed text-only Gradle scan was not a complete defence against such
+mutations either. Review all additions to compiler task actions and convention
+plugins before granting C3 authority. It is not a bytecode verifier:
+transformations after `checkArchitecture`, custom non-compiler bytecode
+generators, reflection through undiscovered indirection, JNI, and other
+non-Gradle bytecode paths remain outside the guarantee.
+A suppression annotation renamed
+through a typealias supplied by a precompiled external dependency (and not
+spelled as `Suppress`/`SuppressWarnings` in scanned source) is outside this
+text-based guard; all dependency additions require independent security
+review. The KGP built-in compiler plugin artifacts are checked by resolved
+cache origin and module coordinates, not by artifact SHA-256; a compromised
+artifact cache remains outside this guard's guarantee. The guard does not authorize effects, resume, model execution or C3
+publication.
+
 ## Commands, CI and non-dropping guarantee
 
 ~~~sh
@@ -232,8 +278,103 @@ node --test contracts/v1/session-v1.test.mjs
 
 `test` **still runs all existing tests** regardless of their tags; `./gradlew test installDist` is backward-compatible. An untagged future test is therefore still included in the full JVM CI, not silently dropped. New tests **must** have an effective tier tag or `checkTestTiers` fails, even though they still execute under `test`. Do not classify a test as pure just because it has fake model/workspace interfaces if its fixture writes files or launches a process.
 
-CI has three independent jobs: architecture/tier-validation/pure-unit with cold/reused Gradle 9.8.1 configuration-cache checks; full JVM `test`, `integrationTest`, `e2eTest`, mandatory sandbox JUnit XML/no-skip assertion, installed CLI E2E and published JUnit results; and protocol conformance with the English-only documentation guard. Since merged [PR #71](https://github.com/YuriiSokolenko/recursive-coder/pull/71), all three jobs use GitHub-hosted `ubuntu-24.04` VMs with JDK 21, Gradle 9.8.1, Python 3.12 and Node.js 22. Bubblewrap and the restricted `bwrap-userns-restrict` AppArmor profile are installed before the real isolation probe, without disabling system-wide AppArmor or sharing the host network. Fork PRs run on disposable GitHub VMs, not N150. Tests need neither live inference nor credentials. The [CI migration run](https://github.com/YuriiSokolenko/recursive-coder/actions/runs/43120760211) passed all three jobs on 2026-11-11, including mandatory sandbox E2E (0 skips). Sandbox E2E may be skipped on unsupported local hosts, but **must run and pass on Linux CI**.
+CI has six independent jobs with explicit dependencies: architecture/tier-validation/pure-unit with cold/reused Gradle 9.8.1 configuration-cache checks; production-only `installDist` compilation and artifact upload; a **separate clean checkout and isolated Python verifier** that checks compiled outputs and standard Gradle launchers and publishes the approved artifact; full JVM `test`, `integrationTest`, `e2eTest`, mandatory sandbox JUnit XML/no-skip assertion and published JUnit results (blocked until the verifier passes); **separately isolated installed CLI E2E** on a fresh VM (only after verification, with no preceding Gradle/Kotlin test execution, SHA-256 verification and `python3 -I`); and protocol conformance with the English-only documentation guard. Since merged [PR #71](https://github.com/YuriiSokolenko/recursive-coder/pull/71), these jobs use GitHub-hosted `ubuntu-24.04` VMs with JDK 21, Gradle 9.8.1 where needed, Python 3.12 and Node.js 22 as required. Bubblewrap and the restricted `bwrap-userns-restrict` AppArmor profile are installed independently in both the JVM job and the isolated CLI E2E job before their real isolation probes, without disabling system-wide AppArmor or sharing the host network. Fork PRs run on disposable GitHub VMs, not N150. Tests need neither live inference nor credentials. The [CI migration run](https://github.com/YuriiSokolenko/recursive-coder/actions/runs/43120760211) passed the three original jobs on 2026-11-11, including mandatory sandbox E2E (0 skips). Sandbox E2E may be skipped on unsupported local hosts, but **must run and pass on Linux CI**.
 
 ## Mandatory preparation host conformance (#119)
 
 Run `./gradlew --no-build-cache clean checkPreparationHostConformance` on a supported Linux host with the restricted bubblewrap profile. The task requires every concrete production preparation host and each mandatory fake to execute all shared contract methods exactly once in both `test` and `integrationTest`; missing, excluded, skipped or unregistered suites fail. The architecture job independently executes the negative bytecode/report fixtures. See [preparation stages](PREPARATION_STAGES.md) for the adapter authoring procedure and the explicit Linux pending-refusal profile.
+
+
+### Production JVM bytecode and package verification (#140)
+
+The CI **Independent production distribution verifier** job runs
+`tools/check_production_bytecode.py` in a fresh checkout after the separate
+production build has published its `installDist` and compiled classes as a strictly
+extracted artifact, **before** any JVM test job is allowed to run. It reuses the JVM class-file parser behind
+`checkTestTiers` to inspect constant-pool class, method and MethodHandle
+references from **production** classes. A fail-closed JDK package allowlist
+rejects unreviewed JDK API owners, including `URLClassLoader`, `ServiceLoader`,
+`java.beans`, `java.lang.foreign`, `java.io.ObjectInputStream`,
+`java.util.logging`, `javax.script`, `javax.management`, `Unsafe` and module
+reconfiguration. Loader method names are blocked independent of the static
+owner, and Kotlin callable-reflection methods are denied. This also rejects
+reflection APIs including
+Kotlin `::class.java.methods`, `Class.getDeclaredMethods`,
+`ClassLoader.loadClass` and `Thread.getContextClassLoader`.
+The class-file `BootstrapMethods` attribute is also checked: only compiler-
+generated `LambdaMetafactory`, `StringConcatFactory` and JDK 21
+`SwitchBootstraps.typeSwitch` bootstrap calls are allowed. Any other
+invokedynamic bootstrap (including `ObjectMethods.bootstrap`) is rejected. The Kotlin
+`kotlin.jvm.internal.Reflection` class-literal helper remains allowed.
+
+Packaging is checked against compiler output by exact bytes: extra or
+replaced `*.class` entries in production JARs are rejected. Production JAR
+manifests must not add a `Class-Path` or agent entry (including CR-only line
+endings). The **entire installed tree** is restricted to two launchers and flat
+`lib/*.jar` files; extra files, symlinks and directories fail closed. Both
+launchers are byte-compared, apart from validated CLASSPATH order, to trusted
+`startScripts` outputs generated by Gradle 9.8.1 from a minimal application
+project **in the separate verification job**. All shipped JARs must match
+compiler-produced module JARs or the exact resolved application
+`:app:cli:runtimeClasspath` SHA-256 inventory. This manifest constrains
+what is packaged to resolved runtime dependencies, but does not independently
+authenticate the external dependency cache; dependency SHA-256 pinning is tracked
+in #142. Production
+`*.class` and `*.jar` resource inputs are rejected separately by
+`checkArchitecture` before compilation.
+
+Both the root and included build-logic settings permit only the reviewed
+HTTPS Maven Central and Plugin Portal repositories. Project repositories
+are forbidden through `RepositoriesMode.FAIL_ON_PROJECT_REPOS`. Local
+`mavenLocal`, `flatDir`, `file:` repositories, `artifactUrls` fallback
+repositories, and declared legacy project/settings `buildscript` repositories
+or classpath dependencies are refused. Ordinary Gradle `apply(from = ...)`
+and `apply { from(...) }` script-plugin syntax is rejected by additional
+textual guards in project build files **and both root/included-build settings
+scripts**; negative fixtures cover the settings cases. Dynamically generated
+or indirectly applied scripts are outside this lexical check. Effective
+`project.buildscript.repositories` is also checked, regardless of the DSL
+spelling. Arbitrary build logic, user-supplied
+Gradle init scripts and execution-time code mutations are **not sandboxed**
+by these checks.
+
+Pinned external dependency checksums in `gradle/verification-metadata.xml`
+are **not yet configured** (#142). The Gradle-emitted runtimeClasspath inventory
+is a build observation, not independently authenticated provenance: malicious
+build logic could forge it. Dynamic calls hidden in precompiled dependencies,
+unsupported transformations after verification, and build-time Gradle/init-script
+execution remain outside the guard. Legitimate Git/sandbox adapters still call
+`ProcessBuilder.start`, whose authority is enforced by runtime policy.
+The standalone verifier uses `python3 -I` and checks its clean `tools/` and
+`tests/` checkout before inspecting the untrusted artifact. Environment
+mutations made in the build job do not cross this job boundary. Full JVM tests
+start only after a successful independent verification. After verification, the
+clean job publishes the approved archive and exports its SHA-256 as a job output.
+The JVM job still recompiles and runs Gradle/JUnit suites separately; it
+does not provide the CLI E2E execution environment. A distinct `cli-e2e`
+GitHub-hosted job starts from a fresh credential-free checkout after the
+verifier succeeds. It downloads the approved archive, compares its SHA-256
+with the independent job output, restores only allowed installed files, then
+installs and probes the restricted bubblewrap/AppArmor sandbox, and runs
+**both installed CLI Python suites with `python3 -I`** (no Gradle or
+Kotlin test bytecode previously executed on that runner). This establishes a
+clean-job execution boundary for the verified CLI files and limits Python
+startup/module injection from the checkout and the JVM-test environment. It
+does **not** prove that independently compiled JUnit classes match the
+approved distribution, nor does it make the test checkout, host runner or
+system tooling cryptographically authenticated. This is still a CI boundary,
+not a sandbox, mandatory CODEOWNERS approval, or authenticated base commit
+policy; run the final review independently before merging.
+
+Six trusted C3 source paths have `.gitattributes` `eol=lf` entries
+to make raw SHA-256 stable across Windows, Linux and macOS. The compiler
+classpath pins exactly KGP **2.4.21**; updating Kotlin requires updating
+the reviewed compiler-artifact baseline and re-running the complete guard.
+Compiler option `-P` is rejected intentionally and broadly.
+
+CODEOWNERS covers C3 files, build logic, Gradle settings and wrappers,
+workflow definitions, compiler fixtures, architecture verification scripts
+and its own policy. **CODEOWNERS is advisory in this solo repository**:
+`dev` has no branch protection or rulesets, and PR authors cannot
+approve their own changes. Independent security review and content pins
+remain required before manually merging.

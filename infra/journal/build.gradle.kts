@@ -22,18 +22,22 @@ tasks.register("verifyRunningHostOptIn") {
             .joinToString(System.getProperty("path.separator")) { it.absolutePath }
         val javaBin = file(System.getProperty("java.home") + "/bin/java").absolutePath
 
-        fun compile(fixture: String): Pair<Int, String> {
+        fun compile(fixture: String, extras: List<String> = emptyList()): Pair<Int, String> {
             val name = fixture.removeSuffix(".kt")
             val output = layout.buildDirectory.dir("running-optin-verification/$name")
                 .get().asFile
             output.mkdirs()
-            val source = file("src/optInFixtures/$fixture")
+            val sourcePaths = (listOf(fixture) + extras).map {
+                file("src/optInFixtures/$it").absolutePath
+            }
             val process = ProcessBuilder(
-                javaBin, "-cp", compilerClasspath,
-                "org.jetbrains.kotlin.cli.jvm.K2JVMCompiler",
-                "-no-stdlib", "-no-reflect",
-                "-classpath", applicationClasspath,
-                "-d", output.absolutePath, source.absolutePath
+                listOf(
+                    javaBin, "-cp", compilerClasspath,
+                    "org.jetbrains.kotlin.cli.jvm.K2JVMCompiler",
+                    "-no-stdlib", "-no-reflect",
+                    "-classpath", applicationClasspath,
+                    "-d", output.absolutePath
+                ) + sourcePaths
             ).redirectErrorStream(true).start()
             val diagnostics = process.inputStream.bufferedReader().use { it.readText() }
             return process.waitFor() to diagnostics
@@ -138,6 +142,59 @@ tasks.register("verifyRunningHostOptIn") {
             errorAtSource(methodFixture, "runtime.publishTrustedAcceptedRunning(", it)
         }) throw GradleException("C3 runtime method opt-in gate failed:\n" +
             methodErrors.joinToString("\n"))
+
+        // Kotlin allows an annotated override to be called through an unmarked
+        // interface. This is a reproducible bypass that the source guard must ban.
+        val unsafeOverride = compile("UnmarkedInterfaceDispatchCompiles.kt")
+        if (unsafeOverride.first != 0)
+            throw GradleException("Unmarked interface dispatch Kotlin fixture changed:\n" +
+                unsafeOverride.second)
+
+        // A caller can suppress an opt-in error by diagnostic name without
+        // ever referencing the marker. Confirm Kotlin's actual behavior so
+        // the architectural source-policy test does not rely on speculation.
+        val suppressed = compile("SuppressedRunningOptInCompiles.kt")
+        if (suppressed.first != 0)
+            throw GradleException("Kotlin C3 suppression behavior changed:\n" +
+                suppressed.second)
+
+        // These three K2 expression forms were observed to compile on
+        // Kotlin 2.4.21, so their success is a fixed security regression
+        // contract. Never silently accept their compilation failures.
+        val dynamicSuppressionCases = listOf(
+            "UnicodeSuppressedRunningOptInCompiles.kt" to emptyList<String>(),
+            "ConcatenatedSuppressedRunningOptInCompiles.kt" to emptyList(),
+            "ExternalConstSuppressedRunningOptInCompiles.kt" to
+                listOf("ExternalSuppressionKeys.kt")
+        )
+        dynamicSuppressionCases.forEach { (fixture, extras) ->
+            val (status, output) = compile(fixture, extras)
+            if (status != 0)
+                throw GradleException("K2 C3 bypass compiler behavior changed for $fixture:\n" +
+                    output)
+            logger.lifecycle("K2 C3 suppression fixture $fixture: suppression COMPILES")
+        }
+
+        // Kotlin 2.4.21 does not honor Java's SuppressWarnings for Kotlin C3
+        // opt-in errors. Pin that behavior so a later compiler upgrade cannot
+        // silently enable a new opt-in bypass. Require the real C3 diagnostics
+        // (including a failure at the protected runtime call), not just any
+        // compiler failure from a malformed Java annotation.
+        val javaFixture = "JavaSuppressWarningsCannotCompile.kt"
+        val (javaStatus, javaOutput) = compile(javaFixture)
+        val javaErrors = javaOutput.lineSequence().filter {
+            it.contains("error:", ignoreCase = true)
+        }.toList()
+        if (javaStatus == 0 || javaErrors.isEmpty() || javaErrors.any {
+                !it.contains("$javaFixture:") ||
+                    !it.contains(markerMessage, ignoreCase = true)
+            } || javaErrors.none {
+                errorAtSource(javaFixture, "runtime.publishTrustedAcceptedRunning(", it)
+            }) {
+            throw GradleException("Java @SuppressWarnings unexpectedly changed C3 opt-in behavior:\n" +
+                javaOutput)
+        }
+        logger.lifecycle("K2 Java @SuppressWarnings fixture: C3 opt-in correctly refused")
 
         logger.lifecycle("Verified Kotlin C3 host opt-in: positive compiles, " +
             "negative host, internal publisher, port and runtime gates all refuse")

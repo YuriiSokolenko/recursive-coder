@@ -1,0 +1,7 @@
+# Preserve the exact SHA-256 of trusted C3 Kotlin source across platforms.
+core/session/src/main/kotlin/ai/yuriilab/recursivecoder/SessionRuntime.kt text eol=lf
+core/session/src/main/kotlin/ai/yuriilab/recursivecoder/TrustedRunningBoundaryPolicy.kt text eol=lf
+core/session/src/main/kotlin/ai/yuriilab/recursivecoder/TrustedSessionPreExecutionHost.kt text eol=lf
+infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/DurableAcceptedRunningHandoff.kt text eol=lf
+infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/DurableRuntimeAcceptedRunningHost.kt text eol=lf
+infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/DurableSessionEventLedger.kt text eol=lf

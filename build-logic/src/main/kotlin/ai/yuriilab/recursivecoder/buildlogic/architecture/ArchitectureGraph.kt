@@ -103,54 +103,241 @@ object ArchitectureGraph {
 }
 
 /**
- * Fail-closed token allowlist for the host-only C3 marker. A raw token check
- * catches Kotlin import aliases, typealiases, multiline/comment tricks and
- * qualified/file-level opt-ins without trusting a regex to parse annotations.
- * Only the reviewed C3 declaration/usage files may carry the bare annotation
- * or declare the marker; no @OptIn wrappers are permitted even within them.
+ * Host-only C3 source allowlist. Exact checkout-relative paths, never suffixes.
+ * A marker in an unreviewed production file is denied even if imported under an alias.
+ * Reviewed files may only contain bare @TrustedRunningBoundaryApi usages; they
+ * cannot use @OptIn or place the marker on an override of an unmarked interface.
  */
 object TrustedRunningOptInPolicy {
     private const val marker = "TrustedRunningBoundaryApi"
-    private val allowedProductionPaths = setOf(
-        "core/session/src/main/kotlin/ai/yuriilab/recursivecoder/SessionRuntime.kt",
-        "core/session/src/main/kotlin/ai/yuriilab/recursivecoder/TrustedRunningBoundaryPolicy.kt",
-        "core/session/src/main/kotlin/ai/yuriilab/recursivecoder/TrustedSessionPreExecutionHost.kt",
-        "infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/DurableAcceptedRunningHandoff.kt",
-        "infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/DurableRuntimeAcceptedRunningHost.kt",
-        "infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/DurableSessionEventLedger.kt",
+    private const val fqMarker = "ai.yuriilab.recursivecoder.TrustedRunningBoundaryApi"
+    private const val declarationFile =
+        "core/session/src/main/kotlin/ai/yuriilab/recursivecoder/TrustedRunningBoundaryPolicy.kt"
+    private const val hostFile =
+        "infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/DurableRuntimeAcceptedRunningHost.kt"
+    private val approvedTargets = mapOf(
+        "core/session/src/main/kotlin/ai/yuriilab/recursivecoder/SessionRuntime.kt" to
+            listOf("publishTrustedAcceptedRunning"),
+        declarationFile to emptyList(),
+        "core/session/src/main/kotlin/ai/yuriilab/recursivecoder/TrustedSessionPreExecutionHost.kt" to
+            listOf("TrustedSessionRunningHost"),
+        "infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/DurableAcceptedRunningHandoff.kt" to
+            listOf("DurableAcceptedRunningHandoff"),
+        hostFile to listOf("DurableRuntimeAcceptedRunningHost"),
+        "infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/DurableSessionEventLedger.kt" to
+            listOf("appendTrustedAcceptedRunning", "appendTrustedRunningWithFault"),
     )
 
-    // The allowlist selects locations, not permissions: even reviewed source
-    // files cannot launder the marker through @OptIn, imports or typealiases.
-    // Each occurrence must be the bare annotation or its declaration.
+    /** SHA-256 over exact UTF-8 file bytes. Any edit needs a trusted-boundary review. */
+    val approvedSourceSha256: Map<String, String> = mapOf(
+        "core/session/src/main/kotlin/ai/yuriilab/recursivecoder/SessionRuntime.kt" to
+            "d4189bc6c19613efaa50a0503f6dd0116de181bf372ff3f8f603fe0801d6ac3d",
+        "core/session/src/main/kotlin/ai/yuriilab/recursivecoder/TrustedRunningBoundaryPolicy.kt" to
+            "f06db73cf6e29ae5ce6add2f1e9d4a9b05a3b6e33756367027812fa37687df35",
+        "core/session/src/main/kotlin/ai/yuriilab/recursivecoder/TrustedSessionPreExecutionHost.kt" to
+            "da9512f54c0b32fe84eda6186d0a7b240dfdb415662f581b8b1ba70efbdd3546",
+        "infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/DurableAcceptedRunningHandoff.kt" to
+            "740501efc1bcbd90422d47d0d444d8283e2684b16b39453874e9c61bfa0bad25",
+        "infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/DurableRuntimeAcceptedRunningHost.kt" to
+            "7d89e7fd4a8362efdb6de602f6869f1a692550e863b8a109b5286abac8c4149e",
+        "infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/DurableSessionEventLedger.kt" to
+            "2097733678d7855087a37b0fbf1f6e6d8980baf183c5535da89f987cf3ebfc4f",
+    )
+
     private val reviewedMarkerLine = Regex(
         """\s*(?:@TrustedRunningBoundaryApi|annotation\s+class\s+TrustedRunningBoundaryApi)\s*""",
     )
+    // Kotlin permits calling an annotated override through an unannotated interface.
+    // No reviewed production file may introduce that new implementation escape hatch.
+    private val markedOverride = Regex(
+        """@TrustedRunningBoundaryApi\s+(?:(?:@[\w.]+(?:\([^\n)]*\))?|""" +
+            """public|private|internal|protected|final|open|suspend|inline|""" +
+            """tailrec|operator|infix|external|abstract|actual|expect)\s+)*override\b""",
+    )
+
+    private val declarationName = Regex(
+        """\b(?:fun\s+interface|annotation\s+class|class|object|fun)\s+([A-Za-z_]\w*)""",
+    )
+
+    /**
+     * Kotlin diagnostic suppression accepts compile-time constant expressions.
+     * Only an explicit, unescaped literal from this small allowlist may appear
+     * in a production @Suppress annotation. No arbitrary const, concatenation,
+     * unicode escape, spread, named argument, or alias is accepted.
+     *
+     * After removing every canonical allowed annotation, the remaining source
+     * must not contain "Suppress" (including imports/typealiases to it).
+     * Conservative token checking intentionally also refuses suspicious text
+     * in comments, rather than risk a missed suppression syntax. Also deny
+     * the Java-style SuppressWarnings symbol: it may be used as a Kotlin
+     * Suppress alias, and its native compiler behavior is independently tested.
+     */
+    private val allowedSuppress = Regex(
+        """@(?:(?:file|field|get|set|property|receiver|param|setparam|delegate):)?""" +
+            """(?:kotlin\.)?Suppress\s*\(\s*"(?:UNCHECKED_CAST|UNUSED_PARAMETER)"\s*""" +
+            """(?:,\s*"(?:UNCHECKED_CAST|UNUSED_PARAMETER)"\s*)*\)""",
+    )
+    private val forbiddenDiagnosticName = Regex(
+        """\b(?:OPT_IN_USAGE_ERROR|OPT_IN_USAGE|OPT_IN_OVERRIDE_ERROR|""" +
+            """OPT_IN_OVERRIDE|EXPERIMENTAL_API_USAGE_ERROR|""" +
+            """EXPERIMENTAL_API_USAGE|EXPERIMENTAL_OVERRIDE_ERROR)\b""",
+    )
+
+    private val suppressionSymbol = Regex("""\b(?:Suppress|SuppressWarnings)\b""")
+
+    fun forbiddenOptInSuppression(source: String): Boolean =
+        suppressionSymbol.containsMatchIn(allowedSuppress.replace(source, "")) ||
+            forbiddenDiagnosticName.containsMatchIn(source)
 
     fun forbiddenInProduction(source: String, sourcePath: String): Boolean {
-        if (!source.contains(marker)) return false
+        if (forbiddenOptInSuppression(source)) return true
         val normalized = sourcePath.replace('\\', '/')
-        if (allowedProductionPaths.none { normalized == it || normalized.endsWith("/$it") })
-            return true
-        return source.lineSequence().any { line ->
-            line.contains(marker) && !reviewedMarkerLine.matches(line)
+        val expected = approvedTargets[normalized]
+        if (expected == null) return marker in source
+        // This also detects a reviewed source silently losing its C3 marker.
+        val lines = source.lines()
+        val annotatedLines = lines.withIndex().filter { it.value.trim() == "@TrustedRunningBoundaryApi" }
+        if (annotatedLines.size != expected.size) return true
+        val actual = annotatedLines.map { (index, _) ->
+            val declaration = lines.drop(index + 1).firstOrNull {
+                it.isNotBlank() && !it.trimStart().startsWith("@")
+            }.orEmpty()
+            if (Regex("""\boverride\b""").containsMatchIn(declaration)) return true
+            declarationName.find(declaration)?.groupValues?.get(1).orEmpty()
+        }
+        if (actual != expected || markedOverride.containsMatchIn(source)) return true
+        if (source.lineSequence().any { line ->
+                line.contains(marker) &&
+                    (!reviewedMarkerLine.matches(line) ||
+                        (line.trimStart().startsWith("annotation class") &&
+                            normalized != declarationFile))
+            }) return true
+
+        // An annotated *class* is still unsafe when one of its interfaces is
+        // unmarked: its overridden method can be called via that interface.
+        // Freeze the C3 adapter to the one reviewed, marked port and method.
+        if (normalized == hostFile) {
+            val safeHeader = Regex(
+                """(?s)@TrustedRunningBoundaryApi\s+class\s+""" +
+                    """DurableRuntimeAcceptedRunningHost\s*\(.*?\)\s*:\s*""" +
+                    """TrustedSessionRunningHost\s*\{""",
+            )
+            if (!safeHeader.containsMatchIn(source)) return true
+            val overrides = Regex("""\boverride\s+fun\s+([A-Za-z_]\w*)""")
+                .findAll(source).map { it.groupValues[1] }.toList()
+            if (overrides != listOf("publishAcceptedRunning")) return true
+        }
+        // Marking an interface does not make any unmarked superinterface safe.
+        if (normalized.endsWith("/TrustedSessionPreExecutionHost.kt") &&
+            !Regex("""@TrustedRunningBoundaryApi\s+fun\s+interface\s+TrustedSessionRunningHost\s*\{""")
+                .containsMatchIn(source)) return true
+        if (normalized.endsWith("/DurableAcceptedRunningHandoff.kt") &&
+            !Regex("""@TrustedRunningBoundaryApi\s+internal\s+object\s+DurableAcceptedRunningHandoff\s*\{""")
+                .containsMatchIn(source)) return true
+        return false
+    }
+
+    /** Conservative text-level prohibition; dynamic invocation needs independent review. */
+    private val dynamicInvocation = Regex(
+        """\b(?:Class\s*\.\s*forName|getMethod|getDeclaredMethod|""" +
+            """getMethods|getDeclaredMethods|getConstructors|getDeclaredConstructors|""" +
+            """getFields|getDeclaredFields|getConstructor|getDeclaredConstructor|""" +
+            """getField|getDeclaredField|setAccessible|trySetAccessible|MethodHandles|""" +
+            """java\.lang\.reflect|kotlin\.reflect|java\.beans|""" +
+            """java\.lang\.foreign|java\.util\.logging|ObjectInputStream|""" +
+            """javax\.(?:script|management)|java\.lang\.instrument|""" +
+            """ClassLoader|URLClassLoader|SecureClassLoader|ServiceLoader|""" +
+            """java\.lang\.invoke|sun\.misc\.Unsafe|""" +
+            """jdk\.internal\.[A-Za-z0-9_.]*Unsafe|ModuleLayer|addOpens|""" +
+            """Proxy\s*\.\s*newProxyInstance|""" +
+            """System\s*\.\s*load(?:Library)?|external\s+fun)\b""",
+    )
+    private val kotlinPropertyReflection = Regex(
+        """::class\s*\.\s*java\s*\.\s*(?:methods|declaredMethods|""" +
+            """constructors|declaredConstructors|fields|declaredFields)\b""",
+    )
+    private val contextLoaderReflection = Regex("""contextClassLoader\s*\.\s*loadClass\b""")
+
+    fun forbiddenDynamicInvocation(source: String): Boolean =
+        dynamicInvocation.containsMatchIn(source) ||
+            kotlinPropertyReflection.containsMatchIn(source) ||
+            Regex("""::class\s*\.\s*members\b""").containsMatchIn(source) ||
+            contextLoaderReflection.containsMatchIn(source)
+
+    /**
+     * KGP 2.4.21 supplies these seven compiler-plugin classpath libraries even
+     * without optional compiler plugins. Only exact resolved built-in Maven
+     * modules may be used, not an extra jar with a familiar filename.
+     */
+    private val baselineCompilerModules = listOf(
+        "org.jetbrains:annotations:13.0",
+        "org.jetbrains.kotlin:kotlin-script-runtime:2.4.21",
+        "org.jetbrains.kotlin:kotlin-scripting-common:2.4.21",
+        "org.jetbrains.kotlin:kotlin-scripting-compiler-embeddable:2.4.21",
+        "org.jetbrains.kotlin:kotlin-scripting-compiler-impl-embeddable:2.4.21",
+        "org.jetbrains.kotlin:kotlin-scripting-jvm:2.4.21",
+        "org.jetbrains.kotlin:kotlin-stdlib:2.4.21",
+    )
+
+    fun forbiddenCompilerPluginClasspath(paths: List<String>, gradleUserHome: String): Boolean {
+        if (paths.size != baselineCompilerModules.size) return true
+        val cacheRoot = java.io.File(gradleUserHome).canonicalFile.toPath()
+            .resolve("caches/modules-2/files-2.1")
+        return baselineCompilerModules.any { id ->
+            val (group, artifact, version) = id.split(":")
+            val moduleDir = cacheRoot.resolve(group).resolve(artifact).resolve(version)
+            val filename = "$artifact-$version.jar"
+            paths.count { entry ->
+                val resolved = java.io.File(entry).canonicalFile.toPath()
+                if (!resolved.startsWith(moduleDir)) return@count false
+                val relative = moduleDir.relativize(resolved)
+                relative.nameCount == 2 &&
+                    relative.getName(0).toString().matches(Regex("[0-9a-f]{40}")) &&
+                    relative.getName(1).toString() == filename &&
+                    resolved.toFile().isFile &&
+                    java.security.MessageDigest.getInstance("SHA-1").let { digest ->
+                        resolved.toFile().inputStream().buffered().use { stream ->
+                            val buffer = ByteArray(65536)
+                            while (true) {
+                                val bytes = stream.read(buffer)
+                                if (bytes < 0) break
+                                digest.update(buffer, 0, bytes)
+                            }
+                        }
+                        digest.digest().joinToString("") { byte ->
+                            "%02x".format(byte.toInt() and 255)
+                        } == relative.getName(0).toString()
+                    }
+            } != 1
         }
     }
 
-    /**
-     * Inspect root/module build scripts and build-logic convention plugins.
-     * A marker reference plus any compiler-wide opt-in configuration is denied,
-     * including aliases or values assigned before the compiler option is set.
-     * This intentionally errs toward rejection of unusual build script wiring.
-     * Best-effort defence-in-depth only: dynamically composed marker names and
-     * compiler settings outside the scanned Gradle scripts require separate review.
-     */
-    fun forbiddenCompilerOptIn(script: String): Boolean =
-        script.contains(marker) && (
-            Regex("""\b(?:compilerOptions|languageSettings|freeCompilerArgs)\b""")
-                .containsMatchIn(script) ||
-            script.contains("-opt-in")
-        )
+    fun forbiddenCompilerPluginArguments(arguments: List<String>): Boolean =
+        arguments.any { raw ->
+            val value = raw.trim()
+            // Deliberately broad: fail closed for every -P-prefixed switch.
+            value == "-P" || value.startsWith("-P") ||
+                value == "-Xplugin" || value.startsWith("-Xplugin=") ||
+                value == "-Xcompiler-plugin" || value.startsWith("-Xcompiler-plugin=")
+        }
+
+    fun isTrustedMarker(value: String): Boolean = value.trim() == fqMarker
+
+    /** Inspect evaluated compiler arguments, not script text or unrelated comments. */
+    fun forbiddenFreeCompilerArgs(arguments: List<String>): Boolean =
+        arguments.withIndex().any { (index, raw) ->
+            val value = raw.trim()
+            // kotlinc expands @argfiles *after* Gradle has configured the
+            // compiler. Reject them rather than trusting an untracked file.
+            if (value.startsWith("@")) return@any true
+            val switches = setOf("-opt-in", "-Xopt-in", "-Xuse-experimental")
+            val markerList = when {
+                switches.any { value.startsWith("$it=") } -> value.substringAfter('=')
+                value in switches -> arguments.getOrNull(index + 1).orEmpty()
+                else -> ""
+            }
+            markerList.split(',').any(::isTrustedMarker)
+        }
 }
 
 /**

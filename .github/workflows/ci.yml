@@ -16,6 +16,7 @@ concurrency:
 
 jobs:
   architecture:
+    needs: [bytecode-verifier]
     name: Architecture boundaries and pure unit tests
     # Public repository: use a fresh GitHub-hosted VM, including for fork PRs.
     runs-on: ubuntu-24.04
@@ -95,7 +96,165 @@ jobs:
           print(f"Verified {len(cases)} passing pure unit tests")
           PY
 
+  bytecode-build:
+    name: Build isolated production verifier input
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Set up JDK 21
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Set up Gradle 9.8.1
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '9.8.1'
+          cache-provider: basic
+      - name: Preflight bytecode guard and fixtures
+        run: |
+          python3 -I -m py_compile tools/check_production_bytecode.py tools/check_test_tiers.py
+          python3 -I -m unittest discover -s tests -p 'test_production_bytecode.py' -v
+      - name: Compile and install production artifacts without test execution
+        env:
+          CI: 'true'
+        run: ./gradlew --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache clean installDist :app:cli:writeRuntimeClasspathManifest --stacktrace
+      - name: Bundle compiled production inputs
+        run: |
+          python3 -I - <<'PY'
+          from pathlib import Path
+          import tarfile
+          root = Path.cwd()
+          modules = ("app/cli", "agent/runtime", "core/contracts", "core/session",
+                     "core/tasks", "infra/model", "infra/workspace", "infra/task-store",
+                     "infra/journal")
+          dirs = [root / "build/install/recursive-coder",
+                  root / "build/verification"]
+          dirs += [root / module / sub for module in modules
+                   for sub in ("build/classes/kotlin/main", "build/classes/java/main",
+                               "build/libs")]
+          with tarfile.open("production-artifacts.tar.gz", "w:gz") as tar:
+              for directory in dirs:
+                  if not directory.is_dir():
+                      continue
+                  for item in sorted(directory.rglob("*")):
+                      if item.is_file() or item.is_symlink():
+                          tar.add(item, arcname=item.relative_to(root), recursive=False)
+          PY
+      - uses: actions/upload-artifact@v7
+        with:
+          name: isolated-production-artifacts
+          path: production-artifacts.tar.gz
+          if-no-files-found: error
+          retention-days: 3
+
+  bytecode-verifier:
+    name: Independent production distribution verifier
+    needs: [bytecode-build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    outputs:
+      verified_tar_sha256: ${{ steps.approved_archive.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Set up JDK 21
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Set up Gradle 9.8.1 for trusted launcher generation
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '9.8.1'
+          cache-provider: basic
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v8
+        with:
+          name: isolated-production-artifacts
+          path: ${{ runner.temp }}/production-input
+      - name: Strictly extract production artifacts
+        env:
+          INPUT_TAR: ${{ runner.temp }}/production-input/production-artifacts.tar.gz
+        run: |
+          python3 -I - <<'PY'
+          import os
+          from pathlib import Path
+          import tarfile
+          root = Path.cwd()
+          with tarfile.open(os.environ["INPUT_TAR"], "r:gz") as archive:
+              members = archive.getmembers()
+              if not members or len(members) > 30000:
+                  raise SystemExit("Missing or excessive build artifacts")
+              for member in members:
+                  name = member.name
+                  parts = Path(name).parts
+                  permitted = (
+                      name.startswith("build/install/recursive-coder/") or
+                      name == "build/verification/runtime-classpath.sha256" or
+                      len(parts) >= 5 and parts[0] in ("agent", "app", "core", "infra")
+                      and "build" in parts and (
+                          "/build/classes/" in name or "/build/libs/" in name))
+                  if (not member.isfile() or not permitted
+                          or Path(name).is_absolute()
+                          or ".." in parts or member.size > 200_000_000):
+                      raise SystemExit(f"Untrusted artifact entry: {name}")
+              archive.extractall(root, members=members, filter="data")
+          PY
+      - name: Generate trusted Gradle 9.8.1 launcher templates
+        env:
+          VERIFIED_DISTRIBUTION_LIB: ${{ github.workspace }}/build/install/recursive-coder/lib
+        run: |
+          mkdir -p "$RUNNER_TEMP/verified-launchers"
+          cat > "$RUNNER_TEMP/verified-launchers/settings.gradle.kts" <<'EOF'
+          rootProject.name = "trusted-launcher-reference"
+          EOF
+          cat > "$RUNNER_TEMP/verified-launchers/build.gradle.kts" <<'EOF'
+          import org.gradle.jvm.application.tasks.CreateStartScripts
+
+          plugins { application }
+          application {
+              applicationName = "recursive-coder"
+              mainClass.set("ai.yuriilab.recursivecoder.MainKt")
+          }
+          tasks.named<CreateStartScripts>("startScripts") {
+              classpath = files(fileTree(System.getenv("VERIFIED_DISTRIBUTION_LIB")) {
+                  include("*.jar")
+              })
+          }
+          EOF
+          gradle -p "$RUNNER_TEMP/verified-launchers" --no-daemon --max-workers=1 startScripts
+      - name: Verify in clean checkout with an isolated Python process
+        run: |
+          git diff --exit-code "$GITHUB_SHA" -- tools tests
+          test -z "$(git ls-files --others --exclude-standard -- tools tests)"
+          python3 -I tools/check_production_bytecode.py --root . \
+            --trusted-launchers "$RUNNER_TEMP/verified-launchers/build/scripts" \
+            --runtime-classpath-manifest build/verification/runtime-classpath.sha256
+          python3 -I -m unittest discover -s tests -p 'test_production_bytecode.py' -v
+      - name: Record verified archive SHA-256
+        id: approved_archive
+        run: |
+          archive="$RUNNER_TEMP/production-input/production-artifacts.tar.gz"
+          test -f "$archive"
+          echo "sha256=$(sha256sum "$archive" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - name: Publish independently verified production archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: verified-production-artifacts
+          path: ${{ runner.temp }}/production-input/production-artifacts.tar.gz
+          if-no-files-found: error
+          retention-days: 3
+
   kotlin:
+    needs: [bytecode-verifier]
     name: Full JVM integration and sandbox E2E
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -141,11 +300,10 @@ jobs:
             --ro-bind /usr /usr --ro-bind /bin /bin \
             --ro-bind /lib /lib --ro-bind /lib64 /lib64 \
             -- /usr/bin/true
-      - name: Compile and test standalone Gradle modules and distribution
+      - name: Run full JVM and sandbox tests only after the bytecode gate
         env:
           CI: 'true'
-        # Bound Gradle memory/concurrency on both public and local runners.
-        run: ./gradlew --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache clean test integrationTest e2eTest installDist checkPreparationHostConformance --stacktrace
+        run: ./gradlew --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache test integrationTest e2eTest checkPreparationHostConformance --stacktrace
       - name: Confirm sandbox integration test was not skipped
         run: |
           python3 - <<'PY'
@@ -254,13 +412,131 @@ jobs:
             **/build/test-results/e2eTest/TEST-*.xml
           if-no-files-found: error
 
-      - name: Execute installed CLI and validate result/events against v1 schema
-        # JAVA_TOOL_OPTIONS emits a JVM startup banner even when set to "".
-        # Unset it only for these local/fake-model CLI contract tests so the
-        # runner and Gradle retain their proxy configuration.
+  cli-e2e:
+    needs: [bytecode-verifier]
+    name: Installed CLI E2E on independently verified distribution
+    # Never execute unverified Gradle/Kotlin test bytecode in this VM.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Set up JDK 21
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install CLI schema validation dependency
+        run: python3 -I -m pip install --disable-pip-version-check 'jsonschema==4.25.1'
+      - name: Require clean installed-CLI test source checkout
         run: |
-          env -u JAVA_TOOL_OPTIONS python -m unittest discover -s tests -p 'test_cli_runtime_v1.py' -v
-          env -u JAVA_TOOL_OPTIONS python -m unittest discover -s tests -p 'test_cli_writable_workflow.py' -v
+          git diff --exit-code "$GITHUB_SHA" -- tests contracts
+          test -z "$(git ls-files --others --exclude-standard -- tests contracts)"
+      - name: Download independently verified CLI archive
+        uses: actions/download-artifact@v8
+        with:
+          name: verified-production-artifacts
+          path: ${{ runner.temp }}/verified-cli
+      - name: Restore verified installDist before installed CLI E2E
+        env:
+          VERIFIED_TAR_SHA256: ${{ needs.bytecode-verifier.outputs.verified_tar_sha256 }}
+          VERIFIED_TAR: ${{ runner.temp }}/verified-cli/production-artifacts.tar.gz
+        run: |
+          python3 -I - <<'PY'
+          import hashlib
+          import os
+          from pathlib import Path
+          import re
+          import shutil
+          import tarfile
+          import tempfile
+
+          archive_path = Path(os.environ["VERIFIED_TAR"])
+          digest = os.environ["VERIFIED_TAR_SHA256"]
+          if not re.fullmatch(r"[0-9a-f]{64}", digest):
+              raise SystemExit("Missing verifier-approved SHA-256")
+          if hashlib.sha256(archive_path.read_bytes()).hexdigest() != digest:
+              raise SystemExit("Verified CLI archive SHA-256 mismatch")
+
+          destination = Path("build/install/recursive-coder")
+          with tempfile.TemporaryDirectory(prefix="verified-cli-") as stage:
+              installed = Path(stage) / "recursive-coder"
+              seen = set()
+              with tarfile.open(archive_path, mode="r:gz") as archive:
+                  members = archive.getmembers()
+                  if not members or len(members) > 30000:
+                      raise SystemExit("Missing or excessive verified archive entries")
+                  for member in members:
+                      parts = Path(member.name).parts
+                      if (not member.isfile() or Path(member.name).is_absolute()
+                              or ".." in parts or member.size > 200_000_000):
+                          raise SystemExit(f"Unsafe verified archive entry: {member.name}")
+                      if parts[:3] != ("build", "install", "recursive-coder"):
+                          continue
+                      rel = Path(*parts[3:])
+                      allowed = (rel.parts in (("bin", "recursive-coder"),
+                                               ("bin", "recursive-coder.bat"))
+                                 or (len(rel.parts) == 2 and rel.parts[0] == "lib"
+                                     and rel.suffix == ".jar"))
+                      if not allowed or rel in seen:
+                          raise SystemExit(f"Unexpected verified install entry: {member.name}")
+                      seen.add(rel)
+                      out = installed / rel
+                      out.parent.mkdir(parents=True, exist_ok=True)
+                      with archive.extractfile(member) as inp, out.open("wb") as writer:
+                          shutil.copyfileobj(inp, writer)
+                      out.chmod(member.mode & 0o777)
+              if (Path("bin/recursive-coder") not in seen or
+                      Path("bin/recursive-coder.bat") not in seen or
+                      not any(p.parts[0] == "lib" for p in seen)):
+                  raise SystemExit("Incomplete independently verified installDist")
+              if destination.is_symlink():
+                  raise SystemExit("Refusing to replace symlinked installDist")
+              if destination.exists():
+                  shutil.rmtree(destination)
+              shutil.copytree(installed, destination)
+          print(f"Restored {len(seen)} verified CLI files: {digest}")
+          PY
+
+      # CLI writable/recursive acceptance exercises real sandbox hosts.
+      # Re-establish the same restricted bubblewrap environment on this clean
+      # runner; do not execute Gradle or unrelated JVM tests in this job.
+      # Ubuntu 24.04 AppArmor denies unprivileged userns capabilities needed
+      # to configure the private network loopback. Load the narrowly scoped
+      # distro bwrap profile, never disable AppArmor or share host networking.
+      - name: Install bubblewrap and its restricted AppArmor profile
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap apparmor-profiles apparmor-utils
+          test -x /usr/bin/bwrap
+          if [ ! -f /etc/apparmor.d/bwrap-userns-restrict ]; then
+            test -f /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+            sudo install -m 0644 \
+              /usr/share/apparmor/extra-profiles/bwrap-userns-restrict \
+              /etc/apparmor.d/bwrap-userns-restrict
+          fi
+          sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
+          sudo aa-status | grep -i bwrap
+          test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = 1
+      - name: Verify bubblewrap isolation is executable
+        run: |
+          /usr/bin/bwrap --die-with-parent --new-session --unshare-all \
+            --tmpfs / --proc /proc --dev /dev \
+            --ro-bind /usr /usr --ro-bind /bin /bin \
+            --ro-bind /lib /lib --ro-bind /lib64 /lib64 \
+            -- /usr/bin/true
+      - name: Execute isolated CLI contract and writable E2E
+        # JAVA_TOOL_OPTIONS can add JVM arguments or banner output to a CLI test.
+        # Exclude inherited JVM injection variables and isolate Python startup.
+        run: |
+          env -u JAVA_TOOL_OPTIONS -u JAVA_OPTS -u JDK_JAVA_OPTIONS -u _JAVA_OPTIONS python3 -I -m unittest discover -s tests -p 'test_cli_runtime_v1.py' -v
+          env -u JAVA_TOOL_OPTIONS -u JAVA_OPTS -u JDK_JAVA_OPTIONS -u _JAVA_OPTIONS python3 -I -m unittest discover -s tests -p 'test_cli_writable_workflow.py' -v
+
 
   contracts:
     name: Versioned session contracts
