@@ -50,6 +50,33 @@ class CiBootstrapTrustTest(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "Unreviewed"):
             bootstrap.audit_workflow(mutated)
 
+    def test_checkout_without_disabled_credentials_rejected(self):
+        mutated = self.workflow.replace(
+            "          persist-credentials: false\n",
+            "",
+            1,
+        )
+        self.assertNotEqual(mutated, self.workflow)
+        with self.assertRaisesRegex(AssertionError, "persist-credentials: false"):
+            bootstrap.audit_workflow(mutated)
+
+    def test_checkout_with_credential_persistence_enabled_rejected(self):
+        mutated = self.workflow.replace(
+            "          persist-credentials: false",
+            "          persist-credentials: true", 1,
+        )
+        with self.assertRaisesRegex(AssertionError, "persist-credentials: false"):
+            bootstrap.audit_workflow(mutated)
+
+    def test_flow_style_action_reference_rejected(self):
+        mutated = self.workflow.replace(
+            "      - name: Set up Node.js 22",
+            "      - {uses: unknown/action@v1}\n      - name: Set up Node.js 22", 1,
+        )
+        self.assertNotEqual(mutated, self.workflow)
+        with self.assertRaisesRegex(AssertionError, "Unreviewed GitHub Actions uses syntax"):
+            bootstrap.audit_workflow(mutated)
+
     def test_removed_gradle_bootstrap_rejected(self):
         mutated = self.workflow.replace(
             "python3 -I tools/check_ci_bootstrap.py --install-gradle", "true", 1,
@@ -102,7 +129,7 @@ class CiBootstrapTrustTest(unittest.TestCase):
             self.assertEqual(result.returncode, 127)
             self.assertIn("refusing PATH fallback", result.stderr)
 
-    def test_ci_launcher_rejects_unverified_absolute_path(self):
+    def test_ci_launcher_rejects_missing_executable(self):
         env = os.environ.copy()
         env["GITHUB_ACTIONS"] = "true"
         env.pop("CI", None)
@@ -112,6 +139,23 @@ class CiBootstrapTrustTest(unittest.TestCase):
             env=env, capture_output=True, text=True, check=False,
         )
         self.assertEqual(result.returncode, 127)
+
+    def test_ci_false_uses_local_launcher_without_verified_gradle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_gradle = Path(tmp) / "gradle"
+            fake_gradle.write_text("#!/bin/sh\nprintf 'local fallback works\\n'\n", encoding="utf-8")
+            fake_gradle.chmod(0o755)
+            env = os.environ.copy()
+            env["CI"] = "false"
+            env.pop("GITHUB_ACTIONS", None)
+            env.pop("RECURSIVE_VERIFIED_GRADLE", None)
+            env["PATH"] = f"{tmp}:{env.get('PATH', '/usr/bin:/bin')}"
+            result = subprocess.run(
+                ["/bin/sh", str(ROOT / "gradlew"), "--version"],
+                env=env, capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("local fallback works", result.stdout)
 
     def test_missing_gradle_archive_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:

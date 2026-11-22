@@ -35,7 +35,7 @@ REQUIRED_JOBS = (
 )
 GRADLE_JOBS = ("architecture", "bytecode-build", "bytecode-verifier", "kotlin")
 USE_LINE = re.compile(r"^\s*(?:-\s*)?uses\s*:\s*(.*?)\s*$")
-PINNED = re.compile(r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)@([0-9a-f]{40})\s+#\s+(v[0-9]+)")
+PINNED = re.compile(r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)@([0-9a-f]{40})\s+#\s+(v[0-9]+(?:\.[0-9]+){0,2})")
 JOB_LINE = re.compile(r"^  ([a-z][a-z0-9-]*):\s*$", re.MULTILINE)
 INSTALL = "run: python3 -I tools/check_ci_bootstrap.py --install-gradle"
 
@@ -43,8 +43,13 @@ INSTALL = "run: python3 -I tools/check_ci_bootstrap.py --install-gradle"
 def audit_workflow(source: str) -> None:
     """Reject mutable, unreviewed, missing or additionally introduced actions."""
     counts = dict.fromkeys(APPROVED_ACTIONS, 0)
-    for line in source.splitlines():
+    lines = source.splitlines()
+    for index, line in enumerate(lines):
         match = USE_LINE.match(line)
+        # This policy deliberately rejects YAML flow-style action references;
+        # every action must occupy its own "uses:" line to be reviewed.
+        if re.search(r"\buses\s*:", line) and match is None and not line.lstrip().startswith("#"):
+            raise AssertionError(f"Unreviewed GitHub Actions uses syntax: {line.strip()}")
         if match is None:
             continue
         pin = PINNED.fullmatch(match.group(1).strip())
@@ -57,6 +62,18 @@ def audit_workflow(source: str) -> None:
         if (sha, version) != (approved_sha, approved_version):
             raise AssertionError(f"Changed GitHub Actions pin: {action}@{sha} # {version}")
         counts[action] += 1
+        if action == "actions/checkout":
+            if not line.startswith("      - uses: "):
+                raise AssertionError("Checkout must be a directly visible job step")
+            step_tail = []
+            for subsequent in lines[index + 1:]:
+                if subsequent.startswith("      - "):
+                    break
+                step_tail.append(subsequent)
+            if (step_tail.count("        with:") != 1
+                    or step_tail.count("          persist-credentials: false") != 1
+                    or sum("persist-credentials" in entry for entry in step_tail) != 1):
+                raise AssertionError("Each checkout must explicitly set persist-credentials: false")
     for action, (_, _, required_count) in APPROVED_ACTIONS.items():
         if counts[action] != required_count:
             raise AssertionError(
