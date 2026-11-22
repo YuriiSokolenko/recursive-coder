@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -82,6 +84,34 @@ class CiBootstrapTrustTest(unittest.TestCase):
             bootstrap.require_archive_sha256(archive, expected=correct)
             with self.assertRaisesRegex(AssertionError, "SHA-256 mismatch"):
                 bootstrap.require_archive_sha256(archive, expected="0" * 64)
+
+    def test_ci_launcher_rejects_local_gradle_path_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_gradle = Path(tmp) / "gradle"
+            fake_gradle.write_text("#!/bin/sh\\nexit 0\\n", encoding="utf-8")
+            fake_gradle.chmod(0o755)
+            env = os.environ.copy()
+            env["CI"] = "true"
+            env["GITHUB_ACTIONS"] = "true"
+            env["PATH"] = f"{tmp}:{env.get('PATH', '/usr/bin:/bin')}"
+            env.pop("RECURSIVE_VERIFIED_GRADLE", None)
+            result = subprocess.run(
+                ["/bin/sh", str(ROOT / "gradlew"), "--version"],
+                env=env, capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(result.returncode, 127)
+            self.assertIn("refusing PATH fallback", result.stderr)
+
+    def test_ci_launcher_rejects_unverified_absolute_path(self):
+        env = os.environ.copy()
+        env["GITHUB_ACTIONS"] = "true"
+        env.pop("CI", None)
+        env["RECURSIVE_VERIFIED_GRADLE"] = "/not-a-reviewed-gradle"
+        result = subprocess.run(
+            ["/bin/sh", str(ROOT / "gradlew"), "--version"],
+            env=env, capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 127)
 
     def test_missing_gradle_archive_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
