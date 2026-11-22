@@ -69,8 +69,30 @@ object ToolAuthorizationPolicy {
     val knownReadTools: Set<String> = setOf("read", "list", "find", "search", "git_status", "git_diff")
     private val protectedSegments = setOf(".git", ".github", ".gradle", ".env", "secrets", "credentials")
     private val protectedFiles = setOf("gradle.properties", "local.properties", "build.gradle.kts",
-        "settings.gradle.kts", ".gitattributes", ".gitignore", ".gitmodules")
+        "settings.gradle.kts", "build.gradle", "settings.gradle", "pom.xml", "package.json",
+        ".gitattributes", ".gitignore", ".gitmodules")
     private val developerTestSuffix = Regex(".*(test|spec)\\.[a-z0-9]+")
+
+    /**
+     * Files that configure *how tests execute* rather than what they assert. Main
+     * resources are on the test runtime classpath of common JVM builds, so a
+     * Developer could otherwise neutralize frozen tests without editing them
+     * (for example `junit.platform.execution.dryRun.enabled=true`). This is a
+     * defense-in-depth denylist, not a proof of test integrity (issue #152).
+     */
+    private val developerTestConfigFiles = setOf("junit-platform.properties", "testng.xml",
+        "kotest.properties", "pytest.ini", "tox.ini", "setup.cfg", "pyproject.toml",
+        "sitecustomize.py", "usercustomize.py", "phpunit.xml", "phpunit.xml.dist")
+    private val developerTestConfigPrefixes = listOf("jest.config.", "vitest.config.",
+        "karma.conf.", ".mocharc", "playwright.config.", "cypress.config.")
+
+    private fun developerTestConfiguration(parts: List<String>): Boolean {
+        val name = parts.last()
+        // ServiceLoader registrations can auto-install test-framework extensions.
+        val serviceLoader = parts.windowed(2).any { (a, b) -> a == "meta-inf" && b == "services" }
+        return serviceLoader || name in developerTestConfigFiles ||
+            developerTestConfigPrefixes.any { name.startsWith(it) }
+    }
     private val hostIdentifierPattern = Regex("[A-Za-z0-9][A-Za-z0-9._:-]{0,159}")
 
     /** Shared stable grammar for host-issued session IDs, check IDs and review request IDs. */
@@ -123,7 +145,8 @@ object ToolAuthorizationPolicy {
         }
         if (!allowed || facts.operationKind == null)
             return ToolAuthorizationDecision.Deny("ROLE_NOT_AUTHORIZED")
-        if (facts.actorRole == EngineeringRole.DEVELOPER && developerTestSuffix.matches(name))
+        if (facts.actorRole == EngineeringRole.DEVELOPER &&
+            (developerTestSuffix.matches(name) || developerTestConfiguration(parts)))
             return ToolAuthorizationDecision.Deny("PROTECTED_PATH")
         if (facts.withinSubmodule)
             return ToolAuthorizationDecision.Deny("SUBMODULE_BOUNDARY")

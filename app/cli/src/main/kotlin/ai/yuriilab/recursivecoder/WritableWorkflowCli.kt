@@ -244,8 +244,18 @@ internal object WritableWorkflowCli {
             (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content
                 ?: error("Invalid check argument")
         } ?: error("Invalid check arguments")
-        require(executable.isAbsolute && Files.isExecutable(executable) &&
-            executable.toString() !in setOf("/usr/bin/true", "/bin/true") &&
+        // Accident guard, not a quality guarantee (issue #163): resolve symlinks and
+        // refuse constant-result binaries, including through `env`. The operator
+        // remains responsible for selecting a check that exercises the artifacts.
+        // Multi-call binaries (e.g. coreutils) dispatch on the invoked name, so both
+        // the configured and the resolved file names are checked.
+        val constant = setOf("true", "false")
+        val names = if (executable.isAbsolute && Files.isExecutable(executable))
+            setOfNotNull(executable.fileName?.toString(),
+                executable.toRealPath().fileName?.toString()) else emptySet()
+        val viaEnv = arguments.firstOrNull { !it.startsWith("-") }?.substringAfterLast('/')
+        require(names.isNotEmpty() && names.none { it in constant } &&
+            !("env" in names && viaEnv in constant) &&
             arguments.size <= 16 && arguments.all { it.length <= 1024 }) {
             "A meaningful operator-selected isolated check is required"
         }
@@ -365,13 +375,17 @@ internal object WritableWorkflowCli {
         // configured verdict remains authoritative for the parent Reviewer,
         // including a rejection *after* successful child integration.
         val childExecutor = ConfiguredFakeRoleExecutor(fixtureProposals, "ACCEPT")
+        // One deadline and one cancellation token for the parent plan AND its
+        // recursive children, so stopping the workflow stops both (issue #163).
+        val workflowDeadline = Instant.now().plusSeconds(deadlineSeconds)
+        val workflowCancellation = Cancellation()
         val recursive = recursiveConfig?.let { configs ->
             InstalledRecursiveWorkflow(sessionId, host,
                 StageIsolatedCheck(executable, arguments),
                 targets, stageInstructions, developerTargets,
                 permittedDigests, model,
-                Instant.now().plusSeconds(deadlineSeconds),
-                Cancellation(), childExecutor, configs, tokens, duration,
+                workflowDeadline,
+                workflowCancellation, childExecutor, configs, tokens, duration,
                 maxDepth, maxChildren, maxToolCalls, childTokens, null)
         }
         val callback: (suspend (StageRoleRequest) -> String?)? =
@@ -405,8 +419,8 @@ internal object WritableWorkflowCli {
         val result = try {
             runBlocking {
                 runner.execute(FiveRoleWorkflowPlan(targets, stageInstructions,
-                    developerTargets, model, Instant.now().plusSeconds(deadlineSeconds),
-                    Cancellation()),
+                    developerTargets, model, workflowDeadline,
+                    workflowCancellation),
                     journal?.let(::CorrelatedRoleSessionEvents) ?: StageRoleEventSink { },
                     journal?.let(::CorrelatedPreparationSessionEvents)
                         ?: PreparationStageEventSink { },

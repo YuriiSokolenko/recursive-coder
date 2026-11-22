@@ -424,6 +424,9 @@ class RecursiveGraphScheduler(
                 if (node.state == RecursiveNodeState.RUNNING) {
                     replace(node.copy(state = RecursiveNodeState.FAILED))
                     tokens.getValue(node.graphId).cancel()
+                    // Stop the executor itself, not only its cooperative token (issue #161).
+                    // execute() still reports USAGE_CHARGE_DENIED from the FAILED state.
+                    runningJobs[node.graphId]?.cancel()
                     cancelDescendants(node.graphId)
                 }
             }
@@ -553,6 +556,21 @@ class RecursiveGraphScheduler(
             RecursiveExecutionOutcome.Cancelled
         } catch (_: Exception) {
             RecursiveExecutionOutcome.Failed("STAGE_EXECUTOR_FAILED")
+        } catch (fatal: Error) {
+            // A JVM error is never a success, and must not strand a RUNNING node
+            // or its job entry (issue #161). Record FAILED, then propagate.
+            synchronized(lock) {
+                runningJobs.remove(id)?.cancel()
+                val node = snapshot.node(id)!!
+                if (node.state == RecursiveNodeState.RUNNING) {
+                    tokens.getValue(id).cancel()
+                    val failed = node.copy(state = RecursiveNodeState.FAILED)
+                    replace(failed)
+                    emit(failed, RecursiveEventKind.FAILED, "STAGE_EXECUTOR_ERROR")
+                }
+                cancelDescendants(id)
+            }
+            throw fatal
         }
         // Re-verify physical evidence outside the scheduler lock. Only concurrent
         // changes to this stage's subtree invalidate the frame at terminal commit.

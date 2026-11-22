@@ -288,6 +288,60 @@ class FiveRoleWorkflowCoordinatorUnitTest {
         assertEquals(workspaceMayBeDirty, outcome.workspaceMayBeDirty)
     }
 
+    private fun Fixture.withTokenBudget(maxTokens: Long) {
+        state = state.copy(graph = state.graph.copy(
+            budget = state.graph.budget.copy(maxTokens = maxTokens)))
+    }
+
+    /** Issue #156: StageBudget.maxTokens bounds the whole sequential workflow. */
+    @Test fun graphWideTokenBudgetStopsAfterTheCommittedStageThatOverrunsIt() = runBlocking {
+        val f = Fixture()
+        // Three preparation stages spend 390 tokens; the Developer brings it to 520.
+        f.withTokenBudget(400)
+        expectStopped(f, "GRAPH_TOKEN_BUDGET_EXHAUSTED", StageKind.DEVELOP)
+        assertEquals(listOf(StageKind.SDD, StageKind.ATDD, StageKind.TDD, StageKind.DEVELOP),
+            f.called)
+    }
+
+    @Test fun exhaustedGraphBudgetNeverStartsAnotherStage() = runBlocking {
+        val f = Fixture()
+        f.withTokenBudget(390)
+        expectStopped(f, "GRAPH_TOKEN_BUDGET_EXHAUSTED", StageKind.DEVELOP)
+        assertEquals(listOf(StageKind.SDD, StageKind.ATDD, StageKind.TDD), f.called)
+    }
+
+    @Test fun unknownOrOverflowingStageUsageIsChargedAsExhaustion() {
+        assertEquals(130L, FiveRoleTokenBudget.charge(0, StageRoleUsage(1, 100, 30), 1000))
+        assertEquals(5L, FiveRoleTokenBudget.charge(5, StageRoleUsage(), 1000))
+        assertNull(FiveRoleTokenBudget.charge(0, StageRoleUsage(1, null, 30), 1000))
+        assertNull(FiveRoleTokenBudget.charge(0, StageRoleUsage(1, 100, null), 1000))
+        assertNull(FiveRoleTokenBudget.charge(0, StageRoleUsage(0, -1, 0), 1000))
+        assertNull(FiveRoleTokenBudget.charge(900, StageRoleUsage(1, 100, 1), 1000))
+        assertEquals(1000L, FiveRoleTokenBudget.charge(900, StageRoleUsage(1, 60, 40), 1000))
+        assertNull(FiveRoleTokenBudget.charge(0,
+            StageRoleUsage(1, Long.MAX_VALUE, Long.MAX_VALUE), Long.MAX_VALUE))
+    }
+
+    @Test fun reviewerUsesTheHostSelectedReviewerModel() = runBlocking {
+        val f = Fixture()
+        val base = f.plan()
+        val reviewer = base.model.copy(modelId = "fake-reviewer")
+        var seen: ModelConfig? = null
+        val recording = object : FiveRoleStageActions by f {
+            override suspend fun review(command: ReviewerStageCommand,
+                roleEvents: StageRoleEventSink, events: ReviewerDecisionSink
+            ): ReviewerStageResult {
+                seen = command.model
+                return f.review(command, roleEvents, events)
+            }
+        }
+        assertIs<FiveRoleWorkflowOutcome.Completed>(RunFiveRoleWorkflowUseCase(recording, f)
+            .execute(base.copy(reviewerModel = reviewer), StageRoleEventSink { },
+                PreparationStageEventSink { }, ReviewerDecisionSink { }))
+        assertEquals(reviewer, seen)
+        assertEquals(base.model, base.reviewerModel)
+    }
+
     @Test fun deniedRolesVerifyTheCommittedSnapshotAndMissingEvidenceCannotBeInvented() =
         runBlocking {
         for (kind in listOf(StageKind.SDD, StageKind.DEVELOP, StageKind.REVIEW)) {

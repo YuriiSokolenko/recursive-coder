@@ -879,18 +879,9 @@ class LinuxFiveRoleWorkflowHost(
         // Detect identity collisions BEFORE any Git ref mutation.
         if (graph.stages.any { it.correlation.stageRunId == newStageId })
             return null
-        val frozen = graph.artifacts.filter { it.id in accepted &&
-            proof.files.none { changed -> changed.path == it.declaredPath } }
-            .associate { it.declaredPath to it.sha256 }
-        val status = reconciler.reconcile(StageGitReconciliationRequest(head, branch,
-            previous.kind.role,
-            proof.files.map { StageGitAcceptedFile(it.path, it.after) }, frozen))
-        val newHead = (status as? StageGitReconciliationResult.Committed)?.newHead
-        if (newHead == null) {
-            quarantined = true
-            return null
-        }
-        head = newHead
+        // The next node does not depend on the new HEAD. Build and validate it
+        // BEFORE the irreversible Git commit, so a policy denial can never leave
+        // HEAD advanced while the graph is not (issue #160).
         val dependencies = graph.stages.filter {
             it.kind.output in next.requiredInputs && it.state == StageState.ACCEPTED
         }
@@ -903,8 +894,20 @@ class LinuxFiveRoleWorkflowHost(
             dependencies.flatMap { it.outputArtifacts }.toSet()
         )
         val result = graph.copy(stages = graph.stages + newStage)
-        if (StageGraphPolicy.validate(result) != StageGateDecision.Permit ||
-            !frozenIntact() || !clean()) {
+        if (StageGraphPolicy.validate(result) != StageGateDecision.Permit) return null
+        val frozen = graph.artifacts.filter { it.id in accepted &&
+            proof.files.none { changed -> changed.path == it.declaredPath } }
+            .associate { it.declaredPath to it.sha256 }
+        val status = reconciler.reconcile(StageGitReconciliationRequest(head, branch,
+            previous.kind.role,
+            proof.files.map { StageGitAcceptedFile(it.path, it.after) }, frozen))
+        val newHead = (status as? StageGitReconciliationResult.Committed)?.newHead
+        if (newHead == null) {
+            quarantined = true
+            return null
+        }
+        head = newHead
+        if (!frozenIntact() || !clean()) {
             quarantined = true
             return null
         }

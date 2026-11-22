@@ -14,8 +14,34 @@ data class FiveRoleWorkflowPlan(
     val developerTargets: List<DeveloperFileTarget>,
     val model: ModelConfig,
     val deadline: Instant,
-    val cancellation: Cancellation
+    val cancellation: Cancellation,
+    /**
+     * Host-selected Reviewer model (issue #158). Defaults to [model]; selecting a
+     * distinct configuration is the host's decision. Agent IDs alone do not make
+     * a review independent of the Developer's model.
+     */
+    val reviewerModel: ModelConfig = model
 )
+
+/**
+ * Graph-wide token accounting across sequential stages (issue #156). Each stage
+ * use case only checks a single invocation against `graph.budget.maxTokens`.
+ * Usage that reports model requests but no token counts is unknown and is
+ * charged at the full budget (fail closed).
+ */
+internal object FiveRoleTokenBudget {
+    /** Returns the new graph-wide total, or null when the budget is exhausted/unknown. */
+    fun charge(spent: Long, usage: StageRoleUsage, maxTokens: Long): Long? {
+        if (spent < 0 || spent > maxTokens) return null
+        if (usage.modelRequests <= 0 && usage.inputTokens == null && usage.outputTokens == null)
+            return spent
+        val input = usage.inputTokens ?: return null
+        val output = usage.outputTokens ?: return null
+        if (input < 0 || output < 0 || input > maxTokens - spent ||
+            output > maxTokens - spent - input) return null
+        return spent + input + output
+    }
+}
 
 data class FiveRoleArtifactTarget(val id: ArtifactId, val path: String)
 
@@ -185,6 +211,8 @@ class RunFiveRoleWorkflowUseCase(
 
         var authoritative = initial
         var developerHandoff: DeveloperReviewEvidence? = null
+        val maxTokens = initial.graph.budget.maxTokens
+        var spentTokens = 0L
         for ((index, kind) in order.withIndex()) {
             val before = authoritative
             val current = try { host.snapshot() }
@@ -196,7 +224,11 @@ class RunFiveRoleWorkflowUseCase(
             } ?: return stop(kind, "MISSING_WORKFLOW_STAGE", current)
             if (stage.state !in setOf(StageState.CREATED, StageState.READY))
                 return stop(kind, "WORKFLOW_STAGE_NOT_READY", current)
+            // Never start a model-backed stage once the graph-wide budget is spent.
+            if (spentTokens >= maxTokens)
+                return stop(kind, "GRAPH_TOKEN_BUDGET_EXHAUSTED", current)
             val id = stage.correlation.stageRunId
+            var stageUsage = StageRoleUsage()
 
             val result = when (kind) {
                 StageKind.SDD, StageKind.ATDD, StageKind.TDD -> {
@@ -215,6 +247,7 @@ class RunFiveRoleWorkflowUseCase(
                             val graph = done.graph ?: return uncertain(kind, "MISSING_COMMITTED_GRAPH")
                             val ids = done.hostAcceptedArtifactIds
                                 ?: return uncertain(kind, "MISSING_HOST_ACCEPTANCE")
+                            stageUsage = outcome.usage
                             PreparationStageSnapshot(graph, ids)
                         }
                         is PreparationStageOutcome.ReconciliationRequired ->
@@ -262,6 +295,7 @@ class RunFiveRoleWorkflowUseCase(
                             val graph = done.graph ?: return uncertain(kind, "MISSING_COMMITTED_GRAPH")
                             val ids = done.hostAcceptedArtifactIds
                                 ?: return uncertain(kind, "MISSING_HOST_ACCEPTANCE")
+                            stageUsage = outcome.usage
                             PreparationStageSnapshot(graph, ids)
                         }
                         is DeveloperStageOutcome.ReconciliationRequired ->
@@ -289,7 +323,7 @@ class RunFiveRoleWorkflowUseCase(
                 StageKind.REVIEW -> {
                     val done = stages.review(
                         ReviewerStageCommand(current.graph, current.acceptedIds,
-                            id, plan.model, plan.instructions.getValue(kind),
+                            id, plan.reviewerModel, plan.instructions.getValue(kind),
                             plan.deadline, plan.cancellation),
                         roleEvents, reviewerEvents)
                     when (val outcome = done.outcome) {
@@ -297,6 +331,7 @@ class RunFiveRoleWorkflowUseCase(
                             val graph = done.graph ?: return uncertain(kind, "MISSING_COMMITTED_GRAPH")
                             val ids = done.hostAcceptedArtifactIds
                                 ?: return uncertain(kind, "MISSING_HOST_ACCEPTANCE")
+                            stageUsage = outcome.usage
                             PreparationStageSnapshot(graph, ids)
                         }
                         is ReviewerStageOutcome.ReconciliationRequired ->
@@ -332,6 +367,10 @@ class RunFiveRoleWorkflowUseCase(
             catch (cancelled: CancellationException) { throw cancelled }
             catch (_: Exception) { return uncertain(kind, "HOST_SNAPSHOT_UNAVAILABLE") }
             if (after != result) return uncertain(kind, "UNCONFIRMED_STAGE_COMMIT")
+            // The committed stage stays auditable, but the workflow must not advance
+            // past a graph-wide overrun or unknown usage (issue #156).
+            spentTokens = FiveRoleTokenBudget.charge(spentTokens, stageUsage, maxTokens)
+                ?: return stop(kind, "GRAPH_TOKEN_BUDGET_EXHAUSTED", result)
             authoritative = result
             if (index < order.lastIndex) {
                 val next = order[index + 1]
