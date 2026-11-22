@@ -531,6 +531,112 @@ class ArchitectureBoundaryTest(_GradleOutputAssertions):
             self.assert_gradle_contains(
                 "Precompiled JVM bytecode in production resources is forbidden", result.stdout)
 
+    def test_dependency_verification_settings_guard_is_fail_closed(self):
+        # These tests exercise the real root AND standalone build-logic settings,
+        # rather than a mock of the guard. Assert the security diagnostic so a
+        # failed plugin download or unrelated configuration error cannot pass.
+        diagnostic = "Strict Gradle SHA-256 dependency verification is mandatory"
+        with tempfile.TemporaryDirectory(prefix="gradle-verification-modes-") as directory:
+            fixture = Path(directory)
+            ArchitectureConfigurationCacheRegressionTest.copy_fixture(fixture)
+            sequence = 0
+
+            def execute(mode: str, options: list[str], *, standalone: bool = False):
+                nonlocal sequence
+                sequence += 1
+                args = [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                        "--console=plain"]
+                if standalone:
+                    args.extend(["-p", "build-logic"])
+                args.extend(options)
+                args.append("help")
+                return run_logged_gradle(
+                    args, cwd=fixture, scenario=f"verification {mode}",
+                    phase="negative", sequence=sequence, timeout=180,
+                )
+
+            for standalone in (False, True):
+                scope = "standalone build-logic" if standalone else "root"
+                for mode in ("off", "lenient"):
+                    with self.subTest(scope=scope, cli=mode):
+                        result = execute(
+                            f"{scope}: --dependency-verification {mode}",
+                            ["--dependency-verification", mode],
+                            standalone=standalone,
+                        )
+                        self.assertNotEqual(0, result.returncode)
+                        self.assert_gradle_contains(diagnostic, result.stdout)
+
+                properties = fixture / ("build-logic/gradle.properties" if standalone
+                                        else "gradle.properties")
+                previous = properties.read_bytes() if properties.exists() else None
+                try:
+                    for mode in ("off", "lenient"):
+                        with self.subTest(scope=scope, gradle_properties=mode):
+                            properties.write_text(
+                                (previous.decode("utf-8") if previous else "") +
+                                f"\norg.gradle.dependency.verification={mode}\n",
+                                encoding="utf-8",
+                            )
+                            result = execute(
+                                f"{scope}: gradle.properties {mode}", [],
+                                standalone=standalone,
+                            )
+                            self.assertNotEqual(0, result.returncode)
+                            self.assert_gradle_contains(diagnostic, result.stdout)
+                finally:
+                    if previous is None:
+                        properties.unlink(missing_ok=True)
+                    else:
+                        properties.write_bytes(previous)
+
+                manifest = fixture / ("build-logic/gradle/verification-metadata.xml"
+                                      if standalone else "gradle/verification-metadata.xml")
+                saved = manifest.read_bytes()
+                manifest.unlink()
+                try:
+                    with self.subTest(scope=scope, manifest="missing"):
+                        result = execute(f"{scope}: missing manifest", [],
+                                         standalone=standalone)
+                        self.assertNotEqual(0, result.returncode)
+                        self.assert_gradle_contains(
+                            "Missing reviewed gradle/verification-metadata.xml",
+                            result.stdout,
+                        )
+                finally:
+                    manifest.write_bytes(saved)
+
+    def test_verification_metadata_refresh_is_available_only_in_fixture(self):
+        # The production manifests must not be rewritten as part of normal CI.
+        # This checks the documented manual refresh route on disposable copies
+        # with the actual new strict settings guards active.
+        with tempfile.TemporaryDirectory(prefix="gradle-verify-refresh-") as directory:
+            fixture = Path(directory)
+            ArchitectureConfigurationCacheRegressionTest.copy_fixture(fixture)
+            for i, standalone in enumerate((True, False), 1):
+                with self.subTest(standalone=standalone):
+                    relative = ("build-logic/gradle/verification-metadata.xml"
+                                if standalone else "gradle/verification-metadata.xml")
+                    manifest = fixture / relative
+                    before = manifest.read_bytes()
+                    command = [str(ROOT / "gradlew"), "--no-daemon",
+                               "--offline", "--console=plain"]
+                    if standalone:
+                        command.extend(["-p", "build-logic"])
+                    command.extend(["--write-verification-metadata", "sha256", "help"])
+                    result = run_logged_gradle(
+                        command, cwd=fixture,
+                        scenario=f"manual SHA-256 refresh: {relative}",
+                        phase="positive", sequence=i, timeout=240,
+                    )
+                    self.assertEqual(0, result.returncode,
+                                     "Manual SHA-256 refresh should be usable in fixture")
+                    self.assertTrue(manifest.is_file())
+                    self.assertIn(b"<sha256", manifest.read_bytes())
+                    # At least verify this was an isolated fixture update, not
+                    # a write to the security-controlled repository manifest.
+                    self.assertEqual(before, (ROOT / relative).read_bytes())
+
     def test_local_settings_repositories_are_denied(self):
         variants = {
             "mavenLocal": 'dependencyResolutionManagement { repositories { mavenLocal() } }\n',
@@ -919,7 +1025,11 @@ class ArchitectureConfigurationCacheRegressionTest(_GradleOutputAssertions):
         # Discover product module build scripts instead of maintaining a fixed
         # list. The included build-logic build is copied separately below.
         # Exclude Gradle output directories and existing configuration caches.
-        inputs = [ROOT / "settings.gradle.kts", ROOT / "gradle.properties"]
+        inputs = [
+            ROOT / "settings.gradle.kts",
+            ROOT / "gradle.properties",
+            ROOT / "gradle/verification-metadata.xml",
+        ]
         inputs.extend(
             source
             for source in ROOT.rglob("build.gradle.kts")

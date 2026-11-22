@@ -32,7 +32,7 @@ Recursive Coder itself owns its tasks and sessions. Git can manage source worksp
 
 The current foundation uses Kotlin 2.4.21, JDK 21, Gradle 9.8.1, Koin 4.2.2 (CLI composition root only), and Session Protocol `1.0`. Core modules do not depend on Koog, HTTP adapters or Koin.
 
-The Gradle build has **nine product modules**: `:agent:runtime`, `:core:contracts`, `:core:session`, `:core:tasks`, `:infra:model`, `:infra:workspace`, `:infra:task-store`, `:infra:journal`, and the only executable module, `:app:cli`. `build-logic` is an included build, not a product module. See [Gradle module ownership](docs/architecture/MODULES.md).
+The Gradle build has **nine product modules**: `:agent:runtime`, `:core:contracts`, `:core:session`, `:core:tasks`, `:infra:model`, `:infra:workspace`, `:infra:task-store`, `:infra:journal`, and the only executable module, `:app:cli`. `build-logic` is an included build, not a product module. See [Gradle module ownership](docs/architecture/MODULES.md). For changes to Gradle plugins or dependencies, follow the [SHA-256 verification and manual checksum review procedure](docs/dependency-verification.md).
 
 The installed distribution remains at `build/install/recursive-coder/bin/recursive-coder`, preserving the existing CLI smoke-test path.
 

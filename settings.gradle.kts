@@ -1,3 +1,13 @@
+// Verification applies to plugin, compiler, production and test resolution.
+// A missing manifest or an explicit --dependency-verification off/lenient is fatal.
+require(
+    gradle.startParameter.dependencyVerificationMode ==
+        org.gradle.api.artifacts.verification.DependencyVerificationMode.STRICT
+) { "Strict Gradle SHA-256 dependency verification is mandatory" }
+require(settingsDir.resolve("gradle/verification-metadata.xml").isFile) {
+    "Missing reviewed gradle/verification-metadata.xml in ${settingsDir}"
+}
+
 pluginManagement {
     includeBuild("build-logic")
     repositories { gradlePluginPortal(); mavenCentral() }
