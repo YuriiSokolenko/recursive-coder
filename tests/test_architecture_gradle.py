@@ -314,7 +314,8 @@ class ArchitectureBoundaryTest(_GradleOutputAssertions):
             ("core/tasks/build.gradle.kts",
              f'kotlin.sourceSets.all {{ languageSettings.optIn("{marker}") }}\n'),
             ("build-logic/src/main/kotlin/recursivecoder.jvm.gradle.kts",
-             f'// compilerOptions.optIn.add("{marker}")\n'),
+             'tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile>().configureEach { '
+             f'compilerOptions.optIn.add("{marker}") }}\n'),
         )
         with tempfile.TemporaryDirectory(prefix="architecture-gradle-optin-") as directory:
             fixture = Path(directory)
@@ -338,6 +339,441 @@ class ArchitectureBoundaryTest(_GradleOutputAssertions):
                     finally:
                         path.write_text(original, encoding="utf-8")
 
+    def test_effective_source_roots_include_custom_generated_and_java(self):
+        with tempfile.TemporaryDirectory(prefix="architecture-extra-roots-") as directory:
+            fixture = Path(directory)
+            ArchitectureConfigurationCacheRegressionTest.copy_fixture(fixture)
+            module = fixture / "core/tasks/build.gradle.kts"
+            original = module.read_text(encoding="utf-8")
+            cases = (
+                ('kotlin.sourceSets.getByName("main").kotlin.srcDir("src/extra")',
+                 "core/tasks/src/extra/Bad.kt",
+                 "@file:OptIn(TrustedRunningBoundaryApi::class)\n",
+                 "Unauthorized TrustedRunningBoundaryApi reference"),
+                ('kotlin.sourceSets.getByName("main").kotlin.srcDir("src/generatedExtra")',
+                 "core/tasks/src/generatedExtra/Bad.kt",
+                 "@file:OptIn(TrustedRunningBoundaryApi::class)\n",
+                 "Unauthorized TrustedRunningBoundaryApi reference"),
+                ('sourceSets.getByName("main").java.srcDir("src/generatedJava")',
+                 "core/tasks/src/generatedJava/Bad.java", "class Bad {}\n",
+                 "Production Java source is forbidden"),
+            )
+            for n, (config, source_name, content, expected) in enumerate(cases):
+                with self.subTest(source=source_name):
+                    source = fixture / source_name
+                    source.parent.mkdir(parents=True, exist_ok=True)
+                    source.write_text(content, encoding="utf-8")
+                    module.write_text(original + "\n" + config + "\n", encoding="utf-8")
+                    try:
+                        run = run_logged_gradle(
+                            [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                             "--console=plain", "checkArchitecture"],
+                            cwd=fixture, scenario=f"source root {source_name}",
+                            phase="negative", sequence=n + 1, timeout=180,
+                        )
+                        self.assertNotEqual(0, run.returncode)
+                        self.assert_gradle_contains(expected, run.stdout)
+                    finally:
+                        source.unlink()
+                        module.write_text(original, encoding="utf-8")
+
+    def test_java_main_denied_and_java_test_permitted(self):
+        with tempfile.TemporaryDirectory(prefix="architecture-java-") as directory:
+            fixture = Path(directory)
+            ArchitectureConfigurationCacheRegressionTest.copy_fixture(fixture)
+            test = fixture / "core/tasks/src/test/java/Allowed.java"
+            test.parent.mkdir(parents=True, exist_ok=True)
+            test.write_text("class Allowed {}\n", encoding="utf-8")
+            good = run_logged_gradle(
+                [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                 "--console=plain", "checkArchitecture"],
+                cwd=fixture, scenario="Java test source", phase="positive",
+                sequence=1, timeout=180)
+            self.assertEqual(0, good.returncode)
+            main = fixture / "infra/journal/src/main/java/Unreviewed.java"
+            main.parent.mkdir(parents=True, exist_ok=True)
+            main.write_text(
+                "package ai.yuriilab.recursivecoder;\n"
+                "public final class Unreviewed {\n"
+                "  public static void publish(TrustedSessionRunningHost host,\n"
+                "      SessionRequest request, Cancellation cancellation,\n"
+                "      java.time.Instant deadline, java.time.Clock clock) {\n"
+                "    host.publishAcceptedRunning(request, cancellation, deadline, clock);\n"
+                "  }\n"
+                "}\n", encoding="utf-8")
+            bad = run_logged_gradle(
+                [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                 "--console=plain", "checkArchitecture"],
+                cwd=fixture, scenario="Java production source", phase="negative",
+                sequence=2, timeout=180)
+            self.assertNotEqual(0, bad.returncode)
+            self.assert_gradle_contains("Production Java source is forbidden", bad.stdout)
+
+    def test_semantic_split_marker_is_rejected_but_unrelated_opt_in_is_allowed(self):
+        with tempfile.TemporaryDirectory(prefix="architecture-semantic-") as directory:
+            fixture = Path(directory)
+            ArchitectureConfigurationCacheRegressionTest.copy_fixture(fixture)
+            build = fixture / "core/tasks/build.gradle.kts"
+            original = build.read_text(encoding="utf-8")
+            injection = (
+                'tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile>().configureEach { '
+                'compilerOptions.optIn.add(listOf("ai.yuriilab.recursivecoder.", '
+                '"TrustedRunningBoundaryApi").joinToString("")) }\n'
+            )
+            build.write_text(original + "\n" + injection, encoding="utf-8")
+            denied = run_logged_gradle(
+                [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                 "--console=plain", "checkArchitecture"],
+                cwd=fixture, scenario="split marker compiler opt-in", phase="negative",
+                sequence=1, timeout=180)
+            self.assertNotEqual(0, denied.returncode)
+            self.assert_gradle_contains("Forbidden compiler-wide TrustedRunningBoundaryApi opt-in", denied.stdout)
+            build.write_text(original + "\n"
+                '// compilerOptions.optIn.add("TrustedRunningBoundaryApi")\n'
+                'tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile>().configureEach { '
+                'compilerOptions.optIn.add("com.example.Unrelated") }\n', encoding="utf-8")
+            allowed = run_logged_gradle(
+                [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                 "--console=plain", "checkArchitecture"],
+                cwd=fixture, scenario="comment and unrelated compiler opt-in", phase="positive",
+                sequence=2, timeout=180)
+            self.assertEqual(0, allowed.returncode)
+
+    def test_c3_suppression_without_marker_is_rejected(self):
+        cases = {
+            "literal": '@Suppress("OPT_IN_USAGE_ERROR")\n',
+            "unicode": r'@Suppress("OPT_IN_USAGE\u005FERROR")' + "\n",
+            "concat": '@Suppress("OPT_IN_" + "USAGE_ERROR")\n',
+            "external-constant": '@Suppress(OtherFile.C3_ERROR)\n',
+            "import-alias": 'import kotlin.Suppress as Ignore\n@Ignore(OtherFile.C3_ERROR)\n',
+            "java-suppress-warnings": '@java.lang.SuppressWarnings("OPT_IN_" + "USAGE_ERROR")\n',
+            "suppress-warnings-alias": 'import kotlin.Suppress as SuppressWarnings\n@SuppressWarnings("OPT_IN_" + "USAGE_ERROR")\n',
+        }
+        with tempfile.TemporaryDirectory(prefix="architecture-suppression-") as directory:
+            fixture = Path(directory)
+            ArchitectureConfigurationCacheRegressionTest.copy_fixture(fixture)
+            source = fixture / "core/tasks/src/main/kotlin/Suppressed.kt"
+            source.parent.mkdir(parents=True, exist_ok=True)
+            for idx, (name, suppression) in enumerate(cases.items()):
+                with self.subTest(name=name):
+                    source.write_text(
+                        suppression +
+                        'fun bypass(runtime: DefaultRunSessionUseCase, request: SessionRequest, '
+                        'cancellation: Cancellation, host: TrustedSessionRunningHost) =\n'
+                        '    runtime.publishTrustedAcceptedRunning(request, cancellation, host)\n',
+                        encoding="utf-8")
+                    run = run_logged_gradle(
+                        [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                         "--console=plain", "checkArchitecture"],
+                        cwd=fixture, scenario=f"production {name} suppression",
+                        phase="negative", sequence=idx + 1, timeout=180)
+                    self.assertNotEqual(0, run.returncode)
+                    self.assert_gradle_contains(
+                        "Forbidden Kotlin suppression in production source", run.stdout)
+
+    def test_other_production_bytecode_and_dynamic_entrypoints_are_denied(self):
+        mutations = {
+            "groovy-compiler": ('apply(plugin = "groovy")\n',
+                                "Unapproved production JVM compiler"),
+            "scala-compiler": ('apply(plugin = "scala")\n',
+                               "Unapproved production JVM compiler"),
+            "direct-jar": ('dependencies { "implementation"(files("rogue.jar")) }\n',
+                           "Unreviewed production file dependency"),
+            "compiler-plugin-flags": (
+                'tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile>()'
+                '.configureEach { compilerOptions.freeCompilerArgs.add("-Xplugin=rogue.jar") }\n',
+                "Forbidden Kotlin compiler plugin argument"),
+            "compiler-plugin-P": (
+                'tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile>()'
+                '.configureEach { compilerOptions.freeCompilerArgs.addAll('
+                'listOf("-P", "plugin:rogue:key=value")) }\n',
+                "Forbidden Kotlin compiler plugin argument"),
+            "compiler-plugin-classpath": (
+                'tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile>()'
+                '.configureEach { pluginClasspath.from(files("rogue.jar")) }\n',
+                "Kotlin compiler plugin classpath is forbidden"),
+            "extra-output-dir": (
+                'extensions.getByType<org.gradle.api.tasks.SourceSetContainer>()'
+                '.named("main") { output.dir(file("rogue-classes")) }\n',
+                "Unreviewed production output.dir bytecode directory"),
+        }
+        with tempfile.TemporaryDirectory(prefix="architecture-bytecode-") as directory:
+            fixture = Path(directory)
+            ArchitectureConfigurationCacheRegressionTest.copy_fixture(fixture)
+            script = fixture / "core/tasks/build.gradle.kts"
+            base_script = script.read_text(encoding="utf-8")
+            (fixture / "core/tasks/rogue.jar").write_bytes(b"invalid-bytecode-placeholder")
+            for idx, (name, (injection, diagnostic)) in enumerate(mutations.items()):
+                with self.subTest(name=name):
+                    script.write_text(base_script + "\n" + injection, encoding="utf-8")
+                    run = run_logged_gradle(
+                        [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                         "--console=plain", "checkArchitecture"],
+                        cwd=fixture, scenario=f"production bytecode {name}",
+                        phase="negative", sequence=idx + 1, timeout=240)
+                    self.assertNotEqual(0, run.returncode)
+                    self.assert_gradle_contains(diagnostic, run.stdout)
+
+    def test_production_precompiled_resources_are_denied(self):
+        with tempfile.TemporaryDirectory(prefix="architecture-evil-resource-") as directory:
+            fixture = Path(directory)
+            ArchitectureConfigurationCacheRegressionTest.copy_fixture(fixture)
+            resource = (fixture / "core/tasks/src/main/resources" /
+                        "ai/yuriilab/recursivecoder/Evil.class")
+            resource.parent.mkdir(parents=True, exist_ok=True)
+            resource.write_bytes(b"\xca\xfe\xba\xbe")
+            result = run_logged_gradle(
+                [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                 "--console=plain", "checkArchitecture"],
+                cwd=fixture, scenario="precompiled resource class",
+                phase="negative", sequence=1, timeout=240)
+            self.assertNotEqual(0, result.returncode)
+            self.assert_gradle_contains(
+                "Precompiled JVM bytecode in production resources is forbidden", result.stdout)
+
+    def test_local_settings_repositories_are_denied(self):
+        variants = {
+            "mavenLocal": 'dependencyResolutionManagement { repositories { mavenLocal() } }\n',
+            "flatDir": 'dependencyResolutionManagement { repositories { flatDir { dirs("libs") } } }\n',
+            "file-uri": 'dependencyResolutionManagement { repositories { maven { url = uri("file:/tmp/local") } } }\n',
+        }
+        with tempfile.TemporaryDirectory(prefix="architecture-local-repo-") as directory:
+            fixture = Path(directory)
+            ArchitectureConfigurationCacheRegressionTest.copy_fixture(fixture)
+            settings = fixture / "settings.gradle.kts"
+            original = settings.read_text(encoding="utf-8")
+            for idx, (name, addition) in enumerate(variants.items()):
+                with self.subTest(name=name):
+                    settings.write_text(original + addition, encoding="utf-8")
+                    result = run_logged_gradle(
+                        [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                         "--console=plain", "checkArchitecture"],
+                        cwd=fixture, scenario=f"settings repository {name}",
+                        phase="negative", sequence=idx + 1, timeout=240)
+                    self.assertNotEqual(0, result.returncode)
+                    self.assert_gradle_contains("Unreviewed Gradle repository in settings",
+                                                result.stdout)
+
+
+    def test_artifact_urls_in_maven_central_are_rejected(self):
+        with tempfile.TemporaryDirectory(prefix="architecture-artifact-urls-") as directory:
+            fixture = Path(directory)
+            ArchitectureConfigurationCacheRegressionTest.copy_fixture(fixture)
+            settings = fixture / "settings.gradle.kts"
+            original = settings.read_text(encoding="utf-8")
+            needle = "repositories { mavenCentral() }"
+            self.assertIn(needle, original)
+            settings.write_text(original.replace(
+                needle,
+                'repositories { mavenCentral { artifactUrls("https://example.invalid/m2") } }',
+                1), encoding="utf-8")
+            result = run_logged_gradle(
+                [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                 "--console=plain", "checkArchitecture"],
+                cwd=fixture, scenario="Maven Central artifactUrls injection",
+                phase="negative", sequence=1, timeout=240)
+            self.assertNotEqual(0, result.returncode)
+            self.assert_gradle_contains("artifactUrls are forbidden", result.stdout)
+
+    def test_settings_and_project_legacy_buildscript_are_rejected(self):
+        variants = {
+            "settings.gradle.kts":
+                'buildscript { repositories { maven { url = uri("file:/tmp/injected") } } }\n',
+            "core/tasks/build.gradle.kts":
+                'buildscript { repositories { maven { url = uri("file:/tmp/injected") } } }\n',
+        }
+        with tempfile.TemporaryDirectory(prefix="architecture-buildscript-") as directory:
+            fixture = Path(directory)
+            ArchitectureConfigurationCacheRegressionTest.copy_fixture(fixture)
+            for idx, (name, injection) in enumerate(variants.items()):
+                with self.subTest(name=name):
+                    script = fixture / name
+                    original = script.read_text(encoding="utf-8")
+                    script.write_text(original + "\n" + injection, encoding="utf-8")
+                    try:
+                        result = run_logged_gradle(
+                            [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                             "--console=plain", "checkArchitecture"],
+                            cwd=fixture, scenario=f"legacy buildscript {name}",
+                            phase="negative", sequence=idx + 1, timeout=240)
+                        self.assertNotEqual(0, result.returncode)
+                        self.assert_gradle_contains("buildscript", result.stdout)
+                    finally:
+                        script.write_text(original, encoding="utf-8")
+
+    def test_computed_project_buildscript_repository_is_rejected(self):
+        with tempfile.TemporaryDirectory(prefix="architecture-buildscript-computed-") as directory:
+            fixture = Path(directory)
+            ArchitectureConfigurationCacheRegressionTest.copy_fixture(fixture)
+            script = fixture / "core/tasks/build.gradle.kts"
+            with script.open("a", encoding="utf-8") as stream:
+                stream.write(
+                    '\nproject.buildscript.repositories.maven { '
+                    'url = uri("https://example.invalid/plugin") }\n'
+                )
+            result = run_logged_gradle(
+                [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                 "--console=plain", "checkArchitecture"],
+                cwd=fixture, scenario="computed project buildscript repository",
+                phase="negative", sequence=1, timeout=240)
+            self.assertNotEqual(0, result.returncode)
+            self.assert_gradle_contains("buildscript repository", result.stdout)
+
+    def test_settings_apply_from_script_plugins_are_rejected(self):
+        settings_paths = ("settings.gradle.kts", "build-logic/settings.gradle.kts")
+        for sequence, relative in enumerate(settings_paths, start=1):
+            with self.subTest(settings=relative):
+                with tempfile.TemporaryDirectory(
+                    prefix="architecture-settings-script-plugin-"
+                ) as directory:
+                    fixture = Path(directory)
+                    ArchitectureConfigurationCacheRegressionTest.copy_fixture(fixture)
+                    settings = fixture / relative
+                    plugin = settings.parent / "unreviewed-fixture.gradle.kts"
+                    plugin.write_text("// Benign fixture to test a forbidden apply(from)\n",
+                                      encoding="utf-8")
+                    settings.write_text(
+                        settings.read_text(encoding="utf-8") +
+                        '\napply(from = "unreviewed-fixture.gradle.kts")\n',
+                        encoding="utf-8",
+                    )
+                    result = run_logged_gradle(
+                        [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                         "--console=plain", "checkArchitecture"],
+                        cwd=fixture, scenario=f"settings apply(from) {relative}",
+                        phase="negative", sequence=sequence, timeout=240,
+                    )
+                    self.assertNotEqual(0, result.returncode)
+                    self.assert_gradle_contains(
+                        "Unreviewed apply(from) script plugin in settings",
+                        result.stdout,
+                    )
+
+    def test_project_apply_from_script_plugin_is_rejected(self):
+        with tempfile.TemporaryDirectory(prefix="architecture-script-plugin-") as directory:
+            fixture = Path(directory)
+            ArchitectureConfigurationCacheRegressionTest.copy_fixture(fixture)
+            injected = fixture / "core/tasks/reviewed-fixture.gradle.kts"
+            injected.write_text("// Harmless fixture: explicit script plugins are denied\n",
+                                encoding="utf-8")
+            script = fixture / "core/tasks/build.gradle.kts"
+            script.write_text(
+                script.read_text(encoding="utf-8") +
+                '\napply(from = "reviewed-fixture.gradle.kts")\n', encoding="utf-8")
+            result = run_logged_gradle(
+                [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                 "--console=plain", "checkArchitecture"],
+                cwd=fixture, scenario="apply(from) script plugin",
+                phase="negative", sequence=1, timeout=240)
+            self.assertNotEqual(0, result.returncode)
+            self.assert_gradle_contains("unreviewed apply(from) script plugin",
+                                        result.stdout)
+
+    def test_inherited_test_named_file_dependency_reaches_production(self):
+        with tempfile.TemporaryDirectory(prefix="architecture-inherited-file-") as directory:
+            fixture = Path(directory)
+            ArchitectureConfigurationCacheRegressionTest.copy_fixture(fixture)
+            script = fixture / "core/tasks/build.gradle.kts"
+            script.write_text(script.read_text(encoding="utf-8") + """
+val hiddenBridge = configurations.create("testHiddenBridge")
+configurations.named("implementation") { extendsFrom(hiddenBridge) }
+dependencies { add("testHiddenBridge", files("rogue.jar")) }
+""", encoding="utf-8")
+            (fixture / "core/tasks/rogue.jar").write_bytes(b"unreviewed")
+            result = run_logged_gradle(
+                [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                 "--console=plain", "checkArchitecture"],
+                cwd=fixture, scenario="inherited test named production dependency",
+                phase="negative", sequence=1, timeout=240)
+            self.assertNotEqual(0, result.returncode)
+            self.assert_gradle_contains(
+                "Unreviewed production file dependency", result.stdout)
+
+    def test_content_pinned_c3_file_mutation_is_denied(self):
+        with tempfile.TemporaryDirectory(prefix="architecture-c3-sha-") as directory:
+            fixture = Path(directory)
+            ArchitectureConfigurationCacheRegressionTest.copy_fixture(fixture)
+            source = fixture / (
+                "infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/"
+                "DurableAcceptedRunningHandoff.kt"
+            )
+            source.write_text(
+                source.read_text(encoding="utf-8") + "\n// Safe-looking change\n",
+                encoding="utf-8",
+            )
+            run = run_logged_gradle(
+                [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                 "--console=plain", "checkArchitecture"],
+                cwd=fixture, scenario="trusted C3 SHA-256 content pin",
+                phase="negative", sequence=1, timeout=240)
+            self.assertNotEqual(0, run.returncode)
+            self.assert_gradle_contains(
+                "Trusted C3 source content changed", run.stdout)
+
+    def test_production_reflection_is_denied(self):
+        with tempfile.TemporaryDirectory(prefix="architecture-reflection-") as directory:
+            fixture = Path(directory)
+            ArchitectureConfigurationCacheRegressionTest.copy_fixture(fixture)
+            source = fixture / "core/tasks/src/main/kotlin/Reflective.kt"
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_text(
+                'fun bypass() = Class.forName("ai.yuriilab.recursivecoder.SomeHost")\n',
+                encoding="utf-8",
+            )
+            run = run_logged_gradle(
+                [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                 "--console=plain", "checkArchitecture"],
+                cwd=fixture, scenario="reflective trusted C3 access",
+                phase="negative", sequence=1, timeout=240)
+            self.assertNotEqual(0, run.returncode)
+            self.assert_gradle_contains(
+                "Forbidden reflection or dynamic class loading", run.stdout)
+
+    def test_compiler_argfile_is_denied_without_marker_in_script(self):
+        with tempfile.TemporaryDirectory(prefix="architecture-argfile-") as directory:
+            fixture = Path(directory)
+            ArchitectureConfigurationCacheRegressionTest.copy_fixture(fixture)
+            script = fixture / "core/tasks/build.gradle.kts"
+            script.write_text(script.read_text(encoding="utf-8") +
+                '\n// Compiler arguments may hide dangerous flags.\n'
+                'tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile>().configureEach { '
+                'compilerOptions.freeCompilerArgs.add("@c3.args") }\n',
+                encoding="utf-8")
+            (fixture / "core/tasks/c3.args").write_text(
+                "-opt-in=ai.yuriilab.recursivecoder.TrustedRunningBoundaryApi\n",
+                encoding="utf-8")
+            run = run_logged_gradle(
+                [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                 "--console=plain", "checkArchitecture"],
+                cwd=fixture, scenario="effective compiler @argfile", phase="negative",
+                sequence=1, timeout=180)
+            self.assertNotEqual(0, run.returncode)
+            self.assert_gradle_contains(
+                "Compiler @argfile is forbidden in production", run.stdout)
+
+    def test_groovy_init_script_compiler_opt_in_is_rejected(self):
+        with tempfile.TemporaryDirectory(prefix="architecture-groovy-optin-") as directory:
+            fixture = Path(directory)
+            ArchitectureConfigurationCacheRegressionTest.copy_fixture(fixture)
+            init = fixture / "c3-optin.gradle"
+            init.write_text(
+                "gradle.projectsEvaluated {\n"
+                "  def source = gradle.rootProject.findProject(':core:tasks')\n"
+                "  if (source != null) {\n"
+                "  def marker = ['ai.yuriilab.recursivecoder.', 'TrustedRunningBoundaryApi'].join('')\n"
+                "  source.tasks.named('compileKotlin').get().compilerOptions.optIn.add(marker)\n"
+                "  }\n"
+                "}\n", encoding="utf-8")
+            result = run_logged_gradle(
+                [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                 "--console=plain", "--init-script", str(init), "checkArchitecture"],
+                cwd=fixture, scenario="Groovy init script compiler opt-in",
+                phase="negative", sequence=1, timeout=180)
+            self.assertNotEqual(0, result.returncode)
+            self.assert_gradle_contains(
+                "Forbidden compiler-wide TrustedRunningBoundaryApi opt-in", result.stdout)
+            self.assert_gradle_not_contains("could not be found in project", result.stdout)
+
     def test_reviewed_marker_declaration_is_allowed(self):
         with tempfile.TemporaryDirectory(prefix="architecture-allowed-c3-") as directory:
             fixture = Path(directory)
@@ -346,12 +782,7 @@ class ArchitectureBoundaryTest(_GradleOutputAssertions):
                 "core/session/src/main/kotlin/ai/yuriilab/recursivecoder/"
                 "TrustedRunningBoundaryPolicy.kt"
             )
-            reviewed.parent.mkdir(parents=True, exist_ok=True)
-            reviewed.write_text(
-                "package ai.yuriilab.recursivecoder\n"
-                "annotation class TrustedRunningBoundaryApi\n",
-                encoding="utf-8",
-            )
+            self.assertTrue(reviewed.is_file())  # Original, content-pinned declaration.
             result = run_logged_gradle(
                 [str(ROOT / "gradlew"), "--no-daemon", "--offline",
                  "--console=plain", "checkArchitecture"],
@@ -507,6 +938,20 @@ class ArchitectureConfigurationCacheRegressionTest(_GradleOutputAssertions):
             destination / "build-logic",
             ignore=shutil.ignore_patterns(".gradle", "build", "__pycache__"),
         )
+        # The guard pins exact SHA-256 of these six reviewed C3 sources.
+        # Temporary workspaces need their real bytes to verify unrelated edits.
+        trusted = (
+            "core/session/src/main/kotlin/ai/yuriilab/recursivecoder/SessionRuntime.kt",
+            "core/session/src/main/kotlin/ai/yuriilab/recursivecoder/TrustedRunningBoundaryPolicy.kt",
+            "core/session/src/main/kotlin/ai/yuriilab/recursivecoder/TrustedSessionPreExecutionHost.kt",
+            "infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/DurableAcceptedRunningHandoff.kt",
+            "infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/DurableRuntimeAcceptedRunningHost.kt",
+            "infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/DurableSessionEventLedger.kt",
+        )
+        for relative in trusted:
+            target = destination / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / relative, target)
 
     def check_architecture(
         self, directory: Path, *, scenario: str, phase: str
@@ -571,6 +1016,27 @@ class ArchitectureConfigurationCacheRegressionTest(_GradleOutputAssertions):
             + input_pattern,
         )
 
+    def test_generated_source_root_rechecked_after_configuration_cache_hit(self):
+        with tempfile.TemporaryDirectory(prefix="architecture-generated-cache-") as directory:
+            fixture = Path(directory)
+            self.copy_fixture(fixture)
+            build = fixture / "core/tasks/build.gradle.kts"
+            build.write_text(build.read_text(encoding="utf-8") +
+                '\nkotlin.sourceSets.getByName("main").kotlin.srcDir("src/generatedRoot")\n',
+                encoding="utf-8")
+            self.assert_valid(self.check_architecture(
+                fixture, scenario="generated root baseline", phase="cold-warmup"))
+            self.assert_cache_hit(fixture, scenario="generated root baseline")
+            source = fixture / "core/tasks/src/generatedRoot/Generated.kt"
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_text(
+                "@file:OptIn(TrustedRunningBoundaryApi::class)\n", encoding="utf-8")
+            denied = self.check_architecture(
+                fixture, scenario="generated source after cache hit", phase="negative")
+            self.assertNotEqual(0, denied.returncode)
+            self.assert_gradle_contains(
+                "Unauthorized TrustedRunningBoundaryApi reference", denied.stdout)
+
     def test_running_marker_new_source_and_script_are_checked_after_cache_hit(self):
         with tempfile.TemporaryDirectory(prefix="running-optin-cache-") as directory:
             fixture = Path(directory)
@@ -595,20 +1061,15 @@ class ArchitectureConfigurationCacheRegressionTest(_GradleOutputAssertions):
             finally:
                 injected.unlink()
 
-            # A newly created standalone Gradle Kotlin script must also be
-            # read by the task, even when its file tree was snapshotted earlier.
+            # An unapplied script comment is not an effective compiler option.
             script = fixture / "core/tasks/new-c3-guard.gradle.kts"
             script.write_text(
                 '// compilerOptions.optIn.add("TrustedRunningBoundaryApi")\n',
                 encoding="utf-8",
             )
             try:
-                refusal = self.check_architecture(
-                    fixture, scenario="new Gradle script after cache hit", phase="negative")
-                self.assertNotEqual(0, refusal.returncode)
-                self.assert_gradle_contains(
-                    "Forbidden compiler-wide TrustedRunningBoundaryApi opt-in",
-                    refusal.stdout)
+                self.assert_valid(self.check_architecture(
+                    fixture, scenario="unapplied Gradle script", phase="positive"))
             finally:
                 script.unlink()
             self.assert_restored_cache_ready(fixture, scenario="running marker restored")
@@ -624,7 +1085,8 @@ class ArchitectureConfigurationCacheRegressionTest(_GradleOutputAssertions):
             original = script.read_text(encoding="utf-8")
             try:
                 script.write_text(
-                    original + '\n// compilerOptions.optIn.add("TrustedRunningBoundaryApi")\n',
+                    original + '\ntasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile>().configureEach { '
+                    + 'compilerOptions.optIn.add("ai.yuriilab.recursivecoder.TrustedRunningBoundaryApi") }\n',
                     encoding="utf-8",
                 )
                 self.assert_cache_invalidated(

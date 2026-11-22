@@ -17,12 +17,69 @@ class ArchitectureGraphTest {
             "import ai.yuriilab.recursivecoder.TrustedRunningBoundaryApi as T",
             "typealias RunningAlias = TrustedRunningBoundaryApi",
             "import ai.yuriilab.recursivecoder.TrustedRunningBoundaryApi",
+            "@Suppress(\"OPT_IN_USAGE_ERROR\") fun unmarkedCaller() {}",
+            "@file:Suppress(\"OPT_IN_USAGE\")",
+            "@kotlin.Suppress(\"EXPERIMENTAL_API_USAGE_ERROR\")",
+            "@Suppress(\"ALL\") fun broadSuppress() {}",
         )
         forbidden.forEach { source ->
             assertTrue(TrustedRunningOptInPolicy.forbiddenInProduction(source, unreviewed), source)
         }
         assertFalse(TrustedRunningOptInPolicy.forbiddenInProduction(
             "@OptIn(OtherMarker::class) class Unrelated", unreviewed))
+        assertFalse(TrustedRunningOptInPolicy.forbiddenInProduction(
+            """@Suppress("UNCHECKED_CAST") fun harmlessCast() {}""", unreviewed))
+        assertTrue(TrustedRunningOptInPolicy.forbiddenInProduction(
+            "// OPT_IN_USAGE_ERROR is not used here", // conservative token check
+            unreviewed,
+        ))
+    }
+
+    @Test
+    fun suppressionArgumentsMustBeCanonicalSafeLiterals() {
+        val unreviewed = "core/tasks/src/main/kotlin/Unsafe.kt"
+        val rejected = listOf(
+            """@Suppress("OPT_IN_USAGE\u005FERROR") fun escaped() {}""",
+            """@Suppress("OPT_IN_" + "USAGE_ERROR") fun concatenated() {}""",
+            """@Suppress(OtherFile.C3_ERROR) fun importedConstant() {}""",
+            """import kotlin.Suppress as Ignore
+               @Ignore(OtherFile.C3_ERROR) fun aliased() {}""",
+            """typealias Ignore = kotlin.Suppress
+               @Ignore(OtherFile.C3_ERROR) fun typealiasBypass() {}""",
+            """@file:kotlin.Suppress(OtherFile.C3_ERROR)""",
+            """@Suppress("UNCHECKED_CAST", OtherFile.C3_ERROR) fun mixed() {}""",
+            """@Suppress("UNCHECKED\u005FCAST") fun escapedAllowed() {}""",
+            """@Suppress(""" + "\"\"\"" + """UNCHECKED_CAST""" + "\"\"\"" + """) fun rawLiteral() {}""",
+            """@Suppress("ALL") fun suppressEverything() {}""",
+            """@SuppressWarnings("OPT_IN_" + "USAGE_ERROR") fun javaStyle() {}""",
+            """@java.lang.SuppressWarnings("OPT_IN_" + "USAGE_ERROR") fun qualified() {}""",
+            """import kotlin.Suppress as SuppressWarnings
+               @SuppressWarnings("OPT_IN_" + "USAGE_ERROR") fun aliasedJavaStyle() {}""",
+            """@Suppress("UNCHECKED_CAST") @Suppress(OtherFile.C3_ERROR) fun chained() {}""",
+        )
+        rejected.forEach { text ->
+            assertTrue(
+                TrustedRunningOptInPolicy.forbiddenInProduction(text, unreviewed),
+                text,
+            )
+        }
+        val allowed = listOf(
+            """fun recordFailure(t: Throwable) = t.addSuppressed(RuntimeException())""",
+            """fun recordFailure(t: Throwable) = t.suppressedExceptions""",
+            """@Suppress("UNCHECKED_CAST") val safe = 1""",
+            """@Suppress("UNUSED_PARAMETER") fun harmless(v: Int) {}""",
+            """@file:Suppress("UNCHECKED_CAST", "UNUSED_PARAMETER")""",
+            """@kotlin.Suppress(
+                  "UNCHECKED_CAST",
+                  "UNUSED_PARAMETER"
+               ) fun safe() {}""",
+        )
+        allowed.forEach { text ->
+            assertFalse(
+                TrustedRunningOptInPolicy.forbiddenInProduction(text, unreviewed),
+                text,
+            )
+        }
     }
 
     @Test
@@ -31,7 +88,7 @@ class ArchitectureGraphTest {
             "core/session/src/main/kotlin/ai/yuriilab/recursivecoder/TrustedRunningBoundaryPolicy.kt"
                 to "annotation class TrustedRunningBoundaryApi",
             "infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/DurableAcceptedRunningHandoff.kt"
-                to "@TrustedRunningBoundaryApi\ninternal object TrustedHandoff",
+                to "@TrustedRunningBoundaryApi\ninternal object DurableAcceptedRunningHandoff { }",
         )
         reviewed.forEach { (path, source) ->
             assertFalse(TrustedRunningOptInPolicy.forbiddenInProduction(source, path), path)
@@ -44,7 +101,8 @@ class ArchitectureGraphTest {
     @Test
     fun reviewedSourceFilesCannotLaunderTrustedRunningOptIn() {
         val reviewed = "infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/DurableSessionEventLedger.kt"
-        val permitted = "@TrustedRunningBoundaryApi\ninternal fun hostOnly() {}"
+        val permitted = "@TrustedRunningBoundaryApi\ninternal fun appendTrustedAcceptedRunning() {}" +
+            "\n@TrustedRunningBoundaryApi\ninternal fun appendTrustedRunningWithFault() {}"
         assertFalse(TrustedRunningOptInPolicy.forbiddenInProduction(permitted, reviewed))
 
         val bypasses = listOf(
@@ -64,22 +122,122 @@ class ArchitectureGraphTest {
     }
 
     @Test
-    fun rejectsCompilerWideGradleOptInAndAllowsUnrelatedCompilerSettings() {
-        val forbidden = listOf(
-            """kotlin { compilerOptions.optIn.add("ai.yuriilab.recursivecoder.TrustedRunningBoundaryApi") }""",
-            """kotlin { compilerOptions { optIn.add("TrustedRunningBoundaryApi") } }""",
-            """kotlin { freeCompilerArgs.add("-opt-in=ai.yuriilab.recursivecoder.TrustedRunningBoundaryApi") }""",
-            """kotlin { sourceSets.main { languageSettings.optIn("TrustedRunningBoundaryApi") } }""",
-            """val marker = "TrustedRunningBoundaryApi"
-                compilerOptions.optIn.add(marker)""",
-        )
-        forbidden.forEach { script ->
-            assertTrue(TrustedRunningOptInPolicy.forbiddenCompilerOptIn(script), script)
+    fun rejectsSemanticCompilerOptInsAndAllowsUnrelatedOptions() {
+        val marker = "ai.yuriilab.recursivecoder.TrustedRunningBoundaryApi"
+        assertTrue(TrustedRunningOptInPolicy.isTrustedMarker(marker))
+        assertFalse(TrustedRunningOptInPolicy.isTrustedMarker("com.example.Unrelated"))
+        assertFalse(TrustedRunningOptInPolicy.isTrustedMarker(
+            "// compilerOptions.optIn.add(\"$marker\")"
+        ))
+        listOf("-opt-in=$marker", "-Xopt-in=$marker", "-Xuse-experimental=$marker",
+            "-opt-in=com.example.Unrelated,$marker").forEach {
+            assertTrue(TrustedRunningOptInPolicy.forbiddenFreeCompilerArgs(listOf(it)), it)
         }
-        assertFalse(TrustedRunningOptInPolicy.forbiddenCompilerOptIn(
-            """tasks.register("verify") { println("TrustedRunningBoundaryApi marker") }"""))
-        assertFalse(TrustedRunningOptInPolicy.forbiddenCompilerOptIn(
-            """kotlin { compilerOptions.optIn.add("com.example.Unrelated") }"""))
+        assertTrue(TrustedRunningOptInPolicy.forbiddenFreeCompilerArgs(listOf("-opt-in", marker)))
+        assertTrue(TrustedRunningOptInPolicy.forbiddenFreeCompilerArgs(listOf("@c3.args")))
+        assertTrue(TrustedRunningOptInPolicy.forbiddenFreeCompilerArgs(listOf(" @/tmp/c3.args ")))
+        assertFalse(TrustedRunningOptInPolicy.forbiddenFreeCompilerArgs(
+            listOf("-Xjvm-default=all", "-opt-in=com.example.Unrelated")
+        ))
+    }
+
+    @Test
+    fun productionCompilerPluginsAndReflectionFailClosed() {
+        listOf("-P", "-Pplugin:sample:flag", "-Xplugin=evil.jar",
+            "-Xplugin", "-Xcompiler-plugin=rogue").forEach {
+            assertTrue(TrustedRunningOptInPolicy.forbiddenCompilerPluginArguments(listOf(it)), it)
+        }
+        assertFalse(TrustedRunningOptInPolicy.forbiddenCompilerPluginArguments(
+            listOf("-Xjvm-default=all", "-Xno-param-assertions")))
+        listOf(
+            """Class.forName("hidden.C3")""",
+            """host.getDeclaredMethod("publishAcceptedRunning")""",
+            """java.lang.reflect.Method""",
+            """MethodHandles.lookup()""",
+            """DefaultRunSessionUseCase::class.java.methods.single { it.name == "x" }""",
+            """DefaultRunSessionUseCase::class.java.declaredMethods""",
+            """Thread.currentThread().contextClassLoader.loadClass(name)""",
+            """Proxy.newProxyInstance(...)""",
+            """System.loadLibrary("unsafe")""",
+            """external fun nativePublish()""",
+        ).forEach {
+            assertTrue(TrustedRunningOptInPolicy.forbiddenDynamicInvocation(it), it)
+        }
+        assertFalse(TrustedRunningOptInPolicy.forbiddenDynamicInvocation(
+            """val className = "no reflection"; failure.addSuppressed(exception)"""))
+        val builtIns = listOf(
+            "org.jetbrains:annotations:13.0",
+            "org.jetbrains.kotlin:kotlin-script-runtime:2.4.21",
+            "org.jetbrains.kotlin:kotlin-scripting-common:2.4.21",
+            "org.jetbrains.kotlin:kotlin-scripting-compiler-embeddable:2.4.21",
+            "org.jetbrains.kotlin:kotlin-scripting-compiler-impl-embeddable:2.4.21",
+            "org.jetbrains.kotlin:kotlin-scripting-jvm:2.4.21",
+            "org.jetbrains.kotlin:kotlin-stdlib:2.4.21",
+        )
+        // A cache-shaped path is not enough: the SHA-1 directory must match
+        // the actual bytes of every artifact, including the baseline modules.
+        val home = java.nio.file.Files.createTempDirectory("compiler-plugin-cache").toFile()
+        try {
+            val paths = builtIns.mapIndexed { index, id ->
+                val (group, artifact, version) = id.split(":")
+                val bytes = "reviewed-test-artifact-$index".toByteArray(Charsets.UTF_8)
+                val sha1 = java.security.MessageDigest.getInstance("SHA-1")
+                    .digest(bytes).joinToString("") { byte ->
+                        "%02x".format(byte.toInt() and 255)
+                    }
+                val jar = home.resolve(
+                    "caches/modules-2/files-2.1/$group/$artifact/$version/$sha1/$artifact-$version.jar"
+                )
+                jar.parentFile.mkdirs()
+                jar.writeBytes(bytes)
+                jar.absolutePath
+            }
+            assertFalse(TrustedRunningOptInPolicy.forbiddenCompilerPluginClasspath(
+                paths, home.absolutePath))
+            assertTrue(TrustedRunningOptInPolicy.forbiddenCompilerPluginClasspath(
+                paths + "/tmp/rogue.jar", home.absolutePath))
+            assertTrue(TrustedRunningOptInPolicy.forbiddenCompilerPluginClasspath(
+                paths.dropLast(1), home.absolutePath))
+            assertTrue(TrustedRunningOptInPolicy.forbiddenCompilerPluginClasspath(
+                paths.dropLast(1) + "/tmp/kotlin-stdlib-2.4.21.jar", home.absolutePath))
+            assertTrue(TrustedRunningOptInPolicy.forbiddenCompilerPluginClasspath(
+                paths.map { it.replace(home.absolutePath, "/repo/fake/.gradle") },
+                home.absolutePath))
+            java.io.File(paths[0]).appendText("tampered")
+            assertTrue(TrustedRunningOptInPolicy.forbiddenCompilerPluginClasspath(
+                paths, home.absolutePath))
+        } finally {
+            home.deleteRecursively()
+        }
+        assertEquals(6, TrustedRunningOptInPolicy.approvedSourceSha256.size)
+        assertTrue(TrustedRunningOptInPolicy.approvedSourceSha256.values.all {
+            it.matches(Regex("[0-9a-f]{64}"))
+        })
+    }
+
+    @Test
+    fun reviewedPathsMustMatchExactlyAndMarkerDeclarationCannotMove() {
+        val marker = "annotation class TrustedRunningBoundaryApi"
+        val original = "core/session/src/main/kotlin/ai/yuriilab/recursivecoder/TrustedRunningBoundaryPolicy.kt"
+        assertFalse(TrustedRunningOptInPolicy.forbiddenInProduction(marker, original))
+        assertTrue(TrustedRunningOptInPolicy.forbiddenInProduction(marker, "prefix/" + original))
+        assertTrue(TrustedRunningOptInPolicy.forbiddenInProduction(
+            marker, "infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/DurableSessionEventLedger.kt"
+        ))
+    }
+
+    @Test
+    fun rejectsMarkedOverrideOfUnmarkedInterface() {
+        val source = """
+            interface Unmarked { fun publish() }
+            class Unsafe: Unmarked {
+                @TrustedRunningBoundaryApi
+                override fun publish() {}
+            }
+            fun throughInterface(v: Unmarked) = v.publish()
+        """.trimIndent()
+        val reviewed = "infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/DurableSessionEventLedger.kt"
+        assertTrue(TrustedRunningOptInPolicy.forbiddenInProduction(source, reviewed))
     }
 
     @Test

@@ -5,7 +5,7 @@ No non-stdlib dependencies. Gradle compiles test classes before invoking this ch
 """
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import struct
 import sys
@@ -73,6 +73,9 @@ class ClassInfo:
     source: str | None
     module: str
     class_path: Path
+    method_references: set = field(default_factory=set)
+    method_handle_references: set = field(default_factory=set)
+    bootstrap_references: set = field(default_factory=set)
 
 
 def parse_class(path, module):
@@ -139,6 +142,8 @@ def parse_class(path, module):
             return [element(reader) for _ in range(reader.u2())]
         raise ClassFormatError(f"Unknown annotation element type {kind}")
 
+    bootstrap_indexes = []
+
     def attributes(reader):
         annotations = []
         source = None
@@ -153,6 +158,10 @@ def parse_class(path, module):
                     annotations += [annotation(payload) for _ in range(payload.u2())]
             elif name == "SourceFile":
                 source = utf(payload.u2())
+            elif name == "BootstrapMethods":
+                for _ in range(payload.u2()):
+                    bootstrap_indexes.append(payload.u2())
+                    payload.take(payload.u2() * 2)
         return annotations, source
 
     flags = data.u2()
@@ -175,8 +184,36 @@ def parse_class(path, module):
         methods.append(Member(method_name, descriptor, annotations))
     annotations, source = attributes(data)
     references = {class_name(i) for i, item in enumerate(cp) if item and item[0] == 7}
+
+    def member_ref(index):
+        value = cp[index]
+        if value is None or value[0] not in (9, 10, 11):
+            raise ClassFormatError(f"Invalid constant-pool member ref {index}")
+        name_and_type = cp[value[2]]
+        if name_and_type is None or name_and_type[0] != 12:
+            raise ClassFormatError("Invalid constant-pool NameAndType")
+        return (class_name(value[1]), utf(name_and_type[1]), utf(name_and_type[2]))
+
+    method_refs = {member_ref(index) for index, item in enumerate(cp)
+                   if item and item[0] in (10, 11)}
+    handle_refs = set()
+    for item in cp:
+        if item and item[0] == 15:
+            index = item[2]
+            if not 0 < index < len(cp):
+                raise ClassFormatError(f"Invalid MethodHandle reference {index}")
+            target = cp[index]
+            if target is None or target[0] not in (9, 10, 11):
+                raise ClassFormatError(f"Invalid MethodHandle target {index}")
+            handle_refs.add(member_ref(index))
+    bootstrap_refs = set()
+    for index in bootstrap_indexes:
+        handle = cp[index]
+        if handle is None or handle[0] != 15:
+            raise ClassFormatError(f"Invalid BootstrapMethods handle {index}")
+        bootstrap_refs.add(member_ref(handle[2]))
     return ClassInfo(name, superclass, interfaces, flags, annotations, fields, methods,
-                     references, source, module, path)
+                     references, source, module, path, method_refs, handle_refs, bootstrap_refs)
 
 
 def expanded(annotations, classes, visited=frozenset()):
