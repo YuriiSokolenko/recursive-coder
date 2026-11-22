@@ -1,0 +1,27 @@
+# Trusted C3 files: changes require explicit owner and independent security review.
+# CODEOWNERS alone does not enforce approval without branch protection.
+/core/session/src/main/kotlin/ai/yuriilab/recursivecoder/SessionRuntime.kt @YuriiSokolenko
+/core/session/src/main/kotlin/ai/yuriilab/recursivecoder/TrustedRunningBoundaryPolicy.kt @YuriiSokolenko
+/core/session/src/main/kotlin/ai/yuriilab/recursivecoder/TrustedSessionPreExecutionHost.kt @YuriiSokolenko
+/infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/DurableAcceptedRunningHandoff.kt @YuriiSokolenko
+/infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/DurableRuntimeAcceptedRunningHost.kt @YuriiSokolenko
+/infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/DurableSessionEventLedger.kt @YuriiSokolenko
+/build-logic/src/main/kotlin/ai/yuriilab/recursivecoder/buildlogic/architecture/ArchitectureGraph.kt @YuriiSokolenko
+/build-logic/src/main/kotlin/ai/yuriilab/recursivecoder/buildlogic/architecture/CheckArchitectureTask.kt @YuriiSokolenko
+/build-logic/src/main/kotlin/recursivecoder.architecture.gradle.kts @YuriiSokolenko
+
+# Build/supply-chain controls. Advisory until code-owner review is required by rulesets.
+/.github/ @YuriiSokolenko
+/build-logic/ @YuriiSokolenko
+/**/*.gradle.kts @YuriiSokolenko
+/*.gradle.kts @YuriiSokolenko
+/gradle/ @YuriiSokolenko
+/gradle.properties @YuriiSokolenko
+/gradlew @YuriiSokolenko
+/tools/ @YuriiSokolenko
+/tests/test_architecture*.py @YuriiSokolenko
+/tests/test_test_tiers.py @YuriiSokolenko
+/infra/journal/src/optInFixtures/ @YuriiSokolenko
+/.gitattributes @YuriiSokolenko
+
+/tests/ @YuriiSokolenko
