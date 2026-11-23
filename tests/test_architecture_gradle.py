@@ -1784,11 +1784,17 @@ class ArchitectureConfigurationCacheRegressionTest(_GradleOutputAssertions):
 
 
 class LoggedGradleSubprocessTest(unittest.TestCase):
-    """Fast runner checks that do not require Gradle."""
+    """Fast runner checks that do not require Gradle, except the policy probe."""
+
+    def setUp(self):
+        # A developer override cannot change unit-test fixture expectations.
+        patcher = mock.patch.dict(os.environ, {_SUITE_PARENT_OVERRIDE: ""})
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_suite_daemon_registry_is_private_but_offline_cache_is_shared(self):
         with tempfile.TemporaryDirectory(prefix="ordinary-gradle-home-") as source:
-            original = Path(source)
+            original = Path(source).resolve()
             caches = original / "caches"
             caches.mkdir()
             (caches / "cached-module").write_text("present", encoding="utf-8")
@@ -1797,7 +1803,7 @@ class LoggedGradleSubprocessTest(unittest.TestCase):
             artifact.write_bytes(b"verified artifact")
             (original / "daemon" / "9.8.2").mkdir(parents=True)
             with _create_suite_gradle_home(original) as isolated:
-                suite = Path(isolated)
+                suite = Path(isolated).resolve()
                 self.assertNotEqual(original, suite)
                 self.assertEqual(
                     "present", (suite / "caches" / "cached-module").read_text(encoding="utf-8")
@@ -1811,7 +1817,7 @@ class LoggedGradleSubprocessTest(unittest.TestCase):
 
     def test_suite_setup_metrics_and_cleanup_policy_are_private(self):
         with tempfile.TemporaryDirectory(prefix="ordinary-gradle-home-") as directory:
-            shared = Path(directory)
+            shared = Path(directory).resolve()
             (shared / "init.d").mkdir()
             (shared / "init.d" / "developer.init.gradle").write_text(
                 "throw new RuntimeException('must not execute')", encoding="utf-8",
@@ -1822,7 +1828,7 @@ class LoggedGradleSubprocessTest(unittest.TestCase):
             output = io.StringIO()
             with redirect_stdout(output):
                 with _create_suite_gradle_home(shared) as isolated:
-                    suite = Path(isolated)
+                    suite = Path(isolated).resolve()
                     self.assertEqual(
                         _CACHE_CLEANUP_INIT,
                         (suite / "init.d/disable-cache-cleanup.init.gradle")
@@ -1843,7 +1849,7 @@ class LoggedGradleSubprocessTest(unittest.TestCase):
 
     def test_cross_device_cache_rejected_before_any_artifact_copy(self):
         with tempfile.TemporaryDirectory(prefix="ordinary-gradle-home-") as directory:
-            shared = Path(directory)
+            shared = Path(directory).resolve()
             artifact = shared / "caches/modules-2/files-2.1/a/b/1/hash/lib.jar"
             artifact.parent.mkdir(parents=True)
             artifact.write_bytes(b"do not copy")
@@ -1857,7 +1863,7 @@ class LoggedGradleSubprocessTest(unittest.TestCase):
 
     def test_cross_device_hardlink_failure_never_falls_back_to_copy(self):
         with tempfile.TemporaryDirectory(prefix="ordinary-gradle-home-") as directory:
-            shared = Path(directory)
+            shared = Path(directory).resolve()
             artifact = shared / "caches/modules-2/files-2.1/a/b/1/hash/lib.jar"
             artifact.parent.mkdir(parents=True)
             artifact.write_bytes(b"do not copy")
@@ -1869,7 +1875,7 @@ class LoggedGradleSubprocessTest(unittest.TestCase):
 
     def test_small_same_device_copy_fallback_is_measured_and_bounded(self):
         with tempfile.TemporaryDirectory(prefix="ordinary-gradle-home-") as directory:
-            shared = Path(directory)
+            shared = Path(directory).resolve()
             artifact = shared / "caches/modules-2/files-2.1/a/b/1/hash/lib.jar"
             artifact.parent.mkdir(parents=True)
             artifact.write_bytes(b"small")
@@ -1888,20 +1894,24 @@ class LoggedGradleSubprocessTest(unittest.TestCase):
 
     def test_unwritable_sibling_uses_private_directory_inside_shared_home(self):
         with tempfile.TemporaryDirectory(prefix="ordinary-gradle-home-") as directory:
-            shared = Path(directory)
-            real_temporary_directory = tempfile.TemporaryDirectory
+            shared = Path(directory).resolve()
+            private_sibling = shared.parent / _SUITE_PARENT_NAME
+            actual_mkdir = Path.mkdir
 
-            def simulate_readonly_parent(*args, **kwargs):
-                if kwargs.get("dir") == shared.parent:
+            def simulate_readonly_parent(path, *args, **kwargs):
+                if path == private_sibling:
                     raise PermissionError(errno.EACCES, "parent is read-only")
-                return real_temporary_directory(*args, **kwargs)
+                return actual_mkdir(path, *args, **kwargs)
 
             output = io.StringIO()
             with mock.patch.object(
-                tempfile, "TemporaryDirectory", side_effect=simulate_readonly_parent,
+                Path, "mkdir", autospec=True, side_effect=simulate_readonly_parent,
             ), redirect_stdout(output):
                 with _create_suite_gradle_home(shared) as isolated:
-                    self.assertEqual(shared, Path(isolated).parent)
+                    self.assertEqual(
+                        shared / _SUITE_PARENT_NAME,
+                        Path(isolated).resolve().parent,
+                    )
             self.assertIn(
                 "placement=inside-shared fallback=sibling:PermissionError", output.getvalue(),
             )
@@ -1921,7 +1931,73 @@ class LoggedGradleSubprocessTest(unittest.TestCase):
                 phase="cache-policy", sequence=1, timeout=180,
             )
             self.assertEqual(0, result.returncode)
-            self.assertIn("Architecture suite cache cleanup disabled", result.stdout)
+            self.assertIn("Architecture suite cache cleanup=DISABLED", result.stdout)
+
+    def test_explicit_suite_parent_override_is_reported_and_used(self):
+        with tempfile.TemporaryDirectory(prefix="gradle-home-override-") as directory:
+            root = Path(directory).resolve()
+            shared = root / "ordinary"
+            shared.mkdir()
+            override = root / "other-mount"
+            override.mkdir()
+            output = io.StringIO()
+            with mock.patch.dict(os.environ, {_SUITE_PARENT_OVERRIDE: str(override)}):
+                with redirect_stdout(output):
+                    with _create_suite_gradle_home(shared) as isolated:
+                        self.assertEqual(
+                            override / _SUITE_PARENT_NAME,
+                            Path(isolated).resolve().parent,
+                        )
+            self.assertIn("placement=override fallback=none", output.getvalue())
+
+    def test_stale_home_pruning_only_removes_owned_marked_dead_homes(self):
+        with tempfile.TemporaryDirectory(prefix="architecture-stale-test-") as directory:
+            base = Path(directory).resolve()
+            parent = _private_suite_parent(base)
+            stale = parent / (_SUITE_HOME_PREFIX + "stale")
+            fresh = parent / (_SUITE_HOME_PREFIX + "fresh")
+            unrelated = parent / (_SUITE_HOME_PREFIX + "unmarked")
+            active = parent / (_SUITE_HOME_PREFIX + "active")
+            for child in (stale, fresh, unrelated, active):
+                child.mkdir(mode=0o700)
+            marker_content = (
+                f"{_SUITE_MARKER_MAGIC}\npid=999999999\n"
+                f"host={socket.gethostname()}\n"
+            )
+            past = time.time() - _STALE_SUITE_SECONDS - 3600
+            for child in (stale, fresh, active):
+                marker = child / _SUITE_MARKER
+                marker.write_text(
+                    marker_content if child != active else (
+                        f"{_SUITE_MARKER_MAGIC}\npid={os.getpid()}\n"
+                        f"host={socket.gethostname()}\n"
+                    ), encoding="utf-8",
+                )
+                if child != fresh:
+                    os.utime(marker, (past, past))
+            with mock.patch.object(
+                sys.modules[__name__], "_suite_process_alive",
+                side_effect=lambda pid: pid == os.getpid(),
+            ):
+                _prune_stale_suite_homes(parent)
+            self.assertFalse(stale.exists())
+            self.assertTrue(fresh.exists())
+            self.assertTrue(unrelated.exists())
+            self.assertTrue(active.exists())
+
+    def test_missing_all_home_locations_reports_fallbacks(self):
+        with tempfile.TemporaryDirectory(prefix="ordinary-gradle-home-") as directory:
+            output = io.StringIO()
+            with mock.patch.object(
+                sys.modules[__name__], "_private_suite_parent",
+                side_effect=PermissionError(errno.EACCES, "readonly"),
+            ), redirect_stdout(output):
+                with self.assertRaisesRegex(OSError, _SUITE_PARENT_OVERRIDE):
+                    _create_suite_gradle_home(Path(directory).resolve())
+            self.assertIn("status=failed placement=none", output.getvalue())
+            self.assertIn("sibling:PermissionError", output.getvalue())
+            self.assertIn("inside-shared:PermissionError", output.getvalue())
+            self.assertIn("system-temp:PermissionError", output.getvalue())
 
     def test_daemon_stop_targets_only_private_suite_registry(self):
         with tempfile.TemporaryDirectory(prefix="architecture-daemon-unit-") as directory:
