@@ -37,7 +37,11 @@ sealed interface ReviewerStageOutcome {
         ReviewerStageOutcome
     data class Denied(val code: String) : ReviewerStageOutcome
     data class Failed(val code: String) : ReviewerStageOutcome
-    data class ReconciliationRequired(val code: String) : ReviewerStageOutcome
+    /** The cleanup uncertainty code is distinct from the original host denial. */
+    data class ReconciliationRequired(
+        val code: String,
+        val denialCode: String? = null
+    ) : ReviewerStageOutcome
 }
 
 data class ReviewerStageResult(
@@ -156,16 +160,20 @@ class RunReviewerStageUseCase(
         val running = lease.graph
         var spentUsage = StageRoleUsage()
 
-        suspend fun abort(code: String): ReviewerStageResult {
-            val terminal = if (code == "ROLE_TIMED_OUT" || code == "ROLE_CANCELLED")
-                StageState.CANCELLED else StageState.FAILED
+        suspend fun abort(
+            code: String,
+            terminal: StageState = if (code == "ROLE_TIMED_OUT" ||
+                code == "ROLE_CANCELLED") StageState.CANCELLED else StageState.FAILED,
+            denialCode: String? = null
+        ): ReviewerStageResult {
             val snapshot = try {
                 withContext(NonCancellable + blockingDispatcher) {
                     host.abortStage(lease, terminal)
                 }
             } catch (_: Exception) { null }
             return if (snapshot == null) ReviewerStageResult(null, null,
-                ReviewerStageOutcome.ReconciliationRequired("REVIEW_ABORT_UNCONFIRMED"), spentUsage)
+                ReviewerStageOutcome.ReconciliationRequired(
+                    "REVIEW_ABORT_UNCONFIRMED", denialCode), spentUsage)
             else ReviewerStageResult(snapshot.graph, snapshot.acceptedIds,
                 ReviewerStageOutcome.Failed(code), spentUsage)
         }
@@ -357,16 +365,17 @@ class RunReviewerStageUseCase(
             when (committed) {
                 ReviewerFinishResult.Committed -> Unit
                 is ReviewerFinishResult.Denied -> {
-                    // A definite no-commit still may leave a live Reviewer lease.
-                    // Abort if current; if stale, preserve the host's diagnosis
-                    // rather than falsely claiming that the finish was uncertain.
-                    val aborted = abort(committed.code)
-                    if (committed.code == "STALE_REVIEW_LEASE" &&
-                        aborted.outcome is ReviewerStageOutcome.ReconciliationRequired)
+                    // The finish definitively did not commit. A host-confirmed
+                    // stale generation cannot be aborted: do not attempt cleanup.
+                    if (committed.code == ReviewerFinishDenialCodes.STALE_LEASE)
                         return ReviewerStageResult(null, null,
                             ReviewerStageOutcome.ReconciliationRequired(
-                                "REVIEW_FINISH_DENIED_STALE"), spentUsage)
-                    return aborted
+                                "REVIEW_FINISH_DENIED_STALE", committed.code), spentUsage)
+                    // Even if the host's reason resembles a pre-finish stop
+                    // signal, a denied finish must terminate a live lease FAILED.
+                    // If ownership moved before abort, retain the original
+                    // denial alongside the distinct cleanup uncertainty.
+                    return abort(committed.code, StageState.FAILED, committed.code)
                 }
                 ReviewerFinishResult.Unknown -> return ReviewerStageResult(null, null,
                     ReviewerStageOutcome.ReconciliationRequired("REVIEW_FINISH_UNCONFIRMED"),

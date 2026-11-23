@@ -72,11 +72,21 @@ committing the decision atomically. The atomic `finishStage` port returns
 `ReviewerFinishResult`: `Committed` confirms the decision, `Denied(code)`
 confirms **no** commit and reports why (stale lease, failed evidence check,
 frozen-input drift, or a policy denial). A still-active lease is immediately
-aborted to a confirmed `FAILED` stage. An unconfirmed abort requires
-reconciliation; stale-lease denials use `REVIEW_FINISH_DENIED_STALE` to
-distinguish an invalidated lease from an uncertain finish. `Unknown` or a
-thrown exception requires reconciliation under #85 even when a commit
-may already have happened. No automatic retry or abort follows an
+aborted to a confirmed `FAILED` stage, regardless of the denial code
+(including a host reason `ROLE_CANCELLED`, which is **not** a pre-finish
+cancellation signal). The shared `ReviewerFinishDenialCodes.STALE_LEASE`
+means the lease is already invalidated: no futile abort is attempted, and
+`REVIEW_FINISH_DENIED_STALE` requires reconciliation. For other denials,
+if the lease changes before abort or abort fails, `REVIEW_ABORT_UNCONFIRMED`
+requires reconciliation. The original host `Denied(code)` is separately
+retained as `ReviewerStageOutcome.ReconciliationRequired.denialCode` and
+forwarded to the workflow's `reviewerDenialCode`; the primary `code`
+describes the cleanup uncertainty. Neither case returns a trusted graph or
+publishes review acceptance. `Unknown` or a thrown finish requires
+reconciliation under #85 even when a commit may already have happened.
+Constructing `Denied(code)` with a blank code throws via `require`; if
+this occurs in a host finish call, the caller must treat it as an unknown
+finish, not a definite no-commit. No automatic retry or abort follows an
 unknown finish.
 
 ## Bounded repair routing

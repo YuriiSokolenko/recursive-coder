@@ -57,7 +57,9 @@ sealed interface FiveRoleWorkflowOutcome {
      */
     data class ReconciliationRequired(
         val code: String, val stage: StageKind,
-        val workspaceMayBeDirty: Boolean = false
+        val workspaceMayBeDirty: Boolean = false,
+        /** Original Reviewer host denial, when its subsequent cleanup is unconfirmed. */
+        val reviewerDenialCode: String? = null
     ) : FiveRoleWorkflowOutcome
 }
 
@@ -161,8 +163,11 @@ class RunFiveRoleWorkflowUseCase(
         preparationEvents: PreparationStageEventSink,
         reviewerEvents: ReviewerDecisionSink
     ): FiveRoleWorkflowOutcome {
-        fun uncertain(kind: StageKind, code: String, workspaceMayBeDirty: Boolean = false) =
-            FiveRoleWorkflowOutcome.ReconciliationRequired(code, kind, workspaceMayBeDirty)
+        fun uncertain(
+            kind: StageKind, code: String, workspaceMayBeDirty: Boolean = false,
+            reviewerDenialCode: String? = null
+        ) = FiveRoleWorkflowOutcome.ReconciliationRequired(
+            code, kind, workspaceMayBeDirty, reviewerDenialCode)
         fun stop(kind: StageKind, code: String, state: PreparationStageSnapshot?):
             FiveRoleWorkflowOutcome {
             if (state == null) return FiveRoleWorkflowOutcome.Stopped(code, kind, null)
@@ -335,7 +340,8 @@ class RunFiveRoleWorkflowUseCase(
                             PreparationStageSnapshot(graph, ids)
                         }
                         is ReviewerStageOutcome.ReconciliationRequired ->
-                            return uncertain(kind, outcome.code)
+                            return uncertain(kind, outcome.code,
+                                reviewerDenialCode = outcome.denialCode)
                         is ReviewerStageOutcome.Denied ->
                             return stop(kind, outcome.code, done.graph?.let { graph ->
                                 done.hostAcceptedArtifactIds?.let { ids ->
