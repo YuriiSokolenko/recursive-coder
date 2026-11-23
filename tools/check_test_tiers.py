@@ -360,7 +360,7 @@ def forbidden_reference(name):
 
 
 def module_label(module):
-    return ":" + module.replace("/", ":") if module else ":"
+    return ":" + module.replace("/", ":") if module else ": (root)"
 
 
 def test_source_modules(root):
@@ -401,7 +401,7 @@ def validate(modules, root):
     for source_module in sorted(test_source_modules_cache):
         if source_module not in modules:
             problems.append(
-                f"{module_label(source_module)}{':' if source_module else ''} test sources excluded from "
+                f"{module_label(source_module)}: test sources excluded from "
                 "checkTestTiers discovery; include the Gradle module, apply "
                 "the JVM convention plugin and pass its compiled test class directories"
             )
@@ -419,7 +419,7 @@ def validate(modules, root):
                 except (ValueError, IndexError, struct.error) as error:
                     problems.append(f"{path}: cannot inspect class: {error}")
         if module in test_source_modules_cache and not classes:
-            problems.append(f"{module_label(module)}{':' if module else ''} no compiled test classes found; "
+            problems.append(f"{module_label(module)}: no compiled test classes found; "
                             "check testClasses dependencies and --class-dir inputs")
         descendants = descendant_index(classes)
         purity_cache = {}

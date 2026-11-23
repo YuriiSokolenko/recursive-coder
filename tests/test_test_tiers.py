@@ -370,7 +370,10 @@ class TestTierGuardTest(unittest.TestCase):
             source.write_text("class Suite {}", encoding="utf-8")
             self.assertEqual({""}, guard.test_source_modules(root))
             _, problems = guard.validate({}, root)
-            self.assertTrue(any(p.startswith(": test sources excluded") for p in problems))
+            self.assertTrue(any(p.startswith(": (root): test sources excluded") for p in problems))
+            _, problems = guard.validate({"": []}, root)
+            self.assertTrue(any(p.startswith(": (root): no compiled test classes") for p in problems))
+            self.assertEqual(":core:contracts", guard.module_label("core/contracts"))
 
     def test_kotlin_file_io_entry_point_is_still_rejected(self):
         _, problems = self.compile('''
