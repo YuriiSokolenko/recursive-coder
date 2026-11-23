@@ -66,10 +66,24 @@ post-operation recheck. Each attempted write conservatively discards the stage's
 previous check evidence.
 
 Only the host-selected IDs `git_diff_check` and explicitly allowlisted
-external checks can run. External checks reuse the existing Linux
-bubblewrap boundary (no network, read-only checkout, private scratch,
-bounded output/deadline). There is no unsandboxed fallback. Developers must
-require both the Git diff check and an independent sandboxed check.
+external checks can run. External checks reuse the existing Linux bubblewrap
+boundary: read-only real checkout, writable private tmpfs root (including
+`/tmp`), writable private `/scratch` (`HOME`), no mounted host `/etc`,
+no network or provisioned dependency cache, and bounded output/deadline.
+There is no unsandboxed fallback. Developers must require both the Git diff
+check and an independent sandboxed check.
+
+**Current limitation and future design (#154):** These read-only-checkout
+conditions prevent ordinary offline build-tool suites from writing project
+outputs. The stage adapter grants no extra filesystem/process authority.
+A future *check-only* disposable writable view, offline pinned dependencies
+and verified toolchain are **not implemented**. It must not expand
+`StageWrite` scope, accept agent-selected commands or mounts, or relax
+stage authority revalidation, pre/post-`verifyState()` and final receipt
+checks. The authoritative [sandbox limitations, proposed design and required
+E2E cases](TRUSTED_WRITES.md#proposed-disposable-writable-check-sandbox-design-only-154)
+include the snapshot, resource limits and cache/toolchain receipt
+invalidation rules.
 
 `StageWriteEvidence` and `StageCheckEvidence` contain receipt metadata
 and denial codes; **no HMAC receipt or signing secret is returned to the

@@ -143,8 +143,12 @@ class TaskScheduler(
                                 "cancelled"
                             } catch (_: Exception) {
                                 "failed"
+                            } finally {
+                                // Scheduler polls may still call cancel() while the old
+                                // session is tracked. End interrupt delivery before store I/O.
+                                cancellation.unbind()
                             }
-                            // Clear worker interruption before locking the durable store.
+                            // No later cancellation/expiry may interrupt this worker in FileChannel.
                             Thread.interrupted()
                             if (stopping.get()) {
                                 interrupt(task.id, sessionId,
