@@ -35,9 +35,11 @@ on the **same filesystem** as the shared dependency cache, not directly in
 `$HOME`. The hidden parent is private (mode 0700 on POSIX) and rejects
 symlinks, junctions and unsafe ownership or permissions. On startup the suite
 removes only positively marked directories older than 72 hours whose owning
-POSIX process is no longer running on the same host. Other files, unknown
-directories, live processes and other hosts are never pruned. Windows skips
-automatic stale-home removal unless liveness can be established safely, so
+POSIX process is no longer running on the same reported hostname. Other files,
+unknown directories and live processes are never pruned. Hostnames are not
+unique machine identities: containers sharing a home and hostname but using
+different PID namespaces can mistake each other's homes for stale ones.
+Windows skips automatic stale-home removal without reliable liveness proof;
 an interrupted run may require manual cleanup of this hidden parent.
 
 Set `ARCHITECTURE_GRADLE_HOME_PARENT=/existing/writable/path` to try an
@@ -62,12 +64,13 @@ so the architecture security guard still validates canonical paths and hashes.
 Other selected cache paths, including dependency resolution metadata and the
 local build cache, intentionally point to the **developer's shared cache**.
 The suite's own Gradle 9 `init.d` script sets
-`settings.caches { cleanup = Cleanup.DISABLED }` in a `beforeSettings` hook.
-A real-Gradle probe checks the effective `settings.caches.cleanup.get()`
-value is `DISABLED`, not merely that the init script ran, preventing **suite-initiated Gradle User Home cache cleanup** from pruning
-shared cache entries. Ordinary Gradle access to shared cache metadata is still
-possible, as is cleanup initiated independently by the developer's other
-Gradle processes. The suite does not promise read-only shared caches.
+`settings.caches { cleanup = Cleanup.DISABLED }` in a `beforeSettings` hook,
+preventing **suite-initiated Gradle User Home cache cleanup** from pruning
+shared cache entries. A real-Gradle probe asserts that the effective
+`settings.caches.cleanup.get()` value is the `Cleanup.DISABLED` object.
+Ordinary Gradle access to shared cache metadata is still possible, as is
+cleanup initiated independently by the developer's other Gradle processes.
+The suite does not promise read-only shared caches.
 
 Fixture build outputs and configuration-cache entries remain private per fixture.
 All Gradle regressions still use `--offline`, strict dependency verification
