@@ -1,9 +1,12 @@
 # Metadata-only crash-tail adoption — proposed protocol (issue #117)
 
 **Status: DESIGN ONLY; NOT ACCEPTED; NO PRODUCTION RECOVERY AUTHORITY.**
-This document specifies a possible *new*, opt-in, versioned protocol for a
-single pre-execution metadata tail. It deliberately does **not** change
-`SessionResumeAdmission`, `DurableSessionEventLedger`, the checkpoint store,
+This is the **single canonical #117 proposal** for a *new*, opt-in,
+versioned protocol covering one pre-execution metadata tail. An earlier
+competing proposal (separate permit plus RCMTA1 CLAIM/COMMITTED; see
+"Alternatives considered") is not selected: do not implement both
+protocols or treat them as simultaneously valid recovery authorities.
+This document deliberately does **not** change `SessionResumeAdmission`, `DurableSessionEventLedger`, the checkpoint store,
 the CLI, or the currently mandatory operator-reconciliation behavior. An
 independently reviewed implementation, host evidence producer and real crash
 tests are prerequisites to enabling any part of the proposal.
@@ -51,12 +54,21 @@ event is neither a C2 publication receipt nor an acknowledgement of
 phase-history predicate is not relaxed.
 
 The proposed `meta-tail/v1` admission policy is a **closed list** of one
-additional exact frame: a root-only, completed
+additional exact frame: a root-only, `status="completed"`,
 `session.transition {from:"created",to:"accepted"}` with at most the
-existing `graphId` metadata and no execution actors, timing, tool, child,
-stage, effect, receipt or custom fields. The accepted source is an
-independently verified `created` checkpoint C1 with zero task attempts,
-zero usage, no accepted artifacts or pending effects and only ready children.
+root-matching `metadata.graphId`, and no execution actors, optional
+`timing`, tool, child, stage, effect, receipt or custom fields. Require
+the exact Session Protocol v1 event shape, including frozen `timestamp`,
+sequence, deterministic event ID, causation ID and actor identity;
+unknown fields and any taxonomy expansion fail closed.
+The accepted source is an independently verified `created` checkpoint C1 satisfying
+`PreExecutionSnapshotPolicy.safe`, with `taskState` either `"created"`
+or `"ready"`, zero task attempts, every `hostAssertedUsage` entry
+having `certainty="known"` and `units=0` (unknown usage refuses),
+no accepted artifacts or pending effects and only ready children. An adopted C2 must
+set `taskState="ready"`, as the existing durable handoff does; accepting
+a C1 with `"created"` therefore requires the unique `created → ready`
+task-state change described in section 3, step 7.
 The complete history through C1 must pass the existing
 `PreExecutionPhasePolicy`; its physical ledger offset and both digests must
 match C1. No other transition, duplicate event, multi-record suffix,
@@ -106,6 +118,17 @@ cryptographic no-work witness; this must be documented and audited
 as manual reconciliation, never silently upgraded to automatic
 adoption. It still needs a new, separately reviewed crash-safe
 publication API and tests. It cannot retrofit RCFEN1.
+
+**Separate `MetadataPermitV1` + `RCMTA1 CLAIM/COMMITTED`.** A competing
+draft would publish a separate MACed permit, then an immutable CLAIM,
+N+1 and only afterward the recovery `force(true)`, followed by a separate
+COMMITTED authority. **Not selected for meta-tail/v1**: this adds a second
+precommit authority beyond the source N fence, changes force/fence ordering,
+and creates extra persistent ambiguity states. This version selects one
+precommitted RCFEN2 source fence, authenticated independent no-work evidence,
+force-before-N+1, CAS-once publication, and C2 provenance/receipt verification.
+Do not create RCMTA1 records or accept them as proof. A future change to
+these choices requires a distinct version and independent security review.
 
 **Leave operator reconciliation mandatory.** This costs no new
 trusted control plane and is the valid default. Given the complexity
@@ -162,6 +185,15 @@ following **before** attempting the candidate append under original lease N.
    mediated capability boundary, not an application boolean, event type,
    "no entries found" scan or assertion from the dead JVM. The controller
    must durably issue an authenticated epoch identity before append.
+   A proposed `NoStartWindowV1` must positively attest prior work is
+   drained, no model/tool/child/receipt/result operation is in flight and
+   no execution capability can be issued until the gate is retired.
+   Every external entry point, including callbacks, must first durably
+   publish a domain-separated authenticated `STARTED` record under the
+   monotonic gate *before* crossing the external boundary. The verifier
+   must validate its complete continuous history, generation/high-water
+   mark, revocation state and crash-window coverage. An absent
+   `STARTED` entry in an incomplete log is never no-start proof.
 3. **A new-generation no-start/barrier witness.** After the old owner
    has terminated or irrevocably relinquished its lease, the independent
    controller must authenticate the **complete** effect/work admission
@@ -169,14 +201,20 @@ following **before** attempting the candidate append under original lease N.
    attest there was *no dispatched or unacknowledged model/tool/child/
    side-effect work*, and bind its monotonic barrier to the proposed
    successor generation N+1, exact old fence/anchor and candidate event
-   hash. A higher numeric fence, absent `Started` record, zero usage,
+   hash. A higher numeric fence, absent `STARTED` record, zero usage,
    checkpoint phase, MAC by itself or a human yes/no checkbox is **not**
    this witness. The controller must reject rollback and seal/verify this
    proof independently of the session journal and checkpoint files.
 
 The last two artifacts require a **real, reviewed host-side trusted execution
 controller with mandatory mediation and a retained signing/MAC key or
-equivalent root of trust**. They do not exist in the current runtime.
+equivalent root of trust**. The independent no-start key/MAC domain
+and rollback-resistant head must not be substitutable with public
+RCLDG1/checkpoint hashes. A MAC attests issuance, not truth: every adapter
+must be demonstrably mediated, and a complete authenticated RCEFX1
+history plus host non-start witness must be checked where applicable.
+An empty effect journal alone is insufficient. These safeguards do
+not exist in the current runtime.
 Until the controller and its evidence verification are implemented and
 independently assessed, the policy's only correct outcome is
 `NOT_ELIGIBLE / RECONCILIATION_REQUIRED`.
@@ -215,9 +253,18 @@ to implement recovery.
    provisioned, its separate sibling `<effects-name>.lock` must
    also be inspected during the no-work/effect drift check; a missing,
    busy, changed or inaccessible effect lock is **not** absence-of-work
-   proof. Never create any lock during read-only eligibility.
-   Missing, unsafe or changed lock/data-file identity refuses with
-   no modifications.
+   proof. Determine whether an effect sidecar was ever provisioned
+   from independent host authority, not from absence of files.
+   Snapshot and recheck identity (path, file key/inode, no symlink)
+   of the ledger data and pre-existing ledger/resume/checkpoint/effect
+   lock files, plus all provisioned effect data files and heads.
+   Acquire relevant OS locks nonblockingly and verify effect-head/
+   no-start high-water continuity both before and after replay.
+   Missing, busy, swapped or changed identities refuse. The authority
+   directories must have trusted ownership/permissions on approved
+   persistent local filesystems. Never create a lock during read-only
+   eligibility; missing or unsafe lock/data-file identity refuses
+   without any file modifications.
 2. Take the pre-existing exclusive `resume.lock` with nonblocking
    `tryLock` and the existing ledger OS lock, also nonblocking; keep both
    through any later commit. Acquire `checkpoint.lock` **briefly** to
@@ -281,9 +328,29 @@ to implement recovery.
    `meta-tail/v1` purpose. Never overwrite N or repair a prepared record
    without a distinct operator-reviewed prepared-admission protocol.
    Keep the OS locks and the new token current through C2.
-7. Derive C2 solely from the verified on-disk C1: the only logical change
-   is `phase=accepted`, the next checkpoint sequence/previous hash, and
-   physical journal sequence/head/file hash/offset extended by exactly T.
+7. Derive C2 solely from the verified on-disk C1: allow exactly
+   `phase="created" → "accepted"` and a task-state transition from
+   `"created"` to `"ready"` or from `"ready"` to `"ready"`, matching
+   `DurableCreatedAcceptedHandoff.publish`. Only the next checkpoint
+   sequence/previous hash and exact physical journal sequence/head/
+   file SHA/offset for T may otherwise change, **plus authenticated
+   adoption provenance**. This requires a *new, canonical checkpoint
+   schema version* binding C1 SHA, original RCFEN2 N fence/anchor SHA,
+   exact T frame digest/offset, no-start barrier/epoch digest,
+   successor N+1 generation and its fence SHA. Neither ordinary
+   `saveFenced` nor existing v1/v2/v3 checkpoint codecs may invent
+   or silently reinterpret this provenance. **Conversely, a pre-#117
+   reader encountering the new C2 schema version must fail closed with
+   `CHECKPOINT_VERSION_UNSUPPORTED` (or an equivalent typed
+   unsupported-version refusal) before admission, rather than parse
+   it as an ordinary accepted checkpoint, ignore the adoption fields,
+   or downgrade it to an older version.** The current
+   `SessionCheckpointCodec.decode` accepts only versions 1–3 and
+   already refuses unknown versions; the future schema must preserve
+   that fail-closed compatibility boundary. All future read-only
+   admissions must verify provenance against independently observed
+   physical C2, ledger, source and recovery fence heads; until the
+   new schema and reader are implemented, C2 adoption is unsupported.
    Prove the complete post-tail history is accepted by the **closed v1
    adoption policy**, and that all attempts/children/artifacts/usage/
    pending effects and all non-journal bindings are unchanged. Publish C2
@@ -293,11 +360,17 @@ to implement recovery.
    `checkpoint.saved` append is permitted. Read back C2's exact digest,
    file/ledger evidence and fence/anchor head *before* reporting success.
 8. Acknowledge **only** `AdoptedMetadataCheckpoint(C2, N+1)` to the trusted
-   host, never a receipt for the old append or any external action.
+   host after independent verification of durable C2, its adoption
+   provenance and N+1 fence. This is a *new recovery receipt*,
+   never the original append/force ACK or an external-effect receipt.
+   Subsequent readers may recognize the already committed C2 only;
+   prepared N+1 or ambiguous C2 never permits a retry.
    Release ledger lock/writer before retiring the N+1 resume lease.
    The separately reviewed normal pre-execution admission still needs a
    **fresh** generation N+2 before any later host work, and must not
-   treat this metadata checkpoint as permission for execution.
+   treat this metadata checkpoint as permission for execution. Keep the
+   no-start gate closed until a separate, explicitly authorized, freshly
+   fenced host boundary retires it; C2 alone does not activate execution.
 
 Use existing nonblocking OS lock acquisition and its short lock durations.
 The proposal uses **one ledger data `FileChannel`** for read/force and
@@ -371,7 +444,13 @@ and after; prove nothing was silently truncated or repaired.
 | Same-UID path swap, unsupported filesystem, missing ledger/effect lock | Refuse before modifying bytes or publishing a generation |
 | Fence budget N=254 vs N=255/256 | N=254 may adopt at N+1=255 and subsequently admit at N+2=256; N>=255 must refuse unchanged before publication with `RESUME_FENCE_LIMIT`; never rotate/evict old fences |
 | Canonical event payload with altered precommitted timestamp or optional `timing` object | Refuse unchanged; timestamp is frozen before admission, not a durability clock |
-| Successful isolated recovery, fresh JVM read and re-admission | C2 contains exactly one adopted edge; C1/C2 chain, physical ledger and N+1 anchor verify; no double adoption, no permission to execute; later read-only admission requires a new generation |
+| C1 taskState `created` or `ready` | Both adopt to C2 `ready` with no other task-state mutations; C1 `running` refuses before force |
+| C1 `hostAssertedUsage` contains `certainty="unknown"` (even with other known-zero entries) | Reject before force, fence or C2; no ledger or authority mutation |
+| Pre-#117 reader opens a valid new-version adopted C2 | `CHECKPOINT_VERSION_UNSUPPORTED` (or equivalent typed unknown-version refusal) before admission; no provenance stripping or downgrade |
+| Missing/busy/swapped ledger/effect lock; missing provisioned effect data; changed inode/head | Read-only eligibility refuses without creating files, force, fence or checkpoint |
+| Incomplete/revoked no-start gate; missing `STARTED` record due to history gap; active late callback | Refuse before force; zero journal entries are not positive non-start proof |
+| Forged/missing C2 provenance, mixed fence versions or changed source digest | Future reader refuses; no silent v1/v2/v3 adoption |
+| Successful isolated recovery, fresh JVM read and re-admission | C2 contains exactly one adopted edge and verified new-schema provenance; C1/C2 chain, physical ledger and N+1 anchor verify; no double adoption, no permission to execute; later read-only admission requires N+2 |
 
 Tests must distinguish **SIGKILL / process crash** from power-loss
 durability. The latter requires separate filesystem/storage acceptance
@@ -388,10 +467,13 @@ To implement safely, the project must add, in separately reviewable PRs:
 - Mandatory-mediation host controller, authenticated no-work epoch and
   successor barrier, anti-rollback root and fault-injected conformance.
   The current #104/#105 artifacts do **not** provide this proof.
-- A new versioned, closed persisted fence/anchor commitment; explicit
-  incompatibility with existing uncommitted v1 tails; read-only
-  `inspectCandidate` that never creates evidence; a single-use,
-  lease-guarded `publishAdoptedCheckpoint` distinct from ordinary saves.
+- A new versioned, closed RCFEN2 fence/anchor commitment (not a parallel
+  `MetadataPermitV1` / `RCMTA1` record); incompatibility with old
+  uncommitted v1 tails; read-only `inspectCandidate` that creates no
+  evidence; and single-use guarded `publishAdoptedCheckpoint` distinct
+  from ordinary saves.
+- A new canonical C2 checkpoint schema with authenticated adoption
+  provenance and explicit fail-closed read-side verification.
 - Deterministic real-JVM kill/race/force/CAS acceptance above, independent
   review of exact-head code and CI on the actual integration suite.
 
