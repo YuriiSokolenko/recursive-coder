@@ -10,6 +10,7 @@ import java.util.concurrent.TimeUnit
 /** Compatibility façade; new CLI and scheduler consumers inject use cases directly. */
 class TaskService(
     val store: TaskRepository,
+    private val runPaths: TaskRunPaths,
     private val clock: Clock = Clock.systemUTC(),
     private val enqueueUseCase: EnqueueTaskUseCase = DefaultEnqueueTaskUseCase(store, clock)
 ) {
@@ -19,7 +20,7 @@ class TaskService(
     internal val interruptUseCase: InterruptTaskAttemptUseCase = DefaultInterruptTaskAttemptUseCase(store, clock)
     internal val recoverUseCase: RecoverInterruptedAttemptsUseCase =
         DefaultRecoverInterruptedAttemptsUseCase(store, clock)
-    internal val prepareUseCase: PrepareTaskAttemptUseCase = DefaultPrepareTaskAttemptUseCase(store)
+    internal val prepareUseCase: PrepareTaskAttemptUseCase = DefaultPrepareTaskAttemptUseCase(runPaths)
     private val cancelUseCase: CancelTaskUseCase = DefaultCancelTaskUseCase(store, clock)
     private val retryUseCase: RetryTaskUseCase = DefaultRetryTaskUseCase(store, clock)
     private val pauseUseCase: PauseTaskQueueUseCase = DefaultPauseTaskQueueUseCase(store, clock)

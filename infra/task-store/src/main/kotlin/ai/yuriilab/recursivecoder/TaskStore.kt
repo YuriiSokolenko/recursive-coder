@@ -97,9 +97,6 @@ class TaskStore(directory: Path) : TaskRepository {
         check(schedulerLeaseHeld.get()) { "Scheduler lease required for recovery" }
     }
 
-    override fun outputRoot(task: Task): Path = directory.resolve("runs").resolve(task.id)
-        .resolve("attempt-" + task.attempt).toAbsolutePath()
-
     private fun load(): TaskQueue {
         if (!Files.exists(snapshot, LinkOption.NOFOLLOW_LINKS)) return TaskQueue()
         require(Files.size(snapshot) <= 64L * 1024 * 1024) { "Task store is too large" }
