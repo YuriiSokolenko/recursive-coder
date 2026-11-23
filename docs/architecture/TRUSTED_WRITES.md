@@ -85,7 +85,9 @@ one additional sandboxed check. A Developer policy that does not require both
 git_diff_check and an additional allowlisted check is rejected by open()
 with TEST_CHECK_REQUIRED, before a workspace lease or any write. The default
 required-check policy (git_diff_check only) is therefore intentionally
-invalid for Developer. SDD/ATDD/TDD may finish with only Git validation.
+invalid for Developer. The installed `RunPreparationStageUseCase` also
+requires `git_diff_check` plus at least one additional configured validator
+for each SDD, ATDD and TDD stage; that validator need not run new tests.
 
 **Important trust boundary:** the runtime guarantees that a host-allowlisted
 command ran in isolation and exited successfully; it does **not** determine
@@ -146,8 +148,9 @@ following limits are known and tracked:
   are not evidence that a test failed on the pre-implementation baseline, and a
   passing Developer check does not prove that the implementation caused it.
   Nothing binds the operator's check to the ATDD/TDD artifact paths. Per-role
-  check sets and an authenticated failing baseline receipt (distinguishable
-  from sandbox unavailability) are a planned design.
+  check sets, artifact-bound test selection, and authenticated expected-failure
+  evidence are specified in [Red-to-green checks](RED_TO_GREEN_CHECKS.md),
+  but are **not implemented**.
 - **The sandbox cannot run most build tools** ([#154](https://github.com/YuriiSokolenko/recursive-coder/issues/154)).
   External checks see the checkout read-only at `/workspace`, an initially
   empty private tmpfs root (including writable `/tmp`) and writable host-
