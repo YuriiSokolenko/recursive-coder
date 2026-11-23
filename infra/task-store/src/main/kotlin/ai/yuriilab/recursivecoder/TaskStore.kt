@@ -41,7 +41,11 @@ class TaskStore(directory: Path) : TaskRepository {
 
     /** Read and mutation callbacks execute under the SAME cross-process OS lock. */
     private fun <T> transaction(operation: (TaskQueue) -> T): T {
-        val mutex = localLocks.computeIfAbsent(directory) { ReentrantLock() }
+        // A symlinked parent may expose the same .store.lock via different
+        // normalized paths. Serialize those aliases BEFORE opening a channel:
+        // closing a failed second channel can drop the first POSIX file lock.
+        val mutex = localLocks.computeIfAbsent(directory.toRealPath()) { ReentrantLock() }
+        check(!mutex.isHeldByCurrentThread) { "Nested task store transaction is not allowed" }
         return mutex.withLock {
             require(!Files.isSymbolicLink(guardFile) && !Files.isSymbolicLink(snapshot))
             FileChannel.open(guardFile, StandardOpenOption.CREATE, StandardOpenOption.WRITE).use { channel ->

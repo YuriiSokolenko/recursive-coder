@@ -83,7 +83,50 @@ the tiered suites, or `./gradlew test` for the full unfiltered suite.
 
 `recursive-coder run` and scheduled task execution use `RunSessionUseCase` resolved through Koin at `:app:cli`. The implementation owns all existing session lifecycle coordination and verification; the old `SessionController` API delegates for compatibility. There is no global Koin container and no shared mutable session state. A single task command-scoped `TaskComposition` shares one `TaskRepository` across all task Use Cases and scheduler operations. The CLI explicitly owns the `TaskStore` it constructs, whereas tests and external composition callers can borrow a repository without transferring its lifetime. On command termination the Koin container closes first, then an **owned** repository is closed if its adapter implements `AutoCloseable`; borrowed repositories are never closed by the composition. Shutdown is idempotent, attempts repository cleanup even after DI close fails, and retains multiple cleanup failures using suppressed exceptions. `executeCli` cleans up on success, Clikt usage errors, and command exceptions. The current `TaskStore` and in-memory adapter own no long-lived handles and therefore do not implement `AutoCloseable`; locks and channels continue to be scoped to individual transactions and scheduler leases. Session Koin containers are closed after each invocation.
 
-Issue [#59](https://github.com/YuriiSokolenko/recursive-coder/issues/59) migrates the remaining operations. `TaskQueriesUseCase` groups read-only list/show/pause-status inspection. Cancel, retry, pause, resume, cancel-all and replace-dependencies each have an interface and independent `Default*` implementation. For scheduled attempts, `ClaimNextTaskUseCase`, `CompleteTaskAttemptUseCase`, `InterruptTaskAttemptUseCase`, `RecoverInterruptedAttemptsUseCase` and `PrepareTaskAttemptUseCase` are injected directly into `TaskScheduler`. The scheduler owns the exclusive repository lease spanning recovery, dispatch and worker shutdown. `RecoverInterruptedAttemptsUseCase` now calls `TaskRepository.requireSchedulerLockHeld()` before opening a transaction: an unleased call throws `IllegalStateException` without reading or writing the queue. The in-memory adapter checks current-thread lock ownership; the durable adapter exposes a current-thread guard only while holding the real `.scheduler.lock` OS file lock. A competing thread, different repository instance, or caller after lock release cannot invoke recovery. The OS lock—not the guard—is still the cross-process authority. Before opening `.scheduler.lock`, a JVM-wide set of active canonical task-store directories rejects a second `TaskStore.withSchedulerLock` acquisition (including from another instance, thread or parent-path alias); this prevents closing a second `FileChannel` from accidentally releasing the first lock on POSIX systems. The set is removed after the channel and OS lease close; it never substitutes for process-wide file locking. This runtime check is intentionally thread-bound because recovery currently executes synchronously under `TaskScheduler.runUntilIdle`; moving recovery to another thread would require an explicit lease capability or a deliberate contract redesign. `TaskService.recoverInterrupted()` is a compatibility API with the same enforced precondition: callers must hold `store.withSchedulerLock` on their current thread, and calls made without it now throw `IllegalStateException`. Claim/finish use atomic transactions, completion rejects unsupported status before mutation, and stale session IDs cannot overwrite newer attempts. `TaskService` and its scheduler constructor are compatibility adapters only. Isolated in-memory/fixed-clock tests cover denial, contention, stale completions and recovery; durable adapter, installed CLI and sandbox tests remain in place.
+Issue [#59](https://github.com/YuriiSokolenko/recursive-coder/issues/59)
+migrates the remaining operations. `TaskQueriesUseCase` groups read-only
+list/show/pause-status inspection. Cancel, retry, pause, resume, cancel-all,
+and replace-dependencies each have an interface and a `Default*` implementation.
+For scheduled attempts, `ClaimNextTaskUseCase`,
+`CompleteTaskAttemptUseCase`, `InterruptTaskAttemptUseCase`,
+`RecoverInterruptedAttemptsUseCase`, and `PrepareTaskAttemptUseCase`
+are injected directly into `TaskScheduler`.
+
+### Scheduler lease and recovery
+
+The scheduler owns the exclusive repository lease across recovery, dispatch,
+and worker shutdown. `RecoverInterruptedAttemptsUseCase` calls
+`TaskRepository.requireSchedulerLockHeld()` **before** opening a transaction.
+Without the lease, recovery throws `IllegalStateException` and does not read
+or modify the queue. The in-memory adapter checks current-thread lock ownership.
+The durable adapter exposes a current-thread guard only while holding the real
+`.scheduler.lock` OS file lock.
+
+Cross-process exclusion remains the OS file lock's responsibility. Before
+opening `.scheduler.lock`, a JVM-wide set of canonical store directories
+prevents another `TaskStore` instance or thread (including parent-path
+aliases) from opening and closing a second channel on the same lock file.
+This avoids accidentally releasing the first POSIX lock. The JVM guard is
+cleared only **after** the OS lock and channel close.
+
+Ordinary queue transactions use a separate `.store.lock`. Their JVM mutex
+is also keyed by the canonical directory so aliases cannot open overlapping
+channels; nested transactions on the same thread fail before opening a
+second channel. This JVM serialization complements, rather than replaces,
+cross-process file locking.
+
+The recovery check is intentionally thread-bound because
+`TaskScheduler.runUntilIdle` executes recovery synchronously while holding
+the lease. Moving recovery to another thread would require an explicit lease
+capability or a deliberate contract redesign. The compatibility method
+`TaskService.recoverInterrupted()` has the same enforced precondition:
+callers must hold `store.withSchedulerLock` on their current thread.
+
+Claim and finish use atomic transactions. Completion rejects unsupported
+statuses before mutation, and stale session IDs cannot overwrite newer
+attempts. `TaskService` and its scheduler constructor are compatibility
+adapters only. Fixed-clock, in-memory, durable-store, CLI, and sandbox tests
+cover denial, contention, recovery, and stale-session fencing.
 
 ## State transitions
 
