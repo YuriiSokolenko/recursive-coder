@@ -35,7 +35,10 @@ _DAEMON_STOP_TIMEOUT_S = 20
 _MAX_ARTIFACT_COPY_BYTES = 128 * 1024 * 1024
 _CACHE_CLEANUP_INIT = (
     "beforeSettings { settings ->\n"
-    "    settings.caches.cleanup = Cleanup.DISABLED\n"
+    "    settings.caches { cleanup = Cleanup.DISABLED }\n"
+    "    if (System.getProperty('architecture.cacheCleanupProbe') == 'true') {\n"
+    "        println 'Architecture suite cache cleanup disabled'\n"
+    "    }\n"
     "}\n"
 )
 
@@ -1808,19 +1811,17 @@ class LoggedGradleSubprocessTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="gradle-cleanup-probe-") as directory:
             project = Path(directory)
             (project / "settings.gradle").write_text(
-                "assert caches.cleanup.toString() == 'DISABLED' : "
-                "'architecture suite cleanup must be disabled'\n"
-                "rootProject.name = 'cache-cleanup-probe'\n",
-                encoding="utf-8",
+                "rootProject.name = 'cache-cleanup-probe'\n", encoding="utf-8",
             )
             (project / "build.gradle").write_text("", encoding="utf-8")
             result = run_logged_gradle(
                 [str(ROOT / "gradlew"), "--daemon", "--offline",
-                 "--console=plain", "help"],
+                 "--console=plain", "-Darchitecture.cacheCleanupProbe=true", "help"],
                 cwd=project, scenario="Gradle User Home cleanup policy",
                 phase="cache-policy", sequence=1, timeout=180,
             )
             self.assertEqual(0, result.returncode)
+            self.assertIn("Architecture suite cache cleanup disabled", result.stdout)
 
     def test_daemon_stop_targets_only_private_suite_registry(self):
         with tempfile.TemporaryDirectory(prefix="architecture-daemon-unit-") as directory:
