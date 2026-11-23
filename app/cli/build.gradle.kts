@@ -18,6 +18,7 @@ dependencies {
     implementation(libs.koin.core)
     testImplementation(libs.koin.test)
     testImplementation(testFixtures(project(":core:contracts")))
+    testImplementation(testFixtures(project(":core:tasks")))
     implementation(libs.coroutines.core)
 }
 

@@ -181,8 +181,12 @@ private class TasksCommand(
 
     // Delay file store creation until after Clikt has validated the command.
     private fun dependencies(): TaskComposition =
-        composition ?: TaskComposition(repositoryFactory(storeDirectory), TaskRepositoryOwnership.OWNED)
-            .also { composition = it }
+        composition ?: TaskComposition(
+            repositoryFactory(storeDirectory),
+            TaskRepositoryOwnership.OWNED,
+            // The CLI store option owns run layout even with a substituted repository adapter.
+            DirectoryTaskRunPaths.forStore(storeDirectory)
+        ).also { composition = it }
 
     fun enqueue(): EnqueueTaskUseCase = dependencies().enqueue()
     fun queries(): TaskQueriesUseCase = dependencies().queries()

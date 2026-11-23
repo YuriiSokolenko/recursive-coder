@@ -126,7 +126,7 @@ class EnqueueTaskUseCaseTest {
         val substitute = object : EnqueueTaskUseCase {
             override fun invoke(requestJson: String, priority: Int, dependencies: List<String>): Task = expected
         }
-        val service = TaskService(repository, fixed, substitute)
+        val service = TaskService(repository, VirtualTaskRunPaths, fixed, substitute)
         assertSame(expected, service.enqueue("intentionally not valid JSON"))
         assertTrue(repository.read { it.tasks }.isEmpty())
     }

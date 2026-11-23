@@ -7,9 +7,14 @@ import java.util.concurrent.Executors
 import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
 
-/** Compatibility façade; new CLI and scheduler consumers inject use cases directly. */
+/**
+ * Compatibility façade; new CLI and scheduler consumers inject use cases directly.
+ * Callers must explicitly supply run paths: the historical TaskService(store, clock, ...)
+ * signature is intentionally not retained because it would silently infer output layout.
+ */
 class TaskService(
     val store: TaskRepository,
+    private val runPaths: TaskRunPaths,
     private val clock: Clock = Clock.systemUTC(),
     private val enqueueUseCase: EnqueueTaskUseCase = DefaultEnqueueTaskUseCase(store, clock)
 ) {
@@ -19,7 +24,7 @@ class TaskService(
     internal val interruptUseCase: InterruptTaskAttemptUseCase = DefaultInterruptTaskAttemptUseCase(store, clock)
     internal val recoverUseCase: RecoverInterruptedAttemptsUseCase =
         DefaultRecoverInterruptedAttemptsUseCase(store, clock)
-    internal val prepareUseCase: PrepareTaskAttemptUseCase = DefaultPrepareTaskAttemptUseCase(store)
+    internal val prepareUseCase: PrepareTaskAttemptUseCase = DefaultPrepareTaskAttemptUseCase(runPaths)
     private val cancelUseCase: CancelTaskUseCase = DefaultCancelTaskUseCase(store, clock)
     private val retryUseCase: RetryTaskUseCase = DefaultRetryTaskUseCase(store, clock)
     private val pauseUseCase: PauseTaskQueueUseCase = DefaultPauseTaskQueueUseCase(store, clock)

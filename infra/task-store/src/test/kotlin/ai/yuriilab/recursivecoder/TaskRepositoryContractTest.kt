@@ -48,7 +48,7 @@ with open(sys.argv[1], 'a+b', buffering=0) as guard:
             "memory" to InMemoryTaskRepository(),
             "file" to TaskStore(temp.resolve("store"))
         ).map { (name, repo) ->
-            val service = TaskService(repo)
+            val service = TaskService(repo, DirectoryTaskRunPaths(temp.resolve("contract-runs/$name")))
             val initial = Task(
                 id = "only", requestTemplate = "{}", dependencies = emptyList(),
                 priority = 50, state = TaskState.READY
