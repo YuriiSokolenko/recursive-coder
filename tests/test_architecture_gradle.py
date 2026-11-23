@@ -106,7 +106,7 @@ def _prune_stale_suite_homes(parent: Path) -> None:
                 continue
             shutil.rmtree(home)  # CPython 3.10+ does not follow junction targets.
             print(f"[architecture-suite-home] pruned-stale={home.name}", flush=True)
-        except (OSError, UnicodeError, ValueError) as error:
+        except (OSError, UnicodeError, ValueError, OverflowError) as error:
             # Stale cleanup is best-effort and cannot make the test suite fail.
             print(
                 f"[architecture-suite-home] stale-prune-warning="
@@ -1985,6 +1985,29 @@ class LoggedGradleSubprocessTest(unittest.TestCase):
             self.assertTrue(fresh.exists())
             self.assertTrue(unrelated.exists())
             self.assertTrue(active.exists())
+
+    @unittest.skipUnless(os.name == "posix", "POSIX oversized PID regression")
+    def test_corrupt_stale_marker_pid_never_aborts_suite_setup(self):
+        with tempfile.TemporaryDirectory(prefix="architecture-stale-pid-") as directory:
+            base = Path(directory).resolve()
+            parent = _private_suite_parent(base)
+            invalid = parent / (_SUITE_HOME_PREFIX + "invalid-pid")
+            invalid.mkdir(mode=0o700)
+            marker = invalid / _SUITE_MARKER
+            marker.write_text(
+                f"{_SUITE_MARKER_MAGIC}\npid=99999999999999999999\n"
+                f"host={socket.gethostname()}\n",
+                encoding="utf-8",
+            )
+            past = time.time() - _STALE_SUITE_SECONDS - 3600
+            os.utime(marker, (past, past))
+            output = io.StringIO()
+            with redirect_stdout(output):
+                with _create_suite_gradle_home(base) as isolated:
+                    self.assertTrue(Path(isolated).is_dir())
+            self.assertTrue(invalid.exists())
+            self.assertIn("stale-prune-warning=", output.getvalue())
+            self.assertIn("OverflowError", output.getvalue())
 
     def test_missing_all_home_locations_reports_fallbacks(self):
         with tempfile.TemporaryDirectory(prefix="ordinary-gradle-home-") as directory:
