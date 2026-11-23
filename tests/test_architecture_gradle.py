@@ -8,8 +8,8 @@ import os
 import re
 from pathlib import Path
 import shutil
-import statistics
 import signal
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -20,10 +20,83 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# Every fixture still owns its build outputs and configuration cache. Reusing
-# Gradle's process avoids repeated JVM startup without skipping any smoke checks.
+# Every fixture owns its build outputs and configuration cache. Gradle daemon
+# reuse across fixtures assumes immutable build-logic static/classloader state:
+# ArchitectureGraph and opt-in policies must not acquire mutable global caches.
+# The suite also owns a separate daemon registry so deliberately hostile fixture
+# scripts cannot run inside a developer's ordinary Gradle daemon.
 _GRADLE_INVOCATIONS: list[tuple[str, str, str, float, float | None, str]] = []
 _FIXTURE_COPIES: list[tuple[str, float]] = []
+_SUITE_GRADLE_HOME: tempfile.TemporaryDirectory[str] | None = None
+_DAEMON_IDLE_TIMEOUT_MS = 60_000
+_DAEMON_STOP_TIMEOUT_S = 20
+
+
+def _create_suite_gradle_home(shared_home: Path) -> tempfile.TemporaryDirectory[str]:
+    """Isolate daemon registry and user scripts, retain trusted offline caches."""
+    home = tempfile.TemporaryDirectory(prefix="architecture-gradle-home-")
+    try:
+        source = shared_home.expanduser().resolve() / "caches"
+        if source.is_dir():
+            dest = Path(home.name) / "caches"
+            try:
+                dest.symlink_to(source, target_is_directory=True)
+            except OSError:
+                if os.name != "nt":
+                    raise
+                # Windows junctions do not require elevated symlink privileges.
+                subprocess.run(
+                    ["cmd", "/c", "mklink", "/J", str(dest), str(source)],
+                    check=True, capture_output=True, text=True, timeout=10,
+                )
+        return home
+    except BaseException:
+        home.cleanup()
+        raise
+
+
+def _suite_gradle_home() -> str:
+    global _SUITE_GRADLE_HOME
+    if _SUITE_GRADLE_HOME is None:
+        shared = Path(os.environ.get("GRADLE_USER_HOME") or Path.home() / ".gradle")
+        _SUITE_GRADLE_HOME = _create_suite_gradle_home(shared)
+    return _SUITE_GRADLE_HOME.name
+
+
+def _stop_suite_daemons(reason: str) -> None:
+    """Stop ONLY this suite's daemon registry, never the user's daemon registry."""
+    if _SUITE_GRADLE_HOME is None:
+        return
+    print(f"[architecture-daemon] stopping isolated daemons: {reason}", flush=True)
+    try:
+        result = subprocess.run(
+            [str(ROOT / "gradlew"), "--stop"],
+            cwd=ROOT,
+            env={**os.environ, "GRADLE_USER_HOME": _SUITE_GRADLE_HOME.name},
+            capture_output=True,
+            text=True,
+            timeout=_DAEMON_STOP_TIMEOUT_S,
+            check=False,
+        )
+        print(
+            f"[architecture-daemon] stop exit={result.returncode}; "
+            f"output={result.stdout[-1024:]!r} stderr={result.stderr[-1024:]!r}",
+            flush=True,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        print(f"[architecture-daemon] WARNING stop failed: {error}", flush=True)
+
+
+@atexit.register
+def _cleanup_suite_gradle_home() -> None:
+    global _SUITE_GRADLE_HOME
+    if _SUITE_GRADLE_HOME is None:
+        return
+    try:
+        _stop_suite_daemons("test suite finished")
+    finally:
+        _SUITE_GRADLE_HOME.cleanup()
+        _SUITE_GRADLE_HOME = None
 
 
 @atexit.register
@@ -33,16 +106,9 @@ def _print_architecture_timings() -> None:
         return
     phase_times: dict[str, list[float]] = defaultdict(list)
     compile_times: dict[str, list[float]] = defaultdict(list)
-    for fixture, scenario, phase, elapsed, first_task, compile_state in _GRADLE_INVOCATIONS:
+    for _, _, phase, elapsed, _, compile_state in _GRADLE_INVOCATIONS:
         phase_times[phase].append(elapsed)
         compile_times[compile_state].append(elapsed)
-        startup = f"{first_task:.1f}s" if first_task is not None else "n/a"
-        print(
-            f"[architecture-timing] fixture={fixture} scenario={scenario!r} "
-            f"phase={phase} total={elapsed:.1f}s pre-task={startup} "
-            f"build-logic={compile_state}",
-            flush=True,
-        )
     print(
         f"[architecture-timing] Gradle invocations={len(_GRADLE_INVOCATIONS)} "
         f"elapsed-total={sum(x[3] for x in _GRADLE_INVOCATIONS):.1f}s "
@@ -62,7 +128,6 @@ def _print_architecture_timings() -> None:
             f"total={sum(values):.1f}s",
             flush=True,
         )
-
 
 
 class _WindowsProcessJob:
@@ -103,7 +168,7 @@ def _stop_gradle_tree(
     process: subprocess.Popen[str], *, force: bool = False,
     windows_job=None,
 ) -> None:
-    """Stop Gradle and its descendants, including children holding stdout."""
+    """Stop the CLI process tree; detached Gradle daemons require separate stop."""
     if os.name == "posix":
         try:
             os.killpg(process.pid, signal.SIGKILL if force else signal.SIGTERM)
@@ -143,12 +208,25 @@ def run_logged_gradle(
 ) -> subprocess.CompletedProcess[str]:
     """Stream combined output now, retain an exact transcript for assertions."""
     label = f"[gradle #{sequence:02d}] {scenario} | {phase}"
+    # All 93 Gradle invocations share a suite-only daemon pool. The 60s idle
+    # limit avoids leaving large test daemons running on developer workstations.
+    is_gradle = Path(command[0]).stem == "gradlew"  # also gradlew.bat on Windows
+    gradle_env = (
+        {**os.environ, "GRADLE_USER_HOME": _suite_gradle_home()}
+        if is_gradle else None
+    )
+    if is_gradle:
+        command = [
+            command[0], f"-Dorg.gradle.daemon.idletimeout={_DAEMON_IDLE_TIMEOUT_MS}",
+            *command[1:],
+        ]
     started = time.monotonic()
     print(f"{label} START timeout={timeout:g}s", flush=True)
     try:
         process = subprocess.Popen(
             command,
             cwd=cwd,
+            env=gradle_env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -220,8 +298,13 @@ def run_logged_gradle(
                         process, force=True, windows_job=windows_job
                     )
                     process.wait()
+                # A detached daemon is not a descendant of the Gradle CLI.
+                if is_gradle:
+                    _stop_suite_daemons(f"{label} timed out")
             reader.join(timeout=5)
             if reader.is_alive():
+                if is_gradle:
+                    _stop_suite_daemons(f"{label} stdout reader stuck")
                 # Parent may exit while its descendants still hold stdout.
                 _stop_gradle_tree(
                     process, force=True, windows_job=windows_job
@@ -279,11 +362,12 @@ def run_logged_gradle(
     compiled = re.findall(r"(?m)^> Task :build-logic:compileKotlin(?: ([^\r\n]+))?$", transcript)
     if not compiled:
         compile_state = "no-compile-task"
-    elif any(not item or item not in ("FROM-CACHE", "UP-TO-DATE", "SKIPPED") for item in compiled):
+    elif any(item not in ("FROM-CACHE", "UP-TO-DATE", "SKIPPED", "NO-SOURCE")
+             for item in compiled):
         compile_state = "executed"
     else:
         compile_state = compiled[-1].lower()
-    if Path(command[0]).name == "gradlew":
+    if is_gradle:
         _GRADLE_INVOCATIONS.append(
             (cwd.name, scenario, phase, elapsed, first_task_elapsed, compile_state)
         )
