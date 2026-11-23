@@ -40,9 +40,13 @@ class FailClosedProviderUsageGatewayTest {
         var calls = 0
         val caps = mutableListOf<Long>()
         val retries = mutableListOf<Boolean>()
+        val discoveryTimeouts = mutableListOf<Long>()
         override fun negotiate(config: ModelConfig, cancellation: Cancellation,
-            deadline: Instant) = GatewayCapabilities(config.features,
-            config.contextTokens, config.maxOutputTokens)
+            deadline: Instant): GatewayCapabilities {
+            discoveryTimeouts.add(config.requestTimeoutMs)
+            return GatewayCapabilities(config.features,
+                config.contextTokens, config.maxOutputTokens)
+        }
         override fun next(config: ModelConfig, task: Path,
             observed: Pair<Int, String>?, cancellation: Cancellation,
             deadline: Instant, allowRetry: Boolean): ModelTurn {
@@ -187,7 +191,7 @@ class FailClosedProviderUsageGatewayTest {
             failureCode { ledger.next() })
         assertEquals(10L, ledger.snapshot().observedInputTokens)
         assertEquals(5L, ledger.snapshot().observedOutputTokens)
-        assertEquals(50L, ledger.snapshot().accountedTokens)
+        assertEquals(15L, ledger.snapshot().accountedTokens)
         assertEquals(FailClosedProviderUsageGateway.ReceiptOutcome.DEADLINE_EXCEEDED,
             ledger.snapshot().receipts.single().outcome)
         assertEquals("MODEL_DEADLINE_EXCEEDED",
@@ -216,7 +220,7 @@ class FailClosedProviderUsageGatewayTest {
             ledger.next(config, task, null, cancellation, deadline, true)
         }
         assertFalse(ledger.snapshot().usageUnconfirmed)
-        assertEquals(50L, ledger.snapshot().accountedTokens)
+        assertEquals(15L, ledger.snapshot().accountedTokens)
         assertEquals(FailClosedProviderUsageGateway.ReceiptOutcome.CANCELLED,
             ledger.snapshot().receipts.single().outcome)
         assertEquals("MODEL_CANCELLED_AFTER_RESPONSE",
@@ -267,6 +271,16 @@ class FailClosedProviderUsageGatewayTest {
         ledger.next()
         assertEquals(125L, receivedTimeout)
         assertEquals(1, delegate.calls)
+    }
+
+    @Test fun discoveryTimeoutIsClampedWithoutReservingInferenceTokens() {
+        now.set(deadline.minusMillis(125))
+        val delegate = RecordedGateway { _, _ -> reply() }
+        val ledger = meter(delegate)
+        ledger.negotiate(config, Cancellation(), deadline)
+        assertEquals(listOf(125L), delegate.discoveryTimeouts)
+        assertEquals(0, delegate.calls)
+        assertEquals(0L, ledger.snapshot().accountedTokens)
     }
 
     @Test fun exceptionWithNoUsageRecordsAnUnconfirmedReceiptAndSafeCauseCode() {
@@ -392,6 +406,36 @@ class FailClosedProviderUsageGatewayTest {
             assertEquals(0, ledger.snapshot().receipts.size)
         }
         assertEquals(0, delegate.calls)
+    }
+
+    @Test fun invalidTimeoutAfterAcceptedTurnRetainsOnlyConfirmedUsage() {
+        val delegate = RecordedGateway { _, _ -> reply() }
+        val ledger = meter(delegate)
+        ledger.next()
+        assertEquals("MODEL_REQUEST_TIMEOUT_INVALID",
+            failureCode { ledger.next(model = config.copy(requestTimeoutMs = 0)) })
+        val snapshot = ledger.snapshot()
+        assertEquals(15L, snapshot.accountedTokens)
+        assertFalse(snapshot.usageUnconfirmed)
+        assertEquals(1, snapshot.receipts.size)
+        assertEquals("MODEL_REQUEST_TIMEOUT_INVALID", snapshot.terminalCode)
+        assertEquals("MODEL_REQUEST_TIMEOUT_INVALID",
+            failureCode { ledger.next() })
+        assertEquals(1, delegate.calls)
+    }
+
+    @Test fun subMillisecondDeadlineAfterAcceptedTurnDoesNotForfeitGrant() {
+        val delegate = RecordedGateway { _, _ -> reply() }
+        val ledger = meter(delegate)
+        ledger.next()
+        now.set(deadline.minusNanos(500_000))
+        assertEquals("MODEL_DEADLINE_EXCEEDED",
+            failureCode { ledger.next() })
+        val snapshot = ledger.snapshot()
+        assertEquals(15L, snapshot.accountedTokens)
+        assertFalse(snapshot.usageUnconfirmed)
+        assertEquals(1, snapshot.receipts.size)
+        assertEquals(1, delegate.calls)
     }
 
     @Test fun cancellationBeforeAnyDispatchDoesNotReserveInferenceTokens() {

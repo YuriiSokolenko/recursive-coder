@@ -59,9 +59,6 @@ class FailClosedProviderUsageGateway(
 
     private val lock = Any()
     private var inFlightOperation: Operation? = null
-    // True only after a completion has been admitted for dispatch, not for
-    // discovery or other pre-dispatch policy denials.
-    private var completionAttempted = false
     private var input = 0L
     private var output = 0L
     private var unconfirmed = false
@@ -76,16 +73,15 @@ class FailClosedProviderUsageGateway(
     private fun observed() = saturatedSum(input, output)
 
     /**
-     * Never waits for a provider call. Only an active completion reserves
-     * the grant; capability discovery is not inference. A known overrun
-     * accounts the excess, while uncertain completion attempts retain a
-     * nonrefundable allocation. No double-counting as a scheduler charge.
+     * Never waits for a provider call. Active completions and unconfirmed
+     * usage reserve at least the grant; capability discovery and terminal
+     * states with confirmed usage account only observed tokens, including
+     * known overruns. No double-counting as a scheduler charge.
      */
     fun snapshot(): Snapshot = synchronized(lock) {
         val observed = observed()
         Snapshot(grantedTokens, input, output,
-            if (inFlightOperation == Operation.COMPLETION || unconfirmed ||
-                (terminalCode != null && completionAttempted))
+            if (inFlightOperation == Operation.COMPLETION || unconfirmed)
                 maxOf(grantedTokens, observed)
             else observed,
             receipts.toList(), unconfirmed, terminalCode, causeCode,
@@ -129,16 +125,22 @@ class FailClosedProviderUsageGateway(
     override fun negotiate(
         config: ModelConfig, cancellation: Cancellation, deadline: Instant
     ): GatewayCapabilities {
-        val bounded = synchronized(lock) {
-            val value = gate(config, deadline)
-            checkCancellation(cancellation, value)
+        val prepared = synchronized(lock) {
+            val bounded = gate(config, deadline)
+            checkCancellation(cancellation, bounded)
+            // Discovery has no inference charge, but its HTTP request must
+            // still respect the admitted deadline.
+            val timeout = Duration.between(clock.instant(), bounded).toMillis()
+            if (timeout <= 0L) deny("MODEL_DEADLINE_EXCEEDED")
+            if (config.requestTimeoutMs <= 0L) deny("MODEL_REQUEST_TIMEOUT_INVALID")
             inFlightOperation = Operation.DISCOVERY
-            value
+            Prepared(config.copy(requestTimeoutMs = minOf(config.requestTimeoutMs, timeout)),
+                bounded)
         }
         try {
             // Discovery is not an inference attempt; a discovery failure
             // cannot certify successful completion nor spend an inference grant.
-            return delegate.negotiate(config, cancellation, bounded)
+            return delegate.negotiate(prepared.config, cancellation, prepared.deadline)
         } finally {
             synchronized(lock) { inFlightOperation = null }
         }
@@ -185,7 +187,6 @@ class FailClosedProviderUsageGateway(
                 terminalCode = "MODEL_REQUEST_TIMEOUT_INVALID"
                 deny(terminalCode!!)
             }
-            completionAttempted = true
             inFlightOperation = Operation.COMPLETION
             Prepared(boundedConfig, bounded)
         }
@@ -197,7 +198,7 @@ class FailClosedProviderUsageGateway(
                 prepared.deadline, allowRetry = false)
         } catch (stopped: Stopped) {
             synchronized(lock) {
-                record(config, ReceiptOutcome.CANCELLED, provenance = "gateway-stopped")
+                record(prepared.config, ReceiptOutcome.CANCELLED, provenance = "gateway-stopped")
                 unconfirmed = true
                 terminalCode = "MODEL_USAGE_UNCONFIRMED"
                 inFlightOperation = null
@@ -205,7 +206,7 @@ class FailClosedProviderUsageGateway(
             throw stopped
         } catch (interrupted: InterruptedException) {
             synchronized(lock) {
-                record(config, ReceiptOutcome.CANCELLED, provenance = "gateway-interrupted")
+                record(prepared.config, ReceiptOutcome.CANCELLED, provenance = "gateway-interrupted")
                 unconfirmed = true
                 terminalCode = "MODEL_USAGE_UNCONFIRMED"
                 inFlightOperation = null
@@ -214,14 +215,14 @@ class FailClosedProviderUsageGateway(
             throw Stopped(false)
         } catch (failure: Exception) {
             synchronized(lock) {
-                record(config, ReceiptOutcome.UNCONFIRMED, provenance = "gateway-exception")
+                record(prepared.config, ReceiptOutcome.UNCONFIRMED, provenance = "gateway-exception")
                 inFlightOperation = null
                 poison("MODEL_USAGE_UNCONFIRMED",
                     (failure as? Refused)?.code)
             }
         } catch (fatal: Error) {
             synchronized(lock) {
-                record(config, ReceiptOutcome.UNCONFIRMED, provenance = "gateway-error")
+                record(prepared.config, ReceiptOutcome.UNCONFIRMED, provenance = "gateway-error")
                 unconfirmed = true
                 terminalCode = "MODEL_USAGE_UNCONFIRMED"
                 inFlightOperation = null
@@ -235,7 +236,7 @@ class FailClosedProviderUsageGateway(
             inFlightOperation = null
             val usage = turn.usage
             if (usage == null) {
-                record(config, ReceiptOutcome.UNCONFIRMED, status = turn.statusCode,
+                record(prepared.config, ReceiptOutcome.UNCONFIRMED, status = turn.statusCode,
                     attempts = turn.attempts)
                 poison("MODEL_USAGE_UNCONFIRMED")
             }
@@ -246,25 +247,25 @@ class FailClosedProviderUsageGateway(
             if (usage.input <= 0 || usage.output < 0 || inputOverflow || outputOverflow ||
                 usage.input > Long.MAX_VALUE - usage.output ||
                 input > Long.MAX_VALUE - output) {
-                record(config, ReceiptOutcome.UNCONFIRMED, usage,
+                record(prepared.config, ReceiptOutcome.UNCONFIRMED, usage,
                     turn.statusCode, turn.attempts)
                 poison("MODEL_USAGE_UNCONFIRMED")
             }
             val status = turn.statusCode
             if (turn.attempts != 1 || status == null || status !in 200..299) {
-                record(config, ReceiptOutcome.UNCONFIRMED, usage,
+                record(prepared.config, ReceiptOutcome.UNCONFIRMED, usage,
                     status, turn.attempts)
                 poison("MODEL_USAGE_UNCONFIRMED")
             }
             if (usage.output > prepared.config.maxOutputTokens ||
                 this.observed() > grantedTokens) {
-                record(config, ReceiptOutcome.BUDGET_EXCEEDED, usage,
+                record(prepared.config, ReceiptOutcome.BUDGET_EXCEEDED, usage,
                     status, turn.attempts)
                 terminalCode = "MODEL_TOKEN_BUDGET_EXHAUSTED"
                 deny(terminalCode!!)
             }
             if (!clock.instant().isBefore(prepared.deadline)) {
-                record(config, ReceiptOutcome.DEADLINE_EXCEEDED, usage,
+                record(prepared.config, ReceiptOutcome.DEADLINE_EXCEEDED, usage,
                     status, turn.attempts)
                 terminalCode = "MODEL_DEADLINE_EXCEEDED"
                 deny(terminalCode!!)
@@ -274,12 +275,12 @@ class FailClosedProviderUsageGateway(
             try {
                 checkCancellation(cancellation, prepared.deadline)
             } catch (stopped: Stopped) {
-                record(config, ReceiptOutcome.CANCELLED, usage,
+                record(prepared.config, ReceiptOutcome.CANCELLED, usage,
                     status, turn.attempts)
                 terminalCode = "MODEL_CANCELLED_AFTER_RESPONSE"
                 throw stopped
             }
-            record(config, ReceiptOutcome.ACCEPTED, usage, status, turn.attempts)
+            record(prepared.config, ReceiptOutcome.ACCEPTED, usage, status, turn.attempts)
             turn
         }
     }

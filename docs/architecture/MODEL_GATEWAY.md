@@ -139,8 +139,9 @@ positive token grant and an absolute child deadline. The wrapper:
   per-attempt accounting protocol. Capability-discovery GET retries are
   unaffected; they are not completion/inference requests.
 - Bounds `maxOutputTokens` to remaining *total* grant before dispatch
-  and clamps the HTTP request timeout to the admitted deadline's remaining
-  milliseconds. This is best-effort transport limiting; a stalled body read
+  and clamps the HTTP request timeout (including capability discovery)
+  to the admitted deadline's remaining milliseconds. This is best-effort
+  transport limiting; a stalled body read
   can still require an external cancellation/watchdog.
   Sums input+output tokens across all calls, retaining valid observed
   consumption even if it exceeds the grant. Any overrun, response after
@@ -155,21 +156,23 @@ positive token grant and an absolute child deadline. The wrapper:
   unproven-status usage as **unconfirmed**; a thrown exception after a
   possible completion dispatch does the same (including cancellation).
   An unconfirmed meter is permanently poisoned and refuses any next
-  completion or negotiation. Unconfirmed attempts conservatively reserve
-  at least the full grant; confirmed overruns account the full observed
-  input-plus-output total, even when it exceeds the grant.
+  completion or negotiation.
 - Exposes nonblocking `snapshot()` with metadata-only per-call receipts
   for **accepted, budget-exceeded, late, cancelled, and unconfirmed** attempts,
-  observed input/output counters, a nonrefundable allocation and an uncertainty
-  flag. Failed requests without usage have null token counts, never fake zero
+  observed input/output counters, a conservative in-flight or uncertain-usage
+  reservation and an uncertainty flag. Failed requests without usage have null token counts, never fake zero
   usage. A concurrent `next` is denied as `MODEL_CALL_IN_FLIGHT`; the
   network call never holds the state monitor. Capability discovery uses a
   separate in-flight operation: it blocks concurrent inference but does
   **not** reserve inference tokens in `snapshot()`. Invalid configured
   request timeouts fail with `MODEL_REQUEST_TIMEOUT_INVALID` before
   dispatch and record no inference charge.
-  Confirmed overspends are accounted as `maxOf(grant, observed)`, not capped
-  at the grant; unknown consumption reserves at least the whole grant.
+  `accountedTokens` reports observed input-plus-output tokens for confirmed
+  responses, including fully metered late/cancelled responses and overruns
+  (which can exceed the grant). It reserves `maxOf(grant, observed)` only
+  during an in-flight completion or when usage is unconfirmed. A later
+  pre-dispatch terminal denial does **not** forfeit unused grant, although
+  the terminal state still blocks additional work.
   The snapshot also retains a sanitized provider `causeCode` (no exception
   text, paths or credentials). Cancellation after a fully metered response
   retains confirmed usage but terminates the meter.
