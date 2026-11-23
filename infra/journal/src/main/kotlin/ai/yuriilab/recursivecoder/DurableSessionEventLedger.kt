@@ -131,7 +131,7 @@ class DurableSessionEventLedger private constructor(
         /** A new full framed record must leave the reopened ledger checkpointable. */
         internal fun requireReopenCheckpointCapacity(position: Long, payloadSize: Int) {
             if (payloadSize <= 0 || position < 0 ||
-                position + FRAME_OVERHEAD_BYTES + payloadSize > MAX_LIVE_CHECKPOINT_LEDGER_BYTES)
+                position > MAX_LIVE_CHECKPOINT_LEDGER_BYTES - FRAME_OVERHEAD_BYTES - payloadSize)
                 throw SessionLedgerUnconfirmed(REOPEN_CHECKPOINT_CAPACITY_CODE)
         }
         /** Both normal and reopened writers enforce the replayable whole-file caps. */
@@ -139,7 +139,8 @@ class DurableSessionEventLedger private constructor(
             if (committed >= MAX_EVENTS)
                 throw SessionLedgerUnconfirmed("LEDGER_EVENT_LIMIT_EXCEEDED")
             if (payloadSize !in 1..MAX_EVENT_BYTES ||
-                position < MAGIC.size || position + FRAME_OVERHEAD_BYTES + payloadSize > MAX_LEDGER_BYTES)
+                position < MAGIC.size ||
+                position > MAX_LEDGER_BYTES - FRAME_OVERHEAD_BYTES - payloadSize)
                 throw SessionLedgerUnconfirmed("LEDGER_RECORD_SIZE_INVALID")
         }
 
@@ -268,7 +269,15 @@ class DurableSessionEventLedger private constructor(
          * workspace root is mandatory so journal storage cannot be placed under
          * a checkout whose files are controlled by a Developer stage.
          */
-        fun create(path: Path, workspaceRoot: Path): DurableSessionEventLedger {
+        @OptIn(LedgerTestFaultInjection::class)
+        fun create(path: Path, workspaceRoot: Path): DurableSessionEventLedger =
+            createWithFault(path, workspaceRoot) { }
+
+        /** Test-only fault seam; production callers never supply arbitrary callbacks. */
+        @LedgerTestFaultInjection
+        internal fun createWithFault(
+            path: Path, workspaceRoot: Path, afterPhase: (String) -> Unit
+        ): DurableSessionEventLedger {
             val file = guardedPath(path)
             val workspace = workspaceRoot.toRealPath()
             if (file.startsWith(workspace))
@@ -282,10 +291,15 @@ class DurableSessionEventLedger private constructor(
             try {
                 channel = FileChannel.open(file, StandardOpenOption.CREATE_NEW,
                     StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)
+                afterPhase("before-header-write")
                 writeFully(channel, MAGIC)
+                afterPhase("header-written")
+                afterPhase("before-header-force")
                 channel.force(true)
+                afterPhase("header-forced")
                 // Persist new directory entries as well as the file content.
                 FileChannel.open(file.parent, StandardOpenOption.READ).use { it.force(true) }
+                afterPhase("parent-forced")
                 return DurableSessionEventLedger(file, channel, owner, lock)
             } catch (e: Exception) {
                 try { channel?.close() } catch (cleanup: Exception) { e.addSuppressed(cleanup) }
@@ -293,7 +307,7 @@ class DurableSessionEventLedger private constructor(
                 catch (cleanup: Exception) { e.addSuppressed(cleanup) }
                 if (e is java.nio.file.FileAlreadyExistsException)
                     throw SessionLedgerUnconfirmed("LEDGER_ALREADY_EXISTS", e)
-                throw e
+                throw SessionLedgerUnconfirmed("LEDGER_CREATE_UNCONFIRMED", e)
             }
         }
 
@@ -428,9 +442,11 @@ class DurableSessionEventLedger private constructor(
         }
 
         /** Read-only inspect owns a separate READ channel under its own lease. */
-        private fun replayUnlocked(file: Path): VerifiedSessionEventLedger =
+        private fun replayUnlocked(
+            file: Path, eventLimit: Int = MAX_EVENTS
+        ): VerifiedSessionEventLedger =
             FileChannel.open(file, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS).use {
-                replayChannel(it)
+                replayChannel(it, eventLimit)
             }
 
         /**
@@ -438,7 +454,9 @@ class DurableSessionEventLedger private constructor(
          * No new path lookup or second descriptor can change the file identity
          * between validation and the long-lived writer's subsequent writes.
          */
-        private fun replayChannel(reader: FileChannel): VerifiedSessionEventLedger {
+        private fun replayChannel(
+            reader: FileChannel, eventLimit: Int = MAX_EVENTS
+        ): VerifiedSessionEventLedger {
                 reader.position(0L)
                 val size = reader.size()
                 if (size < MAGIC.size || size > MAX_LEDGER_BYTES)
@@ -454,7 +472,9 @@ class DurableSessionEventLedger private constructor(
                 var identity: Pair<String, String>? = null
                 var sequence = 0
                 while (reader.position() < size) {
-                    if (++sequence > MAX_EVENTS || size - reader.position() < 4)
+                    if (++sequence > eventLimit)
+                        throw SessionLedgerUnconfirmed("LEDGER_EVENT_LIMIT_EXCEEDED")
+                    if (size - reader.position() < 4)
                         throw SessionLedgerUnconfirmed("LEDGER_TRUNCATED")
                     val sizeBytes = readFully(reader, 4)
                     val payloadSize = ByteBuffer.wrap(sizeBytes).int
@@ -486,24 +506,54 @@ class DurableSessionEventLedger private constructor(
         }
 
         /** Immutable, fully checked read. Never interprets a prefix as safe resume. */
-        fun inspect(path: Path): VerifiedSessionEventLedger {
+        @OptIn(LedgerTestFaultInjection::class)
+        fun inspect(path: Path): VerifiedSessionEventLedger =
+            inspectWithFault(path) { }
+
+        /** Fault seam for failed cleanup; the OS lease is always released. */
+        @LedgerTestFaultInjection
+        internal fun inspectWithFault(
+            path: Path, beforeRelease: () -> Unit
+        ): VerifiedSessionEventLedger = inspectWithBound(path, beforeRelease, MAX_EVENTS)
+
+        /**
+         * Test-only small replay ceiling: exercises the real replay branch
+         * without allocating 100k JSON objects or performing 100k fsyncs.
+         */
+        @LedgerTestFaultInjection
+        internal fun inspectWithEventLimitForTest(
+            path: Path, eventLimit: Int
+        ): VerifiedSessionEventLedger {
+            require(eventLimit in 1..MAX_EVENTS)
+            return inspectWithBound(path, {}, eventLimit)
+        }
+
+        private fun inspectWithBound(
+            path: Path, beforeRelease: () -> Unit, eventLimit: Int
+        ): VerifiedSessionEventLedger {
             val file = guardedPath(path)
             if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS))
                 throw SessionLedgerUnconfirmed("INVALID_LEDGER_PATH")
             val (owner, lock) = acquire(file, createLock = false)
             var inspectionFailure: Throwable? = null
             try {
-                return replayUnlocked(file)
+                return replayUnlocked(file, eventLimit)
             } catch (failure: Throwable) {
                 inspectionFailure = failure
                 throw failure
             } finally {
-                try {
-                    release(file, owner, lock)
-                } catch (cleanup: Exception) {
-                    // Never replace the corruption/verification refusal with cleanup.
-                    if (inspectionFailure != null) inspectionFailure.addSuppressed(cleanup)
-                    else throw cleanup
+                var cleanupFailure: Throwable? = null
+                try { beforeRelease() }
+                catch (error: Throwable) { cleanupFailure = error }
+                try { release(file, owner, lock) }
+                catch (error: Throwable) {
+                    if (cleanupFailure == null) cleanupFailure = error
+                    else cleanupFailure.addSuppressed(error)
+                }
+                if (cleanupFailure != null) {
+                    // Never replace the corruption/hash refusal with cleanup.
+                    if (inspectionFailure != null) inspectionFailure.addSuppressed(cleanupFailure)
+                    else throw cleanupFailure
                 }
             }
         }
@@ -821,7 +871,9 @@ class DurableSessionEventLedger private constructor(
                     }
                     pendingPhase = nextPhase
                     afterPhase("record-written")
-                    forcePending { afterPhase("forced-before-ack") }
+                    // The hook runs *after* force(true), before publication/ack.
+                    // A named argument prevents trailing-lambda rebinding.
+                    forcePending(afterForce = { afterPhase("forced-before-ack") })
                 }
             }
         } catch (_: FencedPolicyRefusal) {
@@ -847,7 +899,16 @@ class DurableSessionEventLedger private constructor(
         appendFrame(event)
     }
 
-    private fun appendFrame(event: JsonObject) {
+    /** Inject write faults without giving test callbacks to production callers. */
+    @LedgerTestFaultInjection
+    @Synchronized internal fun appendWithFault(
+        event: JsonObject, afterPhase: (String) -> Unit
+    ) {
+        if (resumeLease != null) throw SessionLedgerUnconfirmed("LEDGER_FENCED_API_REQUIRED")
+        appendFrame(event, afterPhase)
+    }
+
+    private fun appendFrame(event: JsonObject, afterPhase: ((String) -> Unit)? = null) {
         check(!closed && !poisoned && pending == null) { "Ledger not ready for append" }
         val next = committedSequence + 1
         val payload = event.toString().toByteArray(StandardCharsets.UTF_8)
@@ -863,7 +924,16 @@ class DurableSessionEventLedger private constructor(
         val frame = ByteBuffer.allocate(4 + 32 + payload.size)
             .putInt(payload.size).put(hash).put(payload).array()
         try {
-            writeFully(channel, frame)
+            if (afterPhase == null) {
+                // Preserve the production fast path and original write behavior.
+                writeFully(channel, frame)
+            } else {
+                afterPhase("before-record-write")
+                writeFully(channel, frame.copyOfRange(0, 4))
+                afterPhase("mid-record-write")
+                writeFully(channel, frame.copyOfRange(4, frame.size))
+                afterPhase("record-written")
+            }
             pending = (event["eventId"] as JsonPrimitive).content to hash
             pendingIdentity = identity
         } catch (e: Throwable) {
@@ -879,9 +949,20 @@ class DurableSessionEventLedger private constructor(
         forcePending()
     }
 
-    private fun forcePending(afterForce: () -> Unit = {}) {
+    @LedgerTestFaultInjection
+    @Synchronized internal fun flushWithFault(afterPhase: (String) -> Unit) {
+        if (resumeLease != null) throw SessionLedgerUnconfirmed("LEDGER_FENCED_API_REQUIRED")
+        forcePending(
+            afterForce = { afterPhase("forced-before-ack") },
+            beforeForce = { afterPhase("before-force") }
+        )
+    }
+
+    // Keep afterForce last: Kotlin trailing lambdas bind to the last parameter.
+    private fun forcePending(beforeForce: () -> Unit = {}, afterForce: () -> Unit = {}) {
         check(!closed && !poisoned) { "Ledger unavailable" }
         try {
+            beforeForce()
             channel.force(true)
             afterForce()
             pending?.let { (eventId, digest) ->

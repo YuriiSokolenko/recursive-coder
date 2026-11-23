@@ -141,7 +141,7 @@ object TrustedRunningOptInPolicy {
         "infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/DurableRuntimeAcceptedRunningHost.kt" to
             "7d89e7fd4a8362efdb6de602f6869f1a692550e863b8a109b5286abac8c4149e",
         "infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/DurableSessionEventLedger.kt" to
-            "2097733678d7855087a37b0fbf1f6e6d8980baf183c5535da89f987cf3ebfc4f",
+            "80aa979779f95c94e75f4e3373e94163b7660d94986e671b968d7ec7c222a898",
     )
 
     private val reviewedMarkerLine = Regex(

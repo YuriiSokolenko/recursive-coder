@@ -5,6 +5,18 @@ dependencies {
     implementation(project(":core:contracts"))
 }
 
+// The standalone JVM crash fixture must inherit the exact compiled test runtime
+// classpath, including transitive dependencies. Gradle's worker bootstrap
+// java.class.path is not a reliable source for a child Java process.
+listOf("test", "integrationTest").forEach { taskName ->
+    tasks.named<Test>(taskName) {
+        systemProperty(
+            "recursivecoder.fork.classpath",
+            sourceSets["test"].runtimeClasspath.asPath
+        )
+    }
+}
+
 /**
  * Real Kotlin 2.4 compiler contract: a C1/C2-only caller cannot reach C3.
  * Fixtures live outside the normal source sets: the negative file must fail
