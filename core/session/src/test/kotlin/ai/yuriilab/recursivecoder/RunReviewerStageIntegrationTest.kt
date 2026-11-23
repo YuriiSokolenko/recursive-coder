@@ -389,21 +389,25 @@ class RunReviewerStageIntegrationTest {
         }
         val events = mutableListOf<ReviewerDecisionRecord>()
         val changedResult = run(changed, FakeModel(), events)
-        assertEquals("STALE_REVIEW_LEASE",
-            assertIs<ReviewerStageOutcome.Denied>(
-                changedResult.outcome).code)
+        assertEquals("REVIEW_FINISH_DENIED",
+            assertIs<ReviewerStageOutcome.Failed>(changedResult.outcome).code)
+        assertEquals(changed.graph, changedResult.graph)
         assertNull(changed.committedDecision)
-        assertEquals(StageState.RUNNING, changed.graph.stages.last().state)
+        assertEquals(StageState.FAILED, changed.graph.stages.last().state)
+        assertNull(changed.active)
+        assertEquals(1, changed.aborted)
         assertTrue(events.isEmpty())
 
         val revoked = FakeHost()
         revoked.onFinishAttempt = { revoked.verifiedReceipts = false }
         val revokedResult = run(revoked, FakeModel())
-        assertEquals("STALE_REVIEW_LEASE",
-            assertIs<ReviewerStageOutcome.Denied>(
-                revokedResult.outcome).code)
+        assertEquals("REVIEW_FINISH_DENIED",
+            assertIs<ReviewerStageOutcome.Failed>(revokedResult.outcome).code)
+        assertEquals(revoked.graph, revokedResult.graph)
         assertNull(revoked.committedDecision)
-        assertEquals(StageState.RUNNING, revoked.graph.stages.last().state)
+        assertEquals(StageState.FAILED, revoked.graph.stages.last().state)
+        assertNull(revoked.active)
+        assertEquals(1, revoked.aborted)
     }
 
     @Test fun invalidOrHumanContradictoryResponseRetainsSpentUsage() = runBlocking {
@@ -422,11 +426,28 @@ class RunReviewerStageIntegrationTest {
         val host = FakeHost().apply { refuseFinish = true }
         val events = mutableListOf<ReviewerDecisionRecord>()
         val result = run(host, FakeModel(), events)
-        assertEquals("STALE_REVIEW_LEASE",
-            assertIs<ReviewerStageOutcome.Denied>(result.outcome).code)
+        assertEquals("REVIEW_FINISH_DENIED",
+            assertIs<ReviewerStageOutcome.Failed>(result.outcome).code)
+        assertEquals(host.graph, result.graph)
+        assertEquals(host.accepted, result.hostAcceptedArtifactIds)
+        assertNull(host.committedDecision)
+        assertEquals(StageState.FAILED, host.graph.stages.last().state)
+        assertNull(host.active)
+        assertEquals(1, host.aborted)
+        assertTrue(events.isEmpty())
+    }
+
+    @Test fun staleLeaseAtDefinitiveDenialRequiresReconciliation() = runBlocking {
+        val host = FakeHost()
+        host.onFinishAttempt = { host.active = null }
+        val events = mutableListOf<ReviewerDecisionRecord>()
+        val result = run(host, FakeModel(), events)
+        assertEquals("REVIEW_ABORT_UNCONFIRMED",
+            assertIs<ReviewerStageOutcome.ReconciliationRequired>(result.outcome).code)
         assertNull(result.graph)
         assertNull(host.committedDecision)
         assertEquals(StageState.RUNNING, host.graph.stages.last().state)
+        assertEquals(0, host.aborted)
         assertTrue(events.isEmpty())
     }
 

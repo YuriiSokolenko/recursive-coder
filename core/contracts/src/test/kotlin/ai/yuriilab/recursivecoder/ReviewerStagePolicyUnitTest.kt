@@ -142,7 +142,8 @@ class ReviewerStagePolicyUnitTest {
                 ReviewerCorrectionScope.NONE)
         )
         val codes = listOf("OK", "IMPLEMENTATION_DEFECT", "FROZEN_ARTIFACT_CHANGE",
-            "EVIDENCE_MISSING", "CHECK_FAILED", "OTHER_REQUIRES_HUMAN", "FREE_FORM")
+            "EVIDENCE_MISSING", "CHECK_FAILED", "OTHER_REQUIRES_HUMAN",
+            "FREE_FORM", "", "ok")
         val lease = lease()
         for (verdict in ReviewerDisposition.entries) {
             for (code in codes) {
@@ -159,6 +160,33 @@ class ReviewerStagePolicyUnitTest {
                 }
             }
         }
+    }
+
+    @Test fun validVerdictWithWrongTerminalStateIsDenied() {
+        val lease = lease()
+        for (verdict in ReviewerDisposition.entries) {
+            val approved = decision(verdict)
+            val wrongState = if (verdict == ReviewerDisposition.ACCEPT)
+                StageState.REJECTED else StageState.ACCEPTED
+            val malformed = next(lease.graph, approved).copy(stages =
+                next(lease.graph, approved).stages.map {
+                    if (it.kind == StageKind.REVIEW) it.copy(state = wrongState) else it
+                })
+            assertEquals(StageGateDecision.Deny(
+                if (verdict == ReviewerDisposition.ACCEPT) "INVALID_ACCEPTANCE"
+                else "INVALID_REJECTION"
+            ), finish(lease, approved, next = malformed), verdict.name)
+        }
+    }
+
+    @Test fun promptVerditRulesDeriveFromPolicy() {
+        assertEquals(
+            "ACCEPT/OK/NONE; REJECT/IMPLEMENTATION_DEFECT/IMPLEMENTATION_ONLY; " +
+                "NEEDS_HUMAN/FROZEN_ARTIFACT_CHANGE/FROZEN_INPUTS; " +
+                "NEEDS_HUMAN/EVIDENCE_MISSING/NONE; NEEDS_HUMAN/CHECK_FAILED/NONE; " +
+                "NEEDS_HUMAN/OTHER_REQUIRES_HUMAN/NONE",
+            ReviewerVerdictPolicy.promptAllowlist()
+        )
     }
 
     @Test fun positiveReviewerDecisionsRequireIndependentReviewAndHostEvidence() {

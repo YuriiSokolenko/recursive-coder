@@ -38,7 +38,8 @@ A Reviewer proposal is exactly one JSON object with four keys:
 
 The allowed choices are `ACCEPT`, `REJECT` and `NEEDS_HUMAN`.
 `ReviewerVerdictPolicy` in `:core:contracts` is the single literal
-verdict/code/scope allowlist shared by JSON decoding and host CAS:
+verdict/code/scope allowlist shared by JSON decoding, host CAS, and the
+Reviewer prompt:
 `ACCEPT/OK/NONE`; `REJECT/IMPLEMENTATION_DEFECT/IMPLEMENTATION_ONLY`;
 `NEEDS_HUMAN/FROZEN_ARTIFACT_CHANGE/FROZEN_INPUTS`; and
 `NEEDS_HUMAN/{EVIDENCE_MISSING,CHECK_FAILED,OTHER_REQUIRES_HUMAN}/NONE`.
@@ -69,9 +70,10 @@ and no accepted ID or artifact was mutated. The authoritative host must
 run this policy and independently recheck live receipt provenance while
 committing the decision atomically. The atomic `finishStage` port returns `ReviewerFinishResult`:
 `COMMITTED` confirms the decision, `DENIED` confirms **no** commit
-(the lease may still need explicit reconciliation/abort), and `UNKNOWN`
-or a thrown exception requires reconciliation under #85 even when a
-commit may already have happened. Neither denial nor unknown is an
+(a still-active lease is immediately aborted to a confirmed `FAILED`
+stage). If that abort cannot be confirmed, the result requires reconciliation.
+`UNKNOWN` or a thrown exception requires reconciliation under #85 even
+when a commit may already have happened. Neither denial nor unknown is an
 accepted verdict; no automatic retry or abort follows an unknown finish.
 
 ## Bounded repair routing

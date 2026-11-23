@@ -228,11 +228,11 @@ class RunReviewerStageUseCase(
             val prompt = buildString {
                 append(command.instruction)
                 append("\n\nYou are an independent, read-only Reviewer. Return ONLY JSON:")
-                append(" {\"verdict\":\"ACCEPT|REJECT|NEEDS_HUMAN\",")
-                append("\"code\":\"OK|IMPLEMENTATION_DEFECT|FROZEN_ARTIFACT_CHANGE|")
-                append("EVIDENCE_MISSING|CHECK_FAILED|OTHER_REQUIRES_HUMAN\",")
-                append("\"scope\":\"NONE|IMPLEMENTATION_ONLY|FROZEN_INPUTS\",")
-                append("\"evidence\":[\"check:git_diff_check\"]}.")
+                append(" {\"verdict\":\"ACCEPT\",\"code\":\"OK\",")
+                append("\"scope\":\"NONE\",\"evidence\":[\"check:git_diff_check\"]}.")
+                append(" Valid verdict/code/scope triples: ")
+                append(ReviewerVerdictPolicy.promptAllowlist())
+                append(".")
                 append(" ACCEPT requires ALL trusted check and write evidence IDs.")
                 append(" REJECT is ONLY for implementation-only corrections.")
                 append(" Frozen specification/test revisions require NEEDS_HUMAN.")
@@ -344,8 +344,9 @@ class RunReviewerStageUseCase(
             }
             when (committed) {
                 ReviewerFinishResult.COMMITTED -> Unit
-                ReviewerFinishResult.DENIED -> return ReviewerStageResult(null, null,
-                    ReviewerStageOutcome.Denied("STALE_REVIEW_LEASE"), spentUsage)
+                // Definitive denial does not release a still-active host lease.
+                // Abort and return a verified FAILED snapshot, or reconcile if stale.
+                ReviewerFinishResult.DENIED -> return abort("REVIEW_FINISH_DENIED")
                 ReviewerFinishResult.UNKNOWN -> return ReviewerStageResult(null, null,
                     ReviewerStageOutcome.ReconciliationRequired("REVIEW_FINISH_UNCONFIRMED"),
                     spentUsage)

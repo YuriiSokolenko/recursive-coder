@@ -13,20 +13,27 @@ enum class ReviewerCorrectionScope { NONE, IMPLEMENTATION_ONLY, FROZEN_INPUTS }
  * finish policy. A model cannot invent codes or choose a wider repair scope.
  */
 object ReviewerVerdictPolicy {
+    private val allowed = listOf(
+        Triple(ReviewerDisposition.ACCEPT, "OK", ReviewerCorrectionScope.NONE),
+        Triple(ReviewerDisposition.REJECT, "IMPLEMENTATION_DEFECT",
+            ReviewerCorrectionScope.IMPLEMENTATION_ONLY),
+        Triple(ReviewerDisposition.NEEDS_HUMAN, "FROZEN_ARTIFACT_CHANGE",
+            ReviewerCorrectionScope.FROZEN_INPUTS),
+        Triple(ReviewerDisposition.NEEDS_HUMAN, "EVIDENCE_MISSING",
+            ReviewerCorrectionScope.NONE),
+        Triple(ReviewerDisposition.NEEDS_HUMAN, "CHECK_FAILED",
+            ReviewerCorrectionScope.NONE),
+        Triple(ReviewerDisposition.NEEDS_HUMAN, "OTHER_REQUIRES_HUMAN",
+            ReviewerCorrectionScope.NONE)
+    )
+
     fun isAllowed(
         verdict: ReviewerDisposition, code: String, scope: ReviewerCorrectionScope
-    ): Boolean = when (verdict) {
-        ReviewerDisposition.ACCEPT ->
-            code == "OK" && scope == ReviewerCorrectionScope.NONE
-        ReviewerDisposition.REJECT ->
-            code == "IMPLEMENTATION_DEFECT" &&
-                scope == ReviewerCorrectionScope.IMPLEMENTATION_ONLY
-        ReviewerDisposition.NEEDS_HUMAN -> when (code) {
-            "FROZEN_ARTIFACT_CHANGE" -> scope == ReviewerCorrectionScope.FROZEN_INPUTS
-            "EVIDENCE_MISSING", "CHECK_FAILED", "OTHER_REQUIRES_HUMAN" ->
-                scope == ReviewerCorrectionScope.NONE
-            else -> false
-        }
+    ): Boolean = Triple(verdict, code, scope) in allowed
+
+    /** Advisory model prompt generated from the same rules as the authoritative gate. */
+    fun promptAllowlist(): String = allowed.joinToString("; ") { (verdict, code, scope) ->
+        "${verdict.name}/$code/${scope.name}"
     }
 }
 
@@ -114,6 +121,14 @@ interface ReviewerStageHost {
     fun current(lease: ReviewerStageLease): Boolean
     fun readBytes(path: String): ByteArray?
     fun verifyDeveloperEvidence(lease: ReviewerStageLease): Boolean
+    /**
+     * Atomically recheck evidence and commit. COMMITTED confirms persistence;
+     * DENIED definitively means no review commit (the lease may still be active);
+     * UNKNOWN means the host cannot determine whether the commit happened.
+     * Return UNKNOWN for an indeterminate outcome (e.g. lost remote ack), and
+     * throw only for an unexpected failure. A thrown finish is also treated as
+     * unknown by callers: neither may be retried or auto-aborted.
+     */
     fun finishStage(
         lease: ReviewerStageLease, updatedGraph: StageGraph,
         acceptedIds: Set<ArtifactId>, decision: ReviewerDecisionRecord

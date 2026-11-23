@@ -197,6 +197,13 @@ class FiveRoleWorkflowCoordinatorUnitTest {
                 }
                 "failed" -> return ReviewerStageResult(state.graph, state.acceptedIds,
                     ReviewerStageOutcome.Failed("REVIEWER_FAILED"))
+                "finish-denied-aborted" -> {
+                    val finished = committedDenial(StageKind.REVIEW)
+                    return ReviewerStageResult(finished.graph, finished.acceptedIds,
+                        ReviewerStageOutcome.Failed("REVIEW_FINISH_DENIED"))
+                }
+                "finish-denied-stale" -> return ReviewerStageResult(null, null,
+                    ReviewerStageOutcome.ReconciliationRequired("REVIEW_ABORT_UNCONFIRMED"))
                 "uncertain" -> return ReviewerStageResult(null, null,
                     ReviewerStageOutcome.ReconciliationRequired("REVIEWER_UNCERTAIN"))
             }
@@ -532,6 +539,21 @@ class FiveRoleWorkflowCoordinatorUnitTest {
             fixture.reviewMode = mode
             expectUncertain(fixture, code, StageKind.REVIEW)
         }
+    }
+
+    @Test fun reviewerFinishDenialNeverStopsWithoutConfirmedState() = runBlocking {
+        val aborted = Fixture()
+        aborted.reviewMode = "finish-denied-aborted"
+        val outcome = assertIs<FiveRoleWorkflowOutcome.Stopped>(aborted.run())
+        assertEquals("REVIEW_FINISH_DENIED", outcome.code)
+        assertEquals(StageKind.REVIEW, outcome.stage)
+        assertEquals(aborted.state, outcome.authoritative)
+        assertEquals(StageState.FAILED, aborted.state.graph.stages.last().state)
+
+        val stale = Fixture()
+        stale.reviewMode = "finish-denied-stale"
+        expectUncertain(stale, "REVIEW_ABORT_UNCONFIRMED", StageKind.REVIEW)
+        assertEquals(StageState.CREATED, stale.state.graph.stages.last().state)
     }
 
     @Test fun developerEvidenceIsForwardedOnlyToReviewerAndWithoutMutation() = runBlocking {
