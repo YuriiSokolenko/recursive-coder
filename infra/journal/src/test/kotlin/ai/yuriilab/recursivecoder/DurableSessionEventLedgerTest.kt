@@ -279,13 +279,19 @@ public class LeaseProbe {
 }
 """.trimIndent())
         val java = Path.of(System.getProperty("java.home"), "bin", "java").toString()
+        val diagnostics = temp.resolve("LeaseProbe.stderr")
         val process = ProcessBuilder(java, javaSource.toString(), lockFile.toString())
-            .redirectErrorStream(true).start()
+            .redirectError(diagnostics.toFile()).start()
         try {
-            assertTrue(process.waitFor(15, TimeUnit.SECONDS), "Lease probe did not exit")
-            val output = process.inputStream.bufferedReader().readText().trim()
-            assertEquals(0, process.exitValue(), output)
-            return output
+            assertTrue(process.waitFor(20, TimeUnit.SECONDS), "Lease probe did not exit")
+            val output = process.inputStream.bufferedReader().readText()
+            val stderr = Files.readString(diagnostics)
+            assertEquals(0, process.exitValue(), "stdout=$output stderr=$stderr")
+            // stdout is a protocol channel, not merged javac/JVM diagnostics.
+            val results = output.lineSequence().map { it.trim() }
+                .filter { it == "HELD" || it == "AVAILABLE" }.toList()
+            assertEquals(1, results.size, "stdout=$output stderr=$stderr")
+            return results.single()
         } finally {
             process.destroyForcibly()
         }
