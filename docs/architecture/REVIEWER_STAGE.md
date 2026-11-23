@@ -68,13 +68,16 @@ model or provider must select it explicitly.
 the verdict matches the pinned Developer manifest and independent actors,
 and no accepted ID or artifact was mutated. The authoritative host must
 run this policy and independently recheck live receipt provenance while
-committing the decision atomically. The atomic `finishStage` port returns `ReviewerFinishResult`:
-`COMMITTED` confirms the decision, `DENIED` confirms **no** commit
-(a still-active lease is immediately aborted to a confirmed `FAILED`
-stage). If that abort cannot be confirmed, the result requires reconciliation.
-`UNKNOWN` or a thrown exception requires reconciliation under #85 even
-when a commit may already have happened. Neither denial nor unknown is an
-accepted verdict; no automatic retry or abort follows an unknown finish.
+committing the decision atomically. The atomic `finishStage` port returns
+`ReviewerFinishResult`: `Committed` confirms the decision, `Denied(code)`
+confirms **no** commit and reports why (stale lease, failed evidence check,
+frozen-input drift, or a policy denial). A still-active lease is immediately
+aborted to a confirmed `FAILED` stage. An unconfirmed abort requires
+reconciliation; stale-lease denials use `REVIEW_FINISH_DENIED_STALE` to
+distinguish an invalidated lease from an uncertain finish. `Unknown` or a
+thrown exception requires reconciliation under #85 even when a commit
+may already have happened. No automatic retry or abort follows an
+unknown finish.
 
 ## Bounded repair routing
 

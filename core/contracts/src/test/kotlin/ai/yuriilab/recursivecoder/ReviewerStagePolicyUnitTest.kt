@@ -143,7 +143,7 @@ class ReviewerStagePolicyUnitTest {
         )
         val codes = listOf("OK", "IMPLEMENTATION_DEFECT", "FROZEN_ARTIFACT_CHANGE",
             "EVIDENCE_MISSING", "CHECK_FAILED", "OTHER_REQUIRES_HUMAN",
-            "FREE_FORM", "", "ok")
+            "FREE_FORM", "", "ok", "OK ", "\u039fK")
         val lease = lease()
         for (verdict in ReviewerDisposition.entries) {
             for (code in codes) {
@@ -179,14 +179,20 @@ class ReviewerStagePolicyUnitTest {
         }
     }
 
-    @Test fun promptVerdictRulesDeriveFromPolicy() {
-        assertEquals(
-            "ACCEPT/OK/NONE; REJECT/IMPLEMENTATION_DEFECT/IMPLEMENTATION_ONLY; " +
-                "NEEDS_HUMAN/FROZEN_ARTIFACT_CHANGE/FROZEN_INPUTS; " +
-                "NEEDS_HUMAN/EVIDENCE_MISSING/NONE; NEEDS_HUMAN/CHECK_FAILED/NONE; " +
-                "NEEDS_HUMAN/OTHER_REQUIRES_HUMAN/NONE",
-            ReviewerVerdictPolicy.promptAllowlist()
-        )
+    @Test fun reviewerVerdictRulesRemainOrderedAndExact() {
+        assertEquals(listOf(
+            Triple(ReviewerDisposition.ACCEPT, "OK", ReviewerCorrectionScope.NONE),
+            Triple(ReviewerDisposition.REJECT, "IMPLEMENTATION_DEFECT",
+                ReviewerCorrectionScope.IMPLEMENTATION_ONLY),
+            Triple(ReviewerDisposition.NEEDS_HUMAN, "FROZEN_ARTIFACT_CHANGE",
+                ReviewerCorrectionScope.FROZEN_INPUTS),
+            Triple(ReviewerDisposition.NEEDS_HUMAN, "EVIDENCE_MISSING",
+                ReviewerCorrectionScope.NONE),
+            Triple(ReviewerDisposition.NEEDS_HUMAN, "CHECK_FAILED",
+                ReviewerCorrectionScope.NONE),
+            Triple(ReviewerDisposition.NEEDS_HUMAN, "OTHER_REQUIRES_HUMAN",
+                ReviewerCorrectionScope.NONE)
+        ), ReviewerVerdictPolicy.allowedCombinations().toList())
     }
 
     @Test fun positiveReviewerDecisionsRequireIndependentReviewAndHostEvidence() {

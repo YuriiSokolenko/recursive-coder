@@ -382,6 +382,30 @@ class RunReviewerStageIntegrationTest {
             assertIs<ReviewerStageOutcome.Failed>(run(revoked, FakeModel()).outcome).code)
     }
 
+    @Test fun reviewerPromptExplainsEvidenceReferenceGrammar() = runBlocking {
+        val host = FakeHost()
+        val fake = FakeModel()
+        assertIs<ReviewerStageOutcome.Accepted>(run(host, fake).outcome)
+        val prompt = fake.requests.single().instruction
+        assertContains(prompt, "check:<verified-check id>")
+        assertContains(prompt, "write:<verified-write id>")
+        assertContains(prompt, "file:<changed-file path>")
+        assertContains(prompt, "Copy the tag ID/path with its prefix")
+        assertContains(prompt, "Choose exactly one allowed verdict/code/scope triple")
+        assertContains(prompt, "ACCEPT/OK/NONE")
+        assertContains(prompt, "REJECT/IMPLEMENTATION_DEFECT/IMPLEMENTATION_ONLY")
+        assertContains(prompt, "NEEDS_HUMAN/FROZEN_ARTIFACT_CHANGE/FROZEN_INPUTS")
+        assertContains(prompt, "id=\"git_diff_check\"")
+        assertContains(prompt, "id=\"write-77\"")
+
+        val unprefixed = FakeModel().apply {
+            response = """{"verdict":"ACCEPT","code":"OK","scope":"NONE","evidence":["git_diff_check","offline","write-77"]}"""
+        }
+        assertEquals("UNSUPPORTED_REVIEW_EVIDENCE",
+            assertIs<ReviewerStageOutcome.Failed>(
+                run(FakeHost(), unprefixed).outcome).code)
+    }
+
     @Test fun finishCommitRevalidatesFrozenBytesAndReceiptRevocation() = runBlocking {
         val changed = FakeHost()
         changed.onFinishAttempt = {
@@ -389,7 +413,7 @@ class RunReviewerStageIntegrationTest {
         }
         val events = mutableListOf<ReviewerDecisionRecord>()
         val changedResult = run(changed, FakeModel(), events)
-        assertEquals("REVIEW_FINISH_DENIED",
+        assertEquals("FROZEN_INPUT_OR_SOURCE_CHANGED",
             assertIs<ReviewerStageOutcome.Failed>(changedResult.outcome).code)
         assertEquals(changed.graph, changedResult.graph)
         assertNull(changed.committedDecision)
@@ -401,7 +425,7 @@ class RunReviewerStageIntegrationTest {
         val revoked = FakeHost()
         revoked.onFinishAttempt = { revoked.verifiedReceipts = false }
         val revokedResult = run(revoked, FakeModel())
-        assertEquals("REVIEW_FINISH_DENIED",
+        assertEquals("UNVERIFIED_DEVELOPER_EVIDENCE",
             assertIs<ReviewerStageOutcome.Failed>(revokedResult.outcome).code)
         assertEquals(revoked.graph, revokedResult.graph)
         assertNull(revoked.committedDecision)
@@ -442,7 +466,7 @@ class RunReviewerStageIntegrationTest {
         host.onFinishAttempt = { host.active = null }
         val events = mutableListOf<ReviewerDecisionRecord>()
         val result = run(host, FakeModel(), events)
-        assertEquals("REVIEW_ABORT_UNCONFIRMED",
+        assertEquals("REVIEW_FINISH_DENIED_STALE",
             assertIs<ReviewerStageOutcome.ReconciliationRequired>(result.outcome).code)
         assertNull(result.graph)
         assertNull(host.committedDecision)

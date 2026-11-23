@@ -232,8 +232,19 @@ class RunReviewerStageUseCase(
                 append(" verdict (string), code (string), scope (string),")
                 append(" evidence (array of trusted evidence-ID strings).")
                 append(" Choose exactly one allowed verdict/code/scope triple: ")
-                append(ReviewerVerdictPolicy.promptAllowlist())
+                append(ReviewerVerdictPolicy.allowedCombinations()
+                    .joinToString("; ") { (verdict, code, scope) ->
+                        "${verdict.name}/$code/${scope.name}"
+                    })
                 append(".")
+                append(" Evidence IDs must be prefixed: ")
+                append(ReviewerEvidenceReferences.CHECK_PREFIX)
+                append("<verified-check id>, ")
+                append(ReviewerEvidenceReferences.WRITE_PREFIX)
+                append("<verified-write id>, or ")
+                append(ReviewerEvidenceReferences.FILE_PREFIX)
+                append("<changed-file path>.")
+                append(" Copy the tag ID/path with its prefix; never use bare IDs.")
                 append(" ACCEPT requires ALL trusted check and write evidence IDs.")
                 append(" REJECT is ONLY for implementation-only corrections.")
                 append(" Frozen specification/test revisions require NEEDS_HUMAN.")
@@ -344,11 +355,20 @@ class RunReviewerStageUseCase(
                     spentUsage)
             }
             when (committed) {
-                ReviewerFinishResult.COMMITTED -> Unit
-                // Definitive denial does not release a still-active host lease.
-                // Abort and return a verified FAILED snapshot, or reconcile if stale.
-                ReviewerFinishResult.DENIED -> return abort("REVIEW_FINISH_DENIED")
-                ReviewerFinishResult.UNKNOWN -> return ReviewerStageResult(null, null,
+                ReviewerFinishResult.Committed -> Unit
+                is ReviewerFinishResult.Denied -> {
+                    // A definite no-commit still may leave a live Reviewer lease.
+                    // Abort if current; if stale, preserve the host's diagnosis
+                    // rather than falsely claiming that the finish was uncertain.
+                    val aborted = abort(committed.code)
+                    if (committed.code == "STALE_REVIEW_LEASE" &&
+                        aborted.outcome is ReviewerStageOutcome.ReconciliationRequired)
+                        return ReviewerStageResult(null, null,
+                            ReviewerStageOutcome.ReconciliationRequired(
+                                "REVIEW_FINISH_DENIED_STALE"), spentUsage)
+                    return aborted
+                }
+                ReviewerFinishResult.Unknown -> return ReviewerStageResult(null, null,
                     ReviewerStageOutcome.ReconciliationRequired("REVIEW_FINISH_UNCONFIRMED"),
                     spentUsage)
             }
