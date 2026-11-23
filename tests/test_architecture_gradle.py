@@ -1574,6 +1574,72 @@ class ArchitectureConfigurationCacheRegressionTest(_GradleOutputAssertions):
 class LoggedGradleSubprocessTest(unittest.TestCase):
     """Fast runner checks that do not require Gradle."""
 
+    def test_suite_daemon_registry_is_private_but_offline_cache_is_shared(self):
+        with tempfile.TemporaryDirectory(prefix="ordinary-gradle-home-") as source:
+            original = Path(source)
+            caches = original / "caches"
+            caches.mkdir()
+            (caches / "cached-module").write_text("present", encoding="utf-8")
+            (original / "daemon" / "9.8.2").mkdir(parents=True)
+            with _create_suite_gradle_home(original) as isolated:
+                suite = Path(isolated)
+                self.assertNotEqual(original, suite)
+                self.assertEqual(
+                    "present", (suite / "caches" / "cached-module").read_text(encoding="utf-8")
+                )
+                self.assertEqual(caches.resolve(), (suite / "caches").resolve())
+                self.assertFalse((suite / "daemon").exists())
+                self.assertTrue((original / "daemon" / "9.8.2").exists())
+
+    def test_daemon_stop_targets_only_private_suite_registry(self):
+        with tempfile.TemporaryDirectory(prefix="architecture-daemon-unit-") as directory:
+            test_home = mock.Mock()
+            test_home.name = directory
+            command_result = subprocess.CompletedProcess(
+                [str(ROOT / "gradlew"), "--stop"], 0, "Stopped", ""
+            )
+            with mock.patch.dict(globals(), {"_SUITE_GRADLE_HOME": test_home}):
+                with mock.patch.object(subprocess, "run", return_value=command_result) as invoke:
+                    _stop_suite_daemons("unit timeout")
+            invoke.assert_called_once()
+            args, kwargs = invoke.call_args
+            self.assertEqual([str(ROOT / "gradlew"), "--stop"], args[0])
+            self.assertEqual(directory, kwargs["env"]["GRADLE_USER_HOME"])
+            self.assertEqual(_DAEMON_STOP_TIMEOUT_S, kwargs["timeout"])
+            self.assertFalse(kwargs["check"])
+
+    @unittest.skipUnless(os.name == "posix", "POSIX process-group timeout regression")
+    def test_gradle_timeout_stops_detached_daemon_via_private_registry(self):
+        with tempfile.TemporaryDirectory(prefix="gradle-timeout-unit-") as directory:
+            executable = Path(directory) / "gradlew"
+            executable.write_text(
+                "#!/bin/sh\nprintf 'synthetic fixture\\n'\nsleep 60\n",
+                encoding="utf-8",
+            )
+            executable.chmod(0o755)
+            output = io.StringIO()
+            with mock.patch.dict(globals(), {"_SUITE_GRADLE_HOME": mock.Mock(name="unused")}):
+                # Substitute a real, unrelated temporary directory so that no
+                # ordinary Gradle daemon or actual Gradle binary is needed.
+                test_home = tempfile.TemporaryDirectory(prefix="gradle-timeout-home-")
+                with mock.patch.dict(globals(), {"_SUITE_GRADLE_HOME": test_home}):
+                    try:
+                        with mock.patch.object(
+                            sys.modules[__name__], "_stop_suite_daemons"
+                        ) as stop:
+                            with redirect_stdout(output):
+                                with self.assertRaisesRegex(AssertionError, "timed out"):
+                                    run_logged_gradle(
+                                        [str(executable), "--daemon"],
+                                        cwd=Path(directory),
+                                        scenario="simulated detached daemon timeout",
+                                        phase="cleanup", sequence=1, timeout=0.5,
+                                    )
+                        stop.assert_called_once()
+                        self.assertIn("timed out", stop.call_args.args[0])
+                    finally:
+                        test_home.cleanup()
+
     def test_combined_stream_and_failure_marker(self):
         log = io.StringIO()
         with redirect_stdout(log):
