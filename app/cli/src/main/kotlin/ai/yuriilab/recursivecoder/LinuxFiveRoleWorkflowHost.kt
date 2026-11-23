@@ -277,6 +277,13 @@ class LinuxFiveRoleWorkflowHost(
     // Fault seam at the actual port boundary, never installed by production.
     @Volatile internal var preparationReadTestHook: ((String) -> Unit)? = null
 
+    /**
+     * Deny-only fault seam for #160, never installed by production: returning
+     * true forces the pre-commit graph validation in [advance] to fail. It can
+     * only make advancement stricter, never bypass StageGraphPolicy.
+     */
+    @Volatile internal var advanceValidationDenialTestHook: ((StageGraph) -> Boolean)? = null
+
     override fun readBytes(path: String): ByteArray? {
         if (!ToolAuthorizationPolicy.validDeclaredPath(path) ||
             StageKind.entries.none { kind -> kind != StageKind.REVIEW &&
@@ -879,18 +886,9 @@ class LinuxFiveRoleWorkflowHost(
         // Detect identity collisions BEFORE any Git ref mutation.
         if (graph.stages.any { it.correlation.stageRunId == newStageId })
             return null
-        val frozen = graph.artifacts.filter { it.id in accepted &&
-            proof.files.none { changed -> changed.path == it.declaredPath } }
-            .associate { it.declaredPath to it.sha256 }
-        val status = reconciler.reconcile(StageGitReconciliationRequest(head, branch,
-            previous.kind.role,
-            proof.files.map { StageGitAcceptedFile(it.path, it.after) }, frozen))
-        val newHead = (status as? StageGitReconciliationResult.Committed)?.newHead
-        if (newHead == null) {
-            quarantined = true
-            return null
-        }
-        head = newHead
+        // The next node does not depend on the new HEAD. Build and validate it
+        // BEFORE the irreversible Git commit, so a policy denial can never leave
+        // HEAD advanced while the graph is not (issue #160).
         val dependencies = graph.stages.filter {
             it.kind.output in next.requiredInputs && it.state == StageState.ACCEPTED
         }
@@ -904,7 +902,20 @@ class LinuxFiveRoleWorkflowHost(
         )
         val result = graph.copy(stages = graph.stages + newStage)
         if (StageGraphPolicy.validate(result) != StageGateDecision.Permit ||
-            !frozenIntact() || !clean()) {
+            advanceValidationDenialTestHook?.invoke(result) == true) return null
+        val frozen = graph.artifacts.filter { it.id in accepted &&
+            proof.files.none { changed -> changed.path == it.declaredPath } }
+            .associate { it.declaredPath to it.sha256 }
+        val status = reconciler.reconcile(StageGitReconciliationRequest(head, branch,
+            previous.kind.role,
+            proof.files.map { StageGitAcceptedFile(it.path, it.after) }, frozen))
+        val newHead = (status as? StageGitReconciliationResult.Committed)?.newHead
+        if (newHead == null) {
+            quarantined = true
+            return null
+        }
+        head = newHead
+        if (!frozenIntact() || !clean()) {
             quarantined = true
             return null
         }

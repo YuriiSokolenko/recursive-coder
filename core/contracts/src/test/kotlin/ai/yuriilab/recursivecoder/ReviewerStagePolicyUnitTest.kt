@@ -208,6 +208,15 @@ class ReviewerStagePolicyUnitTest {
             "INVALID_RETRY_IDENTITIES" to {
                 plan(graph, rejected, dev = correlation(StageKind.SDD))
             },
+            // Issue #158: historical actors are never reused for a retry.
+            "INVALID_RETRY_IDENTITIES" to {
+                plan(graph, rejected, reviewerAgent = requireNotNull(
+                    graph.stages.first { it.kind == StageKind.DEVELOP }.agentId))
+            },
+            "INVALID_RETRY_IDENTITIES" to {
+                plan(graph, rejected, devAgent = requireNotNull(
+                    graph.stages.first { it.kind == StageKind.REVIEW }.agentId))
+            },
             "INVALID_RETRY_LIMIT" to {
                 plan(graph, rejected, maxRetries = -1)
             },

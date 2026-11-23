@@ -391,4 +391,40 @@ class RecursiveGraphSchedulerIntegrationTest {
         assertTrue(events.any { it.kind == RecursiveEventKind.DENIED &&
             it.code == "TOKEN_BUDGET_EXHAUSTED" })
     }
+
+    /** Issue #161: a denied charge stops the executor, not only its cooperative token. */
+    @Test fun deniedUsageChargeCancelsTheRunningStageJob() = runBlocking {
+        val events = mutableListOf<RecursiveEvent>()
+        val scheduler = scheduler(StageKind.SDD, events, stageDurationMillis = 3_000)
+        var continuedAfterDenial = false
+        val outcome = scheduler.execute(scheduler.rootGraphId, RecursiveStageExecutor { root ->
+            assertIs<RecursiveDecision.Denied>(root.charge(RecursiveUsage(1_000, 0)))
+            delay(2_500)
+            continuedAfterDenial = true
+            RecursiveExecutionOutcome.Completed
+        })
+        assertEquals(RecursiveExecutionOutcome.Failed("USAGE_CHARGE_DENIED"), outcome)
+        assertTrue(!continuedAfterDenial)
+        assertEquals(RecursiveNodeState.FAILED,
+            scheduler.current().node(scheduler.rootGraphId)!!.state)
+    }
+
+    /** Issue #161: a JVM error records a terminal state before propagating. */
+    @Test fun executorErrorIsRecordedAsFailedBeforePropagating() = runBlocking {
+        val events = mutableListOf<RecursiveEvent>()
+        val scheduler = scheduler(StageKind.TDD, events)
+        assertFailsWith<StackOverflowError> {
+            scheduler.execute(scheduler.rootGraphId, RecursiveStageExecutor {
+                throw StackOverflowError("simulated executor error")
+            })
+        }
+        assertEquals(RecursiveNodeState.FAILED,
+            scheduler.current().node(scheduler.rootGraphId)!!.state)
+        assertTrue(events.any { it.kind == RecursiveEventKind.FAILED &&
+            it.code == "STAGE_EXECUTOR_ERROR" })
+        // The stage is terminal; it cannot be started again.
+        assertEquals(RecursiveExecutionOutcome.Denied("STAGE_NOT_READY"),
+            scheduler.execute(scheduler.rootGraphId,
+                RecursiveStageExecutor { RecursiveExecutionOutcome.Completed }))
+    }
 }

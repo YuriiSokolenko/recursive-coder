@@ -157,7 +157,10 @@ internal object SessionAdmissionPolicy {
                 )) ||
             (f.provider == "openai-compatible" && (
                 "model-gateway-v1" !in f.requiredCapabilities ||
-                    "fake-model-v1" in f.requiredCapabilities
+                    "fake-model-v1" in f.requiredCapabilities ||
+                    // Issue #155: without usage_metadata the gateway may return no
+                    // usage, and maxTokens could not be enforced. Fail closed.
+                    "usage_metadata" !in f.modelFeatures
                 )))
             return deny(AdmissionDenial.MODEL)
         if (f.toolPolicyMode != "read-only" ||

@@ -100,6 +100,35 @@ class TaskRepositoryContractTest {
         assertFalse(TaskStore(repo.directory).read { it.paused })
     }
 
+    /** Issue #162: a failed directory fsync after the atomic rename is never silent. */
+    @Test fun directoryFsyncFailureAfterRenameFailsTheTransactionOnLinux() {
+        val store = TaskStore(temp.resolve("fsync-store"))
+        val initial = Task(id = "durable", requestTemplate = "{}", dependencies = emptyList(),
+            priority = 1, state = TaskState.READY)
+        store.update { TaskMutation(it.copy(tasks = listOf(initial)), Unit) }
+        val synced = mutableListOf<Path>()
+        store.directorySyncTestHook = {
+            synced.add(it)
+            throw IOException("induced directory fsync failure")
+        }
+        val changed = initial.copy(priority = 2)
+        val linux = System.getProperty("os.name").startsWith("Linux")
+        if (linux) {
+            val failure = assertFailsWith<IOException> {
+                store.update { TaskMutation(it.copy(tasks = listOf(changed)), Unit) }
+            }
+            assertEquals("induced directory fsync failure", failure.cause?.message)
+        } else {
+            store.update { TaskMutation(it.copy(tasks = listOf(changed)), Unit) }
+        }
+        assertEquals(listOf(store.directory), synced)
+        // The rename already happened: the new snapshot is visible but was reported
+        // as not durable instead of silently claiming a durable commit.
+        store.directorySyncTestHook = null
+        assertEquals(changed, store.read { queue -> queue.tasks.single() })
+        assertFalse(Files.exists(store.directory.resolve("tasks.json.tmp")))
+    }
+
     @Test fun differentFileStoreInstancesCannotHoldSchedulerLeaseSimultaneously() {
         val root = temp.resolve("scheduler-lease")
         val first = TaskStore(root)

@@ -142,6 +142,11 @@ class SessionPolicyUnitTest {
             valid.copy(provider = "invalid") to AdmissionDenial.MODEL,
             valid.copy(modelId = "not-fake-v1") to AdmissionDenial.MODEL,
             valid.copy(modelFeatures = setOf("text")) to AdmissionDenial.MODEL,
+            // Issue #155: a remote provider without usage_metadata cannot be budgeted.
+            valid.copy(provider = "openai-compatible", modelId = "demo",
+                modelFeatures = setOf("tool_calls"),
+                requiredCapabilities = setOf("session-events-v1", "model-gateway-v1",
+                    "read-only-tools-v1")) to AdmissionDenial.MODEL,
             valid.copy(toolPolicyMode = "write") to AdmissionDenial.TOOL_POLICY,
             valid.copy(allowedTools = emptySet()) to AdmissionDenial.TOOL_POLICY,
             valid.copy(deniedTools = setOf("read")) to AdmissionDenial.TOOL_POLICY,

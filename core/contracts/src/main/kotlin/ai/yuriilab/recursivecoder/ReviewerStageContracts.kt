@@ -229,6 +229,8 @@ object ReviewerRepairPlanner {
             graph.stages.any { it.correlation.stageRunId in setOf(
                 nextDeveloper.stageRunId, nextReviewer.stageRunId
             ) } || developerAgent == reviewerAgent ||
+            // No actor of any earlier attempt may be reused (issue #158).
+            graph.stages.any { it.agentId == developerAgent || it.agentId == reviewerAgent } ||
             nextDeveloper.sessionId != graph.correlation.sessionId ||
             nextReviewer.sessionId != graph.correlation.sessionId ||
             nextDeveloper.graphId != graph.correlation.graphId ||

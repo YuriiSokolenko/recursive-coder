@@ -25,6 +25,12 @@ class TaskStore(directory: Path) : TaskRepository {
     private val temp = this.directory.resolve("tasks.json.tmp")
     private val guardFile = this.directory.resolve(".store.lock")
 
+    /**
+     * Fault seam for #162, never installed by production: invoked immediately
+     * before the post-rename directory fsync so tests can inject its failure.
+     */
+    @Volatile internal var directorySyncTestHook: ((Path) -> Unit)? = null
+
     init {
         require(!Files.isSymbolicLink(this.directory)) { "Task store cannot be a symlink" }
         Files.createDirectories(this.directory)
@@ -153,10 +159,17 @@ class TaskStore(directory: Path) : TaskRepository {
             channel.force(true)
         }
         Files.move(temp, snapshot, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
-        // Directory metadata fsync is supported on Unix; the snapshot remains atomic elsewhere.
+        // Directory metadata fsync makes the rename durable. On Linux a failure
+        // means a committed claim/finish could be lost after power loss, so it is
+        // never ignored there (issue #162). Other platforms may not support opening
+        // a directory channel; the rename itself remains atomic.
         try {
+            directorySyncTestHook?.invoke(directory)
             FileChannel.open(directory, StandardOpenOption.READ).use { it.force(true) }
-        } catch (_: java.io.IOException) { }
+        } catch (failure: java.io.IOException) {
+            if (System.getProperty("os.name").startsWith("Linux"))
+                throw java.io.IOException("Task snapshot is not durable", failure)
+        }
     }
 
     private companion object {

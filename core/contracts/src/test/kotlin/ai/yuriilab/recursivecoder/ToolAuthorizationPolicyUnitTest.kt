@@ -172,6 +172,47 @@ class ToolAuthorizationPolicyUnitTest {
         )) assertEquals("UNSUPPORTED_TOOL_POLICY", code(ToolAuthorizationPolicy.admitReadOnlyPolicy(facts)))
     }
 
+    /** Issue #152: test outcomes must not be changeable through Developer-owned config. */
+    @Test
+    fun developerCannotWriteTestFrameworkConfigurationOrServiceRegistrations() {
+        fun developer(path: String) = code(ToolAuthorizationPolicy.authorizeWrite(
+            WriteAuthorizationFacts(EngineeringRole.DEVELOPER, WriteOperationKind.CREATE, path)))
+        for (path in listOf(
+            "src/main/resources/junit-platform.properties",
+            "src/main/resources/JUnit-Platform.properties",
+            "src/main/resources/META-INF/services/org.junit.jupiter.api.extension.Extension",
+            "src/main/resources/meta-inf/services/org.junit.platform.launcher.TestExecutionListener",
+            "src/main/resources/testng.xml",
+            "src/main/resources/kotest.properties",
+            "src/main/pytest.ini",
+            "src/main/tox.ini",
+            "src/main/setup.cfg",
+            "src/main/pyproject.toml",
+            "src/main/sitecustomize.py",
+            "src/main/jest.config.js",
+            "src/main/vitest.config.ts",
+            "src/main/.mocharc.yml",
+            "src/main/karma.conf.js",
+            "src/main/phpunit.xml"
+        )) assertEquals("PROTECTED_PATH", developer(path), path)
+        // Build descriptors that define how tests run are protected for every role.
+        for (path in listOf("src/main/build.gradle", "src/main/settings.gradle",
+                "src/main/pom.xml", "src/main/package.json"))
+            assertEquals("PROTECTED_PATH", developer(path), path)
+        assertEquals("PROTECTED_PATH", code(ToolAuthorizationPolicy.authorizeWrite(
+            WriteAuthorizationFacts(EngineeringRole.TDD, WriteOperationKind.CREATE,
+                "src/test/package.json"))))
+        // Ordinary resources and similarly named source files remain writable.
+        for (path in listOf("src/main/resources/application.properties",
+                "src/main/resources/META-INF/MANIFEST.MF",
+                "src/main/kotlin/Services.kt", "src/main/kotlin/JestConfig.kt"))
+            assertEquals(null, developer(path), path)
+        // Test-owning roles may still configure their own frameworks.
+        assertEquals(null, code(ToolAuthorizationPolicy.authorizeWrite(
+            WriteAuthorizationFacts(EngineeringRole.TDD, WriteOperationKind.CREATE,
+                "src/test/resources/junit-platform.properties"))))
+    }
+
     @Test
     fun adversarialPrecedenceAndImmutableReviewDenials() {
         val base = WriteAuthorizationFacts(EngineeringRole.DEVELOPER, WriteOperationKind.EDIT,

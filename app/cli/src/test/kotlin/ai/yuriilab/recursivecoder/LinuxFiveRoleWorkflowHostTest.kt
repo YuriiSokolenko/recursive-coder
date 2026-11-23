@@ -770,6 +770,39 @@ class LinuxFiveRoleWorkflowHostTest : PreparationStageHostContract() {
         assertEquals("", git(repo, "status", "--porcelain=v1", "--ignored=matching"))
     }
 
+    /** Issue #160: a graph-validation denial must leave HEAD and the graph unchanged. */
+    @Test fun advanceValidationDenialNeverMovesGitHead() = runBlocking {
+        val (host, repo) = newHost()
+        val initialHead = git(repo, "rev-parse", "HEAD")
+        val validated = mutableListOf<StageKind>()
+        host.advanceValidationDenialTestHook = { candidate ->
+            validated.add(candidate.stages.last().kind)
+            true
+        }
+        val roles = OfflineFiveRoleModel()
+        val plan = FiveRoleWorkflowPlan(targets,
+            StageKind.entries.associateWith { "Run " + it.name },
+            listOf(DeveloperFileTarget("src/main/FeatureFull.kt", sha(oldSource))),
+            model, Instant.now().plusSeconds(120), Cancellation())
+        val outcome = RunFiveRoleWorkflowUseCase(
+            RunPreparationStageUseCase(roles, host, host),
+            RunDeveloperStageUseCase(roles, host, host),
+            RunReviewerStageUseCase(roles, host.reviewerHost),
+            host
+        ).execute(plan, noopRole, noopStage, noopReview)
+        val uncertain = assertIs<FiveRoleWorkflowOutcome.ReconciliationRequired>(outcome,
+            outcome.toString())
+        assertEquals("STAGE_RECONCILIATION_DENIED", uncertain.code)
+        assertEquals(listOf(StageKind.SDD), roles.called)
+        assertEquals(listOf(StageKind.ATDD), validated)
+        // The denial happened before the reconciliation commit.
+        assertEquals(initialHead, git(repo, "rev-parse", "HEAD"))
+        assertEquals("1", git(repo, "rev-list", "--count", "HEAD"))
+        val graph = host.snapshot().graph
+        assertEquals(listOf(StageKind.SDD), graph.stages.map { it.kind })
+        assertEquals(StageState.ACCEPTED, graph.stages.single().state)
+    }
+
     @Test fun tamperedDeveloperHandoffIsRejectedBeforeReviewerAdmission() = runBlocking {
         val (host, repo) = newHost()
         val roles = OfflineFiveRoleModel()

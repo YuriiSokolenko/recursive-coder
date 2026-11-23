@@ -41,7 +41,11 @@ fabricated.
 
 stdout is a single machine-readable SessionResult JSON; stderr is a readable
 summary. Exit 0 means succeeded, 1 means failed/cancelled/timed out, 2 means
-rejected/invalid input. Result metadata contains SHA-256 references to the
+rejected/invalid input. Read the terminal outcome rather than the last
+lifecycle event: a cancelled running session emits the non-terminal lifecycle
+phase `cancelled` and then `failed`; a timeout emits `failed` with outcome
+`timed_out` (the `timed_out` phase is never emitted); a cancellation or timeout
+before admission ends in phase `rejected` (#159). Result metadata contains SHA-256 references to the
 append-only `events.jsonl` and `diagnostics.json`. Checkpoint/side-effect
 receipts remain null. Existing outputs are not overwritten.
 

@@ -295,8 +295,19 @@ class StageGraphPolicyUnitTest {
         )
         val auth = StageRevisionAuthorization(
             manifest.id, manifest.sha256, manifest.revision, reviewer)
+        // Issue #157: accepted consumers pinned the previous bytes by artifact ID.
+        assertEquals("DOWNSTREAM_CONSUMER_ACTIVE", code(StageGraphPolicy.authorizeArtifactRevision(
+            graph, manifest.id, EngineeringRole.SDD, auth)))
+        val running = graph.replaceNode(StageKind.REVIEW) {
+            it.copy(state = StageState.CREATED, review = null)
+        }.replaceNode(StageKind.DEVELOP) { it.copy(state = StageState.CREATED) }
+            .replaceNode(StageKind.TDD) { it.copy(state = StageState.CREATED) }
+            .replaceNode(StageKind.ATDD) { it.copy(state = StageState.RUNNING) }
+        assertEquals("DOWNSTREAM_CONSUMER_ACTIVE", code(StageGraphPolicy.authorizeArtifactRevision(
+            running, manifest.id, EngineeringRole.SDD, auth)))
+        val pending = running.replaceNode(StageKind.ATDD) { it.copy(state = StageState.CREATED) }
         assertEquals(StageGateDecision.Permit, StageGraphPolicy.authorizeArtifactRevision(
-            graph, manifest.id, EngineeringRole.SDD, auth))
+            pending, manifest.id, EngineeringRole.SDD, auth))
         assertEquals("FROZEN_ARTIFACT", code(StageGraphPolicy.authorizeArtifactRevision(
             graph, manifest.id, EngineeringRole.SDD,
             auth.copy(expectedRevision = manifest.revision + 1))))
@@ -380,6 +391,20 @@ class StageGraphPolicyUnitTest {
         })
         assertEquals("GRAPH_NOT_ACCEPTED", code(StageGraphPolicy.authorizeGraphTransition(
             staleReview, StageGraphState.SUCCEEDED, activeAcceptance, verifiedReviews())))
+
+        // Issue #158: the author of the superseded implementation cannot review
+        // its replacement, even though active actors are still unique.
+        val retryAgent = AgentId("agent-develop-retry")
+        val formerAuthorReviews = graph.copy(stages = graph.stages.map {
+            when {
+                it.correlation.stageRunId == retryId -> it.copy(agentId = retryAgent)
+                it.kind == StageKind.REVIEW -> it.copy(agentId = agents.getValue(StageKind.DEVELOP),
+                    review = it.review!!.copy(requestedBy = retryAgent,
+                        reviewedBy = agents.getValue(StageKind.DEVELOP)))
+                else -> it
+            }
+        })
+        assertEquals("SHARED_ROLE_ACTOR", code(StageGraphPolicy.validate(formerAuthorReviews)))
     }
 
     @Test

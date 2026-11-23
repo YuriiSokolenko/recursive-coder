@@ -44,6 +44,11 @@ object StageGraphPolicy {
         if (active.mapNotNull { it.agentId }.toSet().size !=
             active.count { it.agentId != null })
             return deny("SHARED_ROLE_ACTOR")
+        // Superseded history counts too: a former Developer must never become a
+        // Reviewer (or any other role) of the same graph (issue #158).
+        if (graph.stages.filter { it.agentId != null }.groupBy { it.agentId }
+                .values.any { nodes -> nodes.map { it.kind }.toSet().size > 1 })
+            return deny("SHARED_ROLE_ACTOR")
         for (stage in graph.stages) {
             val correlation = stage.correlation
             if (correlation.sessionId != identity.sessionId ||
@@ -354,6 +359,14 @@ object StageGraphPolicy {
                 return deny("INVALID_INDEPENDENT_REVIEW")
             reviewedPaths = setOf(manifest.declaredPath)
         }
+        // Inputs are pinned by artifact ID, not by revision. A consumer that has
+        // already run against the current bytes must be superseded first, so its
+        // replacement re-admits against the revised artifact (issue #157).
+        if (graph.stages.any { stage ->
+                stage.supersededBy == null && manifest.id in stage.inputArtifacts &&
+                    stage.state in setOf(StageState.RUNNING, StageState.ACCEPTED)
+            })
+            return deny("DOWNSTREAM_CONSUMER_ACTIVE")
         val decision = ToolAuthorizationPolicy.authorizeWrite(WriteAuthorizationFacts(
             actorRole = actorRole,
             operationKind = WriteOperationKind.EDIT,

@@ -121,7 +121,9 @@ The scheduler runs at most 1–32 local sessions concurrently. On seven of every
 Every eighth dispatch selects the oldest ready task regardless of priority.
 A waiting task also gains one turn whenever another task is claimed. This
 persistent FIFO quota prevents starvation even if all tasks entered the
-queue together with unequal priorities. Dependency unblocking and manual retries
+queue together with unequal priorities. Aging dominates quickly: after about
+ten unselected dispatches a priority-0 task outranks a fresh priority-100 task,
+so priorities order bursts rather than long-running queues. Dependency unblocking and manual retries
 re-enter the queue with fresh order, even when they become ready during a
 global pause. Only tasks already ready before a pause preserve queue order
 and waiting credit on resume. An active old attempt keeps consuming its
@@ -130,7 +132,11 @@ are tracked by session ID rather than task ID.
 
 All queue mutations are serialized with both a JVM mutex and an OS file lock.
 Changed state is written to an fsynced temporary snapshot and atomically renamed
-over `tasks.json`; read-only and no-op transactions do not rewrite it.
+over `tasks.json`, followed by a directory fsync; read-only and no-op
+transactions do not rewrite it. On Linux a failed directory fsync fails the
+transaction (#162): the renamed snapshot may already be visible but is not
+known to be durable, so the operation reports an error instead of claiming a
+durable commit that a power loss could undo.
 A second scheduler cannot obtain the long-lived `.scheduler.lock`;
 ordinary CLI operations retain separate short transaction locks. The lock
 remains held until all local workers terminate, including on shutdown.

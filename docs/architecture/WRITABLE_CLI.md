@@ -46,8 +46,17 @@ The workflow plan is UTF-8 JSON (version 1, maximum 64 KiB), with exactly:
 - `fakeReviewerVerdict`: `ACCEPT`, `REJECT` or `NEEDS_HUMAN`.
 - `check`: a host/operator-chosen absolute `executable` and string
   `arguments` (at most 16), run in the existing bubblewrap sandbox as
-  `offline-check` after each write; `/usr/bin/true` cannot be used.
+  `offline-check` after each write. Constant-result binaries (`true`,
+  `false`) are refused by configured and symlink-resolved name, and the
+  `env` launcher is refused outright because its options (`-u NAME`, `-S`,
+  `VAR=value`) hide the launched program; name the target executable
+  directly (#163). This is an accident guard, **not** a quality
+  guarantee: the operator remains responsible for a check that actually
+  exercises the produced artifacts. The same check gates every role; see
+  [what checks do and do not prove](TRUSTED_WRITES.md#what-checks-do-and-do-not-prove).
   `git_diff_check` is also always required.
+- One deadline (`deadlineSeconds` from start) and one cancellation token are
+  shared by the parent plan and any recursive children (#163).
 - `limits`: positive `maxTokens`, `maxDurationMillis` and
   `deadlineSeconds` within the CLI's bounded ranges. If recursive work is
   enabled, optional `maxDepth` (default 1), `maxChildren` (default 1),
@@ -277,6 +286,14 @@ checkout is automatically reverted, deleted, or safe to reuse**. The in-memory
 `origins` map and `integrated` result are owned by the single sequential
 installed workflow invocation. This mutable state is not safe for a
 concurrent executor refactor without explicit serialized ownership.
+
+Integration in this installed fixture is therefore **byte equality**, not
+decomposition: each child produces the same approved artifact at the same
+path as its parent stage (both are approved against the same digests), and
+the parent may only proceed when the two authenticated results match. It
+exercises the recursive admission, metering, receipt and integration
+plumbing; it does not demonstrate a parent composing different child
+outputs.
 
 The parent must write the same approved artifact bytes through its **own**
 trusted stage tools. It never copies child checkout files into the parent

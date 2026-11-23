@@ -165,6 +165,30 @@ on Reviewer rejection or NEEDS_HUMAN. It does not yet drive the separately
 documented bounded `ReviewerRepairPlanner` retry loop; repair requires a
 distinct host-verified operation and is not an implicit continuation.
 
+A `Stopped` outcome deliberately leaves the stage graph `RUNNING`: the stopped
+stage is terminal, but the graph stays available to a host-verified repair or
+revision. Marking the graph `FAILED` (a terminal, non-resumable state) is the
+host's decision once it abandons the workflow; the coordinator never does it
+implicitly.
+
+**Graph-wide token budget (#156).** Each stage use case checks a single model
+invocation against `graph.budget.maxTokens`; without coordination five stages
+could spend about five times that budget. The coordinator therefore
+accumulates the usage returned by every *committed* stage. It refuses to start
+a stage once the total reaches `maxTokens`, and stops with
+`GRAPH_TOKEN_BUDGET_EXHAUSTED` right after a committed stage whose usage
+overruns it. Every stage of this workflow is model-backed, so a committed
+stage must report at least one model request with both token counts; any
+other usage, including an empty `StageRoleUsage()` from a non-conforming
+`StageRoleExecutor`, is unknown and charged at the full budget. The overrunning stage remains
+committed and auditable; one stage can still overrun before it is detected.
+Budgets shared across recursive origins remain the recursive scheduler's
+responsibility.
+
+**Reviewer model.** `FiveRoleWorkflowPlan.reviewerModel` (default: `model`)
+is passed to the Reviewer stage. A host that requires a different model or
+provider for independent review must set it explicitly (#158).
+
 ## Linux production host and Git baseline reconciliation — PR #92
 
 The host-only `LinuxStageGitBaselineReconciler` in `:infra:workspace`
@@ -179,6 +203,13 @@ and stage/accepted-ID CAS before invoking the reconciler. The Developer handoff
 must match host-retained usage, write tool ID, check records and changed files;
 the separate Reviewer adapter cannot open a write tool. The reconciler itself
 does not establish receipt authenticity or independent Reviewer approval.
+
+`advance` builds and validates the next stage graph **before** the Git
+reconciliation commit (#160). A policy denial therefore leaves both HEAD and
+the graph unchanged; only a failed commit or a failed post-commit
+frozen-byte/clean-baseline check quarantines the host. Git subprocesses for
+admission, `advance` and `finishSuccess` still run under the host monitor;
+the host is single-workflow and this serializes them by design.
 
 For clean-tree admission, the host calls
 `LinuxStageGitBaselineReconciler.inspectCleanBaseline` rather than a second,

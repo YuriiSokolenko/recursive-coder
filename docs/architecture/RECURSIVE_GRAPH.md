@@ -45,7 +45,10 @@ repeat request IDs, same-task siblings, and ancestor task-identity loops.
 Denied proposals (including malformed ones) count toward a **per-parent**
 attempt limit; siblings and unrelated subtrees have independent limits.
 A repeated request ID is refused. Accepted sibling and ancestor `taskId`
-values participate in no-progress detection. Denied task IDs are **not**
+values participate in no-progress detection. This `NO_PROGRESS_LOOP` check is
+**lexical**: it compares task identifiers only, so a renamed task is not
+detected. Termination is guaranteed by depth, child-count, attempt, budget and
+deadline limits, not by this check. Denied task IDs are **not**
 retained as no-progress facts: a corrected proposal with a fresh request ID
 may retry the same task, but only within that parent's bounded attempt limit.
 Each parent has at most max(16, maxChildren * 4) recorded valid-ID attempts,
@@ -58,8 +61,11 @@ and tool calls from the direct parent's unspent and undelegated grant.
 Grandchildren reserve *within* the parent child's allocation and are not
 double-counted at the root. Host-measured `charge` increases spent usage
 monotonically and fails closed if it exceeds the remaining unallocated amount.
-A failed charge marks the stage failed and cancels its descendants; an executor
-cannot turn that error into a successful run. Reservations are never refunded,
+A failed charge marks the stage failed, cancels the stage's own running job
+(not only its cooperative token, #161) and cancels its descendants; an executor
+cannot turn that error into a successful run. A JVM `Error` thrown by an
+executor is recorded as `FAILED` (`STAGE_EXECUTOR_ERROR`) with its subtree
+cancelled before it propagates, so no node is stranded in `RUNNING`. Reservations are never refunded,
 including for rejected, failed or cancelled children. Unknown model/tool usage
 must be conservatively charged at its reserved upper bound by the caller.
 Separate root schedulers for SDD, ATDD, TDD, Developer and Reviewer do **not**

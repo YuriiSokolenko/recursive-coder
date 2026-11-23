@@ -1,7 +1,7 @@
 # Recursive Coder — Target Architecture
 
 > **Status:** Accepted architectural direction; incremental migration, not a claim that all components exist.  
-> **Decision date:** 2026-10-13; **implementation status verified:** 2026-11-11 (`dev@4ed9fe8`)  
+> **Decision date:** 2026-10-13; **implementation status verified:** 2026-11-23 (`dev@87c2daf`)  
 > **Target:** Kotlin/JVM + JetBrains Koog, independently runnable with a local or configured remote LLM.  
 > **Related:** [Current architecture](ARCHITECTURE.md) · [Gradle modules](MODULES.md) · [Session Protocol v1](../../contracts/README.md)
 
@@ -102,7 +102,7 @@ Use typed domain states/outcomes where meaningful. Treat serialized wire DTOs as
 - `:infra:journal` — physical JSONL sink with flush/close/checksum handling.
 - `:app:cli` — Clikt CLI and command/session-scoped Koin composition; only executable module.
 
-The included `build-logic` Gradle build is not a ninth product module. Core policy remains free of Koin, Koog and HTTP adapter dependencies. **Current CLI sessions are read-only**, even though the standalone write/check boundary is implemented.
+The included `build-logic` Gradle build is not a product module (it would be a tenth). Core policy remains free of Koin, Koog and HTTP adapter dependencies. **Default `run` / `tasks` CLI sessions are read-only**; the write/check boundary is reachable only through the separately gated, fake-only `workflow` command.
 
 ### Conditional future modules — add only with working implementations
 

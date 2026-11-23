@@ -109,3 +109,10 @@ same-UID writers; the runtime does not claim to defeat hostile concurrent
 workspace mutation. The adapter does not choose test quality, generate code,
 provide model-facing tools, accept stage artifacts or integrate graph
 scheduling; those are follow-on responsibilities for #75–#79.
+
+A frozen artifact revision is admitted only while no non-superseded consumer
+of that artifact is `RUNNING` or `ACCEPTED` (`DOWNSTREAM_CONSUMER_ACTIVE`,
+[#157](https://github.com/YuriiSokolenko/recursive-coder/issues/157)): stage
+inputs are pinned by artifact ID, so consumers must be superseded before the
+artifact they read can change. For the limits of what isolated checks prove,
+see [Trusted writes](TRUSTED_WRITES.md#what-checks-do-and-do-not-prove).
