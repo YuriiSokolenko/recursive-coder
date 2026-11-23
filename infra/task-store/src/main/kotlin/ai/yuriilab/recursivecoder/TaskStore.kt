@@ -24,6 +24,8 @@ class TaskStore(directory: Path) : TaskRepository {
     private val snapshot = this.directory.resolve("tasks.json")
     private val temp = this.directory.resolve("tasks.json.tmp")
     private val guardFile = this.directory.resolve(".store.lock")
+    // Set only while this thread owns the real .scheduler.lock OS file lock.
+    private val schedulerLeaseHeld = ThreadLocal.withInitial { false }
 
     /**
      * Fault seam for #162, never installed by production: invoked immediately
@@ -39,7 +41,11 @@ class TaskStore(directory: Path) : TaskRepository {
 
     /** Read and mutation callbacks execute under the SAME cross-process OS lock. */
     private fun <T> transaction(operation: (TaskQueue) -> T): T {
-        val mutex = localLocks.computeIfAbsent(directory) { ReentrantLock() }
+        // A symlinked parent may expose the same .store.lock via different
+        // normalized paths. Serialize those aliases BEFORE opening a channel:
+        // closing a failed second channel can drop the first POSIX file lock.
+        val mutex = localLocks.computeIfAbsent(directory.toRealPath()) { ReentrantLock() }
+        check(!mutex.isHeldByCurrentThread) { "Nested task store transaction is not allowed" }
         return mutex.withLock {
             require(!Files.isSymbolicLink(guardFile) && !Files.isSymbolicLink(snapshot))
             FileChannel.open(guardFile, StandardOpenOption.CREATE, StandardOpenOption.WRITE).use { channel ->
@@ -61,11 +67,34 @@ class TaskStore(directory: Path) : TaskRepository {
     override fun <T> withSchedulerLock(operation: () -> T): T {
         val lockPath = directory.resolve(".scheduler.lock")
         require(!Files.isSymbolicLink(lockPath))
-        FileChannel.open(lockPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE).use { channel ->
-            val lock = try { channel.tryLock() } catch (_: OverlappingFileLockException) { null }
-            check(lock != null) { "Another scheduler is active" }
-            lock.use { return operation() }
+        // On POSIX systems, closing even an unsuccessful second FileChannel may
+        // release this JVM's existing locks on the same file. Deny overlapping
+        // TaskStore acquisitions BEFORE opening a second channel. Canonicalize
+        // the directory to catch aliases through symlinked parent directories.
+        // This is only an in-JVM safety guard; the OS file lock remains authoritative.
+        val leaseKey = directory.toRealPath()
+        check(activeSchedulerLeases.add(leaseKey)) { "Another scheduler is active" }
+        try {
+            FileChannel.open(lockPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE).use { channel ->
+                val lock = try { channel.tryLock() } catch (_: OverlappingFileLockException) { null }
+                check(lock != null) { "Another scheduler is active" }
+                lock.use {
+                    schedulerLeaseHeld.set(true)
+                    try {
+                        return operation()
+                    } finally {
+                        schedulerLeaseHeld.remove()
+                    }
+                }
+            }
+        } finally {
+            // The OS lock/channel is closed before another TaskStore may enter.
+            activeSchedulerLeases.remove(leaseKey)
         }
+    }
+
+    override fun requireSchedulerLockHeld() {
+        check(schedulerLeaseHeld.get()) { "Scheduler lease required for recovery" }
     }
 
     override fun outputRoot(task: Task): Path = directory.resolve("runs").resolve(task.id)
@@ -174,6 +203,8 @@ class TaskStore(directory: Path) : TaskRepository {
 
     private companion object {
         val localLocks = ConcurrentHashMap<Path, ReentrantLock>()
+        // Shared by all TaskStore instances; never used in place of .scheduler.lock.
+        val activeSchedulerLeases = ConcurrentHashMap.newKeySet<Path>()
     }
 }
 

@@ -165,7 +165,7 @@ class DefaultInterruptTaskAttemptUseCase(
         }
 }
 
-/** The caller MUST hold TaskRepository.withSchedulerLock across recovery and dispatch. */
+/** Recovery is allowed only on the thread owning the repository's exclusive scheduler lease. */
 fun interface RecoverInterruptedAttemptsUseCase {
     operator fun invoke()
 }
@@ -174,8 +174,12 @@ class DefaultRecoverInterruptedAttemptsUseCase(
     private val repository: TaskRepository,
     private val clock: Clock = Clock.systemUTC()
 ) : RecoverInterruptedAttemptsUseCase {
-    override fun invoke(): Unit = repository.update {
-        TaskMutation(TaskPolicy.recoverInterrupted(it, clock.instant().toString()), Unit)
+    override fun invoke() {
+        // Reject misuse before opening the transaction or consulting the queue snapshot.
+        repository.requireSchedulerLockHeld()
+        repository.update {
+            TaskMutation(TaskPolicy.recoverInterrupted(it, clock.instant().toString()), Unit)
+        }
     }
 }
 
