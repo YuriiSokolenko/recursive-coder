@@ -464,8 +464,9 @@ class RunReviewerStageIntegrationTest {
         val host = FakeHost().apply { refuseFinish = true }
         val events = mutableListOf<ReviewerDecisionRecord>()
         val result = run(host, FakeModel(), events)
-        assertEquals("REVIEW_FINISH_DENIED",
-            assertIs<ReviewerStageOutcome.Failed>(result.outcome).code)
+        val failed = assertIs<ReviewerStageOutcome.Failed>(result.outcome)
+        assertEquals("REVIEW_FINISH_DENIED", failed.code)
+        assertEquals("REVIEW_FINISH_DENIED", failed.denialCode)
         assertEquals(host.graph, result.graph)
         assertEquals(host.accepted, result.hostAcceptedArtifactIds)
         assertNull(host.committedDecision)
@@ -488,6 +489,21 @@ class RunReviewerStageIntegrationTest {
         assertEquals(StageState.RUNNING, host.graph.stages.last().state)
         assertEquals(0, host.aborted)
         assertEquals(0, host.abortAttempts)
+        assertTrue(events.isEmpty())
+    }
+
+    @Test fun stalePreFinishLeaseNeverAttemptsAbort() = runBlocking {
+        val host = FakeHost()
+        val fake = FakeModel().apply { onExecute = { host.active = null } }
+        val events = mutableListOf<ReviewerDecisionRecord>()
+        val result = run(host, fake, events)
+        assertEquals(ReviewerFinishDenialCodes.STALE_LEASE,
+            assertIs<ReviewerStageOutcome.ReconciliationRequired>(result.outcome).code)
+        assertNull(result.graph)
+        assertNull(result.hostAcceptedArtifactIds)
+        assertEquals(StageState.RUNNING, host.graph.stages.last().state)
+        assertEquals(0, host.abortAttempts)
+        assertNull(host.committedDecision)
         assertTrue(events.isEmpty())
     }
 
@@ -517,8 +533,9 @@ class RunReviewerStageIntegrationTest {
         }
         val events = mutableListOf<ReviewerDecisionRecord>()
         val result = run(host, FakeModel(), events)
-        assertEquals("ROLE_CANCELLED",
-            assertIs<ReviewerStageOutcome.Failed>(result.outcome).code)
+        val failed = assertIs<ReviewerStageOutcome.Failed>(result.outcome)
+        assertEquals("REVIEW_FINISH_DENIED", failed.code)
+        assertEquals("ROLE_CANCELLED", failed.denialCode)
         assertEquals(StageState.FAILED, host.graph.stages.last().state)
         assertEquals(1, host.aborted)
         assertEquals(1, host.abortAttempts)

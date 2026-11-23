@@ -202,6 +202,11 @@ class FiveRoleWorkflowCoordinatorUnitTest {
                     return ReviewerStageResult(finished.graph, finished.acceptedIds,
                         ReviewerStageOutcome.Failed("REVIEW_FINISH_DENIED"))
                 }
+                "finish-denied-cancelled" -> {
+                    val finished = committedDenial(StageKind.REVIEW)
+                    return ReviewerStageResult(finished.graph, finished.acceptedIds,
+                        ReviewerStageOutcome.Failed("REVIEW_FINISH_DENIED", "ROLE_CANCELLED"))
+                }
                 "finish-denied-stale" -> return ReviewerStageResult(null, null,
                     ReviewerStageOutcome.ReconciliationRequired(
                         "REVIEW_FINISH_DENIED_STALE", ReviewerFinishDenialCodes.STALE_LEASE))
@@ -553,6 +558,13 @@ class FiveRoleWorkflowCoordinatorUnitTest {
         assertEquals(StageKind.REVIEW, outcome.stage)
         assertEquals(aborted.state, outcome.authoritative)
         assertEquals(StageState.FAILED, aborted.state.graph.stages.last().state)
+
+        val cancelled = Fixture()
+        cancelled.reviewMode = "finish-denied-cancelled"
+        val cancelledOutcome = assertIs<FiveRoleWorkflowOutcome.Stopped>(cancelled.run())
+        assertEquals("REVIEW_FINISH_DENIED", cancelledOutcome.code)
+        assertEquals("ROLE_CANCELLED", cancelledOutcome.reviewerDenialCode)
+        assertEquals(StageState.FAILED, cancelled.state.graph.stages.last().state)
 
         val stale = Fixture()
         stale.reviewMode = "finish-denied-stale"

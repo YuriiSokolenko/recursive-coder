@@ -19,6 +19,27 @@ import org.junit.jupiter.api.io.TempDir
 class TaskCliTest {
     @TempDir lateinit var temp: Path
 
+    @Test fun reviewerDenialCliOutputDistinguishesDefinitiveFailureFromCancellation() {
+        val stopped = WritableWorkflowCli.summarize(FiveRoleWorkflowOutcome.Stopped(
+            "REVIEW_FINISH_DENIED", StageKind.REVIEW, null, "ROLE_CANCELLED")).json()
+        assertEquals("stopped", stopped["outcome"]?.jsonPrimitive?.content)
+        assertEquals("REVIEW_FINISH_DENIED", stopped["code"]?.jsonPrimitive?.content)
+        assertEquals("ROLE_CANCELLED", stopped["reviewerDenialCode"]?.jsonPrimitive?.content)
+
+        val uncertain = WritableWorkflowCli.summarize(
+            FiveRoleWorkflowOutcome.ReconciliationRequired(
+                "REVIEW_ABORT_UNCONFIRMED", StageKind.REVIEW,
+                reviewerDenialCode = "UNVERIFIED_DEVELOPER_EVIDENCE")).json()
+        assertEquals("reconciliation_required", uncertain["outcome"]?.jsonPrimitive?.content)
+        assertEquals("REVIEW_ABORT_UNCONFIRMED", uncertain["code"]?.jsonPrimitive?.content)
+        assertEquals("UNVERIFIED_DEVELOPER_EVIDENCE",
+            uncertain["reviewerDenialCode"]?.jsonPrimitive?.content)
+
+        val ordinary = WritableWorkflowCli.summarize(FiveRoleWorkflowOutcome.Stopped(
+            "ROLE_CANCELLED", StageKind.REVIEW, null)).json()
+        assertFalse("reviewerDenialCode" in ordinary)
+    }
+
     private fun service() = TaskService(TaskStore(temp.resolve("store")))
     private fun git(vararg args: String): String {
         val process = ProcessBuilder(listOf("git") + args)
