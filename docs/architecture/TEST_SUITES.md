@@ -19,6 +19,68 @@ Run `./gradlew checkArchitecture` or `./gradlew checkArchitecture --configuratio
 
 The checker also rejects unclassified new modules and direct core dependencies on Koog, Clikt and common HTTP framework dependency groups. Each forbidden edge diagnostic identifies its module, configuration and target. The Gradle task snapshots declared module/configuration/target coordinates during configuration and consumes only serializable inputs during execution; it never resolves dependencies. A standalone pure Kotlin graph verifier also tests an all-allowed synthetic cycle independently of the allowlist. CI covers illegal production and test dependencies, a test-only cycle, unknown modules, a forbidden core framework group, and valid graphs.
 
+### Architecture suite Gradle home and shared-cache boundary (issues #167, #169)
+
+Run `python3 -I -m unittest discover -s tests -p 'test_architecture_gradle.py' -v`
+with **Python 3.10 or newer** (CI uses Python 3.12) and Gradle 9.8.2.
+The suite creates a private, mode-0700 `GRADLE_USER_HOME` with its own
+daemon registry, `init.d` and minimal `gradle.properties`; developer daemons,
+developer init scripts and developer Gradle properties are **not** imported.
+A 60-second idle timeout and a suite-scoped `--quiet --stop` on exit/timeout
+target only suite daemons. The isolated properties suppress Gradle's welcome
+banner without changing the repository configuration.
+
+By default the home lives below `<resolved GRADLE_USER_HOME parent>/.architecture-gradle-homes/`
+on the **same filesystem** as the shared dependency cache, not directly in
+`$HOME`. The hidden parent is private (mode 0700 on POSIX) and rejects
+symlinks, junctions and unsafe ownership or permissions. On startup the suite
+removes only positively marked directories older than 72 hours whose owning
+POSIX process is no longer running on the same reported hostname. Other files,
+unknown directories and live processes are never pruned. Hostnames are not
+unique machine identities: containers sharing a home and hostname but using
+different PID namespaces can mistake each other's homes for stale ones.
+Windows skips automatic stale-home removal without reliable liveness proof;
+an interrupted run may require manual cleanup of this hidden parent.
+
+Set `ARCHITECTURE_GRADLE_HOME_PARENT=/existing/writable/path` to try an
+explicit base directory **first**, creating its own private
+`.architecture-gradle-homes/` underneath; use a filesystem holding
+`caches/modules-2/files-2.1` if the artifact cache is mounted separately.
+If an attempted location raises `OSError` (for example, permissions), the
+suite tries the sibling location, then a private child of the shared home,
+then a private subdirectory under the system temp location. The last fallback
+will normally fail the artifact-device check if `/tmp` is on tmpfs and the
+cache contains artifacts. A cross-device cache always **fails explicitly**
+rather than silently copying multi-GB artifacts into RAM. Other hardlink
+failures may copy up to a total of 128 MiB; exceeding the cap fails explicitly.
+The `[architecture-suite-home]` log reports placement, attempted-location
+fallbacks, setup elapsed time and hardlinked/copied file counts and byte totals.
+Failures to allocate any home also log their attempted fallbacks. Timings are
+informational only.
+
+**This is not full cache isolation.** The content-addressed
+`caches/modules-2/files-2.1` artifacts are hardlinked (or explicitly copied)
+so the architecture security guard still validates canonical paths and hashes.
+Other selected cache paths, including dependency resolution metadata and the
+local build cache, intentionally point to the **developer's shared cache**.
+The suite's own Gradle 9 `init.d` script sets
+`settings.caches { cleanup = Cleanup.DISABLED }` in a `beforeSettings` hook,
+preventing **suite-initiated Gradle User Home cache cleanup** from pruning
+shared cache entries. A real-Gradle probe asserts that the effective
+`settings.caches.cleanup.get()` value is the `Cleanup.DISABLED` object.
+Ordinary Gradle access to shared cache metadata is still possible, as is
+cleanup initiated independently by the developer's other Gradle processes.
+The suite does not promise read-only shared caches.
+
+Fixture build outputs and configuration-cache entries remain private per fixture.
+All Gradle regressions still use `--offline`, strict dependency verification
+and canonical-path/SHA enforcement; no security negative check is relaxed.
+Windows symlink fallback uses directory junctions. Cleanup is performed by
+`TemporaryDirectory`/`shutil.rmtree` on supported CPython 3.10+, where
+Windows junction removal unlinks the junction itself rather than traversing
+and deleting its target (the behavior was fixed in Python 3.8). Do not replace
+this with recursive removal that follows junctions or symlinks.
+
 ### Configuration-cache invalidation regression (issue #41)
 
 A cache hit is not a permanent architecture approval. The Python regression in
