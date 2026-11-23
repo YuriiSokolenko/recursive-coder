@@ -52,6 +52,9 @@ next automatic admission fails closed (currently
 `CHECKPOINT_JOURNAL_MISMATCH` during evidence verification), even if
 the event is otherwise phase-valid; no truncation, tail adoption or blind
 path-based checkpoint retry is allowed (tracked in #117).
+For the [proposed (not accepted) #117 metadata-tail adoption design](METADATA_TAIL_ADOPTION_DESIGN.md),
+see its security prerequisites and operator-only alternative. That proposal
+does not change this fail-closed runtime behavior.
 
 ### Runtime separation and tests
 

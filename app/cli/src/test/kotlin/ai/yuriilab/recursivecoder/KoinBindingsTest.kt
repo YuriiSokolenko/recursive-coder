@@ -29,6 +29,8 @@ private class KoinCloseProbe
 /** All definitions are exercised with in-memory ports, no filesystem or global Koin. */
 @Tag("unit")
 class KoinBindingsTest {
+    private val testRunPaths: TaskRunPaths = VirtualTaskRunPaths
+
     @Test fun actualCompositionClosesKoinBeforeOwnedRepositoryExactlyOnce() {
         val events = mutableListOf<String>()
         val repository = CloseTrackingTaskRepository(events) {
@@ -47,6 +49,7 @@ class KoinBindingsTest {
         val composition = TaskComposition(
             repository,
             TaskRepositoryOwnership.OWNED,
+            testRunPaths,
             additionalModules = listOf(closeProbe)
         )
         assertSame(repository, composition.service().store)
@@ -60,7 +63,7 @@ class KoinBindingsTest {
 
     @Test fun ownedCloseableRepositoryClosesOnlyOnce() {
         val repository = CloseTrackingTaskRepository()
-        val composition = TaskComposition(repository, TaskRepositoryOwnership.OWNED)
+        val composition = TaskComposition(repository, TaskRepositoryOwnership.OWNED, testRunPaths)
         assertSame(repository, composition.service().store)
         composition.close()
         composition.close()
@@ -70,7 +73,7 @@ class KoinBindingsTest {
 
     @Test fun borrowedCloseableRepositoryIsNeverClosedByComposition() {
         val repository = CloseTrackingTaskRepository()
-        val composition = TaskComposition(repository, TaskRepositoryOwnership.BORROWED)
+        val composition = TaskComposition(repository, TaskRepositoryOwnership.BORROWED, testRunPaths)
         assertSame(repository, composition.service().store)
         composition.close()
         composition.close()
@@ -82,7 +85,7 @@ class KoinBindingsTest {
         val repository = CloseTrackingTaskRepository()
         val closeError = IllegalStateException("repository close failed")
         repository.closeFailure = closeError
-        val composition = TaskComposition(repository, TaskRepositoryOwnership.OWNED)
+        val composition = TaskComposition(repository, TaskRepositoryOwnership.OWNED, testRunPaths)
         assertSame(closeError, assertFailsWith<IllegalStateException> { composition.close() })
         composition.close()
         assertEquals(1, repository.closeCount)
@@ -109,7 +112,7 @@ class KoinBindingsTest {
         repository.closeFailure = closeError
         val commandError = IllegalArgumentException("command failed")
         val caught = assertFailsWith<IllegalArgumentException> {
-            TaskComposition(repository, TaskRepositoryOwnership.OWNED).use {
+            TaskComposition(repository, TaskRepositoryOwnership.OWNED, testRunPaths).use {
                 assertTrue(it.queries().list().isEmpty())
                 throw commandError
             }
@@ -122,7 +125,7 @@ class KoinBindingsTest {
     @Test fun repositoryClosesOnExceptionalCommandExit() {
         val repository = CloseTrackingTaskRepository()
         assertFailsWith<IllegalStateException> {
-            TaskComposition(repository, TaskRepositoryOwnership.OWNED).use {
+            TaskComposition(repository, TaskRepositoryOwnership.OWNED, testRunPaths).use {
                 assertTrue(it.queries().list().isEmpty())
                 error("simulated failure")
             }
@@ -131,13 +134,13 @@ class KoinBindingsTest {
     }
 
     @Test fun definitionsVerifyWithoutStartingGlobalKoin() {
-        taskModule(InMemoryTaskRepository()).verify()
+        taskModule(InMemoryTaskRepository(), testRunPaths).verify()
         sessionModule(FakeModel()).verify()
     }
 
     @Test fun oneTaskCompositionSharesRepositoryAndClosesAfterCommand() {
         val repository = InMemoryTaskRepository()
-        val composition = TaskComposition(repository, TaskRepositoryOwnership.BORROWED)
+        val composition = TaskComposition(repository, TaskRepositoryOwnership.BORROWED, testRunPaths)
         try {
             val first = composition.service()
             val second = composition.service()

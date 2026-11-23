@@ -149,14 +149,194 @@ following limits are known and tracked:
   check sets and an authenticated failing baseline receipt (distinguishable
   from sandbox unavailability) are a planned design.
 - **The sandbox cannot run most build tools** ([#154](https://github.com/YuriiSokolenko/recursive-coder/issues/154)).
-  Checks run with a read-only workspace bind, no network, an empty tmpfs `HOME`
-  and only `/usr`, `/bin` and `/lib*`. Gradle, Maven, npm and most test runners
-  write build output into the workspace and need dependency caches, so they do
-  not work here; current fixtures use small read-only commands. A disposable
-  writable overlay of the checkout plus a read-only, digest-pinned dependency
-  cache and toolchain are a planned design; the post-check `verifyState()` fence
-  must stay unchanged.
+  External checks see the checkout read-only at `/workspace`, an initially
+  empty private tmpfs root (including writable `/tmp`) and writable host-
+  backed `/scratch` (`HOME=/scratch`), no network, and only the
+  host-mounted `/usr`, `/bin`, `/lib` and `/lib64` trees when present.
+  Host `/etc` is not mounted.
+  There is no provisioned dependency cache or pinned build toolchain.
+  Gradle, Maven, npm and most test runners need to write outputs under the
+  checkout and access offline dependencies; the current checks are limited
+  to suitable read-only commands (installed E2E uses `grep`). A
+  [disposable writable check sandbox](#proposed-disposable-writable-check-sandbox-design-only-154)
+  is designed below, **not implemented**.
 - **Receipt HMACs are in-process integrity checks.** The runtime and the Linux
   workflow host keep their HMAC keys in the same JVM. The MACs detect forged or
   stale values passed between components; they are not a trust boundary against
   code running in that process.
+
+## Proposed disposable writable check sandbox (design only, #154)
+
+**Not implemented.** This is a follow-up design contract, not a current
+`TrustedCheck` option, new CLI flag, or expanded stage-tool permission.
+Today `runIsolated()` invokes a host-allowlisted binary and fixed arguments
+inside bubblewrap (`--unshare-all --tmpfs /`, no inherited environment).
+It mounts the real checkout read-only at `/workspace`, an external
+per-check writable `/scratch` with `HOME=/scratch`, and existing `/usr`,
+`/bin`, `/lib` and `/lib64` trees read-only; the private tmpfs root
+(including `/tmp`) is *also writable*. No host `/etc` is mounted. There is
+no dependency-cache provisioning or pinned build-tool distribution.
+`git_diff_check` executes separately. Current small-command E2E only checks
+isolation, and ordinary Gradle-based CI is **not** an independent stage check.
+
+### Proposed host-provisioned execution
+
+1. **Freeze an independently materialized source snapshot.** With the
+   trusted host's workspace lease held, call the existing `verifyState()`
+   and record the accepted manifest. Materialize a **separate complete
+   source-tree snapshot** from the pinned Git HEAD tree plus individually
+   verified accepted postimages/deletions; check all file contents, modes
+   and path spellings against that state. Exclude unrelated untracked and
+   ignored local files (such as `local.properties` or `.env`); newly created
+   files enter the snapshot only when present in the accepted manifest.
+   Materialize private file objects: ordinary copies or filesystem reflinks
+   with independent copy-on-write semantics are permitted, but hardlinks to
+   the live workspace are not. Reject unsupported symlinks, special files or
+   Git tree entries rather than silently following them. Re-run
+   `verifyState()` against the *real* checkout and require it to equal the
+   **same manifest captured before materialization**, before launching the
+   check. That captured value is also the source snapshot's manifest.
+   Freeze the snapshot read-only for the entire check. Do **not** use the
+   mutable live checkout as an overlay lower layer: a lease is not proof
+   against hostile or accidental same-UID writes.
+2. **Give each check a fresh, size-bounded writable view.** Overlay the
+   immutable snapshot read-only with **private upper/work directories**;
+   present the resulting filesystem at sandbox `/workspace`. Build outputs,
+   lockfiles, generated files and ephemeral edits remain within the
+   disposable layer. The actual checkout, external lock/approval files and
+   Git index must never be bound writable. No files from the check view
+   can be copied back to host source. Protect `/workspace/.git` by
+   **omitting Git metadata entirely** from the snapshot/view; Git-dependent
+   build plugins must be rejected as unsupported or supplied narrowly
+   scoped, host-authenticated read-only metadata by a separately reviewed
+   design. Tests must not mistake a synthetic Git repository for the real
+   HEAD. This boundary **does not promise frozen tests are immutable within
+   the disposable view**: a test process can edit its own copy, so test
+   integrity still requires external review (#152).
+3. **Constrain all writable storage and processes.** Before launch, the
+   host applies enforced byte/inode quotas or a size-limited dedicated
+   filesystem for each upper/work pair, cache writable view, `/scratch`,
+   and other private writable paths such as `/tmp`. Use hard limits,
+   accounting all writes (including tmpfs), rather than output-size or
+   time limits alone. Configure independently managed **cgroup v2**
+   memory and process-count limits, plus an appropriate CPU budget; bubblewrap
+   does *not* establish cgroup limits itself. The host must supervise
+   child processes and teardown, refuse unavailable quota/cgroup controls,
+   and distinguish exceeded resource limits from a normal failed test.
+   Failure, timeout, cancellation or exhaustion must not saturate shared
+   host disk/RAM or leave orphan processes or writable layers.
+4. **Provision deterministic offline dependency caches.** A trusted host
+   resolves and verifies all dependency artifacts/plugins *before* test
+   admission and supplies an immutable, content-digest-checked, read-only
+   lower cache. Individual tools may use per-check **quota-limited
+   copy-on-write** cache views for lockfiles and metadata; never write
+   into the shared lower cache. Select explicit offline modes, so missing
+   dependencies fail promptly instead of causing network retries:
+   - **Gradle:** host-pinned installed distribution, `--offline --no-daemon`,
+     `GRADLE_RO_DEP_CACHE` for the read-only `modules-2` dependency cache
+     created by a compatible Gradle version, and fresh writable
+     `GRADLE_USER_HOME` for local metadata, locks and plugin caches.
+     The read-only cache does **not** include Gradle distributions,
+     transforms or every kind of plugin/tool state: all must be separately
+     host-provisioned and digest-checked before offline execution.
+     Always ignore repository `gradle-wrapper.properties` for toolchain
+     selection: the wrapper is never executed, its distribution URL and
+     checksum cannot override the host-pinned Gradle binary, and no wrapper
+     distribution is downloaded.
+   - **Maven:** `-o`, a fresh `-Dmaven.repo.local=...` location
+     backed by the pinned read-only artifact cache plus a disposable
+     writable layer. All build plugins and their transitive dependencies
+     must be present before execution.
+   - **npm:** `npm ci --offline --ignore-scripts` by default, with the
+     host-selected cache directory (`--cache` or `npm_config_cache`)
+     over a pinned read-only cache and writable per-check layer.
+     Lockfile/package content is validated; lifecycle scripts may be
+     explicitly enabled only by a separately authenticated host check
+     policy and then run as untrusted code under the same resource/mount
+     constraints, with no network access. They are never implicitly trusted.
+   All tool configuration and environment variables are **host-selected**;
+   the model cannot choose dependency sources or change offline policy.
+5. **Pin the toolchain and required system data.** The host verifies a
+   versioned SHA-256 content manifest for executables, runtimes, launchers,
+   libraries, plugins and any required non-library files. Provide
+   **minimal, explicitly allowlisted**, verified read-only files normally
+   found in `/etc` (for example passwd/group data, CA trust, timezone,
+   name-service configuration) *only when needed*; do not mount host
+   `/etc` wholesale. Offline JVM/Node/Gradle E2E must demonstrate that
+   the selected toolchain works with this allowlist. The executed `argv[0]`
+   must resolve to an absolute host-pinned binary inside the separately
+   verified, read-only toolchain mount, **never** to a snapshot file or
+   model-editable launcher: disallow `./gradlew`, `./mvnw` and any
+   `/workspace/node_modules/.bin/*` entry as the process executable.
+   Repository wrappers and their properties may be inspected as untrusted
+   project input but may not run or override the host-selected distribution.
+   Build scripts and test code remain untrusted executable content inside
+   the isolated process; this launcher restriction is not a ban on them.
+   Never fall back to unpinned host `PATH`, shell commands or network
+   access.
+6. **Bind and invalidate check evidence.** Extend the future host-authenticated
+   check policy and receipt identity with the complete execution profile:
+   check ID/argv, source snapshot and accepted manifest, toolchain digest,
+   dependency-cache digest, filesystem/mount plan and resource policy.
+   A change in **either toolchain or cache digest**, or any of those
+   security inputs, must revoke all previously issued check receipts,
+   including receipts produced before a stage authority update. Fail closed
+   rather than allowing an old receipt to satisfy a new policy; the host
+   must require a new admitted check against the current inputs.
+   Trusted writes continue to invalidate earlier check receipts as today.
+7. **Keep the original Git fence and discard outputs.** The current
+   `runCheck()` still calls `verifyState()` on the **real** workspace
+   before launching and after the check, requiring
+   `verifyState() == preCheckManifest` unchanged. Here
+   `preCheckManifest` always denotes the value captured **before snapshot
+   materialization**; both the post-materialization and post-check
+   comparisons use exactly that value. `finish()` must still
+   independently verify approved/frozen artifacts, actual postimages,
+   Git HEAD/config/index, current receipts and stage authority.
+   Build/test output is an observation, **not** an approved workspace
+   mutation. Destroy all disposable upper/work/cache layers on every exit
+   path, without copying files back. A failure to verify or safely clean
+   the sandbox denies success; it must never trigger unsandboxed execution.
+
+### Required future acceptance cases
+
+- An actual **offline Gradle/JUnit** check writes `build/` outputs in
+  the disposable view, uses the pinned toolchain/cache, and leaves the host
+  checkout, Git metadata, immutable artifacts and shared dependency cache
+  byte-identical. E2E must reject `gradlew`, `mvnw` and
+  `node_modules/.bin` as snapshot-controlled launchers, while a host-pinned
+  executable can still run untrusted build scripts in isolation.
+  Missing dependencies, a changed pinned toolchain,
+  disallowed system-data requirements and overlay provisioning failures
+  deny admission rather than falling back to the host.
+- A sandbox attempt exceeding its **upper-layer byte/inode quota** is
+  stopped with an isolation/resource failure; host checkout, shared
+  cache, host filesystem free-space safety margin and neighboring check
+  runs remain unaffected. Also test cache-view/`/scratch`/`/tmp` limits
+  and process/memory exhaustion, with no orphan processes.
+- An **external actor changes the live host checkout while the check runs**,
+  despite the host lease: the check continues to see its *unchanged
+  independently materialized snapshot*, and the unchanged post-check
+  `verifyState()` fence detects real-workspace drift, denying the receipt.
+  This scenario is **not** a test of live-checkout overlay lower-layer
+  behavior, because live checkout is never the lower layer.
+- Network remains unavailable; timeout and output quotas still apply;
+  `.git` is hidden, E2E verifies fail-closed Git-dependent tasks;
+  changing **cache or toolchain digest after one passed check**
+  invalidates its outstanding receipt and requires a new check. CI must
+  fail, not skip, the real-sandbox acceptance cases.
+
+Provisioning/isolation failures must be distinguishable from genuine test
+assertion failures. The currently implemented
+`CHECK_FAILED_OR_SANDBOX_UNAVAILABLE` deliberately conflates these; it
+would need revision as part of a future runtime implementation, **not in
+this documentation-only issue**.
+
+This design makes build-tool checks *possible*, not automatically trustworthy:
+relevant assertions, protections against a Developer influencing test outcomes
+(#152), and proof of red-to-green behavior (#153) remain separate. Existing
+same-UID concurrency limits and host authority checks still apply.
+
+**References:** [Gradle dependency caching](https://docs.gradle.org/current/userguide/dependency_caching.html),
+[Maven repositories](https://maven.apache.org/guides/introduction/introduction-to-repositories.html),
+[npm offline/cache options](https://docs.npmjs.com/using-npm/config/).

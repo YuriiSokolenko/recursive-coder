@@ -260,6 +260,10 @@ class ArchitectureGraphTest {
         val fixtureEdges = listOf(
             ProjectEdge(":core:contracts", "testFixturesApi", ":core:contracts"),
             ProjectEdge(":core:contracts", "testImplementation", ":core:contracts"),
+            ProjectEdge(":core:tasks", "testFixturesApi", ":core:tasks"),
+            ProjectEdge(":core:tasks", "testImplementation", ":core:tasks"),
+            ProjectEdge(":infra:task-store", "testImplementation", ":core:tasks"),
+            ProjectEdge(":app:cli", "testImplementation", ":core:tasks"),
             ProjectEdge(":core:session", "testImplementation", ":core:contracts"),
         )
         assertTrue(ArchitectureGraph.violations(modules, fixtureEdges, emptyList()).isEmpty())
@@ -268,6 +272,11 @@ class ArchitectureGraphTest {
         ), emptyList())
         assertTrue(illegal.any { it.contains("Forbidden project dependency") })
         assertTrue(illegal.any { it.contains("Project dependency cycle") })
+        val taskSelf = ArchitectureGraph.violations(modules, fixtureEdges + listOf(
+            ProjectEdge(":core:tasks", "implementation", ":core:tasks")
+        ), emptyList())
+        assertTrue(taskSelf.any { it.contains("Forbidden project dependency") })
+        assertTrue(taskSelf.any { it.contains("Project dependency cycle") })
     }
 
     @Test

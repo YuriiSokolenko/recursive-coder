@@ -188,7 +188,7 @@ fun interface PrepareTaskAttemptUseCase {
     operator fun invoke(task: Task): SessionRequest
 }
 
-class DefaultPrepareTaskAttemptUseCase(private val repository: TaskRepository) : PrepareTaskAttemptUseCase {
+class DefaultPrepareTaskAttemptUseCase(private val runPaths: TaskRunPaths) : PrepareTaskAttemptUseCase {
     override fun invoke(task: Task): SessionRequest =
-        TaskRequestMapper.forAttempt(task, repository.outputRoot(task))
+        TaskRequestMapper.forAttempt(task, runPaths.outputRoot(task))
 }

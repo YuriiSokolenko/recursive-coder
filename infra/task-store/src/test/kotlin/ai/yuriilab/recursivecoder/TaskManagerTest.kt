@@ -9,6 +9,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
 import kotlin.test.*
 import kotlinx.serialization.json.*
@@ -23,7 +24,10 @@ private val schedulerTestRunner = TaskRunner { _, _ -> "succeeded" }
 class TaskManagerTest {
     @TempDir lateinit var temp: Path
 
-    private fun service() = TaskService(TaskStore(temp.resolve("store")))
+    private fun service() = TaskService(
+        TaskStore(temp.resolve("store")),
+        DirectoryTaskRunPaths.forStore(temp.resolve("store"))
+    )
     private fun git(vararg args: String): String {
         val process = ProcessBuilder(listOf("git") + args)
             .directory(temp.resolve("workspace").toFile()).redirectErrorStream(true).start()
@@ -538,7 +542,7 @@ class TaskManagerTest {
                 complete = DefaultCompleteTaskAttemptUseCase(service.store),
                 interrupt = DefaultInterruptTaskAttemptUseCase(service.store),
                 recover = DefaultRecoverInterruptedAttemptsUseCase(service.store),
-                prepare = DefaultPrepareTaskAttemptUseCase(service.store),
+                prepare = DefaultPrepareTaskAttemptUseCase(DirectoryTaskRunPaths.forStore(temp.resolve("store"))),
                 runner = runner,
                 pollMillis = 10
             ).runUntilIdle(concurrency = 2)
@@ -586,6 +590,49 @@ class TaskManagerTest {
             schedulerExecutor.shutdownNow()
             assertTrue(schedulerExecutor.awaitTermination(15, TimeUnit.SECONDS),
                 "Scheduler must release its worker pool and exclusive store lock")
+        }
+    }
+
+    @Test fun cancellationAfterRunnerExitCannotInterruptDurableCompletion() {
+        val service = service()
+        service.enqueue(request("completed"))
+        val store = service.store as TaskStore
+        val runningCancellation = AtomicReference<Cancellation?>()
+        val durabilityHookObserved = CountDownLatch(1)
+        val lateCancellationTimedOut = AtomicBoolean(false)
+        val interruptedDuringSync = AtomicBoolean(false)
+
+        // The worker's complete() transaction calls this hook immediately before
+        // directory fsync. Capture observations without asserting inside TaskStore.
+        store.directorySyncTestHook = {
+            val cancellation = runningCancellation.get()
+            if (cancellation != null) {
+                val cancellingThread = thread(name = "late-cancellation") { cancellation.cancel() }
+                cancellingThread.join(5000)
+                // Keep any failure sticky across multiple directory-sync hook calls.
+                if (cancellingThread.isAlive) lateCancellationTimedOut.set(true)
+                if (Thread.currentThread().isInterrupted) interruptedDuringSync.set(true)
+                durabilityHookObserved.countDown()
+            }
+        }
+        try {
+            val outcome = runCatching {
+                TaskScheduler(service, TaskRunner { _, cancellation ->
+                    runningCancellation.set(cancellation)
+                    "succeeded"
+                }, pollMillis = 10).runUntilIdle()
+            }
+            assertTrue(durabilityHookObserved.await(5, TimeUnit.SECONDS),
+                "Durable completion hook was not observed")
+            assertFalse(lateCancellationTimedOut.get(), "Late cancellation did not finish")
+            assertFalse(interruptedDuringSync.get(),
+                "Cancellation reached the worker after runner completion")
+            val report = outcome.getOrThrow()
+            assertEquals(1, report.launched)
+            assertEquals(1, report.completed)
+            assertEquals(TaskState.SUCCEEDED, service.show("completed").state)
+        } finally {
+            store.directorySyncTestHook = null
         }
     }
 
@@ -648,6 +695,25 @@ class TaskManagerTest {
         val persistedTask = disk.getValue("tasks").jsonArray.single().jsonObject
         assertEquals(stored.prunedTransitions,
             persistedTask.getValue("prunedTransitions").jsonPrimitive.long)
+    }
+
+    @Test fun taskServiceRequestForPreservesV1OutputLayoutAcrossAttempts() {
+        val service = service()
+        service.enqueue(request("layout"))
+        val first = service.claim()!!
+        val firstRoot = temp.resolve("store/runs/layout/attempt-1").toAbsolutePath().normalize()
+        val firstRequest = service.requestFor(first)
+        assertEquals(firstRoot, firstRequest.outputRoot)
+        assertEquals(firstRoot.resolve("result.json"), firstRequest.output("resultPath"))
+        assertEquals(firstRoot.resolve("events.jsonl"), firstRequest.output("eventsPath"))
+        assertEquals(firstRoot.resolve("diagnostics.json"), firstRequest.output("diagnosticsPath"))
+        assertEquals(firstRoot.resolve("checkpoints"), firstRequest.output("checkpointDir"))
+        service.finish(first.id, first.sessionId!!, "failed")
+        service.retry(first.id)
+        val second = service.claim()!!
+        assertEquals(2, second.attempt)
+        val secondRoot = temp.resolve("store/runs/layout/attempt-2").toAbsolutePath().normalize()
+        assertEquals(secondRoot, service.requestFor(second).outputRoot)
     }
 
     @Test fun schedulerRejectsTamperedTaskTemplatesAtMappingBoundary() {

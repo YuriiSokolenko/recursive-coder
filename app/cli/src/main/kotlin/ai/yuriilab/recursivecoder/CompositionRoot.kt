@@ -12,9 +12,10 @@ import org.koin.dsl.module
  * borrowed repositories remain under their caller's lifetime management.
  * No Koin API is imported by core use cases or domain policies.
  */
-internal fun taskModule(repository: TaskRepository): Module = module {
+internal fun taskModule(repository: TaskRepository, runPaths: TaskRunPaths): Module = module {
     single<Clock> { Clock.systemUTC() }
     single<TaskRepository> { repository }
+    single<TaskRunPaths> { runPaths }
     factory<EnqueueTaskUseCase> { DefaultEnqueueTaskUseCase(get(), get()) }
     factory<TaskQueriesUseCase> { DefaultTaskQueriesUseCase(get()) }
     factory<CancelTaskUseCase> { DefaultCancelTaskUseCase(get(), get()) }
@@ -41,7 +42,7 @@ internal fun taskModule(repository: TaskRepository): Module = module {
         )
     }
     // Compatibility adapter for callers still using the original in-process API.
-    factory { TaskService(get(), get(), get()) }
+    factory { TaskService(get(), get(), get(), get()) }
 }
 
 internal fun sessionModule(model: ModelGateway): Module = module {
@@ -100,6 +101,7 @@ internal enum class TaskRepositoryOwnership { OWNED, BORROWED }
 internal class TaskComposition(
     private val repository: TaskRepository,
     private val ownership: TaskRepositoryOwnership,
+    private val runPaths: TaskRunPaths,
     private val additionalModules: List<Module> = emptyList()
 ) : AutoCloseable {
     private fun closeOwnedRepository() {
@@ -109,7 +111,7 @@ internal class TaskComposition(
     }
 
     private val application = try {
-        koinApplication { modules(listOf(taskModule(repository)) + additionalModules) }
+        koinApplication { modules(listOf(taskModule(repository, runPaths)) + additionalModules) }
     } catch (failure: Throwable) {
         // A failed DI setup must not leak a newly created resource-owning adapter.
         try {

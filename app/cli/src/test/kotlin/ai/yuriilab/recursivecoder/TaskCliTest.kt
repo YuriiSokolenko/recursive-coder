@@ -40,7 +40,10 @@ class TaskCliTest {
         assertFalse("reviewerDenialCode" in ordinary)
     }
 
-    private fun service() = TaskService(TaskStore(temp.resolve("store")))
+    private fun serviceAt(directory: Path) = TaskService(
+        TaskStore(directory), DirectoryTaskRunPaths.forStore(directory)
+    )
+    private fun service() = serviceAt(temp.resolve("store"))
     private fun git(vararg args: String): String {
         val process = ProcessBuilder(listOf("git") + args)
             .directory(temp.resolve("workspace").toFile()).redirectErrorStream(true).start()
@@ -126,7 +129,6 @@ class TaskCliTest {
         }.toString()
     }
 
-
     @Test fun taskCliShimRejectsMissingCommandWithoutCreatingStore() {
         val directory = temp.resolve("missing-command-store")
         assertEquals(2, TaskCli.execute(emptyList()))
@@ -142,18 +144,17 @@ class TaskCliTest {
         val dir = temp.resolve("cli-store")
         val prefix = listOf("--store", dir.toString())
         assertEquals(0, TaskCli.execute(prefix + listOf("enqueue", requestFile.toString(), "--priority", "70")))
-        assertEquals(TaskState.READY, TaskService(TaskStore(dir)).show("cli").state)
+        assertEquals(TaskState.READY, serviceAt(dir).show("cli").state)
         assertEquals(0, TaskCli.execute(prefix + listOf("list")))
         assertEquals(0, TaskCli.execute(prefix + listOf("show", "cli")))
         assertEquals(0, TaskCli.execute(prefix + listOf("pause")))
-        assertEquals(TaskState.PAUSED, TaskService(TaskStore(dir)).show("cli").state)
+        assertEquals(TaskState.PAUSED, serviceAt(dir).show("cli").state)
         assertEquals(0, TaskCli.execute(prefix + listOf("resume")))
         assertEquals(0, TaskCli.execute(prefix + listOf("cancel", "cli")))
         assertEquals(0, TaskCli.execute(prefix + listOf("retry", "cli")))
         assertEquals(0, TaskCli.execute(prefix + listOf("run")))
-        assertEquals(TaskState.SUCCEEDED, TaskService(TaskStore(dir)).show("cli").state)
+        assertEquals(TaskState.SUCCEEDED, serviceAt(dir).show("cli").state)
     }
-
 
     @Test fun invalidCliPriorityAndConcurrencyReturnUsageError() {
         val path = temp.resolve("request.json")
@@ -162,9 +163,8 @@ class TaskCliTest {
         val prefix = listOf("--store", directory.toString())
         assertEquals(2, TaskCli.execute(prefix + listOf("enqueue", path.toString(), "--priority", "NaN")))
         assertEquals(2, TaskCli.execute(prefix + listOf("run", "--concurrency", "NaN")))
-        assertTrue(TaskService(TaskStore(directory)).list().isEmpty())
+        assertTrue(serviceAt(directory).list().isEmpty())
     }
-
 
     @Test fun actualFakeSessionIsDispatchedThroughCliComposition() {
         val requestFile = temp.resolve("fake-request.json")
@@ -173,7 +173,7 @@ class TaskCliTest {
         val prefix = listOf("--store", store.toString())
         assertEquals(0, TaskCli.execute(prefix + listOf("enqueue", requestFile.toString())))
         assertEquals(0, TaskCli.execute(prefix + listOf("run")))
-        val task = TaskService(TaskStore(store)).show("readtask")
+        val task = serviceAt(store).show("readtask")
         assertEquals(TaskState.SUCCEEDED, task.state)
         assertEquals(SessionOutcome.SUCCEEDED, task.lastResultStatus)
         val output = store.resolve("runs/readtask/attempt-1")
