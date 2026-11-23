@@ -50,7 +50,8 @@ _CACHE_CLEANUP_INIT = (
     "beforeSettings { settings ->\n"
     "    settings.caches { cleanup = Cleanup.DISABLED }\n"
     "    if (System.getProperty('architecture.cacheCleanupProbe') == 'true') {\n"
-    "        println \"Architecture suite cache cleanup=${settings.caches.cleanup.get()}\"\n"
+    "        def disabled = settings.caches.cleanup.get().is(Cleanup.DISABLED)\n"
+    "        println \"Architecture suite cache cleanup disabled=${disabled}\"\n"
     "    }\n"
     "}\n"
 )
@@ -1931,7 +1932,7 @@ class LoggedGradleSubprocessTest(unittest.TestCase):
                 phase="cache-policy", sequence=1, timeout=180,
             )
             self.assertEqual(0, result.returncode)
-            self.assertIn("Architecture suite cache cleanup=DISABLED", result.stdout)
+            self.assertIn("Architecture suite cache cleanup disabled=true", result.stdout)
 
     def test_explicit_suite_parent_override_is_reported_and_used(self):
         with tempfile.TemporaryDirectory(prefix="gradle-home-override-") as directory:
