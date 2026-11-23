@@ -1,5 +1,7 @@
 """Regression checks for architecture rules using temporary Gradle init scripts."""
 
+import atexit
+from collections import defaultdict
 from contextlib import redirect_stdout
 import io
 import os
@@ -7,6 +9,7 @@ import re
 from pathlib import Path
 import shutil
 import signal
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -16,6 +19,148 @@ import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
+
+# Every fixture owns its build outputs and configuration cache. Gradle daemon
+# reuse across fixtures assumes immutable build-logic static/classloader state:
+# ArchitectureGraph and opt-in policies must not acquire mutable global caches.
+# The suite also owns a separate daemon registry so deliberately hostile fixture
+# scripts cannot run inside a developer's ordinary Gradle daemon.
+_GRADLE_INVOCATIONS: list[tuple[str, str, str, float, float | None, str]] = []
+_FIXTURE_COPIES: list[tuple[str, float]] = []
+_SUITE_GRADLE_HOME: tempfile.TemporaryDirectory[str] | None = None
+_DAEMON_IDLE_TIMEOUT_MS = 60_000
+_DAEMON_STOP_TIMEOUT_S = 20
+
+
+def _link_shared_cache(source: Path, destination: Path) -> None:
+    """Share trusted Gradle caches without merging daemon registries."""
+    try:
+        destination.symlink_to(source, target_is_directory=source.is_dir())
+    except OSError:
+        if os.name != "nt" or not source.is_dir():
+            raise
+        # A junction works for unprivileged Windows users.
+        subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(destination), str(source)],
+            check=True, capture_output=True, text=True, timeout=10,
+        )
+
+
+def _immutable_cache_file(source: str, destination: str) -> str:
+    """Hardlink artifact bytes when possible; copy across distinct filesystems."""
+    try:
+        os.link(source, destination)
+    except OSError:
+        shutil.copy2(source, destination)
+    return destination
+
+
+def _create_suite_gradle_home(shared_home: Path) -> tempfile.TemporaryDirectory[str]:
+    """Use a private daemon registry and canonical cache paths for vetted jars."""
+    home = tempfile.TemporaryDirectory(prefix="architecture-gradle-home-")
+    try:
+        source = shared_home.expanduser().resolve() / "caches"
+        if source.is_dir():
+            dest = Path(home.name) / "caches"
+            dest.mkdir()
+            for entry in source.iterdir():
+                target = dest / entry.name
+                if entry.name != "modules-2" or not entry.is_dir():
+                    _link_shared_cache(entry.resolve(), target)
+                    continue
+                target.mkdir()
+                for module_entry in entry.iterdir():
+                    module_dest = target / module_entry.name
+                    if module_entry.name == "files-2.1" and module_entry.is_dir():
+                        # The architecture guard deliberately verifies canonical
+                        # jar paths under gradleUserHome, in addition to SHA-1
+                        # content. A symlink of files-2.1 would fail that check.
+                        # Gradle's content-addressed artifact files are immutable,
+                        # so hardlinks preserve the exact verified bytes cheaply.
+                        shutil.copytree(
+                            module_entry, module_dest, copy_function=_immutable_cache_file,
+                        )
+                    else:
+                        _link_shared_cache(module_entry.resolve(), module_dest)
+        return home
+    except BaseException:
+        home.cleanup()
+        raise
+
+
+def _suite_gradle_home() -> str:
+    global _SUITE_GRADLE_HOME
+    if _SUITE_GRADLE_HOME is None:
+        shared = Path(os.environ.get("GRADLE_USER_HOME") or Path.home() / ".gradle")
+        _SUITE_GRADLE_HOME = _create_suite_gradle_home(shared)
+    return _SUITE_GRADLE_HOME.name
+
+
+def _stop_suite_daemons(reason: str) -> None:
+    """Stop ONLY this suite's daemon registry, never the user's daemon registry."""
+    if _SUITE_GRADLE_HOME is None:
+        return
+    print(f"[architecture-daemon] stopping isolated daemons: {reason}", flush=True)
+    try:
+        result = subprocess.run(
+            [str(ROOT / "gradlew"), "--stop"],
+            cwd=ROOT,
+            env={**os.environ, "GRADLE_USER_HOME": _SUITE_GRADLE_HOME.name},
+            capture_output=True,
+            text=True,
+            timeout=_DAEMON_STOP_TIMEOUT_S,
+            check=False,
+        )
+        print(
+            f"[architecture-daemon] stop exit={result.returncode}; "
+            f"output={result.stdout[-1024:]!r} stderr={result.stderr[-1024:]!r}",
+            flush=True,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        print(f"[architecture-daemon] WARNING stop failed: {error}", flush=True)
+
+
+@atexit.register
+def _cleanup_suite_gradle_home() -> None:
+    global _SUITE_GRADLE_HOME
+    if _SUITE_GRADLE_HOME is None:
+        return
+    try:
+        _stop_suite_daemons("test suite finished")
+    finally:
+        _SUITE_GRADLE_HOME.cleanup()
+        _SUITE_GRADLE_HOME = None
+
+
+@atexit.register
+def _print_architecture_timings() -> None:
+    """Report timings without flaky elapsed-time pass/fail thresholds."""
+    if not _GRADLE_INVOCATIONS:
+        return
+    phase_times: dict[str, list[float]] = defaultdict(list)
+    compile_times: dict[str, list[float]] = defaultdict(list)
+    for _, _, phase, elapsed, _, compile_state in _GRADLE_INVOCATIONS:
+        phase_times[phase].append(elapsed)
+        compile_times[compile_state].append(elapsed)
+    print(
+        f"[architecture-timing] Gradle invocations={len(_GRADLE_INVOCATIONS)} "
+        f"elapsed-total={sum(x[3] for x in _GRADLE_INVOCATIONS):.1f}s "
+        f"fixture-copies={len(_FIXTURE_COPIES)} "
+        f"copy-total={sum(x[1] for x in _FIXTURE_COPIES):.1f}s",
+        flush=True,
+    )
+    for group, values in sorted(phase_times.items()):
+        print(
+            f"[architecture-timing] phase={group} count={len(values)} "
+            f"total={sum(values):.1f}s median={statistics.median(values):.1f}s",
+            flush=True,
+        )
+    for group, values in sorted(compile_times.items()):
+        print(
+            f"[architecture-timing] build-logic={group} count={len(values)} "
+            f"total={sum(values):.1f}s",
+            flush=True,
+        )
 
 
 class _WindowsProcessJob:
@@ -56,7 +201,7 @@ def _stop_gradle_tree(
     process: subprocess.Popen[str], *, force: bool = False,
     windows_job=None,
 ) -> None:
-    """Stop Gradle and its descendants, including children holding stdout."""
+    """Stop the CLI process tree; detached Gradle daemons require separate stop."""
     if os.name == "posix":
         try:
             os.killpg(process.pid, signal.SIGKILL if force else signal.SIGTERM)
@@ -96,12 +241,25 @@ def run_logged_gradle(
 ) -> subprocess.CompletedProcess[str]:
     """Stream combined output now, retain an exact transcript for assertions."""
     label = f"[gradle #{sequence:02d}] {scenario} | {phase}"
+    # All 93 Gradle invocations share a suite-only daemon pool. The 60s idle
+    # limit avoids leaving large test daemons running on developer workstations.
+    is_gradle = Path(command[0]).stem == "gradlew"  # also gradlew.bat on Windows
+    gradle_env = (
+        {**os.environ, "GRADLE_USER_HOME": _suite_gradle_home()}
+        if is_gradle else None
+    )
+    if is_gradle:
+        command = [
+            command[0], f"-Dorg.gradle.daemon.idletimeout={_DAEMON_IDLE_TIMEOUT_MS}",
+            *command[1:],
+        ]
     started = time.monotonic()
     print(f"{label} START timeout={timeout:g}s", flush=True)
     try:
         process = subprocess.Popen(
             command,
             cwd=cwd,
+            env=gradle_env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -130,10 +288,14 @@ def run_logged_gradle(
             )
 
     output_lines: list[str] = []
+    first_task_elapsed: float | None = None
 
     def relay() -> None:
+        nonlocal first_task_elapsed
         assert process.stdout is not None
         for line in process.stdout:
+            if first_task_elapsed is None and line.startswith("> Task "):
+                first_task_elapsed = time.monotonic() - started
             output_lines.append(line)
             print(line, end="", flush=True)
 
@@ -169,8 +331,13 @@ def run_logged_gradle(
                         process, force=True, windows_job=windows_job
                     )
                     process.wait()
+                # A detached daemon is not a descendant of the Gradle CLI.
+                if is_gradle:
+                    _stop_suite_daemons(f"{label} timed out")
             reader.join(timeout=5)
             if reader.is_alive():
+                if is_gradle:
+                    _stop_suite_daemons(f"{label} stdout reader stuck")
                 # Parent may exit while its descendants still hold stdout.
                 _stop_gradle_tree(
                     process, force=True, windows_job=windows_job
@@ -225,9 +392,23 @@ def run_logged_gradle(
     else:
         cache = "not-reported"
     status = "passed" if process.returncode == 0 else "failed"
+    compiled = re.findall(r"(?m)^> Task :build-logic:compileKotlin(?: ([^\r\n]+))?$", transcript)
+    if not compiled:
+        compile_state = "no-compile-task"
+    elif any(item not in ("FROM-CACHE", "UP-TO-DATE", "SKIPPED", "NO-SOURCE")
+             for item in compiled):
+        compile_state = "executed"
+    else:
+        compile_state = compiled[-1].lower()
+    if is_gradle:
+        _GRADLE_INVOCATIONS.append(
+            (cwd.name, scenario, phase, elapsed, first_task_elapsed, compile_state)
+        )
+    pre_task = f"{first_task_elapsed:.1f}s" if first_task_elapsed is not None else "n/a"
     print(
         f"{label} END status={status} exit={process.returncode} "
-        f"elapsed={elapsed:.1f}s cache={cache}",
+        f"elapsed={elapsed:.1f}s pre-task={pre_task} "
+        f"build-logic={compile_state} cache={cache}",
         flush=True,
     )
     return subprocess.CompletedProcess(command, process.returncode, transcript)
@@ -261,7 +442,7 @@ class ArchitectureBoundaryTest(_GradleOutputAssertions):
                 encoding="utf-8",
             )
             run = run_logged_gradle(
-                [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                [str(ROOT / "gradlew"), "--daemon", "--offline",
                  "--console=plain", "checkArchitecture"],
                 cwd=fixture,
                 scenario="production file-level trusted running opt-in",
@@ -293,7 +474,7 @@ class ArchitectureBoundaryTest(_GradleOutputAssertions):
                 with self.subTest(name=name):
                     injected.write_text(content, encoding="utf-8")
                     result = run_logged_gradle(
-                        [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                        [str(ROOT / "gradlew"), "--daemon", "--offline",
                          "--console=plain", "checkArchitecture"],
                         cwd=fixture, scenario=name,
                         phase="token-negative", sequence=1, timeout=180,
@@ -327,7 +508,7 @@ class ArchitectureBoundaryTest(_GradleOutputAssertions):
                     path.write_text(original + "\n" + injection, encoding="utf-8")
                     try:
                         result = run_logged_gradle(
-                            [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                            [str(ROOT / "gradlew"), "--daemon", "--offline",
                              "--console=plain", "checkArchitecture"],
                             cwd=fixture, scenario=f"{relative} compiler opt-in",
                             phase="script-negative", sequence=index + 1, timeout=180,
@@ -366,7 +547,7 @@ class ArchitectureBoundaryTest(_GradleOutputAssertions):
                     module.write_text(original + "\n" + config + "\n", encoding="utf-8")
                     try:
                         run = run_logged_gradle(
-                            [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                            [str(ROOT / "gradlew"), "--daemon", "--offline",
                              "--console=plain", "checkArchitecture"],
                             cwd=fixture, scenario=f"source root {source_name}",
                             phase="negative", sequence=n + 1, timeout=180,
@@ -385,7 +566,7 @@ class ArchitectureBoundaryTest(_GradleOutputAssertions):
             test.parent.mkdir(parents=True, exist_ok=True)
             test.write_text("class Allowed {}\n", encoding="utf-8")
             good = run_logged_gradle(
-                [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                [str(ROOT / "gradlew"), "--daemon", "--offline",
                  "--console=plain", "checkArchitecture"],
                 cwd=fixture, scenario="Java test source", phase="positive",
                 sequence=1, timeout=180)
@@ -402,7 +583,7 @@ class ArchitectureBoundaryTest(_GradleOutputAssertions):
                 "  }\n"
                 "}\n", encoding="utf-8")
             bad = run_logged_gradle(
-                [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                [str(ROOT / "gradlew"), "--daemon", "--offline",
                  "--console=plain", "checkArchitecture"],
                 cwd=fixture, scenario="Java production source", phase="negative",
                 sequence=2, timeout=180)
@@ -422,7 +603,7 @@ class ArchitectureBoundaryTest(_GradleOutputAssertions):
             )
             build.write_text(original + "\n" + injection, encoding="utf-8")
             denied = run_logged_gradle(
-                [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                [str(ROOT / "gradlew"), "--daemon", "--offline",
                  "--console=plain", "checkArchitecture"],
                 cwd=fixture, scenario="split marker compiler opt-in", phase="negative",
                 sequence=1, timeout=180)
@@ -433,7 +614,7 @@ class ArchitectureBoundaryTest(_GradleOutputAssertions):
                 'tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile>().configureEach { '
                 'compilerOptions.optIn.add("com.example.Unrelated") }\n', encoding="utf-8")
             allowed = run_logged_gradle(
-                [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                [str(ROOT / "gradlew"), "--daemon", "--offline",
                  "--console=plain", "checkArchitecture"],
                 cwd=fixture, scenario="comment and unrelated compiler opt-in", phase="positive",
                 sequence=2, timeout=180)
@@ -463,7 +644,7 @@ class ArchitectureBoundaryTest(_GradleOutputAssertions):
                         '    runtime.publishTrustedAcceptedRunning(request, cancellation, host)\n',
                         encoding="utf-8")
                     run = run_logged_gradle(
-                        [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                        [str(ROOT / "gradlew"), "--daemon", "--offline",
                          "--console=plain", "checkArchitecture"],
                         cwd=fixture, scenario=f"production {name} suppression",
                         phase="negative", sequence=idx + 1, timeout=180)
@@ -507,7 +688,7 @@ class ArchitectureBoundaryTest(_GradleOutputAssertions):
                 with self.subTest(name=name):
                     script.write_text(base_script + "\n" + injection, encoding="utf-8")
                     run = run_logged_gradle(
-                        [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                        [str(ROOT / "gradlew"), "--daemon", "--offline",
                          "--console=plain", "checkArchitecture"],
                         cwd=fixture, scenario=f"production bytecode {name}",
                         phase="negative", sequence=idx + 1, timeout=240)
@@ -523,7 +704,7 @@ class ArchitectureBoundaryTest(_GradleOutputAssertions):
             resource.parent.mkdir(parents=True, exist_ok=True)
             resource.write_bytes(b"\xca\xfe\xba\xbe")
             result = run_logged_gradle(
-                [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                [str(ROOT / "gradlew"), "--daemon", "--offline",
                  "--console=plain", "checkArchitecture"],
                 cwd=fixture, scenario="precompiled resource class",
                 phase="negative", sequence=1, timeout=240)
@@ -544,7 +725,7 @@ class ArchitectureBoundaryTest(_GradleOutputAssertions):
             def execute(mode: str, options: list[str], *, standalone: bool = False):
                 nonlocal sequence
                 sequence += 1
-                args = [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                args = [str(ROOT / "gradlew"), "--daemon", "--offline",
                         "--console=plain"]
                 if standalone:
                     args.extend(["-p", "build-logic"])
@@ -619,7 +800,7 @@ class ArchitectureBoundaryTest(_GradleOutputAssertions):
                                 if standalone else "gradle/verification-metadata.xml")
                     manifest = fixture / relative
                     before = manifest.read_bytes()
-                    command = [str(ROOT / "gradlew"), "--no-daemon",
+                    command = [str(ROOT / "gradlew"), "--daemon",
                                "--offline", "--console=plain"]
                     if standalone:
                         command.extend(["-p", "build-logic"])
@@ -652,7 +833,7 @@ class ArchitectureBoundaryTest(_GradleOutputAssertions):
                 with self.subTest(name=name):
                     settings.write_text(original + addition, encoding="utf-8")
                     result = run_logged_gradle(
-                        [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                        [str(ROOT / "gradlew"), "--daemon", "--offline",
                          "--console=plain", "checkArchitecture"],
                         cwd=fixture, scenario=f"settings repository {name}",
                         phase="negative", sequence=idx + 1, timeout=240)
@@ -674,7 +855,7 @@ class ArchitectureBoundaryTest(_GradleOutputAssertions):
                 'repositories { mavenCentral { artifactUrls("https://example.invalid/m2") } }',
                 1), encoding="utf-8")
             result = run_logged_gradle(
-                [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                [str(ROOT / "gradlew"), "--daemon", "--offline",
                  "--console=plain", "checkArchitecture"],
                 cwd=fixture, scenario="Maven Central artifactUrls injection",
                 phase="negative", sequence=1, timeout=240)
@@ -698,7 +879,7 @@ class ArchitectureBoundaryTest(_GradleOutputAssertions):
                     script.write_text(original + "\n" + injection, encoding="utf-8")
                     try:
                         result = run_logged_gradle(
-                            [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                            [str(ROOT / "gradlew"), "--daemon", "--offline",
                              "--console=plain", "checkArchitecture"],
                             cwd=fixture, scenario=f"legacy buildscript {name}",
                             phase="negative", sequence=idx + 1, timeout=240)
@@ -718,7 +899,7 @@ class ArchitectureBoundaryTest(_GradleOutputAssertions):
                     'url = uri("https://example.invalid/plugin") }\n'
                 )
             result = run_logged_gradle(
-                [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                [str(ROOT / "gradlew"), "--daemon", "--offline",
                  "--console=plain", "checkArchitecture"],
                 cwd=fixture, scenario="computed project buildscript repository",
                 phase="negative", sequence=1, timeout=240)
@@ -744,7 +925,7 @@ class ArchitectureBoundaryTest(_GradleOutputAssertions):
                         encoding="utf-8",
                     )
                     result = run_logged_gradle(
-                        [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                        [str(ROOT / "gradlew"), "--daemon", "--offline",
                          "--console=plain", "checkArchitecture"],
                         cwd=fixture, scenario=f"settings apply(from) {relative}",
                         phase="negative", sequence=sequence, timeout=240,
@@ -767,7 +948,7 @@ class ArchitectureBoundaryTest(_GradleOutputAssertions):
                 script.read_text(encoding="utf-8") +
                 '\napply(from = "reviewed-fixture.gradle.kts")\n', encoding="utf-8")
             result = run_logged_gradle(
-                [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                [str(ROOT / "gradlew"), "--daemon", "--offline",
                  "--console=plain", "checkArchitecture"],
                 cwd=fixture, scenario="apply(from) script plugin",
                 phase="negative", sequence=1, timeout=240)
@@ -787,7 +968,7 @@ dependencies { add("testHiddenBridge", files("rogue.jar")) }
 """, encoding="utf-8")
             (fixture / "core/tasks/rogue.jar").write_bytes(b"unreviewed")
             result = run_logged_gradle(
-                [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                [str(ROOT / "gradlew"), "--daemon", "--offline",
                  "--console=plain", "checkArchitecture"],
                 cwd=fixture, scenario="inherited test named production dependency",
                 phase="negative", sequence=1, timeout=240)
@@ -808,7 +989,7 @@ dependencies { add("testHiddenBridge", files("rogue.jar")) }
                 encoding="utf-8",
             )
             run = run_logged_gradle(
-                [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                [str(ROOT / "gradlew"), "--daemon", "--offline",
                  "--console=plain", "checkArchitecture"],
                 cwd=fixture, scenario="trusted C3 SHA-256 content pin",
                 phase="negative", sequence=1, timeout=240)
@@ -827,7 +1008,7 @@ dependencies { add("testHiddenBridge", files("rogue.jar")) }
                 encoding="utf-8",
             )
             run = run_logged_gradle(
-                [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                [str(ROOT / "gradlew"), "--daemon", "--offline",
                  "--console=plain", "checkArchitecture"],
                 cwd=fixture, scenario="reflective trusted C3 access",
                 phase="negative", sequence=1, timeout=240)
@@ -849,7 +1030,7 @@ dependencies { add("testHiddenBridge", files("rogue.jar")) }
                 "-opt-in=ai.yuriilab.recursivecoder.TrustedRunningBoundaryApi\n",
                 encoding="utf-8")
             run = run_logged_gradle(
-                [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                [str(ROOT / "gradlew"), "--daemon", "--offline",
                  "--console=plain", "checkArchitecture"],
                 cwd=fixture, scenario="effective compiler @argfile", phase="negative",
                 sequence=1, timeout=180)
@@ -871,7 +1052,7 @@ dependencies { add("testHiddenBridge", files("rogue.jar")) }
                 "  }\n"
                 "}\n", encoding="utf-8")
             result = run_logged_gradle(
-                [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                [str(ROOT / "gradlew"), "--daemon", "--offline",
                  "--console=plain", "--init-script", str(init), "checkArchitecture"],
                 cwd=fixture, scenario="Groovy init script compiler opt-in",
                 phase="negative", sequence=1, timeout=180)
@@ -890,7 +1071,7 @@ dependencies { add("testHiddenBridge", files("rogue.jar")) }
             )
             self.assertTrue(reviewed.is_file())  # Original, content-pinned declaration.
             result = run_logged_gradle(
-                [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                [str(ROOT / "gradlew"), "--daemon", "--offline",
                  "--console=plain", "checkArchitecture"],
                 cwd=fixture, scenario="allowed marker declaration",
                 phase="source-regression", sequence=1, timeout=180,
@@ -914,7 +1095,7 @@ dependencies { add("testHiddenBridge", files("rogue.jar")) }
                 encoding="utf-8",
             )
             run = run_logged_gradle(
-                [str(ROOT / "gradlew"), "--no-daemon", "--offline",
+                [str(ROOT / "gradlew"), "--daemon", "--offline",
                  "--console=plain", "checkArchitecture"],
                 cwd=fixture,
                 scenario="reviewed production file cannot launder opt-in",
@@ -950,7 +1131,7 @@ dependencies { add("testHiddenBridge", files("rogue.jar")) }
             run = run_logged_gradle(
                 [
                     "./gradlew",
-                    "--no-daemon",
+                    "--daemon",
                     "--offline",
                     "--console=plain",
                     "--init-script",
@@ -1022,6 +1203,7 @@ class ArchitectureConfigurationCacheRegressionTest(_GradleOutputAssertions):
 
     @staticmethod
     def copy_fixture(destination: Path) -> None:
+        copy_started = time.monotonic()
         # Discover product module build scripts instead of maintaining a fixed
         # list. The included build-logic build is copied separately below.
         # Exclude Gradle output directories and existing configuration caches.
@@ -1062,6 +1244,13 @@ class ArchitectureConfigurationCacheRegressionTest(_GradleOutputAssertions):
             target = destination / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / relative, target)
+        elapsed = time.monotonic() - copy_started
+        _FIXTURE_COPIES.append((destination.name, elapsed))
+        print(
+            f"[architecture-fixture] name={destination.name} "
+            f"copy={elapsed:.2f}s; build outputs and configuration cache excluded",
+            flush=True,
+        )
 
     def check_architecture(
         self, directory: Path, *, scenario: str, phase: str
@@ -1071,7 +1260,7 @@ class ArchitectureConfigurationCacheRegressionTest(_GradleOutputAssertions):
         return run_logged_gradle(
             [
                 str(ROOT / "gradlew"),
-                "--no-daemon",
+                "--daemon",
                 "--offline",
                 "--console=plain",
                 "--configuration-cache",
@@ -1417,6 +1606,78 @@ class ArchitectureConfigurationCacheRegressionTest(_GradleOutputAssertions):
 
 class LoggedGradleSubprocessTest(unittest.TestCase):
     """Fast runner checks that do not require Gradle."""
+
+    def test_suite_daemon_registry_is_private_but_offline_cache_is_shared(self):
+        with tempfile.TemporaryDirectory(prefix="ordinary-gradle-home-") as source:
+            original = Path(source)
+            caches = original / "caches"
+            caches.mkdir()
+            (caches / "cached-module").write_text("present", encoding="utf-8")
+            artifact = caches / "modules-2/files-2.1/org.test/library/1.0/abc/library.jar"
+            artifact.parent.mkdir(parents=True)
+            artifact.write_bytes(b"verified artifact")
+            (original / "daemon" / "9.8.2").mkdir(parents=True)
+            with _create_suite_gradle_home(original) as isolated:
+                suite = Path(isolated)
+                self.assertNotEqual(original, suite)
+                self.assertEqual(
+                    "present", (suite / "caches" / "cached-module").read_text(encoding="utf-8")
+                )
+                copied = suite / artifact.relative_to(original)
+                self.assertEqual(b"verified artifact", copied.read_bytes())
+                self.assertNotEqual(copied.resolve(), artifact.resolve())
+                self.assertTrue(copied.resolve().is_relative_to(suite))
+                self.assertFalse((suite / "daemon").exists())
+                self.assertTrue((original / "daemon" / "9.8.2").exists())
+
+    def test_daemon_stop_targets_only_private_suite_registry(self):
+        with tempfile.TemporaryDirectory(prefix="architecture-daemon-unit-") as directory:
+            test_home = mock.Mock()
+            test_home.name = directory
+            command_result = subprocess.CompletedProcess(
+                [str(ROOT / "gradlew"), "--stop"], 0, "Stopped", ""
+            )
+            with mock.patch.dict(globals(), {"_SUITE_GRADLE_HOME": test_home}):
+                with mock.patch.object(subprocess, "run", return_value=command_result) as invoke:
+                    _stop_suite_daemons("unit timeout")
+            invoke.assert_called_once()
+            args, kwargs = invoke.call_args
+            self.assertEqual([str(ROOT / "gradlew"), "--stop"], args[0])
+            self.assertEqual(directory, kwargs["env"]["GRADLE_USER_HOME"])
+            self.assertEqual(_DAEMON_STOP_TIMEOUT_S, kwargs["timeout"])
+            self.assertFalse(kwargs["check"])
+
+    @unittest.skipUnless(os.name == "posix", "POSIX process-group timeout regression")
+    def test_gradle_timeout_stops_detached_daemon_via_private_registry(self):
+        with tempfile.TemporaryDirectory(prefix="gradle-timeout-unit-") as directory:
+            executable = Path(directory) / "gradlew"
+            executable.write_text(
+                "#!/bin/sh\nprintf 'synthetic fixture\\n'\nsleep 60\n",
+                encoding="utf-8",
+            )
+            executable.chmod(0o755)
+            output = io.StringIO()
+            with mock.patch.dict(globals(), {"_SUITE_GRADLE_HOME": mock.Mock(name="unused")}):
+                # Substitute a real, unrelated temporary directory so that no
+                # ordinary Gradle daemon or actual Gradle binary is needed.
+                test_home = tempfile.TemporaryDirectory(prefix="gradle-timeout-home-")
+                with mock.patch.dict(globals(), {"_SUITE_GRADLE_HOME": test_home}):
+                    try:
+                        with mock.patch.object(
+                            sys.modules[__name__], "_stop_suite_daemons"
+                        ) as stop:
+                            with redirect_stdout(output):
+                                with self.assertRaisesRegex(AssertionError, "timed out"):
+                                    run_logged_gradle(
+                                        [str(executable), "--daemon"],
+                                        cwd=Path(directory),
+                                        scenario="simulated detached daemon timeout",
+                                        phase="cleanup", sequence=1, timeout=0.5,
+                                    )
+                        stop.assert_called_once()
+                        self.assertIn("timed out", stop.call_args.args[0])
+                    finally:
+                        test_home.cleanup()
 
     def test_combined_stream_and_failure_marker(self):
         log = io.StringIO()
