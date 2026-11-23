@@ -7,6 +7,8 @@ from contextlib import redirect_stdout
 import io
 import os
 import re
+import socket
+import stat
 from pathlib import Path
 import shutil
 import signal
@@ -31,13 +33,24 @@ _FIXTURE_COPIES: list[tuple[str, float]] = []
 _SUITE_GRADLE_HOME: tempfile.TemporaryDirectory[str] | None = None
 _DAEMON_IDLE_TIMEOUT_MS = 60_000
 _DAEMON_STOP_TIMEOUT_S = 20
+_SUITE_PARENT_NAME = ".architecture-gradle-homes"
+_SUITE_HOME_PREFIX = "architecture-gradle-home-"
+_SUITE_MARKER = ".recursive-coder-architecture-suite"
+_SUITE_MARKER_MAGIC = "recursive-coder-architecture-suite-v1"
+_STALE_SUITE_SECONDS = 72 * 60 * 60
+_SUITE_PARENT_OVERRIDE = "ARCHITECTURE_GRADLE_HOME_PARENT"
+_CROSS_DEVICE_ERROR = (
+    "Architecture artifact cache is cross-device; refusing a bulk copy into "
+    "the private Gradle home. Set ARCHITECTURE_GRADLE_HOME_PARENT to an "
+    "existing writable directory on the artifact cache filesystem."
+)
 # Never duplicate an entire developer cache after a hardlink failure.
 _MAX_ARTIFACT_COPY_BYTES = 128 * 1024 * 1024
 _CACHE_CLEANUP_INIT = (
     "beforeSettings { settings ->\n"
     "    settings.caches { cleanup = Cleanup.DISABLED }\n"
     "    if (System.getProperty('architecture.cacheCleanupProbe') == 'true') {\n"
-    "        println 'Architecture suite cache cleanup disabled'\n"
+    "        println \"Architecture suite cache cleanup=${settings.caches.cleanup.get()}\"\n"
     "    }\n"
     "}\n"
 )
@@ -48,22 +61,116 @@ def _same_filesystem(source: Path, destination: Path) -> bool:
     return source.stat().st_dev == destination.stat().st_dev
 
 
+def _suite_process_alive(pid: int) -> bool:
+    """Conservatively keep stale homes owned by still-running POSIX processes."""
+    if os.name != "posix":
+        return True  # Never delete Windows homes without reliable liveness proof.
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _prune_stale_suite_homes(parent: Path) -> None:
+    """Only remove old, positively identified private homes of dead processes."""
+    now = time.time()
+    for home in parent.iterdir():
+        if not home.name.startswith(_SUITE_HOME_PREFIX):
+            continue
+        try:
+            info = home.lstat()
+            if not stat.S_ISDIR(info.st_mode):
+                continue  # Never follow a symlink or Windows directory junction.
+            if (getattr(info, "st_file_attributes", 0) &
+                    getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)):
+                continue
+            if os.name == "posix" and info.st_uid != os.getuid():
+                continue
+            marker = home / _SUITE_MARKER
+            if marker.is_symlink() or not marker.is_file():
+                continue
+            if now - marker.stat().st_mtime < _STALE_SUITE_SECONDS:
+                continue
+            lines = marker.read_text(encoding="utf-8").splitlines()
+            if len(lines) != 3 or lines[0] != _SUITE_MARKER_MAGIC:
+                continue
+            if lines[2] != f"host={socket.gethostname()}":
+                continue  # Could still be in use on a different machine.
+            if not lines[1].startswith("pid=") or not lines[1][4:].isdigit():
+                continue
+            if _suite_process_alive(int(lines[1][4:])):
+                continue
+            shutil.rmtree(home)  # CPython 3.10+ does not follow junction targets.
+            print(f"[architecture-suite-home] pruned-stale={home.name}", flush=True)
+        except (OSError, UnicodeError, ValueError) as error:
+            # Stale cleanup is best-effort and cannot make the test suite fail.
+            print(
+                f"[architecture-suite-home] stale-prune-warning="
+                f"{home.name}:{type(error).__name__}", flush=True,
+            )
+
+
+def _private_suite_parent(base: Path) -> Path:
+    """Private 0700 parent, never a symlink or shared user directory."""
+    if not base.is_dir():
+        raise FileNotFoundError(errno.ENOENT, "Suite home parent is not a directory", str(base))
+    parent = base / _SUITE_PARENT_NAME
+    parent.mkdir(mode=0o700, exist_ok=True)
+    info = parent.lstat()
+    if (not stat.S_ISDIR(info.st_mode) or
+            getattr(info, "st_file_attributes", 0) &
+            getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)):
+        raise PermissionError(errno.EACCES, "Unsafe suite parent link", str(parent))
+    if os.name == "posix" and (
+        info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077
+    ):
+        raise PermissionError(errno.EACCES, "Suite parent must be private (0700)", str(parent))
+    _prune_stale_suite_homes(parent)
+    return parent
+
+
 def _private_suite_home(shared_home: Path):
-    """Prefer the cache's own filesystem; report permission-related fallbacks."""
-    locations = [("sibling", shared_home.parent)]
+    """Prefer a hidden same-device suite root; allow explicit mount override."""
+    started = time.monotonic()
+    locations = []
+    if os.environ.get(_SUITE_PARENT_OVERRIDE):
+        locations.append((
+            "override", Path(os.environ[_SUITE_PARENT_OVERRIDE]).expanduser().resolve(),
+        ))
+    locations.append(("sibling", shared_home.parent))
     if shared_home.is_dir():
         locations.append(("inside-shared", shared_home))
-    locations.append(("system-temp", None))
+    locations.append(("system-temp", Path(tempfile.gettempdir()).resolve()))
     failures = []
     for mode, directory in locations:
         try:
-            return (tempfile.TemporaryDirectory(
-                prefix="architecture-gradle-home-", dir=directory,
-            ), mode, failures)
+            parent = _private_suite_parent(directory)
+            home = tempfile.TemporaryDirectory(prefix=_SUITE_HOME_PREFIX, dir=parent)
+            try:
+                (Path(home.name) / _SUITE_MARKER).write_text(
+                    f"{_SUITE_MARKER_MAGIC}\npid={os.getpid()}\n"
+                    f"host={socket.gethostname()}\n", encoding="utf-8",
+                )
+            except BaseException:
+                home.cleanup()
+                raise
+            return home, mode, failures
         except OSError as error:
             failures.append(f"{mode}:{type(error).__name__}")
-    raise OSError(f"No writable location for private Gradle home: {failures}")
-
+    fallback = ",".join(failures)
+    print(
+        f"[architecture-suite-home] status=failed placement=none "
+        f"fallback={fallback} hardlinks=0 hardlink-bytes=0 "
+        f"copies=0 copy-bytes=0 elapsed={time.monotonic() - started:.2f}s",
+        flush=True,
+    )
+    raise OSError(
+        f"No private Gradle home location ({fallback}). "
+        f"Set {_SUITE_PARENT_OVERRIDE} to an existing writable directory."
+    )
 
 
 def _link_shared_cache(source: Path, destination: Path) -> None:
@@ -94,10 +201,7 @@ def _create_suite_gradle_home(shared_home: Path) -> tempfile.TemporaryDirectory[
             os.link(source, destination)
         except OSError as error:
             if error.errno == errno.EXDEV:
-                raise RuntimeError(
-                    "Architecture artifact cache is cross-device; refusing "
-                    "to copy it into the private Gradle home"
-                ) from error
+                raise RuntimeError(_CROSS_DEVICE_ERROR) from error
             if copy_bytes + size > _MAX_ARTIFACT_COPY_BYTES:
                 raise RuntimeError(
                     "Architecture artifact cache hardlink failed and bounded "
@@ -139,11 +243,7 @@ def _create_suite_gradle_home(shared_home: Path) -> tempfile.TemporaryDirectory[
                         # The security guard checks canonical artifact paths
                         # beneath the private Gradle User Home, not symlinks.
                         if not _same_filesystem(module_entry, Path(home.name)):
-                            raise RuntimeError(
-                                "Architecture artifact cache is cross-device; "
-                                "refusing a bulk copy into the private Gradle home. "
-                                "Use a writable directory on the cache filesystem."
-                            )
+                            raise RuntimeError(_CROSS_DEVICE_ERROR)
                         shutil.copytree(
                             module_entry, module_dest, copy_function=link_artifact,
                         )
