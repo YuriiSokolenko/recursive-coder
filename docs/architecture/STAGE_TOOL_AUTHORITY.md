@@ -66,33 +66,24 @@ post-operation recheck. Each attempted write conservatively discards the stage's
 previous check evidence.
 
 Only the host-selected IDs `git_diff_check` and explicitly allowlisted
-external checks can run. External checks reuse the existing Linux
-bubblewrap boundary (no network, read-only checkout at `/workspace`,
-private writable `/scratch` with `HOME=/scratch`, bounded output/deadline,
-no inherited environment or build-tool dependency cache). There is no
-unsandboxed fallback. Developers must require both the Git diff check
-and an independent sandboxed check.
+external checks can run. External checks reuse the existing Linux bubblewrap
+boundary: read-only real checkout, writable private tmpfs root (including
+`/tmp`), writable private `/scratch` (`HOME`), no mounted host `/etc`,
+no network or provisioned dependency cache, and bounded output/deadline.
+There is no unsandboxed fallback. Developers must require both the Git diff
+check and an independent sandboxed check.
 
-**Current build-check limitation (#154):** The stage adapter grants no
-additional filesystem or process authority beyond `TrustedWriteRuntime`.
-The read-only checkout and missing provisioned toolchain/dependency caches
-prevent normal offline Gradle, Maven, npm and other build-tool suites from
-writing their outputs, even if the host selects one as the required check.
-Current read-only check fixtures do not prove independent test-suite execution.
-
-**Proposed, not implemented:** Allow an *isolated check process only* to
-use a fresh disposable writable overlay of a frozen checkout, with a
-read-only host-provisioned dependency cache and SHA-256-pinned toolchain.
-This must not widen any `StageWrite` path, allow agent-controlled executable
-or mount selection, make the real workspace writable from the check, or
-allow test output to become accepted artifact content. The stage opener
-must continue to recheck live host authority after the check; the trusted
-runtime must keep its pre/post-`verifyState()` manifest fence and final
-receipt verification. Cache, toolchain and sandbox-profile identities
-would have to be included in the host-authenticated check policy/evidence
-when such support is implemented. See the
-[disposable writable check sandbox design](TRUSTED_WRITES.md#proposed-disposable-writable-check-sandbox-design-only-154)
-for provisioning, denial and E2E requirements.
+**Current limitation and future design (#154):** These read-only-checkout
+conditions prevent ordinary offline build-tool suites from writing project
+outputs. The stage adapter grants no extra filesystem/process authority.
+A future *check-only* disposable writable view, offline pinned dependencies
+and verified toolchain are **not implemented**. It must not expand
+`StageWrite` scope, accept agent-selected commands or mounts, or relax
+stage authority revalidation, pre/post-`verifyState()` and final receipt
+checks. The authoritative [sandbox limitations, proposed design and required
+E2E cases](TRUSTED_WRITES.md#proposed-disposable-writable-check-sandbox-design-only-154)
+include the snapshot, resource limits and cache/toolchain receipt
+invalidation rules.
 
 `StageWriteEvidence` and `StageCheckEvidence` contain receipt metadata
 and denial codes; **no HMAC receipt or signing secret is returned to the
