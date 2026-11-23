@@ -750,6 +750,27 @@ class LinuxFiveRoleWorkflowHostTest : PreparationStageHostContract() {
         }
     }
 
+    @Test fun productionReviewerHostUsesSharedStaleLeaseCode() {
+        val (host, _) = newHost(checkoutName = "review-stale-code")
+        val snapshot = host.snapshot()
+        val stage = snapshot.graph.stages.single()
+        val manifest = StageArtifactManifest(ArtifactId("stale-review-manifest"),
+            StageArtifactKind.IMPLEMENTATION, "src/main/StaleManifest.kt",
+            sha("uncommitted"), EngineeringRole.DEVELOPER,
+            stage.correlation.stageRunId, 1, ArtifactApproval.ACCEPTED, ArtifactFreeze.FROZEN)
+        val evidence = DeveloperReviewEvidence(manifest, emptyList(), "write-stale",
+            StageValidationEvidence(stage.correlation, requireNotNull(stage.agentId),
+                emptyList(), true), StageRoleUsage())
+        val lease = ReviewerStageLease("revoked-lease", stage.correlation.stageRunId,
+            snapshot.graph, snapshot.acceptedIds,
+            ReviewerDeveloperHandoff(evidence, emptyList()))
+        val decision = ReviewerDecisionRecord(stage.correlation, ReviewerDisposition.ACCEPT,
+            "OK", ReviewerCorrectionScope.NONE, setOf("check:stale"), manifest.sha256)
+        assertEquals(ReviewerFinishResult.Denied(ReviewerFinishDenialCodes.STALE_LEASE),
+            host.reviewerHost.finishStage(lease, snapshot.graph, snapshot.acceptedIds, decision))
+        assertEquals(snapshot, host.snapshot())
+    }
+
     @Test fun authenticFiveRoleWorkflowRunsThroughGitAndIndependentReviewer() = runBlocking {
         val (host, repo) = newHost()
         val roles = OfflineFiveRoleModel()

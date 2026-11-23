@@ -50,6 +50,25 @@ internal object WritableWorkflowCli {
     private val digestPattern = Regex("[0-9a-f]{64}")
     private val headPattern = Regex("[0-9a-f]{40}")
 
+    /** CLI-only diagnostics, independent of Session Protocol v1. */
+    internal data class CliOutcome(
+        val status: String, val code: String, val reviewerDenialCode: String? = null
+    ) {
+        fun json(): JsonObject = buildJsonObject {
+            put("outcome", status)
+            put("code", code)
+            reviewerDenialCode?.let { put("reviewerDenialCode", it) }
+        }
+    }
+
+    internal fun summarize(result: FiveRoleWorkflowOutcome): CliOutcome = when (result) {
+        is FiveRoleWorkflowOutcome.Completed -> CliOutcome("completed", result.graph.state.name)
+        is FiveRoleWorkflowOutcome.Stopped ->
+            CliOutcome("stopped", result.code, result.reviewerDenialCode)
+        is FiveRoleWorkflowOutcome.ReconciliationRequired ->
+            CliOutcome("reconciliation_required", result.code, result.reviewerDenialCode)
+    }
+
     private class WorkflowDenied(val code: String) : IllegalArgumentException()
 
     private fun gate(allowed: Boolean, code: String) {
@@ -116,23 +135,20 @@ internal object WritableWorkflowCli {
     fun execute(planPath: Path, approvalPath: Path): Int {
         val outcome = try { run(planPath, approvalPath) }
         catch (denied: WorkflowDenied) {
-            "denied" to denied.code
+            CliOutcome("denied", denied.code)
         } catch (_: Exception) {
             // Never expose paths, prompts, Git output, checks or credentials.
-            "denied" to "INVALID_WORKFLOW_CONFIGURATION"
+            CliOutcome("denied", "INVALID_WORKFLOW_CONFIGURATION")
         }
-        System.out.println(buildJsonObject {
-            put("outcome", outcome.first)
-            put("code", outcome.second)
-        })
-        return when (outcome.first) {
+        System.out.println(outcome.json())
+        return when (outcome.status) {
             "completed" -> 0
             "reconciliation_required" -> 1
             else -> 2
         }
     }
 
-    private fun run(planPath: Path, approvalPath: Path): Pair<String, String> {
+    private fun run(planPath: Path, approvalPath: Path): CliOutcome {
         require(System.getProperty("os.name").lowercase().contains("linux")) {
             "Writable workflows require Linux"
         }
@@ -414,7 +430,7 @@ internal object WritableWorkflowCli {
                 }
             }
         } catch (_: Exception) {
-            return "denied" to "EVENT_JOURNAL_UNAVAILABLE"
+            return CliOutcome("denied", "EVENT_JOURNAL_UNAVAILABLE")
         }
         recursive?.attachJournal(journal)
         val result = try {
@@ -432,25 +448,18 @@ internal object WritableWorkflowCli {
             // A stage may have written or advanced HEAD before an unexpected
             // failure. Never classify an unconfirmed runtime as a safe denial.
             try { journal?.close() } catch (_: Exception) { }
-            return "reconciliation_required" to "WORKFLOW_EXECUTION_UNCONFIRMED"
+            return CliOutcome("reconciliation_required", "WORKFLOW_EXECUTION_UNCONFIRMED")
         }
         // A failed or partially flushed event stream cannot accompany a
         // successful workflow. Always verify the real bytes after close.
         if (journal != null) {
             try { journal.finish() } catch (_: Exception) {
-                return "reconciliation_required" to "EVENT_JOURNAL_UNCONFIRMED"
+                return CliOutcome("reconciliation_required", "EVENT_JOURNAL_UNCONFIRMED")
             }
         }
         if (recursive?.reconciliationRequired == true)
-            return "reconciliation_required" to "CHILD_EXECUTION_UNCONFIRMED"
-        return when (result) {
-            is FiveRoleWorkflowOutcome.Completed ->
-                "completed" to result.graph.state.name
-            is FiveRoleWorkflowOutcome.Stopped ->
-                "stopped" to result.code
-            is FiveRoleWorkflowOutcome.ReconciliationRequired ->
-                "reconciliation_required" to result.code
-        }
+            return CliOutcome("reconciliation_required", "CHILD_EXECUTION_UNCONFIRMED")
+        return summarize(result)
     }
 
     /**

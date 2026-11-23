@@ -36,8 +36,14 @@ sealed interface ReviewerStageOutcome {
     data class NeedsHuman(val decision: ReviewerDecisionRecord, val usage: StageRoleUsage) :
         ReviewerStageOutcome
     data class Denied(val code: String) : ReviewerStageOutcome
-    data class Failed(val code: String) : ReviewerStageOutcome
-    data class ReconciliationRequired(val code: String) : ReviewerStageOutcome
+    /** Confirmed terminal failure; optional definitive host finish-denial cause. */
+    data class Failed(val code: String, val denialCode: String? = null) :
+        ReviewerStageOutcome
+    /** The cleanup uncertainty code is distinct from the original host denial. */
+    data class ReconciliationRequired(
+        val code: String,
+        val denialCode: String? = null
+    ) : ReviewerStageOutcome
 }
 
 data class ReviewerStageResult(
@@ -156,24 +162,40 @@ class RunReviewerStageUseCase(
         val running = lease.graph
         var spentUsage = StageRoleUsage()
 
-        suspend fun abort(code: String): ReviewerStageResult {
-            val terminal = if (code == "ROLE_TIMED_OUT" || code == "ROLE_CANCELLED")
-                StageState.CANCELLED else StageState.FAILED
+        /** The derived terminal default is only for pre-finish role stops.
+         * Definitive finish denials always request FAILED explicitly.
+         */
+        suspend fun abort(
+            code: String,
+            terminal: StageState = if (code == "ROLE_TIMED_OUT" ||
+                code == "ROLE_CANCELLED") StageState.CANCELLED else StageState.FAILED,
+            denialCode: String? = null
+        ): ReviewerStageResult {
             val snapshot = try {
                 withContext(NonCancellable + blockingDispatcher) {
                     host.abortStage(lease, terminal)
                 }
             } catch (_: Exception) { null }
             return if (snapshot == null) ReviewerStageResult(null, null,
-                ReviewerStageOutcome.ReconciliationRequired("REVIEW_ABORT_UNCONFIRMED"), spentUsage)
+                ReviewerStageOutcome.ReconciliationRequired(
+                    "REVIEW_ABORT_UNCONFIRMED", denialCode), spentUsage)
             else ReviewerStageResult(snapshot.graph, snapshot.acceptedIds,
-                ReviewerStageOutcome.Failed(code), spentUsage)
+                ReviewerStageOutcome.Failed(
+                    if (denialCode != null) "REVIEW_FINISH_DENIED" else code,
+                    denialCode), spentUsage)
         }
+        // Stale lease ownership cannot authorize abort; the graph is unconfirmed.
+        fun staleLease(): ReviewerStageResult = ReviewerStageResult(null, null,
+            ReviewerStageOutcome.ReconciliationRequired("REVIEW_LEASE_STALE"),
+            spentUsage)
+        suspend fun checkpointFailure(code: String): ReviewerStageResult =
+            if (code == ReviewerFinishDenialCodes.STALE_LEASE) staleLease()
+            else abort(code)
         suspend fun checkpoint(): String? {
             currentCoroutineContext().ensureActive()
             stopped(command)?.let { return it }
             return if (withContext(blockingDispatcher) { host.current(lease) })
-                null else "STALE_REVIEW_LEASE"
+                null else ReviewerFinishDenialCodes.STALE_LEASE
         }
         try {
             if (lease.stageRunId != id || lease.acceptedIds != accepted ||
@@ -181,8 +203,9 @@ class RunReviewerStageUseCase(
                 running != ready.copy(stages = ready.stages.map {
                     if (it.correlation.stageRunId == id)
                         it.copy(state = StageState.RUNNING) else it
-                }) || !host.current(lease)) return abort("INVALID_REVIEW_LEASE")
-            checkpoint()?.let { return abort(it) }
+                })) return abort("INVALID_REVIEW_LEASE")
+            if (!host.current(lease)) return staleLease()
+            checkpoint()?.let { return checkpointFailure(it) }
             val evidence = lease.handoff.developerResult
             val manifest = evidence.manifest
             val developer = running.stages.singleOrNull {
@@ -282,7 +305,7 @@ class RunReviewerStageUseCase(
             }
             if (prompt.toByteArray(Charsets.UTF_8).size > StageRoleLimits.MAX_INSTRUCTION_BYTES)
                 return abort("REVIEW_INPUT_TOO_LARGE")
-            checkpoint()?.let { return abort(it) }
+            checkpoint()?.let { return checkpointFailure(it) }
             // StageRoleExecutor has no authenticated usage-bearing exception type.
             // When it throws, post-exception token usage is unobservable.
             val proposal = roles.execute(StageRoleRequest(
@@ -300,7 +323,7 @@ class RunReviewerStageUseCase(
                 observedOutput >= 0 && observedOutput <= command.model.maxOutputTokens &&
                 observedOutput <= running.budget.maxTokens - observedInput)
                 returnedUsage else StageRoleUsage()
-            checkpoint()?.let { return abort(it) }
+            checkpoint()?.let { return checkpointFailure(it) }
             if (proposal.correlation != stage.correlation ||
                 proposal.role != EngineeringRole.REVIEWER || proposal.agentId != stage.agentId)
                 return abort("REVIEW_RESULT_IDENTITY_MISMATCH")
@@ -325,7 +348,7 @@ class RunReviewerStageUseCase(
             val decision = decode(text, stage.correlation, manifest.sha256)
                 ?: return abort("INVALID_REVIEW_RESPONSE")
             if (!intact()) return abort("FROZEN_INPUT_OR_SOURCE_CHANGED")
-            checkpoint()?.let { return abort(it) }
+            checkpoint()?.let { return checkpointFailure(it) }
             val review = StageReviewDecision(developer.correlation.stageRunId, manifest.id,
                 manifest.sha256, developer.agentId ?: return abort("MISSING_DEVELOPER_ACTOR"),
                 stage.agentId ?: return abort("MISSING_REVIEWER_ACTOR"),
@@ -344,7 +367,7 @@ class RunReviewerStageUseCase(
                 decision, host.verifyDeveloperEvidence(lease))
             if (gateResult is StageGateDecision.Deny) return abort(gateResult.code)
             if (!intact()) return abort("FROZEN_INPUT_OR_SOURCE_CHANGED")
-            checkpoint()?.let { return abort(it) }
+            checkpoint()?.let { return checkpointFailure(it) }
             val committed = try {
                 withContext(NonCancellable + blockingDispatcher) {
                     host.finishStage(lease, updated, accepted, decision)
@@ -357,16 +380,17 @@ class RunReviewerStageUseCase(
             when (committed) {
                 ReviewerFinishResult.Committed -> Unit
                 is ReviewerFinishResult.Denied -> {
-                    // A definite no-commit still may leave a live Reviewer lease.
-                    // Abort if current; if stale, preserve the host's diagnosis
-                    // rather than falsely claiming that the finish was uncertain.
-                    val aborted = abort(committed.code)
-                    if (committed.code == "STALE_REVIEW_LEASE" &&
-                        aborted.outcome is ReviewerStageOutcome.ReconciliationRequired)
+                    // The finish definitively did not commit. A host-confirmed
+                    // stale generation cannot be aborted: do not attempt cleanup.
+                    if (committed.code == ReviewerFinishDenialCodes.STALE_LEASE)
                         return ReviewerStageResult(null, null,
                             ReviewerStageOutcome.ReconciliationRequired(
-                                "REVIEW_FINISH_DENIED_STALE"), spentUsage)
-                    return aborted
+                                "REVIEW_FINISH_DENIED_STALE", committed.code), spentUsage)
+                    // Even if the host's reason resembles a pre-finish stop
+                    // signal, a denied finish must terminate a live lease FAILED.
+                    // If ownership moved before abort, retain the original
+                    // denial alongside the distinct cleanup uncertainty.
+                    return abort(committed.code, StageState.FAILED, committed.code)
                 }
                 ReviewerFinishResult.Unknown -> return ReviewerStageResult(null, null,
                     ReviewerStageOutcome.ReconciliationRequired("REVIEW_FINISH_UNCONFIRMED"),
