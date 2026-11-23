@@ -2002,9 +2002,10 @@ class LoggedGradleSubprocessTest(unittest.TestCase):
             past = time.time() - _STALE_SUITE_SECONDS - 3600
             os.utime(marker, (past, past))
             output = io.StringIO()
-            with redirect_stdout(output):
-                with _create_suite_gradle_home(base) as isolated:
-                    self.assertTrue(Path(isolated).is_dir())
+            with mock.patch.dict(os.environ, {_SUITE_PARENT_OVERRIDE: str(base)}):
+                with redirect_stdout(output):
+                    with _create_suite_gradle_home(base) as isolated:
+                        self.assertTrue(Path(isolated).is_dir())
             self.assertTrue(invalid.exists())
             self.assertIn("stale-prune-warning=", output.getvalue())
             self.assertIn("OverflowError", output.getvalue())
