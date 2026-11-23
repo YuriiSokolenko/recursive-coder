@@ -350,4 +350,64 @@ class ModelGatewayTest {
                 Cancellation(), deadline())
         }.code)
     }
+
+    @Test fun meteredHttpTurnsPreserveProvenanceAndRejectCumulativeOverrun() {
+        val c = config("usage_metadata")
+        val meter = FailClosedProviderUsageGateway(gateway(), 40, deadline())
+        meter.negotiate(c, Cancellation(), deadline())
+        assertEquals(ModelDecision.Read(task),
+            meter.next(c, task, null, Cancellation(), deadline(), true).decision)
+        assertEquals("MODEL_TOKEN_BUDGET_EXHAUSTED", assertFailsWith<Refused> {
+            meter.next(c, task, observation, Cancellation(), deadline(), true)
+        }.code)
+        assertEquals(2, postCount.get())
+        val requestedCaps = posts.map {
+            Json.parseToJsonElement(it).jsonObject.getValue("max_tokens").jsonPrimitive.long
+        }
+        assertEquals(listOf(40L, 25L), requestedCaps)
+        val result = meter.snapshot()
+        assertEquals(30L, result.observedInputTokens)
+        assertEquals(11L, result.observedOutputTokens)
+        assertEquals(41L, result.accountedTokens)
+        assertEquals(2, result.receipts.size)
+        assertEquals("host-adapter-response", result.receipts.last().provenance)
+        assertEquals(FailClosedProviderUsageGateway.ReceiptOutcome.BUDGET_EXCEEDED,
+            result.receipts.last().outcome)
+        assertEquals("MODEL_TOKEN_BUDGET_EXHAUSTED", assertFailsWith<Refused> {
+            meter.next(c, task, null, Cancellation(), deadline(), true)
+        }.code)
+        assertEquals(2, postCount.get(), "No further HTTP dispatch after overrun")
+    }
+
+    @Test fun failedHttpTurnIsUnconfirmedAndCannotTriggerHiddenRetry() {
+        val c = config("usage_metadata")
+        postHandler.set { _, _ -> MockReply(429, "retryable response", retryAfter = "0") }
+        val meter = FailClosedProviderUsageGateway(gateway(), 40, deadline())
+        assertEquals("MODEL_USAGE_UNCONFIRMED", assertFailsWith<Refused> {
+            meter.next(c, task, null, Cancellation(), deadline(), true)
+        }.code)
+        assertEquals(1, postCount.get(), "The metered adapter must disable provider retries")
+        assertEquals(40L, meter.snapshot().accountedTokens)
+        assertTrue(meter.snapshot().usageUnconfirmed)
+        assertEquals("MODEL_USAGE_UNCONFIRMED", assertFailsWith<Refused> {
+            meter.next(c, task, null, Cancellation(), deadline(), true)
+        }.code)
+        assertEquals(1, postCount.get())
+    }
+
+    @Test fun incompleteHttpUsageNeverAuthorizesASecondCall() {
+        val c = config("usage_metadata")
+        postHandler.set { _, _ -> MockReply(200,
+            toolCall().substringBefore(",\"usage\":") + "}") }
+        val meter = FailClosedProviderUsageGateway(gateway(), 40, deadline())
+        assertEquals("MODEL_USAGE_UNCONFIRMED", assertFailsWith<Refused> {
+            meter.next(c, task, null, Cancellation(), deadline(), false)
+        }.code)
+        assertTrue(meter.snapshot().usageUnconfirmed)
+        assertEquals(40L, meter.snapshot().accountedTokens)
+        assertEquals("MODEL_USAGE_UNCONFIRMED", assertFailsWith<Refused> {
+            meter.next(c, task, null, Cancellation(), deadline(), false)
+        }.code)
+        assertEquals(1, postCount.get())
+    }
 }
