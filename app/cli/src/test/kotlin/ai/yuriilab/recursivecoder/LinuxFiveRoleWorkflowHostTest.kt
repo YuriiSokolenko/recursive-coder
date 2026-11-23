@@ -776,7 +776,7 @@ class LinuxFiveRoleWorkflowHostTest : PreparationStageHostContract() {
         val initialHead = git(repo, "rev-parse", "HEAD")
         val validated = mutableListOf<StageKind>()
         host.advanceValidationDenialTestHook = { candidate ->
-            validated += candidate.stages.last().kind
+            validated.add(candidate.stages.last().kind)
             true
         }
         val roles = OfflineFiveRoleModel()

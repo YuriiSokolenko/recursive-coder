@@ -108,7 +108,7 @@ class TaskRepositoryContractTest {
         store.update { TaskMutation(it.copy(tasks = listOf(initial)), Unit) }
         val synced = mutableListOf<Path>()
         store.directorySyncTestHook = {
-            synced += it
+            synced.add(it)
             throw IOException("induced directory fsync failure")
         }
         val changed = initial.copy(priority = 2)
