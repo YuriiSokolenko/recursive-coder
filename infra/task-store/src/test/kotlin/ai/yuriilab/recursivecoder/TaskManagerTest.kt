@@ -9,6 +9,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
 import kotlin.test.*
 import kotlinx.serialization.json.*
@@ -586,6 +587,40 @@ class TaskManagerTest {
             schedulerExecutor.shutdownNow()
             assertTrue(schedulerExecutor.awaitTermination(15, TimeUnit.SECONDS),
                 "Scheduler must release its worker pool and exclusive store lock")
+        }
+    }
+
+    @Test fun cancellationAfterRunnerExitCannotInterruptDurableCompletion() {
+        val service = service()
+        service.enqueue(request("completed"))
+        val store = service.store as TaskStore
+        val runningCancellation = AtomicReference<Cancellation?>()
+        val durabilityHookObserved = CountDownLatch(1)
+
+        // The worker's complete() transaction calls this hook immediately before
+        // directory fsync. A concurrent late cancel must not interrupt FileChannel.
+        store.directorySyncTestHook = {
+            val cancellation = runningCancellation.get()
+            if (cancellation != null) {
+                val cancellingThread = thread(name = "late-cancellation") { cancellation.cancel() }
+                cancellingThread.join(5000)
+                assertFalse(cancellingThread.isAlive, "Late cancellation did not finish")
+                assertFalse(Thread.currentThread().isInterrupted,
+                    "Cancellation reached the worker after runner completion")
+                durabilityHookObserved.countDown()
+            }
+        }
+        try {
+            val report = TaskScheduler(service, TaskRunner { _, cancellation ->
+                runningCancellation.set(cancellation)
+                "succeeded"
+            }, pollMillis = 10).runUntilIdle()
+            assertEquals(1, report.launched)
+            assertEquals(1, report.completed)
+            assertTrue(durabilityHookObserved.await(5, TimeUnit.SECONDS))
+            assertEquals(TaskState.SUCCEEDED, service.show("completed").state)
+        } finally {
+            store.directorySyncTestHook = null
         }
     }
 
