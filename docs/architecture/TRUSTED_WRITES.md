@@ -186,11 +186,16 @@ isolation, and ordinary Gradle-based CI is **not** an independent stage check.
    and record the accepted manifest. Materialize a **separate complete
    source-tree snapshot** from the pinned Git HEAD tree plus individually
    verified accepted postimages/deletions; check all file contents, modes
-   and path spellings against that state. Use independently allocated file
-   bytes (no hardlinks to the live workspace). Reject unsupported symlinks,
-   special files or Git tree entries rather than silently following them.
-   Re-run `verifyState()` against the *real* checkout and require the same
-   manifest **after** creating the snapshot, before launching the check.
+   and path spellings against that state. Exclude unrelated untracked and
+   ignored local files (such as `local.properties` or `.env`); newly created
+   files enter the snapshot only when present in the accepted manifest.
+   Materialize private file objects: ordinary copies or filesystem reflinks
+   with independent copy-on-write semantics are permitted, but hardlinks to
+   the live workspace are not. Reject unsupported symlinks, special files or
+   Git tree entries rather than silently following them. Re-run
+   `verifyState()` against the *real* checkout and require it to equal the
+   **same manifest captured before materialization**, before launching the
+   check. That captured value is also the source snapshot's manifest.
    Freeze the snapshot read-only for the entire check. Do **not** use the
    mutable live checkout as an overlay lower layer: a lease is not proof
    against hostile or accidental same-UID writes.
@@ -227,19 +232,27 @@ isolation, and ordinary Gradle-based CI is **not** an independent stage check.
    copy-on-write** cache views for lockfiles and metadata; never write
    into the shared lower cache. Select explicit offline modes, so missing
    dependencies fail promptly instead of causing network retries:
-   - **Gradle:** pinned installed distribution, `--offline --no-daemon`,
-     `GRADLE_RO_DEP_CACHE` for the read-only dependency cache and fresh
-     writable `GRADLE_USER_HOME` for local metadata, locks and plugin
-     caches. The host validates all plugins, wrapper/distribution dependencies
-     and buildscript inputs are already available offline.
+   - **Gradle:** host-pinned installed distribution, `--offline --no-daemon`,
+     `GRADLE_RO_DEP_CACHE` for the read-only `modules-2` dependency cache
+     created by a compatible Gradle version, and fresh writable
+     `GRADLE_USER_HOME` for local metadata, locks and plugin caches.
+     The read-only cache does **not** include Gradle distributions,
+     transforms or every kind of plugin/tool state: all must be separately
+     host-provisioned and digest-checked before offline execution.
+     Repository `gradle-wrapper.properties` cannot select or download a
+     different distribution; if present, its pinned distribution identity
+     must match the host's digest (or it is ignored and not executed).
    - **Maven:** `-o`, a fresh `-Dmaven.repo.local=...` location
      backed by the pinned read-only artifact cache plus a disposable
      writable layer. All build plugins and their transitive dependencies
      must be present before execution.
-   - **npm:** `npm ci --offline` with the host-selected cache directory
-     (`--cache` or `npm_config_cache`) over a pinned read-only cache
-     and writable per-check layer. Lockfile/package content is validated;
-     install scripts cannot access a network (network namespace still off).
+   - **npm:** `npm ci --offline --ignore-scripts` by default, with the
+     host-selected cache directory (`--cache` or `npm_config_cache`)
+     over a pinned read-only cache and writable per-check layer.
+     Lockfile/package content is validated; lifecycle scripts may be
+     explicitly enabled only by a separately authenticated host check
+     policy and then run as untrusted code under the same resource/mount
+     constraints, with no network access. They are never implicitly trusted.
    All tool configuration and environment variables are **host-selected**;
    the model cannot choose dependency sources or change offline policy.
 5. **Pin the toolchain and required system data.** The host verifies a
@@ -249,8 +262,17 @@ isolation, and ordinary Gradle-based CI is **not** an independent stage check.
    found in `/etc` (for example passwd/group data, CA trust, timezone,
    name-service configuration) *only when needed*; do not mount host
    `/etc` wholesale. Offline JVM/Node/Gradle E2E must demonstrate that
-   the selected toolchain works with this allowlist. Never fall back to
-   unpinned host `PATH`, shell commands or network access.
+   the selected toolchain works with this allowlist. The executed `argv[0]`
+   must resolve to an absolute host-pinned binary inside the separately
+   verified, read-only toolchain mount, **never** to a snapshot file or
+   model-editable launcher: disallow `./gradlew`, `./mvnw` and any
+   `/workspace/node_modules/.bin/*` entry as the process executable.
+   Repository wrappers and their properties may be inspected as untrusted
+   project input but may not run or override the host-selected distribution.
+   Build scripts and test code remain untrusted executable content inside
+   the isolated process; this launcher restriction is not a ban on them.
+   Never fall back to unpinned host `PATH`, shell commands or network
+   access.
 6. **Bind and invalidate check evidence.** Extend the future host-authenticated
    check policy and receipt identity with the complete execution profile:
    check ID/argv, source snapshot and accepted manifest, toolchain digest,
@@ -264,7 +286,10 @@ isolation, and ordinary Gradle-based CI is **not** an independent stage check.
 7. **Keep the original Git fence and discard outputs.** The current
    `runCheck()` still calls `verifyState()` on the **real** workspace
    before launching and after the check, requiring
-   `verifyState() == preCheckManifest` unchanged. `finish()` must still
+   `verifyState() == preCheckManifest` unchanged. Here
+   `preCheckManifest` always denotes the value captured **before snapshot
+   materialization**; both the post-materialization and post-check
+   comparisons use exactly that value. `finish()` must still
    independently verify approved/frozen artifacts, actual postimages,
    Git HEAD/config/index, current receipts and stage authority.
    Build/test output is an observation, **not** an approved workspace
@@ -277,7 +302,10 @@ isolation, and ordinary Gradle-based CI is **not** an independent stage check.
 - An actual **offline Gradle/JUnit** check writes `build/` outputs in
   the disposable view, uses the pinned toolchain/cache, and leaves the host
   checkout, Git metadata, immutable artifacts and shared dependency cache
-  byte-identical. Missing dependencies, a changed pinned toolchain,
+  byte-identical. E2E must reject `gradlew`, `mvnw` and
+  `node_modules/.bin` as snapshot-controlled launchers, while a host-pinned
+  executable can still run untrusted build scripts in isolation.
+  Missing dependencies, a changed pinned toolchain,
   disallowed system-data requirements and overlay provisioning failures
   deny admission rather than falling back to the host.
 - A sandbox attempt exceeding its **upper-layer byte/inode quota** is
