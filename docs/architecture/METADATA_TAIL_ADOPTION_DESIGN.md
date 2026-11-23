@@ -8,6 +8,19 @@ the CLI, or the currently mandatory operator-reconciliation behavior. An
 independently reviewed implementation, host evidence producer and real crash
 tests are prerequisites to enabling any part of the proposal.
 
+## Glossary
+
+| Term | Meaning |
+| --- | --- |
+| C1 / C2 | Last independently verified checkpoint / successor checkpoint, not fence generations |
+| T | Exactly one frozen, canonical `created → accepted` ledger frame beyond C1 |
+| N / N+1 / N+2 | Original writer's fenced generation / single-use adoption generation / later ordinary admission generation |
+| RCLDG1 | Existing hash-chained session event ledger; a valid frame alone does not prove acknowledgement |
+| RCFEN1 / RCFEN2 | Existing fence format (never adoption-eligible) / proposed **new** version committing T before append |
+| Epoch | Host-controlled pre-execution interval bound to an exact C1, fence N, and event hash |
+| Barrier | Host-authenticated successor-generation boundary excluding all old and in-flight execution |
+| Witness | Independently checked, authenticated evidence proving the epoch was execution-free; not a journal event or operator assertion |
+
 ## 1. Decision and existing security boundary
 
 The crash window in #114 is **not** claimed to be physically unavoidable.
@@ -17,14 +30,25 @@ original `force(true)` returned, that an append was acknowledged, that
 checkpoint generation C2 was published, or that no model/tool/effect work
 started. No current API establishes all of these facts.
 
-**Decision: stop emitting `checkpoint.saved` as a journal record for new
-metadata-adoptable epochs.** An authoritative checkpoint generation must be
-verified from the checkpoint store, never inferred from a Session Protocol
-event. Previously written `checkpoint.saved` events remain valid only
-*inside an already verified checkpoint-bound historical prefix* where the
-current policy permits them. They are **never eligible for tail adoption**.
-Do not rewrite older ledgers or change `PreExecutionPhasePolicy` to make
-legacy tails recoverable.
+**Decision on #117's `checkpoint.saved` acceptance item: remove these
+appends from all future `meta-tail/v1` writer paths; do not bind them to
+a new host-authenticated receipt.** There is currently **no production
+producer** of `checkpoint.saved`: it remains on the ledger type allowlist
+and `PreExecutionPhasePolicy.step` accepts it in verified, historical,
+checkpoint-covered prefixes. That historical read compatibility is kept;
+removing the type globally from `PreExecutionPhasePolicy` would invalidate
+previously verified histories. In the proposed new, **version-scoped**
+RCFEN2 epoch, both the producer and append verifier MUST reject
+`checkpoint.saved` as an emitted event; no future implementation may
+re-enable it without a separately authenticated, reviewed publication
+receipt design. This is a **design decision**, not an assertion that the
+current implementation already enforces the new-epoch prohibition.
+
+An authoritative checkpoint is proved only by independently verified
+checkpoint-store generation evidence. A journal `checkpoint.saved`
+event is neither a C2 publication receipt nor an acknowledgement of
+`force(true)`. Existing ledgers are not rewritten and the legacy
+phase-history predicate is not relaxed.
 
 The proposed `meta-tail/v1` admission policy is a **closed list** of one
 additional exact frame: a root-only, completed
@@ -47,6 +71,55 @@ resume execution. The #105 effect contracts, including a MACed record or
 a checkpoint effect-head pin, do **not** themselves prove absence of work
 and cannot be used as a substitute for the evidence below.
 
+### Alternatives considered and practicality gate
+
+**Use the existing #104 `accepted → running` order as proof.** The
+intended invariant says execution starts only *after* a durably
+checkpointed `accepted → running` boundary. If that were a
+mandatory, exclusively mediated host gate for **every** runtime/model,
+tool, child, receipt and effect path (including crash, cancellation and
+stale-lease callbacks), a clean history stopping at `created → accepted`
+would be strong negative evidence. **It is not yet that gate.** The
+current `publishTrustedAcceptedRunning` is a separate opt-in
+metadata-only marker, intentionally disconnected from normal
+`DefaultRunSessionUseCase.invoke()` and from side-effect authority.
+Normal runtime paths and independent host callbacks are not proven to
+require it before dispatch. `C2` absence therefore does not rule out
+unrecorded or unacknowledged work. To revisit this alternative,
+[#104](https://github.com/YuriiSokolenko/recursive-coder/issues/104)
+must make the running transition an unavoidable, generation-fenced
+execution gate; [#105](https://github.com/YuriiSokolenko/recursive-coder/issues/105)
+must independently authenticate effect intents/receipts and stale
+callback exclusion. Neither a valid event type nor the current v1
+phase-policy scan establishes these properties today.
+
+**Two-phase event intent with operator-confirmed adoption.** A simpler
+design could publish a new immutable fence N with the exact T hash,
+then append T, then try C2, while the operator independently investigates
+the interrupted run and explicitly approves an exact, one-time
+C1/T/N reconciliation under new-lease CAS. This could be a useful
+**operator-only** recovery path and does not require unattended
+no-work classification. However, the precommitted hash proves intent
+to write T, not absence of unrecorded model/tool/effect execution.
+An operator approval is an external trust decision, not a reusable
+cryptographic no-work witness; this must be documented and audited
+as manual reconciliation, never silently upgraded to automatic
+adoption. It still needs a new, separately reviewed crash-safe
+publication API and tests. It cannot retrofit RCFEN1.
+
+**Leave operator reconciliation mandatory.** This costs no new
+trusted control plane and is the valid default. Given the complexity
+of proving a no-work epoch for a single metadata transition, the
+maintainer may choose this outcome and close #117 as
+**not planned / operator reconciliation by design** after independent
+review, without implementing RCFEN2 adoption. This document
+does **not** make that product/security decision for the maintainer.
+
+The automatic option below is deliberately a conditional future
+design, **not** a commitment to build a general host controller just
+to eliminate this one crash gap. If its proof cannot be produced,
+no safe automatic adoption is enabled.
+
 ## 2. Authenticated evidence required *before* the old writer appends
 
 This design is **not retroactive**. A bare existing #114 C1/N fence plus a
@@ -54,18 +127,32 @@ complete valid RCLDG1 tail has no independent no-execution evidence and
 continues to require an operator. The new host must provision all of the
 following **before** attempting the candidate append under original lease N.
 
-1. **A committed immutable `meta-tail/v1` fence extension** (a distinct,
-   versioned `RCFEN2`/anchor design, not a permissive parser change to
-   `RCFEN1`) binds C1 SHA-256, original resume generation N, ledger path
-   identity, last trusted byte offset, old chain head, session/trace/policy
-   and authority digests, the exact next canonical event *payload hash*,
-   the exact event sequence/causation identity and the closed policy ID.
-   The original generation fence and independent ledger-parent anchor
-   must durably commit this extension **before** the append. The old
-   `RCFEN1` format is ineligible; no post-crash self-attested upgrade.
-   The record and its anchor must be independently authenticated and
-   chained to the already verified C1, not supplied by the candidate
-   writer or inferred from its tail.
+1. **A precommitted, immutable generation-N `RCFEN2` fence**, not a
+   post-fence extension. The trusted host freezes the **entire canonical
+   payload for T before admission to N**. The N fence record itself
+   commits the exact payload SHA-256, session/trace/policy and authority
+   digests, C1 SHA-256, ledger path identity, old ledger offset/head and
+   the next sequence, event ID and causation identity under the closed
+   `meta-tail/v1` policy. The independent ledger-parent N anchor
+   cryptographically binds that exact RCFEN2 fence and is published and
+   durably synced **before** the N fence is committed; both must verify
+   before an append is eligible. There is **no separate immutable
+   post-N extension** and no new fence generation just to precommit T.
+   A crash between the N anchor and N fence publications is an
+   *incomplete admission*, handled by the existing prepared-admission
+   reconciliation model (extended and independently reviewed for
+   RCFEN2), not by tail adoption. An already committed fence N
+   cannot be retrofitted with T. The older `RCFEN1` record, including
+   any legacy `checkpoint.saved` event, remains ineligible.
+
+   `SessionEventJournal.frame` always emits a `timestamp` and
+   correlation/causation/actor/redaction fields. These are **frozen
+   before the N fence is published** and covered by the payload
+   commitment, even though the timestamp will precede the physical
+   append; it is **event-creation time, not fsync or acknowledgement
+   time**. Reject attempts to refresh it after admission.
+   The disallowed execution `timing` object is a different,
+   optional field; the required `timestamp` is not forbidden.
 2. **An independently verifiable execution-free epoch.** A trusted host
    admission controller, outside model-provided state and outside the
    RCLDG1 event stream, must record that this exact (session, generation,
@@ -122,33 +209,58 @@ to implement recovery.
 1. Validate paths and supported local filesystem types, expected host
    context and immutable controller evidence *without creating a lock*.
    Existing `resume.lock`, `checkpoint.lock` and
-   `<ledger>.lock` must already exist. If they are absent, unsafe, busy
-   or their inode/path identities differ, refuse with no modifications.
+   the ledger sibling `<ledger-name>.lock` (for example
+   `events.rcldg.lock`, as used by `DurableSessionEventLedger`)
+   must already exist. If an RCEFX1 effect sidecar is present or
+   provisioned, its separate sibling `<effects-name>.lock` must
+   also be inspected during the no-work/effect drift check; a missing,
+   busy, changed or inaccessible effect lock is **not** absence-of-work
+   proof. Never create any lock during read-only eligibility.
+   Missing, unsafe or changed lock/data-file identity refuses with
+   no modifications.
 2. Take the pre-existing exclusive `resume.lock` with nonblocking
    `tryLock` and the existing ledger OS lock, also nonblocking; keep both
    through any later commit. Acquire `checkpoint.lock` **briefly** to
    verify C1, the whole checkpoint/fence/independent-anchor chain, and the
    original versioned commitment, then release it. Never block for the
    ledger lock while holding `checkpoint.lock`. Do not create N+1.
-3. Under the **same open ledger file descriptor** subsequently used for
-   physical force, verify the complete RCLDG1 prefix and *exactly one*
-   complete following frame, canonical serialized payload bytes,
-   framing/UTF-8, sequence, causal/event identities, session/trace/root
-   graph, full hash chain and exact precommitted event digest. Compare C1
-   offset/head/file digest against the prefix independently from the
-   complete T head/digest/length. Recheck file key/path, size and the
-   immutable C1/fence/anchor heads under another short
-   `checkpoint.lock` while retaining the ledger lock.
-4. Verify the independent execution-free witness and its successor
-   barrier *against this exact physical T*. Verify no effect sidecar/head
-   drift and that no other process still owns generation N. Reject every
-   uncertainty (missing proof, bad signature, stale epoch, invalid shape,
-   short/torn/overlong tail, complete extra tail, valid but nonprecommitted
-   frame, MAC mismatch, changed file key, busy lock, no free fence slot).
-   **A rejected candidate is only an observation**, not a failed recovery
-   transaction: checkpoint, ledger bytes, lock files, anchors, checksum and
-   fence generation must be byte-for-byte unchanged. No truncate, repair,
-   deletion, implicit retry or acceptance on error.
+3. While holding the ledger's **separate OS lock-file channel**,
+   use one continuously open RCLDG1 **data** `FileChannel` for replay,
+   later force, and post-force verification:
+   - Replay the complete C1 prefix and exactly one following complete
+     candidate frame T. Validate framing, UTF-8, canonical JSON,
+     sequence, causation/event identities, session/trace/root graph,
+     full hash chain and the precommitted exact event digest.
+   - Compare the prefix's offset/head/file digest independently with
+     C1; then calculate T's complete head/digest/length. The payload
+     hash is fixed before N, including `timestamp`; do not manufacture
+     or re-emit any field on restart.
+   - Recheck file key/path/length and immutable C1/N/anchor heads under
+     a **second short** `checkpoint.lock` while the ledger OS lock is
+     retained. The data file has its **own** channel; do not confuse
+     that with the separate `<ledger-name>.lock` channel.
+4. Authenticate the independent no-work proof and exact successor
+   barrier against the bytes and generation of physical T:
+   - Validate the witness's epoch, original N fence/anchor, T digest,
+     host signing/key provenance and N+1 successor target against the
+     host's complete execution-admission history; reject stale,
+     incomplete, rolled-back or caller-invented evidence.
+   - Verify the effect sidecar/head has not drifted, including its
+     `<effects-name>.lock` when applicable. Confirm original N
+     ownership has ended and no unacknowledged work or stale callback
+     retains execution/publication permission.
+   - Check `N+2 <= MAX_FENCES (256)` **before touching any file**:
+     one adoption needs N+1 and a meaningful later normal admission
+     needs N+2. A session with fewer than two remaining fence slots
+     is not eligible, even if N+1 alone would fit.
+   - Refuse any uncertainty: missing proof, wrong signature,
+     changed path or head, unsafe/missing/busy lock, truncated or
+     extra frame, noncommitted but hash-valid frame, unsupported
+     version or insufficient fence capacity.
+     **Rejection is a read-only observation:** checkpoint,
+     ledger bytes, lock files, anchors, checksums and fence generation
+     remain byte-for-byte unchanged. No truncate, cleanup, force,
+     repair, delete or implicit retry is allowed.
 
 **Commit path (only after every gate succeeded):**
 
@@ -188,8 +300,13 @@ to implement recovery.
    treat this metadata checkpoint as permission for execution.
 
 Use existing nonblocking OS lock acquisition and its short lock durations.
-No external callbacks, model, tool or network calls are allowed inside
-publication monitors. A blocked `force(true)` may delay lease retirement;
+The proposal uses **one ledger data `FileChannel`** for read/force and
+**one distinct sibling `<ledger-name>.lock` channel** to own its OS
+file lock; this is intentional. Never open a second channel to an
+**already held lock file inode** (notably `resume.lock` or
+`<ledger-name>.lock`) because JVM/POSIX lock ownership can be
+released unexpectedly. No external callbacks, model, tool or network
+calls are allowed inside publication monitors. A blocked `force(true)` may delay lease retirement;
 it must never be moved outside the current-lease guard merely to avoid
 latency. Re-audit JVM monitor and OS lock order before implementation:
 the current adapter has additional same-process reservations and nested
@@ -207,6 +324,19 @@ inspect the immutable on-disk heads under operator control. Do not
 infer absence of publication from an exception, reuse N+1, skip a
 generation or issue a stale receipt. Keep immutable prepared artifacts
 for operator diagnosis. No automatic retry of an uncertain publication.
+
+**Fence budget:** `MAX_FENCES = 256` covers all admitted
+generations. The original RCFEN2 admission N consumes one ordinary
+generation (also needed without recovery). If adoption is required,
+it consumes **one additional N+1**; a future regular admission
+consumes **one more N+2**. Thus an adopted session needs **two
+free generations after N**. If `N >= 255` (or a gap/unknown
+fence version makes the capacity unverifiable), the read-only
+eligibility gate refuses with `RESUME_FENCE_LIMIT` before N+1,
+without altering any ledger, fence, anchor or checkpoint bytes.
+Use a **fresh session identity**, new private store and independently
+reverified inputs/workspace/authority; do not reset or prune
+existing generations. No in-place fence rotation is proposed.
 
 This protocol also needs explicit compatibility of its authenticated
 version-2 fence/anchor with legacy RCFEN1 history and the current
@@ -237,7 +367,9 @@ and after; prove nothing was silently truncated or repaired.
 | N-lease still live / two independent new JVMs racing | Neither can bypass the live lease; with N retired at most one N+1 CAS and one C2; loser leaves all committed artifacts untouched |
 | Old/N callback blocked until after N+1 CAS or retirement | No callback may append or publish a stale receipt/checkpoint; no check-then-publish window |
 | Failure before successor anchor / after anchor / after fence / after C2 rename | Pre-publication denial unchanged; every ambiguous publication quarantined; immutable records remain available |
-| Same-UID path swap, unsupported filesystem, missing lock | Refuse before modifying bytes or publishing a generation |
+| Same-UID path swap, unsupported filesystem, missing ledger/effect lock | Refuse before modifying bytes or publishing a generation |
+| Fence budget N=254 vs N=255/256 | N=254 may adopt at N+1=255 and subsequently admit at N+2=256; N>=255 must refuse unchanged before publication with `RESUME_FENCE_LIMIT`; never rotate/evict old fences |
+| Canonical event payload with altered precommitted timestamp or optional `timing` object | Refuse unchanged; timestamp is frozen before admission, not a durability clock |
 | Successful isolated recovery, fresh JVM read and re-admission | C2 contains exactly one adopted edge; C1/C2 chain, physical ledger and N+1 anchor verify; no double adoption, no permission to execute; later read-only admission requires a new generation |
 
 Tests must distinguish **SIGKILL / process crash** from power-loss
@@ -261,6 +393,13 @@ To implement safely, the project must add, in separately reviewable PRs:
   lease-guarded `publishAdoptedCheckpoint` distinct from ordinary saves.
 - Deterministic real-JVM kill/race/force/CAS acceptance above, independent
   review of exact-head code and CI on the actual integration suite.
+
+The future `meta-tail/v1` producer and append verifier must also
+enforce the explicit `checkpoint.saved` **no-producer** decision for
+new epochs, while the old `PreExecutionPhasePolicy` remains
+compatible with fully checkpoint-covered legacy histories. Do not
+implement a second host-authenticated `checkpoint.saved` receipt
+without a separate reviewed design.
 
 Only **after** that independent review and all tests pass may the
 maintainer update `DURABLE_EVENT_LEDGER.md` and `FENCED_RESUME.md`
