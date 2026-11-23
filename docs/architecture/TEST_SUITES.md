@@ -47,7 +47,7 @@ so the architecture security guard still validates canonical paths and hashes.
 Other selected cache paths, including dependency resolution metadata and the
 local build cache, intentionally point to the **developer's shared cache**.
 The suite's own Gradle 9 `init.d` script sets
-`settings.caches.cleanup = Cleanup.DISABLED` in a `beforeSettings` hook,
+`settings.caches { cleanup = Cleanup.DISABLED }` in a `beforeSettings` hook,
 preventing **suite-initiated Gradle User Home cache cleanup** from pruning
 shared cache entries. Ordinary Gradle access to shared cache metadata is still
 possible, as is cleanup initiated independently by the developer's other
