@@ -596,7 +596,7 @@ class TaskManagerTest {
         val store = service.store as TaskStore
         val runningCancellation = AtomicReference<Cancellation?>()
         val durabilityHookObserved = CountDownLatch(1)
-        val lateCancellationFinished = AtomicBoolean(false)
+        val lateCancellationTimedOut = AtomicBoolean(false)
         val interruptedDuringSync = AtomicBoolean(false)
 
         // The worker's complete() transaction calls this hook immediately before
@@ -606,8 +606,9 @@ class TaskManagerTest {
             if (cancellation != null) {
                 val cancellingThread = thread(name = "late-cancellation") { cancellation.cancel() }
                 cancellingThread.join(5000)
-                lateCancellationFinished.set(!cancellingThread.isAlive)
-                interruptedDuringSync.set(Thread.currentThread().isInterrupted)
+                // Keep any failure sticky across multiple directory-sync hook calls.
+                if (cancellingThread.isAlive) lateCancellationTimedOut.set(true)
+                if (Thread.currentThread().isInterrupted) interruptedDuringSync.set(true)
                 durabilityHookObserved.countDown()
             }
         }
@@ -620,7 +621,7 @@ class TaskManagerTest {
             }
             assertTrue(durabilityHookObserved.await(5, TimeUnit.SECONDS),
                 "Durable completion hook was not observed")
-            assertTrue(lateCancellationFinished.get(), "Late cancellation did not finish")
+            assertFalse(lateCancellationTimedOut.get(), "Late cancellation did not finish")
             assertFalse(interruptedDuringSync.get(),
                 "Cancellation reached the worker after runner completion")
             val report = outcome.getOrThrow()
