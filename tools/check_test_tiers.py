@@ -78,6 +78,7 @@ class ClassInfo:
     method_references: set = field(default_factory=set)
     method_handle_references: set = field(default_factory=set)
     bootstrap_references: set = field(default_factory=set)
+    descriptor_references: set = field(default_factory=set)
 
 
 def parse_class(path, module):
@@ -192,8 +193,8 @@ def parse_class(path, module):
     descriptors.extend(utf(item[2]) for item in cp if item and item[0] == 12)
     descriptors.extend(utf(item[1]) for item in cp if item and item[0] == 16)
     descriptors.extend(name for name in references if name.startswith("["))
-    for descriptor in descriptors:
-        references.update(re.findall(r"L([^;]+);", descriptor))
+    descriptor_references = {name for descriptor in descriptors
+                             for name in re.findall(r"L([^;]+);", descriptor)}
 
     def member_ref(index):
         value = cp[index]
@@ -223,7 +224,8 @@ def parse_class(path, module):
             raise ClassFormatError(f"Invalid BootstrapMethods handle {index}")
         bootstrap_refs.add(member_ref(handle[2]))
     return ClassInfo(name, superclass, interfaces, flags, annotations, fields, methods,
-                     references, source, module, path, method_refs, handle_refs, bootstrap_refs)
+                     references, source, module, path, method_refs, handle_refs, bootstrap_refs,
+                     descriptor_references)
 
 
 def expanded(annotations, classes, visited=frozenset()):
@@ -357,6 +359,10 @@ def forbidden_reference(name):
     return None
 
 
+def module_label(module):
+    return ":" + module.replace("/", ":") if module else ":"
+
+
 def test_source_modules(root):
     """Discover test sources independently of Gradle's supplied class directories.
 
@@ -395,7 +401,7 @@ def validate(modules, root):
     for source_module in sorted(test_source_modules_cache):
         if source_module not in modules:
             problems.append(
-                f"{':' + source_module.replace('/', ':') if source_module else ':'}: test sources excluded from "
+                f"{module_label(source_module)}{':' if source_module else ''} test sources excluded from "
                 "checkTestTiers discovery; include the Gradle module, apply "
                 "the JVM convention plugin and pass its compiled test class directories"
             )
@@ -413,7 +419,7 @@ def validate(modules, root):
                 except (ValueError, IndexError, struct.error) as error:
                     problems.append(f"{path}: cannot inspect class: {error}")
         if module in test_source_modules_cache and not classes:
-            problems.append(f"{':' + module.replace('/', ':') if module else ':'}: no compiled test classes found; "
+            problems.append(f"{module_label(module)}{':' if module else ''} no compiled test classes found; "
                             "check testClasses dependencies and --class-dir inputs")
         descendants = descendant_index(classes)
         purity_cache = {}
@@ -438,6 +444,12 @@ def validate(modules, root):
                         bad = {reference for related_class in related
                                for item in related_class.references
                                if (reference := forbidden_reference(item))}
+                        # Path in a signature alone is a value, not filesystem access.
+                        # Explicit Path class references and calls remain restricted.
+                        bad.update(reference for related_class in related
+                                   for item in related_class.descriptor_references
+                                   if item != "java/nio/file/Path"
+                                   if (reference := forbidden_reference(item)))
                         if any(a.name == "org/junit/jupiter/api/io/TempDir"
                                for other in related for member in other.fields + other.methods
                                for a in expanded(member.annotations, classes)):

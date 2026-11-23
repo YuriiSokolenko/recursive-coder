@@ -1,4 +1,5 @@
 """Verify actual Kotlin-generated class files without executing negative fixtures."""
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -18,7 +19,6 @@ def main():
         raise SystemExit(f"Missing Kotlin-generated helper classes: {sorted(names)}")
     # An empty inventory root isolates fixtures from actual repository sources.
     # Copy only class files so diagnostic paths remain relative to that root.
-    import shutil
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         copied = root / "classes"

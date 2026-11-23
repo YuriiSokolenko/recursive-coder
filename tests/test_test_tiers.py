@@ -309,7 +309,7 @@ class TestTierGuardTest(unittest.TestCase):
 
     def test_descriptor_only_method_field_and_array_types_are_rejected(self):
         for body, expected in (
-            ('Helper.path();', 'java.nio.file.Path'),
+            ('Helper.files();', 'java.nio.file.Files'),
             ('Object value = Helper.file;', 'java.io.File'),
             ('Helper.urls();', 'java.net.URL'),
         ):
@@ -323,12 +323,44 @@ class TestTierGuardTest(unittest.TestCase):
                     package example;
                     public class Helper {
                         public static java.io.File file;
-                        public static java.nio.file.Path path() { return null; }
+                        public static java.nio.file.Files files() { return null; }
                         public static java.net.URL[] urls() { return null; }
                     }
                 """})
                 self.assertEqual(1, len(problems), problems)
                 self.assertIn(expected, problems[0])
+
+    def test_path_in_descriptor_alone_is_allowed_but_direct_access_is_not(self):
+        for body, forbidden in (
+            ("Helper.path();", False),
+            ("java.nio.file.Path.of(\"task.txt\");", True),
+            ("java.nio.file.Files.exists(Helper.path());", True),
+        ):
+            with self.subTest(body=body):
+                count, problems = self.compile(f'''
+                    @org.junit.jupiter.api.Tag("unit")
+                    public class Suite {{
+                      @org.junit.jupiter.api.Test void test() {{ {body} }}
+                    }}
+                ''', extra_sources={"example/Helper.java": """
+                    package example;
+                    public class Helper {
+                        public static java.nio.file.Path path() { return null; }
+                    }
+                """})
+                self.assertEqual(1, count)
+                self.assertEqual(forbidden, bool(problems), problems)
+
+    def test_descriptor_references_do_not_change_shared_class_references(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "Suite.java"
+            source.write_text("class Suite { java.net.URL field; }", encoding="utf-8")
+            subprocess.run(["javac", "-d", str(root), str(source)],
+                           check=True, capture_output=True, text=True)
+            info = guard.parse_class(root / "Suite.class", "fixture")
+            self.assertIn("java/net/URL", info.descriptor_references)
+            self.assertNotIn("java/net/URL", info.references)
 
     def test_root_test_source_module_has_normalized_identity(self):
         with tempfile.TemporaryDirectory() as directory:
