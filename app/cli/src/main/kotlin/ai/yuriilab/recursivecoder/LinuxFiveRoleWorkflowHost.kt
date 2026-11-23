@@ -983,16 +983,16 @@ class LinuxFiveRoleWorkflowHost(
 
         override fun finishStage(lease: ReviewerStageLease,
             updatedGraph: StageGraph, acceptedIds: Set<ArtifactId>,
-            decision: ReviewerDecisionRecord): Boolean =
+            decision: ReviewerDecisionRecord): ReviewerFinishResult =
             synchronized(this@LinuxFiveRoleWorkflowHost) {
                 if (!current(lease) || !verifyDeveloperEvidence(lease) ||
                     ReviewerStageFinishPolicy.permits(lease, updatedGraph,
                         acceptedIds, decision, true) != StageGateDecision.Permit ||
-                    !frozenIntact()) return@synchronized false
+                    !frozenIntact()) return@synchronized ReviewerFinishResult.DENIED
                 graph = updatedGraph
                 reviewing = null
                 finalReview = decision
-                true
+                ReviewerFinishResult.COMMITTED
             }
 
         override fun abortStage(lease: ReviewerStageLease,

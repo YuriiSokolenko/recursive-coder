@@ -127,6 +127,40 @@ class ReviewerStagePolicyUnitTest {
     ): StageGateDecision = ReviewerStageFinishPolicy.permits(
         lease, next, accepted, decision, hostVerified)
 
+    @Test fun literalVerdictCodeScopeMatrixIsSharedWithHostFinish() {
+        val allowed = setOf(
+            Triple(ReviewerDisposition.ACCEPT, "OK", ReviewerCorrectionScope.NONE),
+            Triple(ReviewerDisposition.REJECT, "IMPLEMENTATION_DEFECT",
+                ReviewerCorrectionScope.IMPLEMENTATION_ONLY),
+            Triple(ReviewerDisposition.NEEDS_HUMAN, "FROZEN_ARTIFACT_CHANGE",
+                ReviewerCorrectionScope.FROZEN_INPUTS),
+            Triple(ReviewerDisposition.NEEDS_HUMAN, "EVIDENCE_MISSING",
+                ReviewerCorrectionScope.NONE),
+            Triple(ReviewerDisposition.NEEDS_HUMAN, "CHECK_FAILED",
+                ReviewerCorrectionScope.NONE),
+            Triple(ReviewerDisposition.NEEDS_HUMAN, "OTHER_REQUIRES_HUMAN",
+                ReviewerCorrectionScope.NONE)
+        )
+        val codes = listOf("OK", "IMPLEMENTATION_DEFECT", "FROZEN_ARTIFACT_CHANGE",
+            "EVIDENCE_MISSING", "CHECK_FAILED", "OTHER_REQUIRES_HUMAN", "FREE_FORM")
+        val lease = lease()
+        for (verdict in ReviewerDisposition.entries) {
+            for (code in codes) {
+                for (scope in ReviewerCorrectionScope.entries) {
+                    val combination = Triple(verdict, code, scope)
+                    val permitted = combination in allowed
+                    assertEquals(permitted, ReviewerVerdictPolicy.isAllowed(verdict, code, scope),
+                        combination.toString())
+                    val value = decision(verdict, code, scope)
+                    assertEquals(if (permitted) StageGateDecision.Permit else
+                        StageGateDecision.Deny(if (verdict == ReviewerDisposition.ACCEPT)
+                            "INVALID_ACCEPTANCE" else "INVALID_REJECTION"),
+                        finish(lease, value), combination.toString())
+                }
+            }
+        }
+    }
+
     @Test fun positiveReviewerDecisionsRequireIndependentReviewAndHostEvidence() {
         val lease = lease()
         assertEquals(StageGateDecision.Permit, StageGraphPolicy.validate(lease.graph))
@@ -202,6 +236,23 @@ class ReviewerStagePolicyUnitTest {
         val graph = next(lease.graph, rejected)
         assertEquals(StageGateDecision.Permit, StageGraphPolicy.validate(graph))
         val cases: List<Pair<String, () -> ReviewerRepairResult>> = listOf(
+            "INVALID_GRAPH" to {
+                plan(graph.copy(budget = graph.budget.copy(maxTokens = 0)), rejected)
+            },
+            "INVALID_REJECTED_REVIEW" to {
+                plan(graph, rejected, reviewId = StageRunId("absent-review"))
+            },
+            "INVALID_DEVELOPER_HANDOFF" to {
+                val unacceptedDeveloper = graph.copy(stages = graph.stages.map {
+                    if (it.kind == StageKind.DEVELOP) it.copy(state = StageState.FAILED)
+                    else it
+                })
+                plan(unacceptedDeveloper, rejected)
+            },
+            "INVALID_REPAIR_GRAPH" to {
+                plan(graph, rejected, dev = retryCorrelation("policy-dev-retry")
+                    .copy(requestId = "not/a/valid/request"))
+            },
             "UNAUTHORIZED_REPAIR" to {
                 plan(graph, rejected, verified = emptySet())
             },

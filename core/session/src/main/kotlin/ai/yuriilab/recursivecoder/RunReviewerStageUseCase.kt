@@ -103,21 +103,7 @@ class RunReviewerStageUseCase(
             else -> return null
         }
         val code = string("code") ?: return null
-        if (code !in setOf("OK", "IMPLEMENTATION_DEFECT", "FROZEN_ARTIFACT_CHANGE",
-                "EVIDENCE_MISSING", "CHECK_FAILED", "OTHER_REQUIRES_HUMAN")) return null
-        if (verdict == ReviewerDisposition.ACCEPT &&
-            (code != "OK" || scope != ReviewerCorrectionScope.NONE) ||
-            verdict == ReviewerDisposition.REJECT &&
-            (code != "IMPLEMENTATION_DEFECT" ||
-                scope != ReviewerCorrectionScope.IMPLEMENTATION_ONLY) ||
-            verdict == ReviewerDisposition.NEEDS_HUMAN &&
-            (code !in setOf("FROZEN_ARTIFACT_CHANGE", "EVIDENCE_MISSING",
-                "CHECK_FAILED", "OTHER_REQUIRES_HUMAN") ||
-                (code == "FROZEN_ARTIFACT_CHANGE" &&
-                    scope != ReviewerCorrectionScope.FROZEN_INPUTS) ||
-                (code != "FROZEN_ARTIFACT_CHANGE" &&
-                    scope != ReviewerCorrectionScope.NONE)))
-            return null
+        if (!ReviewerVerdictPolicy.isAllowed(verdict, code, scope)) return null
         val values = root["evidence"] as? JsonArray ?: return null
         if (values.isEmpty() || values.size > 32) return null
         val refs = values.map {
@@ -285,6 +271,8 @@ class RunReviewerStageUseCase(
             if (prompt.toByteArray(Charsets.UTF_8).size > StageRoleLimits.MAX_INSTRUCTION_BYTES)
                 return abort("REVIEW_INPUT_TOO_LARGE")
             checkpoint()?.let { return abort(it) }
+            // StageRoleExecutor has no authenticated usage-bearing exception type.
+            // When it throws, post-exception token usage is unobservable.
             val proposal = roles.execute(StageRoleRequest(
                 ready, id, stage.correlation.requestId, EngineeringRole.REVIEWER,
                 accepted, command.model, prompt, command.deadline, command.cancellation,
@@ -354,8 +342,14 @@ class RunReviewerStageUseCase(
                     ReviewerStageOutcome.ReconciliationRequired("REVIEW_FINISH_UNCONFIRMED"),
                     spentUsage)
             }
-            if (!committed) return ReviewerStageResult(null, null,
-                ReviewerStageOutcome.ReconciliationRequired("STALE_REVIEW_LEASE"), spentUsage)
+            when (committed) {
+                ReviewerFinishResult.COMMITTED -> Unit
+                ReviewerFinishResult.DENIED -> return ReviewerStageResult(null, null,
+                    ReviewerStageOutcome.Denied("STALE_REVIEW_LEASE"), spentUsage)
+                ReviewerFinishResult.UNKNOWN -> return ReviewerStageResult(null, null,
+                    ReviewerStageOutcome.ReconciliationRequired("REVIEW_FINISH_UNCONFIRMED"),
+                    spentUsage)
+            }
             try { decisionEvents.emit(decision) }
             catch (_: Exception) { /* Host CAS remains authoritative. */ }
             val outcome = when (decision.verdict) {

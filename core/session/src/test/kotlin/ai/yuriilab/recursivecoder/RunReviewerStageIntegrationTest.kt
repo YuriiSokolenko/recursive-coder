@@ -97,6 +97,7 @@ class RunReviewerStageIntegrationTest {
         var trustedHandoff = handoff(graph)
         var verifiedReceipts = true
         var throwAfterFinish = false
+        var returnUnknownFinish = false
         var refuseFinish = false
         /** Simulates an edit/revocation strictly AFTER the use-case preflight. */
         var onFinishAttempt: (() -> Unit)? = null
@@ -159,20 +160,21 @@ class RunReviewerStageIntegrationTest {
         @Synchronized override fun finishStage(
             lease: ReviewerStageLease, updatedGraph: StageGraph, acceptedIds: Set<ArtifactId>,
             decision: ReviewerDecisionRecord
-        ): Boolean {
+        ): ReviewerFinishResult {
             onFinishAttempt?.invoke()
             // Atomic fake-host commit boundary: re-evaluate receipts AND disk
             // hashes after any concurrent mutation, not just in the use case.
             if (refuseFinish || !current(lease) ||
                 ReviewerStageFinishPolicy.permits(lease, updatedGraph, acceptedIds,
                     decision, verifyDeveloperEvidence(lease)) != StageGateDecision.Permit)
-                return false
+                return ReviewerFinishResult.DENIED
+            if (returnUnknownFinish) return ReviewerFinishResult.UNKNOWN
             graph = updatedGraph
             accepted = acceptedIds
             committedDecision = decision
             active = null
             if (throwAfterFinish) error("CAS committed, response lost")
-            return true
+            return ReviewerFinishResult.COMMITTED
         }
         @Synchronized override fun abortStage(
             lease: ReviewerStageLease, terminal: StageState
@@ -192,12 +194,14 @@ class RunReviewerStageIntegrationTest {
         val requests = mutableListOf<StageRoleRequest>()
         var response = """{"verdict":"ACCEPT","code":"OK","scope":"NONE","evidence":["check:git_diff_check","check:offline","write:write-77"]}"""
         var onExecute: (() -> Unit)? = null
+        var throwsAfterInvocation = false
         var usage = StageRoleUsage(1, 140, 40)
         override suspend fun execute(
             request: StageRoleRequest, events: StageRoleEventSink
         ): StageRoleResult {
             requests += request
             onExecute?.invoke()
+            if (throwsAfterInvocation) error("Provider failed without usage receipt")
             val stage = request.graph.stages.single {
                 it.correlation.stageRunId == request.stageRunId
             }
@@ -386,7 +390,7 @@ class RunReviewerStageIntegrationTest {
         val events = mutableListOf<ReviewerDecisionRecord>()
         val changedResult = run(changed, FakeModel(), events)
         assertEquals("STALE_REVIEW_LEASE",
-            assertIs<ReviewerStageOutcome.ReconciliationRequired>(
+            assertIs<ReviewerStageOutcome.Denied>(
                 changedResult.outcome).code)
         assertNull(changed.committedDecision)
         assertEquals(StageState.RUNNING, changed.graph.stages.last().state)
@@ -396,7 +400,7 @@ class RunReviewerStageIntegrationTest {
         revoked.onFinishAttempt = { revoked.verifiedReceipts = false }
         val revokedResult = run(revoked, FakeModel())
         assertEquals("STALE_REVIEW_LEASE",
-            assertIs<ReviewerStageOutcome.ReconciliationRequired>(
+            assertIs<ReviewerStageOutcome.Denied>(
                 revokedResult.outcome).code)
         assertNull(revoked.committedDecision)
         assertEquals(StageState.RUNNING, revoked.graph.stages.last().state)
@@ -412,6 +416,42 @@ class RunReviewerStageIntegrationTest {
             assertIs<ReviewerStageOutcome.Failed>(result.outcome).code)
         assertEquals(model.usage, result.usage)
         assertNull(host.committedDecision)
+    }
+
+    @Test fun definitiveHostDenialLeavesNoFalseAcceptance() = runBlocking {
+        val host = FakeHost().apply { refuseFinish = true }
+        val events = mutableListOf<ReviewerDecisionRecord>()
+        val result = run(host, FakeModel(), events)
+        assertEquals("STALE_REVIEW_LEASE",
+            assertIs<ReviewerStageOutcome.Denied>(result.outcome).code)
+        assertNull(result.graph)
+        assertNull(host.committedDecision)
+        assertEquals(StageState.RUNNING, host.graph.stages.last().state)
+        assertTrue(events.isEmpty())
+    }
+
+    @Test fun explicitUnknownHostFinishRequiresReconciliation() = runBlocking {
+        val host = FakeHost().apply { returnUnknownFinish = true }
+        val events = mutableListOf<ReviewerDecisionRecord>()
+        val result = run(host, FakeModel(), events)
+        assertEquals("REVIEW_FINISH_UNCONFIRMED",
+            assertIs<ReviewerStageOutcome.ReconciliationRequired>(result.outcome).code)
+        assertNull(result.graph)
+        assertNull(host.committedDecision)
+        assertTrue(events.isEmpty())
+    }
+
+    @Test fun executorExceptionDoesNotInventUnobservableUsage() = runBlocking {
+        val host = FakeHost()
+        val fake = FakeModel().apply { throwsAfterInvocation = true }
+        val result = run(host, fake)
+        assertEquals("REVIEW_STAGE_FAILED",
+            assertIs<ReviewerStageOutcome.Failed>(result.outcome).code)
+        assertEquals(StageRoleUsage(), result.usage)
+        assertNull(result.usage.inputTokens)
+        assertNull(result.usage.outputTokens)
+        assertNull(host.committedDecision)
+        assertEquals(1, host.aborted)
     }
 
     @Test fun unknownHostFinishDoesNotClaimSuccessOrPublishVerdict() = runBlocking {
