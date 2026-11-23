@@ -12,12 +12,6 @@ dependencies {
 // Compile negative fixtures separately; never execute them as JUnit tests.
 val tierGuardFixture = sourceSets.create("tierGuardFixture")
 tierGuardFixture.compileClasspath += sourceSets["test"].compileClasspath
-tasks.named<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>("compileTierGuardFixtureKotlin") {
-    compilerOptions {
-        freeCompilerArgs.add("-Xlambdas=class")
-        jvmDefault.set(org.jetbrains.kotlin.gradle.dsl.JvmDefaultMode.ENABLE)
-    }
-}
 tasks.register<Exec>("checkKotlinTierFixtures") {
     group = "verification"
     dependsOn(tasks.named(tierGuardFixture.classesTaskName))

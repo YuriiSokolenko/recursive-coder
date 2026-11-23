@@ -6,6 +6,7 @@ No non-stdlib dependencies. Gradle compiles test classes before invoking this ch
 
 import argparse
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 import struct
@@ -185,6 +186,14 @@ def parse_class(path, module):
         methods.append(Member(method_name, descriptor, annotations))
     annotations, source = attributes(data)
     references = {class_name(i) for i, item in enumerate(cp) if item and item[0] == 7}
+    # JVM object types can occur only in descriptors, without CONSTANT_Class
+    # entries (e.g. URI.toURL(), a helper's field, or an indy method type).
+    descriptors = [member.descriptor for member in fields + methods]
+    descriptors.extend(utf(item[2]) for item in cp if item and item[0] == 12)
+    descriptors.extend(utf(item[1]) for item in cp if item and item[0] == 16)
+    descriptors.extend(name for name in references if name.startswith("["))
+    for descriptor in descriptors:
+        references.update(re.findall(r"L([^;]+);", descriptor))
 
     def member_ref(index):
         value = cp[index]
@@ -321,13 +330,15 @@ def test_methods(info, classes):
 
 
 def forbidden_reference(name):
-    # A kotlin.io.CloseableKt.use call can manage an in-memory Closeable.
-    # Only Kotlin file/path and console entry points imply external I/O here.
+    # Fail closed for Kotlin I/O facades, except reviewed in-memory helpers.
+    if name.startswith("kotlin/io/"):
+        if name in {"kotlin/io/CloseableKt", "kotlin/io/ConstantsKt",
+                    "kotlin/io/ExceptionsKt"} or name.startswith("kotlin/io/encoding/"):
+            return None
+        return name.replace("/", ".")
     prefixes = (
         "java/nio/file/", "java/nio/channels/", "java/net/http/",
         "javax/net/", "com/sun/net/httpserver/",
-        "kotlin/io/FilesKt", "kotlin/io/path/", "kotlin/io/ConsoleKt",
-        "kotlin/io/ReadWriteKt",
         "io/ktor/", "ai/koog/", "okhttp3/", "retrofit2/", "org/apache/http/",
         "org/eclipse/jetty/", "io/netty/", "org/eclipse/jgit/",
     )
@@ -361,7 +372,8 @@ def test_source_modules(root):
         if path.name == "test" and path.parent.name == "src":
             if any(source.suffix in {".java", ".kt"}
                    for source in path.rglob("*") if source.is_file()):
-                result.add(path.parent.parent.relative_to(root).as_posix())
+                module = path.parent.parent.relative_to(root).as_posix()
+                result.add("" if module == "." else module)
             directories.clear()
     return result
 
@@ -383,7 +395,7 @@ def validate(modules, root):
     for source_module in sorted(test_source_modules_cache):
         if source_module not in modules:
             problems.append(
-                f":{source_module.replace('/', ':')}: test sources excluded from "
+                f"{':' + source_module.replace('/', ':') if source_module else ':'}: test sources excluded from "
                 "checkTestTiers discovery; include the Gradle module, apply "
                 "the JVM convention plugin and pass its compiled test class directories"
             )
@@ -401,7 +413,7 @@ def validate(modules, root):
                 except (ValueError, IndexError, struct.error) as error:
                     problems.append(f"{path}: cannot inspect class: {error}")
         if module in test_source_modules_cache and not classes:
-            problems.append(f":{module.replace('/', ':')}: no compiled test classes found; "
+            problems.append(f"{':' + module.replace('/', ':') if module else ':'}: no compiled test classes found; "
                             "check testClasses dependencies and --class-dir inputs")
         descendants = descendant_index(classes)
         purity_cache = {}

@@ -289,6 +289,57 @@ class TestTierGuardTest(unittest.TestCase):
         self.assertEqual(1, count)
         self.assertEqual([], problems)
 
+    def test_kotlin_text_streams_and_descriptor_only_url_are_rejected(self):
+        _, problems = self.compile('''
+            @org.junit.jupiter.api.Tag("unit")
+            public class Suite {
+              @org.junit.jupiter.api.Test void net() throws Exception {
+                kotlin.io.TextStreamsKt.readBytes(java.net.URI.create("https://example.test").toURL());
+              }
+            }
+        ''', extra_sources={"kotlin/io/TextStreamsKt.java": """
+            package kotlin.io;
+            public class TextStreamsKt {
+                public static byte[] readBytes(java.net.URL url) { return new byte[0]; }
+            }
+        """})
+        self.assertEqual(1, len(problems), problems)
+        self.assertIn("kotlin.io.TextStreamsKt", problems[0])
+        self.assertIn("java.net.URL", problems[0])
+
+    def test_descriptor_only_method_field_and_array_types_are_rejected(self):
+        for body, expected in (
+            ('Helper.path();', 'java.nio.file.Path'),
+            ('Object value = Helper.file;', 'java.io.File'),
+            ('Helper.urls();', 'java.net.URL'),
+        ):
+            with self.subTest(body=body):
+                _, problems = self.compile(f'''
+                    @org.junit.jupiter.api.Tag("unit")
+                    public class Suite {{
+                      @org.junit.jupiter.api.Test void impure() {{ {body} }}
+                    }}
+                ''', extra_sources={"example/Helper.java": """
+                    package example;
+                    public class Helper {
+                        public static java.io.File file;
+                        public static java.nio.file.Path path() { return null; }
+                        public static java.net.URL[] urls() { return null; }
+                    }
+                """})
+                self.assertEqual(1, len(problems), problems)
+                self.assertIn(expected, problems[0])
+
+    def test_root_test_source_module_has_normalized_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "src/test/java/Suite.java"
+            source.parent.mkdir(parents=True)
+            source.write_text("class Suite {}", encoding="utf-8")
+            self.assertEqual({""}, guard.test_source_modules(root))
+            _, problems = guard.validate({}, root)
+            self.assertTrue(any(p.startswith(": test sources excluded") for p in problems))
+
     def test_kotlin_file_io_entry_point_is_still_rejected(self):
         _, problems = self.compile('''
             @org.junit.jupiter.api.Tag("unit")

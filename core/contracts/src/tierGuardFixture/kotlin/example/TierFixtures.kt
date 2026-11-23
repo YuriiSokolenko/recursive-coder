@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
 import java.io.ByteArrayInputStream
 import java.net.Socket
+import java.net.URI
 
 @Tag("unit")
 class PureFixture {
@@ -24,9 +25,10 @@ class CompanionFixture {
 
 @Tag("unit")
 class LambdaFixture {
+    private fun consume(closure: () -> Socket) { check(closure is Function0<*>) }
     @Test fun lambda() {
         val closure: () -> Socket = { Socket() }
-        check(closure.hashCode() != 0 || closure.hashCode() == 0)
+        consume(closure)
     }
 }
 
@@ -37,4 +39,11 @@ interface DefaultFixtureContract {
 @Tag("unit")
 class DefaultFixture : DefaultFixtureContract {
     @Test fun inheritedDefault() = Unit
+}
+
+@Tag("unit")
+class NetworkFixture {
+    @Test fun readUrl() {
+        URI("https://example.test").toURL().readText()
+    }
 }

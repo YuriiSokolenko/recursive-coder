@@ -22,7 +22,11 @@ gradle.projectsEvaluated {
         .sortedBy { it.path }
     tasks.register("printTestTierModules") {
         group = "verification"
-        val expected = javaModules.map { it.path + ":testClasses" }
+        // Independent project inventory: every configured project with a
+        // testClasses task, not the guard's javaModules selection.
+        val expected = rootProject.subprojects
+            .filter { "testClasses" in it.tasks.names }
+            .map { it.path + ":testClasses" }.sorted()
         doLast { expected.forEach { println("TEST_TIER_MODULE=" + it) } }
     }
     testTierGuard.configure {

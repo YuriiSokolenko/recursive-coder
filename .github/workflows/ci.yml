@@ -53,11 +53,13 @@ jobs:
         run: |
           ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --offline --console=plain check --dry-run > "$RUNNER_TEMP/check-task-plan.log"
           ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --offline --console=plain -q printTestTierModules > "$RUNNER_TEMP/check-expected-modules.log"
+          ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --offline --console=plain :checkTestTiers --dry-run > "$RUNNER_TEMP/guard-task-plan.log"
           python3 - <<'PY'
           import os
           from pathlib import Path
 
           plan = (Path(os.environ["RUNNER_TEMP"]) / "check-task-plan.log").read_text()
+          guard_plan = (Path(os.environ["RUNNER_TEMP"]) / "guard-task-plan.log").read_text()
           count = sum(line.strip() == ":checkTestTiers SKIPPED" for line in plan.splitlines())
           if count != 1:
               raise SystemExit(f"Root Gradle check must schedule checkTestTiers once; found {count}")
@@ -68,12 +70,12 @@ jobs:
           }
           actual = {
               line.strip().removesuffix(" SKIPPED")
-              for line in plan.splitlines()
+              for line in guard_plan.splitlines()
               if line.strip().endswith(":testClasses SKIPPED")
           }
           if not expected or actual != expected:
               raise SystemExit(f"Wrong testClasses graph: missing={sorted(expected - actual)}, unexpected={sorted(actual - expected)}")
-          print("Verified root check schedules one checkTestTiers and compiles test classes")
+          print("Verified root check schedules one guard and the guard alone schedules all testClasses")
           PY
       - name: Prove trusted running host opt-in at the Kotlin compiler boundary
         run: ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g :infra:journal:verifyRunningHostOptIn --stacktrace
