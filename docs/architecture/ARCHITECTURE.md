@@ -117,7 +117,7 @@ Git-host integrations (PR creation, reviews, webhooks), IDE extensions, and task
 - Prompts, model output, and retrieved context are untrusted data.
 - Every shell command, path, and network destination requires independent authorization and appropriate sandboxing.
 - A model-supplied tool result is **not** equivalent to a trusted workspace mutation receipt.
-- Accepting a coding result requires independently verified checks and a permissible final diff. What current checks prove is deliberately narrow; see [what checks do and do not prove](TRUSTED_WRITES.md#what-checks-do-and-do-not-prove).
+- Accepting a coding result requires independently verified checks and a permissible final diff. What current checks prove is deliberately narrow; see [what checks do and do not prove](TRUSTED_WRITES.md#what-checks-do-and-do-not-prove) and the proposed [red-to-green checks](RED_TO_GREEN_CHECKS.md) (**design only, not implemented**).
 - Checkpoints and terminal receipts are tied to the exact session, policy, baseline, and fence generation.
 - Hardware or provider failures must produce an explicit terminal/error state with available diagnostic evidence; crashes may require safe later reconciliation.
 

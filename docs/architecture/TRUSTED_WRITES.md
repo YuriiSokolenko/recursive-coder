@@ -85,9 +85,11 @@ one additional sandboxed check. A Developer policy that does not require both
 git_diff_check and an additional allowlisted check is rejected by open()
 with TEST_CHECK_REQUIRED, before a workspace lease or any write. The default
 required-check policy (git_diff_check only) is therefore intentionally
-invalid for Developer. The installed `RunPreparationStageUseCase` also
-requires `git_diff_check` plus at least one additional configured validator
-for each SDD, ATDD and TDD stage; that validator need not run new tests.
+invalid for Developer. At the generic trusted-write `open()` boundary,
+preparation roles may use only `git_diff_check`. The installed
+`RunPreparationStageUseCase` is stricter: it requires `git_diff_check`
+plus at least one configured validator for each SDD, ATDD and TDD stage;
+that validator need not run the newly authored tests.
 
 **Important trust boundary:** the runtime guarantees that a host-allowlisted
 command ran in isolation and exited successfully; it does **not** determine

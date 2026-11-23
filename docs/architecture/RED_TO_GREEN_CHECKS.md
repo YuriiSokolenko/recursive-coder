@@ -92,12 +92,19 @@ for every writable role):
 
 Preparation validators may check syntax, file format, policy, or other
 appropriate structural conditions. They must never silently stand in for
-the red phase. Where an ATDD/TDD artifact intentionally cannot compile yet,
-a compilation failure is **not** sufficient evidence in the initial design:
-only an adapter that can prove selected test assertions executed and failed
-may mark the red phase `CONFIRMED_RED`. A future explicitly versioned adapter
-could support tightly classified compile-first TDD; generic compiler failure
-must not be accepted as red.
+the red phase.
+
+**Initial-scope restriction for Kotlin/JVM and similar compiled stacks:**
+the first increment supports red-to-green gates only where frozen tests and
+their runner compile against APIs **already present** on `preDeveloperHead`.
+A test for a *new* class or method typically fails compilation because TDD
+cannot write production skeletons under `src/main/`. Without an executed test
+assertion this is `BASELINE_NOT_COMPILABLE` and **denies Developer admission**.
+It must not be accepted as `CONFIRMED_RED` or downgraded to an ordinary passing
+validator. Before supporting new-API TDD, a separately reviewed version must
+provide either a trusted pre-TDD API-stub step with explicit write authority or
+a narrowly classified compile-first adapter; neither is part of the first
+increment. Setup/compiler failures cannot be relabelled as test assertions.
 
 ## Binding tests to artifacts
 
@@ -109,7 +116,14 @@ For every gate, it verifies that:
 1. Every selected test maps to a host-declared `tests/acceptance/`,
    `src/test/`, or `tests/unit/` path belonging to the correct, accepted
    artifact ID/version, producer stage, and digest. No extra or missing path,
-   duplicate alias, or cross-role reassignment may satisfy the binding.
+   duplicate alias, or cross-role **test ownership reassignment** may satisfy
+   the binding. Execution dependencies are separate: an ATDD `.feature` gate
+   may rely on approved TDD-owned step definitions/glue, explicitly listed
+   as a supporting frozen artifact in `GateArtifactBinding`, or on
+   host-provided glue pinned by `CheckPlan`. Support-artifact ID/version/path/
+   digest and producer role (or the trusted runner/glue fingerprint) must be
+   verified, and cannot replace the ATDD-owned tests or become an unbound
+   mutable input. Missing or altered glue denies admission.
 2. The actual sandbox test discovery/report shows those exact selected test
    identities were executed from that pinned source, with no missing, skipped,
    disabled, dry-run, or silently filtered tests. Merely pointing a command
@@ -144,22 +158,33 @@ inventory; a path glob supplied by a model is not a substitute.
    discovery and per-test outcomes. At least one selected test per required
    gate must have executed and failed a recognized behavioral assertion;
    unrelated failures, zero discovered tests and test harness errors deny
-   admission. Other selected tests may already pass. Verify no workspace,
+   admission. Other selected tests may already pass, but they are **not**
+   red-to-green transitions: record the exact assertion-failing ID set
+   separately from already-passing IDs for the Reviewer. A single failed
+   assertion per gate is only a minimum signal, not coverage assurance;
+   padding the selection with passing tests cannot increase red evidence.
+   Apply the pinned repeat policy below. Verify no workspace,
    Git HEAD/index, frozen artifact, or plan drift before and after the run.
    A red receipt is an *expected-failure attestation*, not
    `StageCheckEvidence.passed` and not a successful stage validation.
-3. **Pin red to Developer admission.** Store the red attestations in the
-   host's authoritative state and bind them to the specific Developer
-   stage/attempt, `preDeveloperHead`, graph generation, accepted test
-   manifests, check plan, test inventory and environment. The host verifies
-   this link again at the Developer stage lease and before finish. An
-   unrelated failed command, stale attempt, or model-declared "red" cannot
-   satisfy admission.
+3. **Pin red to Developer admission.** Before executing red, the host
+   reserves a unique Developer attempt ID for the known stage **without
+   issuing a writable lease or other authority**. Store red attestations in
+   authoritative state bound to that reservation, `preDeveloperHead`, graph
+   generation, accepted test manifests, both plan and artifact-binding
+   digests, test inventory and environment. Only a successful red preflight
+   permits an atomic lease claim for that same attempt. Revalidate the
+   reservation at lease admission and fenced finish. An unrelated failed
+   command, stale reservation or model-declared "red" cannot authorize it.
+   A new attempt (including retry) needs workspace reconciliation, a fresh
+   reservation and a new red run on a clean pre-Developer baseline.
 4. **Run green after Developer writes.** The Developer can only write in
    permitted source scope. Execute the same selected gates using the same
    frozen tests, check configuration and environment, now against the
-   Developer postimages. Every selected test must execute and pass; at
-   least the tests that were red must now be explicitly reported passing.
+   Developer postimages. Every selected test must execute and pass on every
+   required repeat; the exact tests that were red must now explicitly pass.
+   A selected assertion failure in green is `GREEN_ASSERTION_FAILURE`, not
+   a passed receipt or a harness error.
    The ordinary `git_diff_check`, any additional Developer validators and
    the existing `verify()`/host approval requirements still apply.
 5. **Commit and review.** Authenticate red and green together with the
@@ -184,28 +209,43 @@ Minimum fields for each phase are:
 - `phase` (`RED` or `GREEN`), unique invocation ID, gate ID, check-plan
   digest, post-freeze artifact-binding digest and sandbox/toolchain
   environment fingerprint;
-- graph/session, producing ATDD/TDD artifact IDs, producer stage IDs, paths,
-  revisions and exact SHA-256 digests; Developer stage/attempt ID;
+- graph/session, owning ATDD/TDD test artifact IDs, separately declared
+  supporting TDD glue artifacts when applicable, producer stages, paths,
+  revisions and exact SHA-256 digests; reserved Developer stage/attempt ID;
 - `preDeveloperHead`, applicable post-write manifest/digest for GREEN,
   execution snapshot and complete selected/discovered test ID set;
-- bounded structured per-test outcomes, normalized runner status, timestamp,
-  nonce, terminal classification and trusted receipt identity/signature.
+- bounded per-test outcomes including repeated runs, exact RED failing ID
+  subset and already-passing IDs, normalized runner status, timestamp, nonce,
+  terminal classification and trusted receipt identity/signature.
 
 The host, not a model, normalizes the outcome. Suggested mutually exclusive
 terminal classifications:
 
 | Outcome | Meaning | May satisfy required evidence? |
 | --- | --- | --- |
-| `CONFIRMED_RED` | Selected tests actually ran; at least one bound assertion failed, without infrastructure failure | RED only |
-| `CONFIRMED_GREEN` | All selected tests actually ran and passed; previously failing IDs now pass | GREEN only |
-| `UNEXPECTED_PASS` | All selected tests already passed before Developer | No |
-| `TEST_FAILURE_UNCLASSIFIED` | Nonzero exit without a verifiable selected-test assertion failure, or unrelated test failure | No |
-| `TEST_SELECTION_INVALID` | Zero/missing/skipped/disabled/dry-run selected tests, or test/artifact binding mismatch | No |
-| `CHECK_UNAVAILABLE` | Missing sandbox/tool, runner startup failure, timeout, interrupted execution or unreadable report | No |
-| `STALE_CHECK_EVIDENCE` | Changed graph/lease, baseline, check plan, frozen input, environment or postimage | No |
+| `CONFIRMED_RED` | Same nonempty selected assertion-failing ID set on every required baseline repeat, without infrastructure failure | RED only |
+| `CONFIRMED_GREEN` | Every selected test passed on every green repeat; the formerly failing IDs now pass | GREEN only |
+| `UNEXPECTED_PASS` | No selected assertion fails before Developer | No (RED only) |
+| `BASELINE_NOT_COMPILABLE` | Selected tests/runner cannot compile against the pre-Developer API; no assertion executed | No (RED only) |
+| `GREEN_ASSERTION_FAILURE` | A selected test executes but still fails an assertion after Developer writes | No (GREEN only) |
+| `FLAKY_TEST` | Repeated outcomes or failing-ID sets disagree for an otherwise unchanged baseline/postimage | No (either phase) |
+| `TEST_FAILURE_UNCLASSIFIED` | Nonzero exit without a verified selected assertion or with an unrelated test/harness failure | No (either phase) |
+| `TEST_SELECTION_INVALID` | Zero/missing/skipped/disabled/dry-run selected tests, or test/artifact binding mismatch | No (either phase) |
+| `CHECK_UNAVAILABLE` | Missing sandbox/tool, runner startup failure, timeout, interrupted execution or unreadable report | No (either phase) |
+| `STALE_CHECK_EVIDENCE` | Changed graph/lease, baseline, plan/binding, frozen input, environment or postimage | No (either phase) |
 
 A nonzero process exit must **never** be accepted as red without independently
-validated structured evidence. The current sandbox's lack of Gradle/Maven/npm
+validated structured evidence. The first increment requires at least **two independent executions** per
+phase under an unchanged, pinned snapshot. RED must retain the same nonempty
+assertion-failing and already-passing selected ID sets on every repeat; GREEN
+must pass every selected ID on every repeat. Any mismatch is `FLAKY_TEST`
+and denies admission/acceptance, even if one run is favorable. The immutable
+host policy may require more repetitions, never fewer or model-selected
+counts. Repetition is only a flakiness screen, not a determinism guarantee
+or proof of test relevance; see [#152](https://github.com/YuriiSokolenko/recursive-coder/issues/152).
+`GREEN_ASSERTION_FAILURE` may inform a future repair decision but cannot
+authorize Developer finish or Reviewer acceptance. Passing tests at RED
+remain visible but do not count as red-to-green evidence. The current sandbox's lack of Gradle/Maven/npm
 and writable build outputs is `CHECK_UNAVAILABLE`, not a test failure.
 The disposable checked overlay and pinned-cache design tracked in #154 is
 a dependency for real build-runner support; the overlay must not grant the
@@ -221,12 +261,12 @@ need a separately specified durable authority and recovery protocol.
 ## Invalidation and fail-closed behavior
 
 Any revision/supersession of bound ATDD/TDD artifacts, selected tests,
-check-plan definition, derived artifact binding, toolchain environment,
-source baseline, graph generation or Developer attempt invalidates the existing
-pairing. Regenerate red on
-the **new clean pre-Developer baseline**, not on a workspace already modified
-by a failed Developer. Developer write retry, partial mutation or unknown
-commit requires trusted Git/workspace reconciliation before new authority.
+check-plan definition, derived artifact binding (including supporting glue),
+toolchain environment, source baseline, graph generation or reserved Developer
+attempt invalidates the existing pairing. Regenerate red on the **new clean
+pre-Developer baseline**, never on a workspace modified by a failed Developer.
+Each retry requires Git/workspace reconciliation, a new reserved attempt and
+a fresh red run; partial mutation or uncertain commit cannot inherit evidence.
 After a Developer write, every later mutation invalidates its green receipts,
 as it does for today's required checks. A checksum mismatch or unavailable
 authority must stop acceptance, not downgrade to a warning.
@@ -238,6 +278,17 @@ from prior CI logs or user-supplied reports. The Reviewer cannot repair
 missing evidence by approving the implementation manually.
 
 ## Implementation gates for a future PR (not supplied here)
+
+- In the initial Kotlin/JVM scope, confirm a real assertion failure against an
+  existing compilable API; reject a new class/method test as
+  `BASELINE_NOT_COMPILABLE`, with no Developer lease. New-API support awaits
+  a separately reviewed stub-authority or compile-first version.
+- Exercise `GREEN_ASSERTION_FAILURE`, `FLAKY_TEST`, stable repeat results,
+  the exact red failing-ID subset and already-passing baseline test IDs.
+- ATDD `.feature` execution must verify a frozen TDD-owned glue dependency
+  or pinned host glue without reassigning test ownership.
+- Verify a reserved attempt has no write capability and a later Developer
+  attempt cannot reuse the earlier red record.
 
 - Role-specific policies are proven to run appropriate *different* checks:
   an ATDD/TDD test may fail before Developer without failing preparation
