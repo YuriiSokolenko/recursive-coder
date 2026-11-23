@@ -511,6 +511,50 @@ class SessionControllerUnitTest {
         assertTrue(events(request).all { it.value("timestamp") == instant.toString() })
     }
 
+    @Test fun explicitCancellationWithMatchingClockIsAccepted() {
+        val instant = Instant.parse("2045-02-02T10:00:00Z")
+        val clock = Clock.fixed(instant, ZoneOffset.UTC)
+        val request = withDeadline(fixture(), instant.plusSeconds(30))
+        val cancellation = Cancellation(clock)
+        val model = StubGateway().apply {
+            onNext = { token, deadline -> token.check(deadline) }
+        }
+        val workspace = StubWorkspace(request, "Read the isolated task", clock)
+
+        val controller = SessionController(
+            request, model, cancellation,
+            workspaceOpener = WorkspaceOpener { _, audit, start ->
+                workspace.attach(audit, start)
+            }, eventSinkFactory = eventSinkFactory, clock = clock
+        )
+
+        assertSame(cancellation, controller.cancellation)
+        assertEquals("succeeded", controller.run().value("status"))
+        assertEquals(2, model.turns)
+    }
+
+    @Test fun mismatchedExplicitCancellationClockFailsBeforeSideEffects() {
+        val instant = Instant.parse("2045-02-02T10:00:00Z")
+        val clock = Clock.fixed(instant, ZoneOffset.UTC)
+        val cancellation = Cancellation(Clock.fixed(instant.minusSeconds(1), ZoneOffset.UTC))
+        val request = withDeadline(fixture(), instant.plusSeconds(30))
+        val model = StubGateway()
+
+        val failure = assertFailsWith<IllegalArgumentException> {
+            SessionController(
+                request, model, cancellation,
+                workspaceOpener = WorkspaceOpener { _, _, _ ->
+                    error("Mismatched clocks must be rejected before workspace opening")
+                }, eventSinkFactory = eventSinkFactory, clock = clock
+            )
+        }
+
+        assertEquals("Cancellation clock must match SessionController clock", failure.message)
+        assertEquals(0, model.negotiations)
+        assertFalse(Files.exists(request.output("eventsPath")))
+        assertFalse(Files.exists(request.output("resultPath")))
+    }
+
     @Test fun schedulerFailureClosesJournalWithoutPublishingResult() {
         val request = fixture()
         val schedulerFailure = IllegalStateException("Injected watchdog scheduling failure")

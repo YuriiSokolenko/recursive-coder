@@ -213,6 +213,9 @@ class Cancellation(private val clock: Clock = Clock.systemUTC()) {
 
     fun signals(): CancellationSignals = CancellationSignals(requested.get(), expired.get())
 
+    /** Check clock affinity without exposing or changing the bound time source. */
+    fun usesClock(expected: Clock): Boolean = clock == expected
+
     /** Samples the injectable clock by default; explicit `now` is deterministic. */
     fun check(deadline: Instant, now: Instant = clock.instant()) {
         val sample = signals()

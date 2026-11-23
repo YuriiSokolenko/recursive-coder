@@ -15,27 +15,30 @@ class SessionController(
     private val runSession: RunSessionUseCase
 ) {
     /**
-     * Explicit cancellation compatibility constructor. With a custom clock,
-     * callers must construct the supplied Cancellation with that same clock.
+     * Retains the original JVM constructor/default-argument signature. An
+     * omitted cancellation token inherits the session Clock instead of
+     * silently using the system clock. A supplied token must use the same
+     * Clock, or construction fails before any model or workspace side effect.
      */
     constructor(
         request: SessionRequest,
         model: ModelGateway,
-        cancellation: Cancellation,
+        cancellation: Cancellation? = null,
         workspaceOpener: WorkspaceOpener,
         eventSinkFactory: EventSinkFactory,
         clock: Clock = Clock.systemUTC()
-    ) : this(request, cancellation,
+    ) : this(request, cancellationForClock(cancellation, clock),
         DefaultRunSessionUseCase(model, workspaceOpener, eventSinkFactory, clock))
 
-    /** Omitted cancellation inherits the controller clock, including model checks. */
-    constructor(
-        request: SessionRequest,
-        model: ModelGateway,
-        workspaceOpener: WorkspaceOpener,
-        eventSinkFactory: EventSinkFactory,
-        clock: Clock = Clock.systemUTC()
-    ) : this(request, model, Cancellation(clock), workspaceOpener, eventSinkFactory, clock)
+    private companion object {
+        fun cancellationForClock(cancellation: Cancellation?, clock: Clock): Cancellation {
+            val resolved = cancellation ?: Cancellation(clock)
+            require(resolved.usesClock(clock)) {
+                "Cancellation clock must match SessionController clock"
+            }
+            return resolved
+        }
+    }
 
     private val finished = CountDownLatch(1)
 

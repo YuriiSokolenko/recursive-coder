@@ -1,5 +1,8 @@
 package ai.yuriilab.recursivecoder
 
+import java.time.Clock
+import java.time.Instant
+import java.time.ZoneOffset
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -10,6 +13,17 @@ import org.junit.jupiter.api.Test
 
 @Tag("unit")
 class CancellationUnitTest {
+    @Test fun cancellationClockAffinityAcceptsEquivalentClocksAndRejectsDifferentClocks() {
+        val time = Instant.parse("2045-02-02T10:00:00Z")
+        val fixed = Clock.fixed(time, ZoneOffset.UTC)
+        val equivalent = Clock.fixed(time, ZoneOffset.UTC)
+        val different = Clock.fixed(time.plusSeconds(1), ZoneOffset.UTC)
+
+        assertTrue(Cancellation(fixed).usesClock(equivalent))
+        assertFalse(Cancellation(fixed).usesClock(different))
+        assertTrue(Cancellation().usesClock(Clock.systemUTC()))
+    }
+
     @Test fun lateCancellationAndExpiryCannotInterruptUnboundWorker() {
         val cancellation = Cancellation()
         val unbound = CountDownLatch(1)
