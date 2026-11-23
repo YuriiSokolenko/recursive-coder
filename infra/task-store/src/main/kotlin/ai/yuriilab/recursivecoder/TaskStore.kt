@@ -63,17 +63,29 @@ class TaskStore(directory: Path) : TaskRepository {
     override fun <T> withSchedulerLock(operation: () -> T): T {
         val lockPath = directory.resolve(".scheduler.lock")
         require(!Files.isSymbolicLink(lockPath))
-        FileChannel.open(lockPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE).use { channel ->
-            val lock = try { channel.tryLock() } catch (_: OverlappingFileLockException) { null }
-            check(lock != null) { "Another scheduler is active" }
-            lock.use {
-                schedulerLeaseHeld.set(true)
-                try {
-                    return operation()
-                } finally {
-                    schedulerLeaseHeld.remove()
+        // On POSIX systems, closing even an unsuccessful second FileChannel may
+        // release this JVM's existing locks on the same file. Deny overlapping
+        // TaskStore acquisitions BEFORE opening a second channel. Canonicalize
+        // the directory to catch aliases through symlinked parent directories.
+        // This is only an in-JVM safety guard; the OS file lock remains authoritative.
+        val leaseKey = directory.toRealPath()
+        check(activeSchedulerLeases.add(leaseKey)) { "Another scheduler is active" }
+        try {
+            FileChannel.open(lockPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE).use { channel ->
+                val lock = try { channel.tryLock() } catch (_: OverlappingFileLockException) { null }
+                check(lock != null) { "Another scheduler is active" }
+                lock.use {
+                    schedulerLeaseHeld.set(true)
+                    try {
+                        return operation()
+                    } finally {
+                        schedulerLeaseHeld.remove()
+                    }
                 }
             }
+        } finally {
+            // The OS lock/channel is closed before another TaskStore may enter.
+            activeSchedulerLeases.remove(leaseKey)
         }
     }
 
@@ -187,6 +199,8 @@ class TaskStore(directory: Path) : TaskRepository {
 
     private companion object {
         val localLocks = ConcurrentHashMap<Path, ReentrantLock>()
+        // Shared by all TaskStore instances; never used in place of .scheduler.lock.
+        val activeSchedulerLeases = ConcurrentHashMap.newKeySet<Path>()
     }
 }
 

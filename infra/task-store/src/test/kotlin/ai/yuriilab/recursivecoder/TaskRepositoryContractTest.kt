@@ -216,6 +216,67 @@ class TaskRepositoryContractTest {
         second.withSchedulerLock { assertFalse(second.read { it.paused }) }
     }
 
+    @Test fun failedJvmSchedulerAcquisitionCannotReleaseOriginalOsLease() {
+        val realParent = temp.resolve("real-parent")
+        Files.createDirectories(realParent)
+        val aliasParent = temp.resolve("alias-parent")
+        Files.createSymbolicLink(aliasParent, realParent)
+        val root = realParent.resolve("queue")
+        val first = TaskStore(root)
+        val second = TaskStore(root)
+        // Parent-path aliases must share the same JVM ownership guard.
+        val aliased = TaskStore(aliasParent.resolve("queue"))
+        val script = """
+import fcntl, sys
+with open(sys.argv[1], 'a+b', buffering=0) as guard:
+    try:
+        fcntl.lockf(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print('BUSY', flush=True)
+    else:
+        print('ACQUIRED', flush=True)
+""".trimIndent()
+
+        val pool = Executors.newSingleThreadExecutor()
+        try {
+            first.withSchedulerLock {
+                for (contender in listOf(first, second, aliased)) {
+                    val denied = assertFailsWith<IllegalStateException> {
+                        contender.withSchedulerLock { error("Overlapping scheduler entered") }
+                    }
+                    assertEquals("Another scheduler is active", denied.message)
+                }
+                pool.submit {
+                    val denied = assertFailsWith<IllegalStateException> {
+                        second.withSchedulerLock { error("Competing thread entered") }
+                    }
+                    assertEquals("Another scheduler is active", denied.message)
+                }.get(5, TimeUnit.SECONDS)
+
+                // A failed same-JVM acquisition must not close a second channel
+                // and silently drop the original JVM's POSIX scheduler lock.
+                val child = ProcessBuilder("python3", "-u", "-c", script,
+                    root.resolve(".scheduler.lock").toString()).start()
+                try {
+                    assertTrue(child.waitFor(5, TimeUnit.SECONDS), "Lock probe did not exit")
+                    assertEquals(0, child.exitValue())
+                    assertEquals("BUSY", child.inputStream.bufferedReader().readLine(),
+                        "Original OS scheduler lock was lost after an in-JVM denial")
+                } finally {
+                    child.destroyForcibly()
+                    child.waitFor(5, TimeUnit.SECONDS)
+                }
+                first.requireSchedulerLockHeld()
+            }
+        } finally {
+            pool.shutdownNow()
+        }
+        // The JVM guard must be released together with the OS lock.
+        aliased.withSchedulerLock {
+            aliased.requireSchedulerLockHeld()
+        }
+    }
+
     @Test fun schedulerLeaseFromAnotherProcessCannotBeBypassedByRecovery() {
         val repo = TaskStore(temp.resolve("external-scheduler"))
         val initial = Task(id = "running", requestTemplate = "{}", dependencies = emptyList(),
