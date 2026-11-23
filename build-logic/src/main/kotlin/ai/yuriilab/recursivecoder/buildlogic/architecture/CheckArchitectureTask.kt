@@ -19,6 +19,13 @@ import org.gradle.work.DisableCachingByDefault
 /** Reads snapshotted inputs only: no Project, SourceSet, or compiler task at execution time. */
 @DisableCachingByDefault(because = "This verification task has no outputs")
 abstract class CheckArchitectureTask : DefaultTask() {
+    // Fail closed if task registration happens but the end-of-evaluation snapshot does not.
+    @get:Input abstract val snapshotComplete: Property<Boolean>
+
+    init {
+        snapshotComplete.convention(false)
+    }
+
     @get:Input abstract val modulePaths: ListProperty<String>
     @get:Input abstract val projectEdges: ListProperty<String>
     @get:Input abstract val externalEdges: ListProperty<String>
@@ -50,6 +57,11 @@ abstract class CheckArchitectureTask : DefaultTask() {
 
     @TaskAction
     fun verify() {
+        if (!snapshotComplete.get()) {
+            throw GradleException(
+                "Architecture snapshot missing: checkArchitecture was not configured after projectsEvaluated",
+            )
+        }
         val paths = modulePaths.get()
         val problems = ArchitectureGraph.violations(
             modules = paths,

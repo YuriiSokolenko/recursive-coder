@@ -1330,6 +1330,24 @@ dependencies { add("testHiddenBridge", files("rogue.jar")) }
         )
         return run.stdout
 
+    def test_unsealed_snapshot_fails_explicitly_before_projects_evaluated(self):
+        # Simulate an action running without the lifecycle callback having
+        # populated inputs. This must fail with our diagnostic, not pass with
+        # an empty graph or depend on another mandatory property being unset.
+        output = self.run_with_init_script(
+            "gradle.afterProject { project ->\n"
+            "    if (project == gradle.rootProject) {\n"
+            "        project.tasks.named('checkArchitecture').get().verify()\n"
+            "    }\n"
+            "}\n",
+            scenario="snapshot action before projectsEvaluated",
+        )
+        self.assert_gradle_contains(
+            "Architecture snapshot missing: checkArchitecture was not configured "
+            "after projectsEvaluated",
+            output,
+        )
+
     def test_forbidden_core_to_adapter_test_dependency(self):
         output = self.run_with_edge(":core:session", ":infra:model", "testImplementation")
         self.assert_gradle_contains(
@@ -1494,6 +1512,77 @@ class ArchitectureConfigurationCacheRegressionTest(_GradleOutputAssertions):
             r"Calculating task graph as configuration cache cannot be reused because [^\n]*"
             + input_pattern,
         )
+
+    def test_early_realization_captures_later_subproject_edge_on_cache_hit(self):
+        # Root-project evaluation precedes :core:tasks evaluation. Realizing the
+        # verifier here must not freeze empty dependency inputs.
+        with tempfile.TemporaryDirectory(prefix="architecture-early-realization-") as temporary:
+            fixture = Path(temporary)
+            self.copy_fixture(fixture)
+            root_build = fixture / "build.gradle.kts"
+            module_build = fixture / "core/tasks/build.gradle.kts"
+
+            baseline = self.check_architecture(
+                fixture, scenario="normal realization", phase="cold-warmup"
+            )
+            self.assert_valid(baseline)
+            self.assert_gradle_contains("Configuration cache entry stored.", baseline.stdout)
+            self.assert_cache_hit(fixture, scenario="normal realization")
+
+            original_root = root_build.read_text(encoding="utf-8")
+            root_build.write_text(
+                original_root +
+                '\n// Force eager realization during root-project evaluation.\n'
+                'tasks.named("checkArchitecture").get()\n'
+                'println("Architecture fixture: task realized before subprojects")\n',
+                encoding="utf-8",
+            )
+            cold = self.check_architecture(
+                fixture, scenario="early realization, allowed graph", phase="cold-warmup"
+            )
+            self.assert_valid(cold)
+            self.assert_gradle_contains(
+                "Architecture fixture: task realized before subprojects", cold.stdout
+            )
+            self.assert_gradle_contains("Configuration cache entry stored.", cold.stdout)
+            self.assert_cache_hit(fixture, scenario="early realization, allowed graph")
+
+            original_module = module_build.read_text(encoding="utf-8")
+            module_build.write_text(
+                original_module +
+                '\n// Evaluated after the root task was already realized.\n'
+                'println("Architecture fixture: late module declares forbidden edge")\n'
+                'dependencies { implementation(project(":infra:workspace")) }\n',
+                encoding="utf-8",
+            )
+            diagnostic = (
+                "Forbidden project dependency "
+                ":core:tasks:implementation -> :infra:workspace"
+            )
+            rejected = self.check_architecture(
+                fixture, scenario="early realization, late forbidden edge", phase="invalidated"
+            )
+            self.assertNotEqual(0, rejected.returncode, "Late edge was silently skipped.")
+            self.assert_gradle_contains(
+                "Architecture fixture: task realized before subprojects", rejected.stdout
+            )
+            self.assert_gradle_contains(
+                "Architecture fixture: late module declares forbidden edge", rejected.stdout
+            )
+            self.assert_gradle_contains(diagnostic, rejected.stdout)
+            self.assert_gradle_contains(
+                "Calculating task graph as configuration cache cannot be reused",
+                rejected.stdout,
+            )
+
+            # A failed task action does not make the stored configuration
+            # model safe: a cache hit must still report the forbidden edge.
+            again = self.check_architecture(
+                fixture, scenario="early realization, late forbidden edge", phase="cache-reuse"
+            )
+            self.assertNotEqual(0, again.returncode)
+            self.assert_gradle_contains("Reusing configuration cache.", again.stdout)
+            self.assert_gradle_contains(diagnostic, again.stdout)
 
     def test_generated_source_root_rechecked_after_configuration_cache_hit(self):
         with tempfile.TemporaryDirectory(prefix="architecture-generated-cache-") as directory:
