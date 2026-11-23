@@ -132,7 +132,7 @@ object TrustedRunningOptInPolicy {
     /** SHA-256 over exact UTF-8 file bytes. Any edit needs a trusted-boundary review. */
     val approvedSourceSha256: Map<String, String> = mapOf(
         "core/session/src/main/kotlin/ai/yuriilab/recursivecoder/SessionRuntime.kt" to
-            "d4189bc6c19613efaa50a0503f6dd0116de181bf372ff3f8f603fe0801d6ac3d",
+            "a8e310eb60caa2f9c56a710c5ef1e5fc866351da636aef1bfa8c582517c4296b",
         "core/session/src/main/kotlin/ai/yuriilab/recursivecoder/TrustedRunningBoundaryPolicy.kt" to
             "f06db73cf6e29ae5ce6add2f1e9d4a9b05a3b6e33756367027812fa37687df35",
         "core/session/src/main/kotlin/ai/yuriilab/recursivecoder/TrustedSessionPreExecutionHost.kt" to
