@@ -5,6 +5,7 @@ No non-stdlib dependencies. Gradle compiles test classes before invoking this ch
 """
 
 import argparse
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 import struct
@@ -273,8 +274,18 @@ def class_tiers(info, classes):
     return tags
 
 
-def pure_unit_related_classes(info, classes):
-    """Include @Nested enclosing fixtures as well as local helpers and base classes.
+def descendant_index(classes):
+    """Index a class and its JVM '$' children once, including Kotlin-generated helpers."""
+    index = {}
+    for info in classes.values():
+        pieces = info.name.split("$")
+        for count in range(1, len(pieces) + 1):
+            index.setdefault("$".join(pieces[:count]), []).append(info)
+    return index
+
+
+def pure_unit_related_classes(info, classes, descendants):
+    """Include @Nested owners, inherited fixtures and Kotlin-generated JVM helpers.
 
     JUnit executes enclosing-class lifecycle fixtures for a nested test even when
     the outer class declares no @Test methods of its own.
@@ -291,9 +302,9 @@ def pure_unit_related_classes(info, classes):
         current = outer
 
     related_names = {parent.name for owner in owners for parent in ancestors(owner, classes)}
-    return [candidate for candidate in classes.values()
-            if any(candidate.name == name or candidate.name.startswith(name + "$")
-                   for name in related_names)]
+    related = {candidate.name: candidate for name in related_names
+               for candidate in descendants.get(name, ())}
+    return list(related.values())
 
 
 def test_methods(info, classes):
@@ -310,8 +321,13 @@ def test_methods(info, classes):
 
 
 def forbidden_reference(name):
+    # A kotlin.io.CloseableKt.use call can manage an in-memory Closeable.
+    # Only Kotlin file/path and console entry points imply external I/O here.
     prefixes = (
-        "java/nio/file/", "kotlin/io/", "java/net/http/", "com/sun/net/httpserver/",
+        "java/nio/file/", "java/nio/channels/", "java/net/http/",
+        "javax/net/", "com/sun/net/httpserver/",
+        "kotlin/io/FilesKt", "kotlin/io/path/", "kotlin/io/ConsoleKt",
+        "kotlin/io/ReadWriteKt",
         "io/ktor/", "ai/koog/", "okhttp3/", "retrofit2/", "org/apache/http/",
         "org/eclipse/jetty/", "io/netty/", "org/eclipse/jgit/",
     )
@@ -322,10 +338,32 @@ def forbidden_reference(name):
         "java/net/URL", "java/net/URLConnection", "java/net/HttpURLConnection",
         "java/net/Socket", "java/net/ServerSocket", "java/net/DatagramSocket",
         "java/net/MulticastSocket", "java/net/InetSocketAddress",
+        "java/net/SocketAddress", "java/net/DatagramPacket",
+        "java/net/NetworkInterface", "java/net/InetAddress", "java/net/Proxy",
     }
     if name in forbidden_classes or any(name.startswith(p) for p in prefixes):
         return name.replace("/", ".")
     return None
+
+
+def test_source_modules(root):
+    """Discover test sources independently of Gradle's supplied class directories.
+
+    The included build-logic build is verified separately; Gradle build output
+    and caches must not be mistaken for newly registered JVM modules.
+    """
+    excluded = {"build", "build-logic", "node_modules", "__pycache__", "venv"}
+    result = set()
+    for parent, directories, _ in os.walk(root):
+        directories[:] = [name for name in directories
+                          if name not in excluded and not name.startswith(".")]
+        path = Path(parent)
+        if path.name == "test" and path.parent.name == "src":
+            if any(source.suffix in {".java", ".kt"}
+                   for source in path.rglob("*") if source.is_file()):
+                result.add(path.parent.parent.relative_to(root).as_posix())
+            directories.clear()
+    return result
 
 
 def report_location(info, root):
@@ -341,6 +379,14 @@ def report_location(info, root):
 def validate(modules, root):
     problems = []
     checked = 0
+    test_source_modules_cache = test_source_modules(root)
+    for source_module in sorted(test_source_modules_cache):
+        if source_module not in modules:
+            problems.append(
+                f":{source_module.replace('/', ':')}: test sources excluded from "
+                "checkTestTiers discovery; include the Gradle module, apply "
+                "the JVM convention plugin and pass its compiled test class directories"
+            )
     for module, paths in sorted(modules.items()):
         classes = {}
         for directory in paths:
@@ -354,6 +400,11 @@ def validate(modules, root):
                     classes[info.name] = info
                 except (ValueError, IndexError, struct.error) as error:
                     problems.append(f"{path}: cannot inspect class: {error}")
+        if module in test_source_modules_cache and not classes:
+            problems.append(f":{module.replace('/', ':')}: no compiled test classes found; "
+                            "check testClasses dependencies and --class-dir inputs")
+        descendants = descendant_index(classes)
+        purity_cache = {}
         for info in sorted(classes.values(), key=lambda c: c.name):
             if info.flags & 0x0600:  # interfaces and abstract bases aren't runnable by themselves
                 continue
@@ -370,14 +421,17 @@ def validate(modules, root):
                     problems.append(f"{target}: incompatible JUnit tiers {sorted(tags)}; "
                                     "only integration + e2e is supported together")
                 if tags == {"unit"}:
-                    related = pure_unit_related_classes(info, classes)
-                    bad = sorted({reference for related_class in related
-                                  for item in related_class.references
-                                  if (reference := forbidden_reference(item))})
-                    if any(a.name == "org/junit/jupiter/api/io/TempDir"
-                           for other in related for member in other.fields + other.methods
-                           for a in expanded(member.annotations, classes)):
-                        bad.append("org.junit.jupiter.api.io.TempDir")
+                    if info.name not in purity_cache:
+                        related = pure_unit_related_classes(info, classes, descendants)
+                        bad = {reference for related_class in related
+                               for item in related_class.references
+                               if (reference := forbidden_reference(item))}
+                        if any(a.name == "org/junit/jupiter/api/io/TempDir"
+                               for other in related for member in other.fields + other.methods
+                               for a in expanded(member.annotations, classes)):
+                            bad.add("org.junit.jupiter.api.io.TempDir")
+                        purity_cache[info.name] = sorted(bad)
+                    bad = purity_cache[info.name]
                     if bad:
                         problems.append(f"{target}: impure unit fixture references "
                                         f"{', '.join(sorted(set(bad)))}; use @Tag(\"integration\") "

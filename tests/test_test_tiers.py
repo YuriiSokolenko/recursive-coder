@@ -90,7 +90,8 @@ class TestTierGuardTest(unittest.TestCase):
         if not shutil.which("javac"):
             raise RuntimeError("javac is required to compile test-tier guard fixtures; install a JDK")
 
-    def compile(self, source, extra_sources=None):
+    def compile(self, source, extra_sources=None, additional_module=None,
+                include_additional_module=False):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         root = Path(directory.name)
@@ -107,7 +108,22 @@ class TestTierGuardTest(unittest.TestCase):
         subprocess.run(["javac", "-encoding", "UTF-8", "-d", str(classes), *files],
                        check=True, capture_output=True, text=True)
         # Compiled annotation stubs are in the same class directory, like custom annotations.
-        return guard.validate({"fixture": [classes]}, root)
+        modules = {"fixture": [classes]}
+        if additional_module is not None:
+            # Compile a real Java test in a new JVM module, but optionally omit its
+            # outputs from Gradle's --class-dir arguments to reproduce a blind spot.
+            new_source = root / "new-jvm-module/src/test/java/example/Fresh.java"
+            new_source.parent.mkdir(parents=True, exist_ok=True)
+            new_source.write_text("package example; " + textwrap.dedent(additional_module),
+                                  encoding="utf-8")
+            new_classes = root / "new-jvm-module/build/classes/java/test"
+            new_classes.mkdir(parents=True)
+            subprocess.run(["javac", "-encoding", "UTF-8", "-cp", str(classes),
+                            "-d", str(new_classes), str(new_source)],
+                           check=True, capture_output=True, text=True)
+            if include_additional_module:
+                modules["new-jvm-module"] = [new_classes]
+        return guard.validate(modules, root)
 
     def test_unclassified_test_is_rejected_with_location_and_method(self):
         _, problems = self.compile('public class Suite { @org.junit.jupiter.api.Test void untagged() {} }')
@@ -216,6 +232,167 @@ class TestTierGuardTest(unittest.TestCase):
                 self.assertEqual(1, len(problems), problems)
                 self.assertIn("impure unit fixture", problems[0])
                 self.assertIn(expected, problems[0])
+
+    def test_nio_channels_socket_address_and_tls_apis_are_rejected(self):
+        samples = (
+            ("file-channel", "java.nio.channels.FileChannel.class.getName()",
+             "java.nio.channels.FileChannel"),
+            ("socket-channel", "java.nio.channels.SocketChannel.class.getName()",
+             "java.nio.channels.SocketChannel"),
+            ("async-channel", "java.nio.channels.AsynchronousFileChannel.class.getName()",
+             "java.nio.channels.AsynchronousFileChannel"),
+            ("socket-address", "java.net.SocketAddress.class.getName()",
+             "java.net.SocketAddress"),
+            ("tls", "javax.net.SocketFactory.getDefault()", "javax.net.SocketFactory"),
+            ("datagram-packet", "java.net.DatagramPacket.class.getName()",
+             "java.net.DatagramPacket"),
+            ("network-interface", "java.net.NetworkInterface.class.getName()",
+             "java.net.NetworkInterface"),
+            ("proxy", "java.net.Proxy.class.getName()", "java.net.Proxy"),
+        )
+        for label, expression, expected in samples:
+            with self.subTest(api=label):
+                count, problems = self.compile(f'''
+                    @org.junit.jupiter.api.Tag("unit")
+                    public class Suite {{
+                      @org.junit.jupiter.api.Test void pure() {{
+                        Object reference = {expression};
+                        if (reference == null) throw new AssertionError();
+                      }}
+                    }}
+                ''')
+                self.assertEqual(1, count)
+                self.assertEqual(1, len(problems), problems)
+                self.assertIn(expected, problems[0])
+
+    def test_in_memory_kotlin_closeable_use_and_jdk_values_pass(self):
+        count, problems = self.compile('''
+            @org.junit.jupiter.api.Tag("unit")
+            public class Suite {
+              @org.junit.jupiter.api.Test void inMemoryUse() throws Exception {
+                kotlin.io.CloseableKt.use(new java.io.ByteArrayInputStream(new byte[0]));
+                java.net.URI uri = java.net.URI.create("https://example.test/no-request");
+                java.nio.ByteBuffer bytes = java.nio.ByteBuffer.wrap(new byte[1]);
+                if (uri == null || bytes.remaining() != 1) throw new AssertionError();
+              }
+            }
+        ''', extra_sources={
+            "kotlin/io/CloseableKt.java": """
+                package kotlin.io;
+                public final class CloseableKt {
+                  public static void use(java.io.Closeable value) throws Exception {
+                    try (value) {}
+                  }
+                }
+            """,
+        })
+        self.assertEqual(1, count)
+        self.assertEqual([], problems)
+
+    def test_kotlin_file_io_entry_point_is_still_rejected(self):
+        _, problems = self.compile('''
+            @org.junit.jupiter.api.Tag("unit")
+            public class Suite {
+              @org.junit.jupiter.api.Test void impure() { kotlin.io.FilesKt.read(); }
+            }
+        ''', extra_sources={
+            "kotlin/io/FilesKt.java": """
+                package kotlin.io;
+                public final class FilesKt { public static void read() {} }
+            """,
+        })
+        self.assertEqual(1, len(problems), problems)
+        self.assertIn("kotlin.io.FilesKt", problems[0])
+
+    def test_compiled_lambda_companion_and_default_impls_helpers_are_scanned(self):
+        cases = (
+            ("lambda", '''
+                @org.junit.jupiter.api.Tag("unit")
+                public class Suite {
+                  @org.junit.jupiter.api.Test void generated() {
+                    Runnable closure = () -> javax.net.SocketFactory.getDefault();
+                    if (closure == null) throw new AssertionError();
+                  }
+                }
+            ''', {}, "javax.net.SocketFactory"),
+            ("companion", '''
+                @org.junit.jupiter.api.Tag("unit")
+                public class Suite {
+                  static final class Companion {
+                    static void connect() { new java.net.Socket(); }
+                  }
+                  @org.junit.jupiter.api.Test void generated() {}
+                }
+            ''', {}, "java.net.Socket"),
+            ("default-impls", '''
+                @org.junit.jupiter.api.Tag("unit")
+                public class Suite implements InterfaceContract {
+                  @org.junit.jupiter.api.Test void generated() {}
+                }
+            ''', {
+                "example/InterfaceContract.java":
+                    "package example; public interface InterfaceContract {}",
+                "example/InterfaceContract$DefaultImpls.java": """
+                    package example;
+                    public final class InterfaceContract$DefaultImpls {
+                      public static void connect() { javax.net.SocketFactory.getDefault(); }
+                    }
+                """,
+            }, "javax.net.SocketFactory"),
+        )
+        for label, suite, stubs, expected in cases:
+            with self.subTest(helper=label):
+                count, problems = self.compile(suite, extra_sources=stubs)
+                self.assertEqual(1, count)
+                self.assertEqual(1, len(problems), problems)
+                self.assertIn(expected, problems[0])
+
+    def test_compiled_pure_nested_helpers_are_allowed(self):
+        count, problems = self.compile('''
+            @org.junit.jupiter.api.Tag("unit")
+            public class Suite {
+              static final class Companion { int value() { return 42; } }
+              @org.junit.jupiter.api.Test void generated() {
+                java.util.function.IntSupplier lambda = () -> new Companion().value();
+                if (lambda.getAsInt() != 42) throw new AssertionError();
+              }
+            }
+        ''')
+        self.assertEqual(1, count)
+        self.assertEqual([], problems)
+
+    def test_new_jvm_module_omitted_from_class_dirs_fails_closed(self):
+        count, problems = self.compile('''
+            @org.junit.jupiter.api.Tag("unit")
+            public class Suite {
+              @org.junit.jupiter.api.Test void existing() {}
+            }
+        ''', additional_module='''
+            public class Fresh {
+              @org.junit.jupiter.api.Test void untagged() {}
+            }
+        ''')
+        self.assertEqual(1, count)
+        self.assertEqual(1, len(problems), problems)
+        self.assertIn(":new-jvm-module:", problems[0])
+        self.assertIn("excluded from checkTestTiers discovery", problems[0])
+
+    def test_new_jvm_module_included_still_rejects_untagged_test(self):
+        count, problems = self.compile('''
+            @org.junit.jupiter.api.Tag("unit")
+            public class Suite {
+              @org.junit.jupiter.api.Test void existing() {}
+            }
+        ''', additional_module='''
+            public class Fresh {
+              @org.junit.jupiter.api.Test void untagged() {}
+            }
+        ''', include_additional_module=True)
+        self.assertEqual(2, count)
+        self.assertEqual(1, len(problems), problems)
+        self.assertIn("new-jvm-module", problems[0])
+        self.assertIn("Fresh#untagged", problems[0])
+        self.assertIn("missing JUnit tier", problems[0])
 
     def test_temp_dir_field_is_not_permitted_in_unit_suite(self):
         _, problems = self.compile('''
