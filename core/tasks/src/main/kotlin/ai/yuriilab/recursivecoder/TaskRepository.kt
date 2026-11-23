@@ -1,6 +1,5 @@
 package ai.yuriilab.recursivecoder
 
-
 /** Atomic read-decide-write result; the returned value is committed with [next]. */
 data class TaskMutation<T>(val next: TaskQueue, val value: T)
 
@@ -26,5 +25,4 @@ interface TaskRepository {
 
     /** Fail fast unless this thread currently holds this repository's scheduler lease. */
     fun requireSchedulerLockHeld()
-
 }

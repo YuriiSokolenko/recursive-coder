@@ -184,7 +184,8 @@ private class TasksCommand(
         composition ?: TaskComposition(
             repositoryFactory(storeDirectory),
             TaskRepositoryOwnership.OWNED,
-            DirectoryTaskRunPaths(storeDirectory.toAbsolutePath().normalize().resolve("runs"))
+            // The CLI store option owns run layout even with a substituted repository adapter.
+            DirectoryTaskRunPaths.forStore(storeDirectory)
         ).also { composition = it }
 
     fun enqueue(): EnqueueTaskUseCase = dependencies().enqueue()

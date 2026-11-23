@@ -174,7 +174,7 @@ class TaskOperationsUseCasesTest {
 
     @Test fun compatibilityServiceRecoveryAlsoRequiresSchedulerOwnership() {
         val repository = repository(task("only"))
-        val service = TaskService(repository, fixed)
+        val service = TaskService(repository, VirtualTaskRunPaths, fixed)
         val running = assertNotNull(service.claim())
         val before = repository.read { it }
 

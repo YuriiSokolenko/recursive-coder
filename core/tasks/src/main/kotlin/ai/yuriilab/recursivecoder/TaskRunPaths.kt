@@ -12,6 +12,12 @@ fun interface TaskRunPaths {
  * A store rooted at <store> supplies <store>/runs as [runsDirectory].
  */
 class DirectoryTaskRunPaths(runsDirectory: Path) : TaskRunPaths {
+    companion object {
+        /** Session Protocol v1 layout for a task store, independent of its repository adapter. */
+        fun forStore(storeDirectory: Path): DirectoryTaskRunPaths =
+            DirectoryTaskRunPaths(storeDirectory.resolve("runs"))
+    }
+
     private val root = runsDirectory.toAbsolutePath().normalize()
 
     override fun outputRoot(task: Task): Path =

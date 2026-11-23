@@ -33,5 +33,4 @@ class InMemoryTaskRepository : TaskRepository {
     override fun requireSchedulerLockHeld() {
         check(schedulerLock.isHeldByCurrentThread) { "Scheduler lease required for recovery" }
     }
-
 }

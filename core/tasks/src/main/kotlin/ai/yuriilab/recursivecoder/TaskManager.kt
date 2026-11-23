@@ -7,7 +7,11 @@ import java.util.concurrent.Executors
 import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
 
-/** Compatibility façade; new CLI and scheduler consumers inject use cases directly. */
+/**
+ * Compatibility façade; new CLI and scheduler consumers inject use cases directly.
+ * Callers must explicitly supply run paths: the historical TaskService(store, clock, ...)
+ * signature is intentionally not retained because it would silently infer output layout.
+ */
 class TaskService(
     val store: TaskRepository,
     private val runPaths: TaskRunPaths,

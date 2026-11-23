@@ -23,7 +23,10 @@ private val schedulerTestRunner = TaskRunner { _, _ -> "succeeded" }
 class TaskManagerTest {
     @TempDir lateinit var temp: Path
 
-    private fun service() = TaskService(TaskStore(temp.resolve("store")))
+    private fun service() = TaskService(
+        TaskStore(temp.resolve("store")),
+        DirectoryTaskRunPaths.forStore(temp.resolve("store"))
+    )
     private fun git(vararg args: String): String {
         val process = ProcessBuilder(listOf("git") + args)
             .directory(temp.resolve("workspace").toFile()).redirectErrorStream(true).start()
@@ -538,7 +541,7 @@ class TaskManagerTest {
                 complete = DefaultCompleteTaskAttemptUseCase(service.store),
                 interrupt = DefaultInterruptTaskAttemptUseCase(service.store),
                 recover = DefaultRecoverInterruptedAttemptsUseCase(service.store),
-                prepare = DefaultPrepareTaskAttemptUseCase(service.store),
+                prepare = DefaultPrepareTaskAttemptUseCase(DirectoryTaskRunPaths.forStore(temp.resolve("store"))),
                 runner = runner,
                 pollMillis = 10
             ).runUntilIdle(concurrency = 2)
@@ -648,6 +651,25 @@ class TaskManagerTest {
         val persistedTask = disk.getValue("tasks").jsonArray.single().jsonObject
         assertEquals(stored.prunedTransitions,
             persistedTask.getValue("prunedTransitions").jsonPrimitive.long)
+    }
+
+    @Test fun taskServiceRequestForPreservesV1OutputLayoutAcrossAttempts() {
+        val service = service()
+        service.enqueue(request("layout"))
+        val first = service.claim()!!
+        val firstRoot = temp.resolve("store/runs/layout/attempt-1").toAbsolutePath().normalize()
+        val firstRequest = service.requestFor(first)
+        assertEquals(firstRoot, firstRequest.outputRoot)
+        assertEquals(firstRoot.resolve("result.json"), firstRequest.output("resultPath"))
+        assertEquals(firstRoot.resolve("events.jsonl"), firstRequest.output("eventsPath"))
+        assertEquals(firstRoot.resolve("diagnostics.json"), firstRequest.output("diagnosticsPath"))
+        assertEquals(firstRoot.resolve("checkpoints"), firstRequest.output("checkpointDir"))
+        service.finish(first.id, first.sessionId!!, "failed")
+        service.retry(first.id)
+        val second = service.claim()!!
+        assertEquals(2, second.attempt)
+        val secondRoot = temp.resolve("store/runs/layout/attempt-2").toAbsolutePath().normalize()
+        assertEquals(secondRoot, service.requestFor(second).outputRoot)
     }
 
     @Test fun schedulerRejectsTamperedTaskTemplatesAtMappingBoundary() {
