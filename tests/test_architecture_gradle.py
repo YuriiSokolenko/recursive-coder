@@ -1334,9 +1334,12 @@ dependencies { add("testHiddenBridge", files("rogue.jar")) }
         # Simulate an action running without the lifecycle callback having
         # populated inputs. This must fail with our diagnostic, not pass with
         # an empty graph or depend on another mandatory property being unset.
+        # The init script also applies to the included build-logic build,
+        # whose root project has no checkArchitecture task.
         output = self.run_with_init_script(
             "gradle.afterProject { project ->\n"
-            "    if (project == gradle.rootProject) {\n"
+            "    if (project == gradle.rootProject &&\n"
+            "        project.rootProject.name == 'recursive-coder') {\n"
             "        project.tasks.named('checkArchitecture').get().verify()\n"
             "    }\n"
             "}\n",
