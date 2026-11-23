@@ -210,7 +210,7 @@ to implement recovery.
    context and immutable controller evidence *without creating a lock*.
    Existing `resume.lock`, `checkpoint.lock` and
    the ledger sibling `<ledger-name>.lock` (for example
-   `events.rcldg.lock`, as used by `DurableSessionEventLedger`)
+   `events.ledger.lock`, as used by `DurableSessionEventLedger`)
    must already exist. If an RCEFX1 effect sidecar is present or
    provisioned, its separate sibling `<effects-name>.lock` must
    also be inspected during the no-work/effect drift check; a missing,
@@ -249,7 +249,7 @@ to implement recovery.
      `<effects-name>.lock` when applicable. Confirm original N
      ownership has ended and no unacknowledged work or stale callback
      retains execution/publication permission.
-   - Check `N+2 <= MAX_FENCES (256)` **before touching any file**:
+   - Check `N+2 <= MAX_FENCES (256)` **before any mutation**:
      one adoption needs N+1 and a meaningful later normal admission
      needs N+2. A session with fewer than two remaining fence slots
      is not eligible, even if N+1 alone would fit.
@@ -306,7 +306,8 @@ file lock; this is intentional. Never open a second channel to an
 **already held lock file inode** (notably `resume.lock` or
 `<ledger-name>.lock`) because JVM/POSIX lock ownership can be
 released unexpectedly. No external callbacks, model, tool or network
-calls are allowed inside publication monitors. A blocked `force(true)` may delay lease retirement;
+calls are allowed inside publication monitors. A blocked `force(true)`
+may delay lease retirement;
 it must never be moved outside the current-lease guard merely to avoid
 latency. Re-audit JVM monitor and OS lock order before implementation:
 the current adapter has additional same-process reservations and nested
@@ -338,9 +339,9 @@ Use a **fresh session identity**, new private store and independently
 reverified inputs/workspace/authority; do not reset or prune
 existing generations. No in-place fence rotation is proposed.
 
-This protocol also needs explicit compatibility of its authenticated
-version-2 fence/anchor with legacy RCFEN1 history and the current
-256-fence bound. Unknown, mismatched or downgraded versions refuse.
+This protocol needs explicit compatibility of its authenticated
+version-2 fence/anchor with legacy RCFEN1 history. Unknown,
+mismatched or downgraded versions refuse.
 Checkpoint publication is **not** a substitute for external-work
 reconciliation and cannot authorize runtime replay.
 
