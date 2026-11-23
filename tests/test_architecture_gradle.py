@@ -32,23 +32,56 @@ _DAEMON_IDLE_TIMEOUT_MS = 60_000
 _DAEMON_STOP_TIMEOUT_S = 20
 
 
+def _link_shared_cache(source: Path, destination: Path) -> None:
+    """Share trusted Gradle caches without merging daemon registries."""
+    try:
+        destination.symlink_to(source, target_is_directory=source.is_dir())
+    except OSError:
+        if os.name != "nt" or not source.is_dir():
+            raise
+        # A junction works for unprivileged Windows users.
+        subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(destination), str(source)],
+            check=True, capture_output=True, text=True, timeout=10,
+        )
+
+
+def _immutable_cache_file(source: str, destination: str) -> str:
+    """Hardlink artifact bytes when possible; copy across distinct filesystems."""
+    try:
+        os.link(source, destination)
+    except OSError:
+        shutil.copy2(source, destination)
+    return destination
+
+
 def _create_suite_gradle_home(shared_home: Path) -> tempfile.TemporaryDirectory[str]:
-    """Isolate daemon registry and user scripts, retain trusted offline caches."""
+    """Use a private daemon registry and canonical cache paths for vetted jars."""
     home = tempfile.TemporaryDirectory(prefix="architecture-gradle-home-")
     try:
         source = shared_home.expanduser().resolve() / "caches"
         if source.is_dir():
             dest = Path(home.name) / "caches"
-            try:
-                dest.symlink_to(source, target_is_directory=True)
-            except OSError:
-                if os.name != "nt":
-                    raise
-                # Windows junctions do not require elevated symlink privileges.
-                subprocess.run(
-                    ["cmd", "/c", "mklink", "/J", str(dest), str(source)],
-                    check=True, capture_output=True, text=True, timeout=10,
-                )
+            dest.mkdir()
+            for entry in source.iterdir():
+                target = dest / entry.name
+                if entry.name != "modules-2" or not entry.is_dir():
+                    _link_shared_cache(entry.resolve(), target)
+                    continue
+                target.mkdir()
+                for module_entry in entry.iterdir():
+                    module_dest = target / module_entry.name
+                    if module_entry.name == "files-2.1" and module_entry.is_dir():
+                        # The architecture guard deliberately verifies canonical
+                        # jar paths under gradleUserHome, in addition to SHA-1
+                        # content. A symlink of files-2.1 would fail that check.
+                        # Gradle's content-addressed artifact files are immutable,
+                        # so hardlinks preserve the exact verified bytes cheaply.
+                        shutil.copytree(
+                            module_entry, module_dest, copy_function=_immutable_cache_file,
+                        )
+                    else:
+                        _link_shared_cache(module_entry.resolve(), module_dest)
         return home
     except BaseException:
         home.cleanup()
@@ -1580,6 +1613,9 @@ class LoggedGradleSubprocessTest(unittest.TestCase):
             caches = original / "caches"
             caches.mkdir()
             (caches / "cached-module").write_text("present", encoding="utf-8")
+            artifact = caches / "modules-2/files-2.1/org.test/library/1.0/abc/library.jar"
+            artifact.parent.mkdir(parents=True)
+            artifact.write_bytes(b"verified artifact")
             (original / "daemon" / "9.8.2").mkdir(parents=True)
             with _create_suite_gradle_home(original) as isolated:
                 suite = Path(isolated)
@@ -1587,7 +1623,10 @@ class LoggedGradleSubprocessTest(unittest.TestCase):
                 self.assertEqual(
                     "present", (suite / "caches" / "cached-module").read_text(encoding="utf-8")
                 )
-                self.assertEqual(caches.resolve(), (suite / "caches").resolve())
+                copied = suite / artifact.relative_to(original)
+                self.assertEqual(b"verified artifact", copied.read_bytes())
+                self.assertNotEqual(copied.resolve(), artifact.resolve())
+                self.assertTrue(copied.resolve().is_relative_to(suite))
                 self.assertFalse((suite / "daemon").exists())
                 self.assertTrue((original / "daemon" / "9.8.2").exists())
 
