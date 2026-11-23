@@ -92,7 +92,8 @@ stale-lease constant. A lease lost before finish, including immediately after
 admission, returns `REVIEW_LEASE_STALE` with no host denial code and requires
 reconciliation without abort. After a definitive stale finish denial the code
 is `REVIEW_FINISH_DENIED_STALE`, with the original stale host reason retained
-separately. Neither case returns a trusted graph or publishes review acceptance. `Unknown` or a thrown finish requires
+separately. Neither case returns a trusted graph or publishes review
+acceptance. `Unknown` or a thrown finish requires
 reconciliation under #85 even when a commit may already have happened.
 Constructing `Denied(code)` with a blank code throws via `require`; if
 this occurs in a host finish call, the caller must treat it as an unknown
