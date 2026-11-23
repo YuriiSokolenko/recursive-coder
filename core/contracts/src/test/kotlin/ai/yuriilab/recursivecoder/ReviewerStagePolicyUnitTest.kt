@@ -179,7 +179,7 @@ class ReviewerStagePolicyUnitTest {
         }
     }
 
-    @Test fun promptVerditRulesDeriveFromPolicy() {
+    @Test fun promptVerdictRulesDeriveFromPolicy() {
         assertEquals(
             "ACCEPT/OK/NONE; REJECT/IMPLEMENTATION_DEFECT/IMPLEMENTATION_ONLY; " +
                 "NEEDS_HUMAN/FROZEN_ARTIFACT_CHANGE/FROZEN_INPUTS; " +
