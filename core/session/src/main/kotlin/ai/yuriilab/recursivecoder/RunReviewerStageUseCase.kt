@@ -181,8 +181,7 @@ class RunReviewerStageUseCase(
                     "REVIEW_ABORT_UNCONFIRMED", denialCode), spentUsage)
             else ReviewerStageResult(snapshot.graph, snapshot.acceptedIds,
                 ReviewerStageOutcome.Failed(
-                    if (denialCode != null && code in setOf("ROLE_CANCELLED", "ROLE_TIMED_OUT"))
-                        "REVIEW_FINISH_DENIED" else code,
+                    if (denialCode != null) "REVIEW_FINISH_DENIED" else code,
                     denialCode), spentUsage)
         }
         // Stale lease ownership cannot authorize abort; the graph is unconfirmed.

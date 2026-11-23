@@ -389,8 +389,9 @@ class RunReviewerStageIntegrationTest {
         val model = FakeModel().apply {
             onExecute = { changed.files[paths.getValue(StageKind.TDD)] = bytes("tampered") }
         }
-        assertEquals("FROZEN_INPUT_OR_SOURCE_CHANGED",
-            assertIs<ReviewerStageOutcome.Failed>(run(changed, model).outcome).code)
+        val preFinish = assertIs<ReviewerStageOutcome.Failed>(run(changed, model).outcome)
+        assertEquals("FROZEN_INPUT_OR_SOURCE_CHANGED", preFinish.code)
+        assertNull(preFinish.denialCode)
         val revoked = FakeHost().apply { verifiedReceipts = false }
         assertEquals("UNVERIFIED_DEVELOPER_EVIDENCE",
             assertIs<ReviewerStageOutcome.Failed>(run(revoked, FakeModel()).outcome).code)
@@ -427,8 +428,9 @@ class RunReviewerStageIntegrationTest {
         }
         val events = mutableListOf<ReviewerDecisionRecord>()
         val changedResult = run(changed, FakeModel(), events)
-        assertEquals("FROZEN_INPUT_OR_SOURCE_CHANGED",
-            assertIs<ReviewerStageOutcome.Failed>(changedResult.outcome).code)
+        val changedFailure = assertIs<ReviewerStageOutcome.Failed>(changedResult.outcome)
+        assertEquals("REVIEW_FINISH_DENIED", changedFailure.code)
+        assertEquals("FROZEN_INPUT_OR_SOURCE_CHANGED", changedFailure.denialCode)
         assertEquals(changed.graph, changedResult.graph)
         assertNull(changed.committedDecision)
         assertEquals(StageState.FAILED, changed.graph.stages.last().state)
@@ -439,8 +441,9 @@ class RunReviewerStageIntegrationTest {
         val revoked = FakeHost()
         revoked.onFinishAttempt = { revoked.verifiedReceipts = false }
         val revokedResult = run(revoked, FakeModel())
-        assertEquals("UNVERIFIED_DEVELOPER_EVIDENCE",
-            assertIs<ReviewerStageOutcome.Failed>(revokedResult.outcome).code)
+        val revokedFailure = assertIs<ReviewerStageOutcome.Failed>(revokedResult.outcome)
+        assertEquals("REVIEW_FINISH_DENIED", revokedFailure.code)
+        assertEquals("UNVERIFIED_DEVELOPER_EVIDENCE", revokedFailure.denialCode)
         assertEquals(revoked.graph, revokedResult.graph)
         assertNull(revoked.committedDecision)
         assertEquals(StageState.FAILED, revoked.graph.stages.last().state)

@@ -84,9 +84,10 @@ forwarded to the workflow's `reviewerDenialCode`; the primary `code`
 describes the cleanup uncertainty. The installed fake-only writable CLI
 also emits the optional `reviewerDenialCode` JSON field beside the stable
 `code`, without changing Session Protocol v1. Once an abort confirms `FAILED`,
-a colliding host reason `ROLE_CANCELLED` or `ROLE_TIMED_OUT` is reported as
-`REVIEW_FINISH_DENIED` with its original reason in `reviewerDenialCode`.
-Pre-finish cancellation/timeout retain their original codes. The production
+every definitive, non-stale finish denial is reported as
+`REVIEW_FINISH_DENIED` with the original host reason in
+`reviewerDenialCode`. Pre-finish errors, cancellation and timeout retain
+their original codes. The production
 Linux host uses the shared stale-lease constant; pre-finish checkpoints also
 require reconciliation without attempting abort on stale ownership. Neither case returns a trusted graph or
 publishes review acceptance. `Unknown` or a thrown finish requires
