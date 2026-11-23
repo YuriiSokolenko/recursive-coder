@@ -235,7 +235,9 @@ terminal classifications:
 | `STALE_CHECK_EVIDENCE` | Changed graph/lease, baseline, plan/binding, frozen input, environment or postimage | No (either phase) |
 
 A nonzero process exit must **never** be accepted as red without independently
-validated structured evidence. The first increment requires at least **two independent executions** per
+validated structured evidence.
+
+The first increment requires **at least two independent executions** per
 phase under an unchanged, pinned snapshot. RED must retain the same nonempty
 assertion-failing and already-passing selected ID sets on every repeat; GREEN
 must pass every selected ID on every repeat. Any mismatch is `FLAKY_TEST`
@@ -243,10 +245,13 @@ and denies admission/acceptance, even if one run is favorable. The immutable
 host policy may require more repetitions, never fewer or model-selected
 counts. Repetition is only a flakiness screen, not a determinism guarantee
 or proof of test relevance; see [#152](https://github.com/YuriiSokolenko/recursive-coder/issues/152).
+
 `GREEN_ASSERTION_FAILURE` may inform a future repair decision but cannot
 authorize Developer finish or Reviewer acceptance. Passing tests at RED
-remain visible but do not count as red-to-green evidence. The current sandbox's lack of Gradle/Maven/npm
-and writable build outputs is `CHECK_UNAVAILABLE`, not a test failure.
+remain visible but do not count as red-to-green evidence.
+
+The current sandbox's lack of Gradle/Maven/npm and writable build outputs
+is `CHECK_UNAVAILABLE`, not a test failure.
 The disposable checked overlay and pinned-cache design tracked in #154 is
 a dependency for real build-runner support; the overlay must not grant the
 model write authority or bypass the normal `verifyState()` post-check fence.
