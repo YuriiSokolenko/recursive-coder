@@ -124,7 +124,7 @@ class RoleExecutionKoinTest {
             override fun finishStage(
                 lease: ReviewerStageLease, updatedGraph: StageGraph,
                 acceptedIds: Set<ArtifactId>, decision: ReviewerDecisionRecord
-            ): ReviewerFinishResult = ReviewerFinishResult.Denied("STALE_REVIEW_LEASE")
+            ): ReviewerFinishResult = ReviewerFinishResult.Denied(ReviewerFinishDenialCodes.STALE_LEASE)
             override fun abortStage(
                 lease: ReviewerStageLease, terminal: StageState
             ): ReviewerStageSnapshot? = null

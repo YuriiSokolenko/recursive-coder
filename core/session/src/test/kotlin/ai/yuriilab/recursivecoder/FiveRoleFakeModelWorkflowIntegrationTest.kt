@@ -262,7 +262,7 @@ class FiveRoleFakeModelWorkflowIntegrationTest {
             acceptedIds: Set<ArtifactId>, decision: ReviewerDecisionRecord
         ): ReviewerFinishResult {
             if (!current(lease))
-                return ReviewerFinishResult.Denied("STALE_REVIEW_LEASE")
+                return ReviewerFinishResult.Denied(ReviewerFinishDenialCodes.STALE_LEASE)
             val gate = ReviewerStageFinishPolicy.permits(lease, updatedGraph,
                 acceptedIds, decision, verifyDeveloperEvidence(lease))
             if (gate is StageGateDecision.Deny)

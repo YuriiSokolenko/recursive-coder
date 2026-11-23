@@ -186,8 +186,8 @@ class RunReviewerStageUseCase(
         }
         // Stale lease ownership cannot authorize abort; the graph is unconfirmed.
         fun staleLease(): ReviewerStageResult = ReviewerStageResult(null, null,
-            ReviewerStageOutcome.ReconciliationRequired(
-                ReviewerFinishDenialCodes.STALE_LEASE), spentUsage)
+            ReviewerStageOutcome.ReconciliationRequired("REVIEW_LEASE_STALE"),
+            spentUsage)
         suspend fun checkpointFailure(code: String): ReviewerStageResult =
             if (code == ReviewerFinishDenialCodes.STALE_LEASE) staleLease()
             else abort(code)

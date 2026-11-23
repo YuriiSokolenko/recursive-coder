@@ -100,6 +100,8 @@ class RunReviewerStageIntegrationTest {
         var returnUnknownFinish = false
         var refuseFinish = false
         var finishDenialCode: String? = null
+        /** Simulates loss of ownership immediately after a successful beginStage. */
+        var revokeImmediatelyAfterBegin = false
         /** Revokes the lease after finish has denied but before cleanup checks it. */
         var onAbortAttempt: (() -> Unit)? = null
         var abortAttempts = 0
@@ -140,6 +142,7 @@ class RunReviewerStageIntegrationTest {
             })
             val token = "review-lease-" + ++generation
             active = token
+            if (revokeImmediatelyAfterBegin) active = null
             return ReviewerStageLease(token, stageRunId, graph, accepted, trustedHandoff)
         }
         @Synchronized override fun current(lease: ReviewerStageLease): Boolean =
@@ -495,13 +498,32 @@ class RunReviewerStageIntegrationTest {
         assertTrue(events.isEmpty())
     }
 
+    @Test fun leaseLostImmediatelyAfterAdmissionRequiresReconciliationWithoutAbort() = runBlocking {
+        val host = FakeHost().apply { revokeImmediatelyAfterBegin = true }
+        val fake = FakeModel()
+        val events = mutableListOf<ReviewerDecisionRecord>()
+        val result = run(host, fake, events)
+        val uncertain = assertIs<ReviewerStageOutcome.ReconciliationRequired>(result.outcome)
+        assertEquals("REVIEW_LEASE_STALE", uncertain.code)
+        assertNull(uncertain.denialCode)
+        assertNull(result.graph)
+        assertNull(result.hostAcceptedArtifactIds)
+        assertEquals(StageState.RUNNING, host.graph.stages.last().state)
+        assertEquals(0, host.abortAttempts)
+        assertEquals(0, host.aborted)
+        assertTrue(fake.requests.isEmpty())
+        assertNull(host.committedDecision)
+        assertTrue(events.isEmpty())
+    }
+
     @Test fun stalePreFinishLeaseNeverAttemptsAbort() = runBlocking {
         val host = FakeHost()
         val fake = FakeModel().apply { onExecute = { host.active = null } }
         val events = mutableListOf<ReviewerDecisionRecord>()
         val result = run(host, fake, events)
-        assertEquals(ReviewerFinishDenialCodes.STALE_LEASE,
-            assertIs<ReviewerStageOutcome.ReconciliationRequired>(result.outcome).code)
+        val uncertain = assertIs<ReviewerStageOutcome.ReconciliationRequired>(result.outcome)
+        assertEquals("REVIEW_LEASE_STALE", uncertain.code)
+        assertNull(uncertain.denialCode)
         assertNull(result.graph)
         assertNull(result.hostAcceptedArtifactIds)
         assertEquals(StageState.RUNNING, host.graph.stages.last().state)
