@@ -149,14 +149,96 @@ following limits are known and tracked:
   check sets and an authenticated failing baseline receipt (distinguishable
   from sandbox unavailability) are a planned design.
 - **The sandbox cannot run most build tools** ([#154](https://github.com/YuriiSokolenko/recursive-coder/issues/154)).
-  Checks run with a read-only workspace bind, no network, an empty tmpfs `HOME`
-  and only `/usr`, `/bin` and `/lib*`. Gradle, Maven, npm and most test runners
-  write build output into the workspace and need dependency caches, so they do
-  not work here; current fixtures use small read-only commands. A disposable
-  writable overlay of the checkout plus a read-only, digest-pinned dependency
-  cache and toolchain are a planned design; the post-check `verifyState()` fence
-  must stay unchanged.
+  External checks see the checkout read-only at `/workspace`, an initially
+  empty private `/scratch` (`HOME=/scratch`), no network, and only the
+  host-mounted `/usr`, `/bin`, `/lib` and `/lib64` trees when present.
+  There is no provisioned dependency cache or pinned build toolchain.
+  Gradle, Maven, npm and most test runners need to write outputs under the
+  checkout and access offline dependencies; the current checks are limited
+  to suitable read-only commands (installed E2E uses `grep`). A
+  [disposable writable check sandbox](#proposed-disposable-writable-check-sandbox-design-only-154)
+  is designed below, **not implemented**.
 - **Receipt HMACs are in-process integrity checks.** The runtime and the Linux
   workflow host keep their HMAC keys in the same JVM. The MACs detect forged or
   stale values passed between components; they are not a trust boundary against
   code running in that process.
+
+
+## Proposed disposable writable check sandbox (design only, #154)
+
+**Not implemented.** This is a follow-up security/design contract, not an
+available `TrustedCheck` option, a new CLI flag, or a relaxation of any
+stage-tool permission. Today `runIsolated()` runs an explicitly host-allowlisted
+executable with arguments, without a shell or inherited environment, inside
+bubblewrap (`--unshare-all`, `--tmpfs /`). It binds the real checkout
+**read-only** to `/workspace`, temporary host scratch read-write to
+`/scratch`, sets `HOME=/scratch` and `PATH=/usr/bin:/bin`, and binds
+available system `/usr`, `/bin`, `/lib`, and `/lib64` read-only. The
+built-in `git_diff_check` is separate. A successful tiny sandbox E2E proves
+isolation behavior, **not** that a Gradle/Maven/npm test suite can run there.
+The ordinary Gradle-based project CI is not an independent stage check.
+
+### Proposed host-provisioned execution
+
+1. **Freeze inputs before launch.** With the exclusive workspace lease held,
+   call the existing `verifyState()` and capture its accepted manifest. Only
+   the trusted host resolves the exact checkout, approved/frozen artifacts,
+   check ID, allowed executable/arguments, timeout and output quota. A model
+   cannot request a different sandbox, cache, toolchain or command.
+2. **Give each check a fresh disposable writable view.** Construct a
+   copy-on-write checkout view (read-only lower snapshot, private upper/work
+   directories) at sandbox `/workspace`. Build/test output, temporary files,
+   package-manager lockfiles and generated sources stay in that upper layer.
+   Neither the lower snapshot nor the real checkout, Git index, external
+   approval files or lock directory may be writable from the sandbox.
+   Do **not** substitute hardlinked writable copies or bind the real checkout
+   read-write. Preserve the frozen test/spec and policy inputs; protect them
+   from writes inside the test view where practical. Because arbitrary test
+   code can still manipulate its own environment, this is isolation rather
+   than proof of test integrity (see #152). If safe unprivileged copy-on-write
+   mounts are unavailable, deny the check; no host-execution fallback.
+3. **Provision dependencies outside the test.** A trusted preparation step
+   obtains and verifies required dependencies before admission, records an
+   immutable content manifest/digest, and exposes the cache read-only inside
+   the namespace. Enforce fully offline resolution: no network, no
+   implicit downloading, no mutable shared cache. For tools requiring cache
+   locks or metadata writes, use a separate per-check disposable copy-on-write
+   cache view, never writes to the shared lower cache. Missing artifacts or
+   unexpected resolution attempts fail closed rather than fetching.
+4. **Pin the toolchain and invocation.** The host provisions a versioned,
+   SHA-256-verified executable/runtime manifest (including transitive
+   launchers, runtimes and required libraries/plugins), and mounts that
+   toolchain read-only. The host chooses an absolute executable and fixed
+   arguments; no agent-provided shell, `PATH` lookup, network or unpinned
+   host-tool fallback. Include the complete execution environment identity
+   (toolchain, cache content digest, check definition and sandbox profile)
+   in a future check-policy/receipt binding, in addition to the current
+   accepted-manifest and HEAD binding.
+5. **Keep the actual Git fence and discard outputs.** The existing
+   `runCheck()` flow must still call `verifyState()` *before* launching the
+   check and *after* it exits, with the unchanged
+   `verifyState() == preCheckManifest` requirement. Final `finish()`
+   revalidates the real checkout, immutable artifacts, current receipts,
+   HEAD/config/index and approved bytes exactly as today. Check outputs are
+   bounded observations, **not** new authorized writes; destroy the private
+   upper layers after every attempt, including timeout, cancellation and
+   failure. Never copy generated artifacts or modified tests back to the
+   actual checkout. A subsequent trusted write must still invalidate
+   prior check receipts.
+
+The initial implementation should support at least one genuinely offline
+Gradle/JUnit check that writes into its disposable `build/` directory without
+changing the host checkout. Real sandbox E2E must demonstrate read-only host
+source, read-only shared cache, pinned toolchain rejection on mismatch, absent
+network, bounded runtime/output, isolation of generated files, missing-cache
+and unavailable-overlay denial, and detection of external checkout drift by
+the unchanged post-check `verifyState()` fence. CI must fail rather than
+silently skip the required real-sandbox case. Test-process failure must be
+distinguishable from provisioning/isolation failure; current
+`CHECK_FAILED_OR_SANDBOX_UNAVAILABLE` conflates them and should be refined
+when implementing, **without changing it in this documentation-only issue**.
+
+This would make meaningful build-tool checks *possible*, not automatically
+trustworthy: selecting relevant assertions and proving red-to-green behavior
+remain independent concerns (#152 and #153). Existing same-UID concurrency
+limits and host authority checks still apply.
