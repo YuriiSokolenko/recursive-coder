@@ -115,6 +115,88 @@ outputs, authorization headers or private model reasoning are logged.
 Provider/request durations, status codes, turn attempts, capability summaries
 and observed token counts are the only model-related event metadata.
 
+
+## Opt-in fail-closed provider usage boundary (issue #173, first slice)
+
+`FailClosedProviderUsageGateway` is an **in-memory host-owned wrapper**
+over the existing `ModelGateway`. It is deliberately not installed in
+the writable five-role/recursive CLI, which remains **FakeModel-only**.
+
+A host constructs a separate wrapper for each admitted workflow with a
+positive token grant and an absolute child deadline. The wrapper:
+
+- Requires the `openai-compatible` provider and `usage_metadata`
+  capability. It **rejects streaming** in this first slice: the existing SSE
+  parser does not yet prove that usage is an authoritative terminal summary.
+  It only accepts a successful (HTTP 2xx) **single-attempt** nonstreaming
+  completion with explicit input/output token counters reported by the
+  host-owned provider adapter, rather than model-generated JSON/text.
+  Each accepted call records a metadata-only receipt containing the model,
+  response status, token counts and `host-adapter-response` provenance.
+- Passes `allowRetry=false` to the delegate irrespective of caller
+  preference. A partial, timed-out, rejected or failed completion may
+  already have billed tokens, so it cannot be retried without a separate
+  per-attempt accounting protocol. Capability-discovery GET retries are
+  unaffected; they are not completion/inference requests.
+- Bounds `maxOutputTokens` to remaining *total* grant before dispatch
+  and clamps the HTTP request timeout (including capability discovery)
+  to the admitted deadline's remaining milliseconds. This is best-effort
+  transport limiting; a stalled body read
+  can still require an external cancellation/watchdog.
+  Sums input+output tokens across all calls, retaining valid observed
+  consumption even if it exceeds the grant. Any overrun, response after
+  deadline, or invalid provider usage stops the workflow before further
+  model calls. The API **cannot preempt an in-flight request** at an exact
+  total-token boundary: input costs are known only after provider return.
+  **Worst-case overspend** is the input tokens of one newly dispatched prompt
+  plus its capped output, on top of already recorded usage. A small remaining
+  grant does not establish that the prompt fits. The host must separately
+  budget prompt size before permitting future unattended execution.
+- Marks missing, zero-input, negative, overflowing, multi-attempt or
+  unproven-status usage as **unconfirmed**; a thrown exception after a
+  possible completion dispatch does the same (including cancellation).
+  An unconfirmed meter is permanently poisoned and refuses any next
+  completion or negotiation.
+- Exposes nonblocking `snapshot()` with metadata-only per-call receipts
+  for **accepted, budget-exceeded, late, cancelled, and unconfirmed** attempts,
+  observed input/output counters, a conservative in-flight or uncertain-usage
+  reservation and an uncertainty flag. Failed requests without usage
+  have null token counts, never fake zero usage. A concurrent `next`
+  is denied as `MODEL_CALL_IN_FLIGHT`; the
+  network call never holds the state monitor. Capability discovery uses a
+  separate in-flight operation: it blocks concurrent inference but does
+  **not** reserve inference tokens in `snapshot()`. Invalid configured
+  request timeouts fail with `MODEL_REQUEST_TIMEOUT_INVALID` before
+  dispatch and record no inference charge. Unlike completion denials,
+  discovery policy denials do not terminally poison the meter; a
+  corrected discovery request can still proceed.
+  `accountedTokens` reports observed input-plus-output tokens for confirmed
+  responses, including fully metered late/cancelled responses and overruns
+  (which can exceed the grant). It reserves `maxOf(grant, observed)` only
+  during an in-flight completion or when usage is unconfirmed. A later
+  pre-dispatch terminal denial does **not** forfeit unused grant, although
+  the terminal state still blocks additional work.
+  The snapshot also retains a sanitized provider `causeCode` (no exception
+  text, paths or credentials). Cancellation after a fully metered response
+  retains confirmed usage but terminates the meter.
+  The allocation is **not a durable scheduler debit**, a verified provider
+  invoice, or proof of an independently authenticated billing feed.
+  It must not be double-counted against later scheduler accounting.
+
+The trusted boundary is **the host-injected adapter and its HTTP response
+parser**, not the model or its prompts. Provider-reported usage is only
+as trustworthy as the selected backend's reporting. A caller must not inject
+a model-controlled `ModelGateway` implementation and treat its `ModelTurn`
+as provider-authenticated evidence.
+
+This first slice is exercised with recorded adapter outcomes and a local
+HTTP test server. It does not include durable parent debit/resume accounting,
+a stage-role/recursive-workflow integration, streaming per-attempt billing,
+host-authenticated provider receipts, write/check authority, or any live
+writable workflow switch. **Issue #173 stays open and the live-model
+release gate stays closed** until the remaining end-to-end requirements and
+independent security review pass.
+
 ## Validation and limitations
 
 Run `./gradlew test` for deterministic in-process HTTP test coverage.
