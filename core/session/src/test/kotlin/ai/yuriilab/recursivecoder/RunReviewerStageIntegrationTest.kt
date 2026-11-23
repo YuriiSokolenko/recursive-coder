@@ -164,17 +164,25 @@ class RunReviewerStageIntegrationTest {
             onFinishAttempt?.invoke()
             // Atomic fake-host commit boundary: re-evaluate receipts AND disk
             // hashes after any concurrent mutation, not just in the use case.
-            if (refuseFinish || !current(lease) ||
-                ReviewerStageFinishPolicy.permits(lease, updatedGraph, acceptedIds,
-                    decision, verifyDeveloperEvidence(lease)) != StageGateDecision.Permit)
-                return ReviewerFinishResult.DENIED
-            if (returnUnknownFinish) return ReviewerFinishResult.UNKNOWN
+            if (!current(lease))
+                return ReviewerFinishResult.Denied("STALE_REVIEW_LEASE")
+            if (refuseFinish)
+                return ReviewerFinishResult.Denied("REVIEW_FINISH_DENIED")
+            if (!frozenAndPostimagesIntact(lease))
+                return ReviewerFinishResult.Denied("FROZEN_INPUT_OR_SOURCE_CHANGED")
+            if (!verifyDeveloperEvidence(lease))
+                return ReviewerFinishResult.Denied("UNVERIFIED_DEVELOPER_EVIDENCE")
+            val gate = ReviewerStageFinishPolicy.permits(
+                lease, updatedGraph, acceptedIds, decision, true)
+            if (gate is StageGateDecision.Deny)
+                return ReviewerFinishResult.Denied(gate.code)
+            if (returnUnknownFinish) return ReviewerFinishResult.Unknown
             graph = updatedGraph
             accepted = acceptedIds
             committedDecision = decision
             active = null
             if (throwAfterFinish) error("CAS committed, response lost")
-            return ReviewerFinishResult.COMMITTED
+            return ReviewerFinishResult.Committed
         }
         @Synchronized override fun abortStage(
             lease: ReviewerStageLease, terminal: StageState
