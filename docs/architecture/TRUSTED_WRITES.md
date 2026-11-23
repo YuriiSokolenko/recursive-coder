@@ -86,7 +86,10 @@ git_diff_check and an additional allowlisted check is rejected by open()
 with TEST_CHECK_REQUIRED, before a workspace lease or any write. The default
 required-check policy (git_diff_check only) is therefore intentionally
 invalid for Developer. At the generic trusted-write `open()` boundary,
-preparation roles may use only `git_diff_check`. The installed
+`ToolAuthorizationPolicy.admitRequiredChecks` does **not** require
+`git_diff_check` or any additional check for preparation roles; that
+role-specific gate accepts any required-check set for a non-Developer role
+(subject to other tool, authority and validation checks). The installed
 `RunPreparationStageUseCase` is stricter: it requires `git_diff_check`
 plus at least one configured validator for each SDD, ATDD and TDD stage;
 that validator need not run the newly authored tests.

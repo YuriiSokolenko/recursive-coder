@@ -86,8 +86,8 @@ for every writable role):
 | SDD output | Git/digest validation and SDD-specific manifest validator | Executable ATDD/TDD tests |
 | ATDD output | Git/digest validation and ATDD-specific artifact/static validator | The new acceptance tests to pass |
 | TDD output | Git/digest validation and TDD-specific artifact/static validator | The new unit tests to pass |
-| Pre-Developer admission | Host-authenticated **red** receipts for bound ATDD and TDD gates | Passing the not-yet-implemented behavior |
-| Developer output | Git/digest validation, **green** receipts for the *same* ATDD/TDD gates, and any additional Developer checks | Treating a previous red failure as a passed check |
+| Pre-Developer admission | Reserve an attempt **without write authority**; require host-authenticated **red** receipts for bound ATDD and TDD gates | Passing the not-yet-implemented behavior |
+| Developer output | Git/digest validation, repeated **green** checks of the *same* ATDD/TDD gates, and any additional Developer checks | Treating a previous red failure as a passed check |
 | Reviewer | Read-only verification of handoff provenance and both phases | A Reviewer write session |
 
 Preparation validators may check syntax, file format, policy, or other
@@ -117,13 +117,17 @@ For every gate, it verifies that:
    `src/test/`, or `tests/unit/` path belonging to the correct, accepted
    artifact ID/version, producer stage, and digest. No extra or missing path,
    duplicate alias, or cross-role **test ownership reassignment** may satisfy
-   the binding. Execution dependencies are separate: an ATDD `.feature` gate
-   may rely on approved TDD-owned step definitions/glue, explicitly listed
-   as a supporting frozen artifact in `GateArtifactBinding`, or on
-   host-provided glue pinned by `CheckPlan`. Support-artifact ID/version/path/
-   digest and producer role (or the trusted runner/glue fingerprint) must be
-   verified, and cannot replace the ATDD-owned tests or become an unbound
-   mutable input. Missing or altered glue denies admission.
+   the binding. Execution dependencies are separate from test ownership.
+   **In the first increment, an ATDD `.feature` gate must use host-provided
+   step definitions/glue pinned by the immutable `CheckPlan` and environment
+   fingerprint.** The current single-`declaredPath` `StageArtifactManifest`
+   cannot bind a separate TDD-produced glue artifact alongside a TDD test.
+   A future multi-artifact inventory could allow frozen TDD-owned glue as an
+   explicitly authenticated supporting dependency, with its own artifact ID,
+   version, path, digest and producer role. Such a dependency cannot replace
+   the ATDD-owned tests or become a mutable input. Missing or altered glue
+   fails closed; first-increment implementations must not assume multi-file
+   TDD outputs or cross-role ownership reassignment.
 2. The actual sandbox test discovery/report shows those exact selected test
    identities were executed from that pinned source, with no missing, skipped,
    disabled, dry-run, or silently filtered tests. Merely pointing a command
@@ -184,7 +188,9 @@ inventory; a path glob supplied by a model is not a substitute.
    Developer postimages. Every selected test must execute and pass on every
    required repeat; the exact tests that were red must now explicitly pass.
    A selected assertion failure in green is `GREEN_ASSERTION_FAILURE`, not
-   a passed receipt or a harness error.
+   a passed receipt or a harness error. Failure to compile the Developer
+   postimage is `POSTIMAGE_NOT_COMPILABLE`, not an assertion failure; it
+   denies Developer finish and may inform a new repair attempt.
    The ordinary `git_diff_check`, any additional Developer validators and
    the existing `verify()`/host approval requirements still apply.
 5. **Commit and review.** Authenticate red and green together with the
@@ -228,6 +234,7 @@ terminal classifications:
 | `UNEXPECTED_PASS` | No selected assertion fails before Developer | No (RED only) |
 | `BASELINE_NOT_COMPILABLE` | Selected tests/runner cannot compile against the pre-Developer API; no assertion executed | No (RED only) |
 | `GREEN_ASSERTION_FAILURE` | A selected test executes but still fails an assertion after Developer writes | No (GREEN only) |
+| `POSTIMAGE_NOT_COMPILABLE` | The Developer postimage or its bound tests fail compilation during the green phase; no valid assertion outcome | No (GREEN only) |
 | `FLAKY_TEST` | Repeated outcomes or failing-ID sets disagree for an otherwise unchanged baseline/postimage | No (either phase) |
 | `TEST_FAILURE_UNCLASSIFIED` | Nonzero exit without a verified selected assertion or with an unrelated test/harness failure | No (either phase) |
 | `TEST_SELECTION_INVALID` | Zero/missing/skipped/disabled/dry-run selected tests, or test/artifact binding mismatch | No (either phase) |
@@ -288,13 +295,15 @@ missing evidence by approving the implementation manually.
   existing compilable API; reject a new class/method test as
   `BASELINE_NOT_COMPILABLE`, with no Developer lease. New-API support awaits
   a separately reviewed stub-authority or compile-first version.
-- Exercise `GREEN_ASSERTION_FAILURE`, `FLAKY_TEST`, stable repeat results,
-  the exact red failing-ID subset and already-passing baseline test IDs.
-- ATDD `.feature` execution must verify a frozen TDD-owned glue dependency
-  or pinned host glue without reassigning test ownership.
+- Exercise `GREEN_ASSERTION_FAILURE`, `POSTIMAGE_NOT_COMPILABLE`,
+  `FLAKY_TEST`, stable repeat results, the exact red failing-ID subset
+  and already-passing baseline test IDs.
+- In the first increment ATDD `.feature` execution must use pinned
+  host-provided glue. Reject a separate TDD-owned glue artifact until an
+  authenticated multi-artifact contract is implemented; keep test ownership
+  unchanged.
 - Verify a reserved attempt has no write capability and a later Developer
   attempt cannot reuse the earlier red record.
-
 - Role-specific policies are proven to run appropriate *different* checks:
   an ATDD/TDD test may fail before Developer without failing preparation
   acceptance, while Developer still requires `git_diff_check` and valid green.
