@@ -53,7 +53,8 @@ The workflow plan is UTF-8 JSON (version 1, maximum 64 KiB), with exactly:
   directly (#163). This is an accident guard, **not** a quality
   guarantee: the operator remains responsible for a check that actually
   exercises the produced artifacts. The same check gates every role; see
-  [what checks do and do not prove](TRUSTED_WRITES.md#what-checks-do-and-do-not-prove).
+  [what checks do and do not prove](TRUSTED_WRITES.md#what-checks-do-and-do-not-prove)
+  and the [red-to-green checks design](RED_TO_GREEN_CHECKS.md) (**not implemented**).
   `git_diff_check` is also always required.
 - One deadline (`deadlineSeconds` from start) and one cancellation token are
   shared by the parent plan and any recursive children (#163).

@@ -66,7 +66,9 @@ revalidates the current source during tool operations.
   host-allowlisted isolated check for **every** SDD/ATDD/TDD stage. Both run
   behind the existing receipt-backed and sandboxed tool port. Denials,
   failed checks, stale authority and write errors are failures, never evidence
-  of passing validation.
+  of passing validation. These are post-write validators, not evidence of a
+  test failing before implementation; see [red-to-green checks](RED_TO_GREEN_CHECKS.md)
+  (**design only, not implemented**).
 - Blocking tool operations and host I/O are dispatched to an injectable coroutine dispatcher (default `Dispatchers.IO`). Host `approve` must be prompt, bounded and must return `HUMAN_REVIEW_REQUIRED` instead of blocking for a human; coroutine timeouts cannot forcibly interrupt an uncooperative blocking host implementation. Deadline/cancellation are
   checked before creation, between checks and before host approval. The
   an approval decision must not irrevocably mutate accepted state or trigger
