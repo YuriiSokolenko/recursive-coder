@@ -67,9 +67,32 @@ previous check evidence.
 
 Only the host-selected IDs `git_diff_check` and explicitly allowlisted
 external checks can run. External checks reuse the existing Linux
-bubblewrap boundary (no network, read-only checkout, private scratch,
-bounded output/deadline). There is no unsandboxed fallback. Developers must
-require both the Git diff check and an independent sandboxed check.
+bubblewrap boundary (no network, read-only checkout at `/workspace`,
+private writable `/scratch` with `HOME=/scratch`, bounded output/deadline,
+no inherited environment or build-tool dependency cache). There is no
+unsandboxed fallback. Developers must require both the Git diff check
+and an independent sandboxed check.
+
+**Current build-check limitation (#154):** The stage adapter grants no
+additional filesystem or process authority beyond `TrustedWriteRuntime`.
+The read-only checkout and missing provisioned toolchain/dependency caches
+prevent normal offline Gradle, Maven, npm and other build-tool suites from
+writing their outputs, even if the host selects one as the required check.
+Current read-only check fixtures do not prove independent test-suite execution.
+
+**Proposed, not implemented:** Allow an *isolated check process only* to
+use a fresh disposable writable overlay of a frozen checkout, with a
+read-only host-provisioned dependency cache and SHA-256-pinned toolchain.
+This must not widen any `StageWrite` path, allow agent-controlled executable
+or mount selection, make the real workspace writable from the check, or
+allow test output to become accepted artifact content. The stage opener
+must continue to recheck live host authority after the check; the trusted
+runtime must keep its pre/post-`verifyState()` manifest fence and final
+receipt verification. Cache, toolchain and sandbox-profile identities
+would have to be included in the host-authenticated check policy/evidence
+when such support is implemented. See the
+[disposable writable check sandbox design](TRUSTED_WRITES.md#proposed-disposable-writable-check-sandbox-design-only-154)
+for provisioning, denial and E2E requirements.
 
 `StageWriteEvidence` and `StageCheckEvidence` contain receipt metadata
 and denial codes; **no HMAC receipt or signing secret is returned to the
