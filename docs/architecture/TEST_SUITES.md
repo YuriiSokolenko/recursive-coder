@@ -17,7 +17,47 @@ Run `./gradlew checkArchitecture` or `./gradlew checkArchitecture --configuratio
 | `:infra:journal` | `:core:session`, `:core:contracts` |
 | `:app:cli` | All seven modules above |
 
-The checker also rejects unclassified new modules and direct core dependencies on Koog, Clikt and common HTTP framework dependency groups. Each forbidden edge diagnostic identifies its module, configuration and target. The Gradle task snapshots declared module/configuration/target coordinates during configuration and consumes only serializable inputs during execution; it never resolves dependencies. A standalone pure Kotlin graph verifier also tests an all-allowed synthetic cycle independently of the allowlist. CI covers illegal production and test dependencies, a test-only cycle, unknown modules, a forbidden core framework group, and valid graphs.
+The checker also rejects unclassified new modules and direct core
+dependencies on Koog, Clikt and common HTTP framework dependency groups.
+Each forbidden edge diagnostic identifies its module, configuration and target.
+A standalone pure Kotlin graph verifier tests an all-allowed synthetic cycle
+independently of the allowlist. CI also covers illegal production and test
+dependencies, a test-only cycle, unknown modules and forbidden core frameworks.
+
+### Architecture snapshot lifecycle (issue #42)
+
+The root plugin registers `checkArchitecture` with only task metadata. Its
+`gradle.projectsEvaluated { taskProvider.configure { ... } }` callback fills
+the dependency and policy inputs **after all projects in this build finish
+evaluation**, including their `afterEvaluate` handlers. This is Gradle's public
+lifecycle API, independent of task realization: even when the root build calls
+`tasks.named("checkArchitecture").get()` before subprojects configure, the
+already-realized task gets the declared module/configuration/target graph before
+execution. No dependencies are resolved; the snapshot includes production,
+test and test-fixture configurations and checks inherited file dependencies.
+The task action reads only serializable properties and declared file inputs,
+never mutable `Project` or `Configuration` objects.
+
+**Callback-order limitation:** `projectsEvaluated` listeners execute in
+registration order. This plugin's listener is registered during root plugin
+application; root build-script listeners run later. For an **eagerly realized**
+task, `configure { ... }` inside this listener runs immediately, before later
+`projectsEvaluated` listeners. For a **lazy** task, that configuration can
+instead run after those listeners. Therefore a dependency inserted from a later
+`projectsEvaluated` callback could be missed only by the eager path. The
+guaranteed common snapshot boundary is the end of normal project evaluation,
+not the end of every `projectsEvaluated` listener. This build's reviewed
+callbacks do not add dependencies; adding such a late dependency mutation
+requires separate policy enforcement or lifecycle redesign.
+
+The snapshot sets `snapshotComplete=true` only after filling all task inputs.
+The task action explicitly rejects an unset seal rather than evaluating an
+empty graph. The regression fixture verifies normal and eager realization on
+cold/reused configuration caches, rejects an edge declared during a later
+subproject's evaluation after cache invalidation and reuse, and separately
+checks the missing-snapshot diagnostic. Issue #42 refers to Gradle 9.8.1;
+this repository currently pins and verifies Gradle 9.8.2, without a wrapper
+version change in this PR.
 
 ### Architecture suite Gradle home and shared-cache boundary (issues #167, #169)
 
