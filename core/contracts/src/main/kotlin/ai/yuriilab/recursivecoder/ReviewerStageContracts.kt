@@ -43,10 +43,19 @@ object ReviewerEvidenceReferences {
     const val FILE_PREFIX = "file:"
 }
 
+/** Stable, shared host reason for a definitively stale Reviewer finish lease. */
+object ReviewerFinishDenialCodes {
+    const val STALE_LEASE = "STALE_REVIEW_LEASE"
+}
+
 /** An Unknown outcome (or a thrown finish) may already have committed. */
 sealed interface ReviewerFinishResult {
     data object Committed : ReviewerFinishResult
-    /** A definitive no-commit decision, with a trusted host diagnostic code. */
+    /**
+     * Definitive no-commit; the diagnostic code must be nonblank. Invalid
+     * construction throws, so a caller observing that exception treats finish
+     * as unknown (requiring reconciliation), not as a confirmed denial.
+     */
     data class Denied(val code: String) : ReviewerFinishResult {
         init { require(code.isNotBlank()) }
     }
@@ -140,8 +149,10 @@ interface ReviewerStageHost {
      * (the lease may still be active). Unknown means the host cannot determine
      * whether the commit happened; return it for an indeterminate outcome
      * (e.g. a lost remote acknowledgement), and
-     * throw only for an unexpected failure. A thrown finish is also treated as
-     * unknown by callers: neither may be retried or auto-aborted.
+     * throw only for an unexpected failure. Invalid Denied(code) construction
+     * (including a blank code rejected by require) throws within the host call
+     * and is treated as unknown by callers. Neither a thrown nor an explicit
+     * unknown finish may be retried or auto-aborted.
      */
     fun finishStage(
         lease: ReviewerStageLease, updatedGraph: StageGraph,

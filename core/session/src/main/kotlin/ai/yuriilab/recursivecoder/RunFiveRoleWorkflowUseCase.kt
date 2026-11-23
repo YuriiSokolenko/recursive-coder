@@ -49,7 +49,9 @@ sealed interface FiveRoleWorkflowOutcome {
     data class Completed(val graph: StageGraph) : FiveRoleWorkflowOutcome
     /** Only verified host snapshots can be offered as resumable state. */
     data class Stopped(val code: String, val stage: StageKind,
-                       val authoritative: PreparationStageSnapshot?) : FiveRoleWorkflowOutcome
+                       val authoritative: PreparationStageSnapshot?,
+                       /** Original host finish-denial cause, if any. */
+                       val reviewerDenialCode: String? = null) : FiveRoleWorkflowOutcome
     /**
      * An uncertain CAS is never retryable. workspaceMayBeDirty is a conservative
      * signal forwarded from the Developer's trusted execution path: false is NOT
@@ -57,7 +59,9 @@ sealed interface FiveRoleWorkflowOutcome {
      */
     data class ReconciliationRequired(
         val code: String, val stage: StageKind,
-        val workspaceMayBeDirty: Boolean = false
+        val workspaceMayBeDirty: Boolean = false,
+        /** Original Reviewer host denial, when its subsequent cleanup is unconfirmed. */
+        val reviewerDenialCode: String? = null
     ) : FiveRoleWorkflowOutcome
 }
 
@@ -161,16 +165,20 @@ class RunFiveRoleWorkflowUseCase(
         preparationEvents: PreparationStageEventSink,
         reviewerEvents: ReviewerDecisionSink
     ): FiveRoleWorkflowOutcome {
-        fun uncertain(kind: StageKind, code: String, workspaceMayBeDirty: Boolean = false) =
-            FiveRoleWorkflowOutcome.ReconciliationRequired(code, kind, workspaceMayBeDirty)
-        fun stop(kind: StageKind, code: String, state: PreparationStageSnapshot?):
-            FiveRoleWorkflowOutcome {
-            if (state == null) return FiveRoleWorkflowOutcome.Stopped(code, kind, null)
+        fun uncertain(
+            kind: StageKind, code: String, workspaceMayBeDirty: Boolean = false,
+            reviewerDenialCode: String? = null
+        ) = FiveRoleWorkflowOutcome.ReconciliationRequired(
+            code, kind, workspaceMayBeDirty, reviewerDenialCode)
+        fun stop(kind: StageKind, code: String, state: PreparationStageSnapshot?,
+            reviewerDenialCode: String? = null): FiveRoleWorkflowOutcome {
+            if (state == null) return FiveRoleWorkflowOutcome.Stopped(
+                code, kind, null, reviewerDenialCode)
             val latest = try { host.snapshot() }
             catch (cancelled: CancellationException) { throw cancelled }
             catch (_: Exception) { return uncertain(kind, "HOST_STOP_SNAPSHOT_UNAVAILABLE") }
             return if (latest != state) uncertain(kind, "UNCONFIRMED_STOP_STATE")
-            else FiveRoleWorkflowOutcome.Stopped(code, kind, latest)
+            else FiveRoleWorkflowOutcome.Stopped(code, kind, latest, reviewerDenialCode)
         }
 
         val writerKinds = order.dropLast(1).toSet()
@@ -335,7 +343,8 @@ class RunFiveRoleWorkflowUseCase(
                             PreparationStageSnapshot(graph, ids)
                         }
                         is ReviewerStageOutcome.ReconciliationRequired ->
-                            return uncertain(kind, outcome.code)
+                            return uncertain(kind, outcome.code,
+                                reviewerDenialCode = outcome.denialCode)
                         is ReviewerStageOutcome.Denied ->
                             return stop(kind, outcome.code, done.graph?.let { graph ->
                                 done.hostAcceptedArtifactIds?.let { ids ->
@@ -347,7 +356,7 @@ class RunFiveRoleWorkflowUseCase(
                                 done.hostAcceptedArtifactIds?.let { ids ->
                                     PreparationStageSnapshot(graph, ids)
                                 }
-                            })
+                            }, outcome.denialCode)
                         is ReviewerStageOutcome.Rejected ->
                             return stop(kind, "REVIEWER_REJECTED", done.graph?.let { graph ->
                                 done.hostAcceptedArtifactIds?.let { ids ->

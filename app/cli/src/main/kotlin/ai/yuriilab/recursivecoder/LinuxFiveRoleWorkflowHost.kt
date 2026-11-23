@@ -986,7 +986,7 @@ class LinuxFiveRoleWorkflowHost(
             decision: ReviewerDecisionRecord): ReviewerFinishResult =
             synchronized(this@LinuxFiveRoleWorkflowHost) {
                 if (!current(lease))
-                    return@synchronized ReviewerFinishResult.Denied("STALE_REVIEW_LEASE")
+                    return@synchronized ReviewerFinishResult.Denied(ReviewerFinishDenialCodes.STALE_LEASE)
                 if (!frozenIntact())
                     return@synchronized ReviewerFinishResult.Denied(
                         "FROZEN_INPUT_OR_SOURCE_CHANGED")
