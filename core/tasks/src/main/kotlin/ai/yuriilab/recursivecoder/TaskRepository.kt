@@ -11,6 +11,7 @@ data class TaskMutation<T>(val next: TaskQueue, val value: T)
  * Durable queue boundary. update MUST re-read the latest snapshot and atomically commit
  * the returned snapshot while holding a lock that excludes other processes. Exceptions
  * abort the write. read is equally serialized and must reject corrupt snapshots.
+ * read/update callbacks must not re-enter this repository (including nested read/update).
  *
  * withSchedulerLock excludes another scheduler for the complete lifecycle, including
  * interrupted-attempt recovery and all worker shutdown. The recovery Use Case
