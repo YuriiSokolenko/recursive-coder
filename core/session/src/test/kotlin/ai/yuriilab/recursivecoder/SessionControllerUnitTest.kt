@@ -5,7 +5,10 @@ import org.junit.jupiter.api.Tag
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
+import java.time.Clock
 import java.time.Instant
+import java.time.ZoneId
+import java.time.ZoneOffset
 import kotlin.test.*
 import kotlinx.serialization.json.*
 import org.junit.jupiter.api.Test
@@ -100,10 +103,44 @@ class SessionControllerUnitTest {
         withField(request, "budgets",
             JsonObject(request.budgets + (key to JsonPrimitive(value))))
 
+    private fun withDeadline(request: SessionRequest, deadline: Instant): SessionRequest =
+        withField(request, "budgets", JsonObject(request.budgets +
+            ("deadlineAt" to JsonPrimitive(deadline.toString()))))
+
+    /** No wall-clock reads, sleeping or worker threads in deterministic tests. */
+    private class MutableClock(private var current: Instant) : Clock() {
+        override fun getZone(): ZoneId = ZoneOffset.UTC
+        override fun withZone(zone: ZoneId): Clock {
+            require(zone == ZoneOffset.UTC) { "MutableClock supports UTC only" }
+            return this
+        }
+        override fun instant(): Instant = current
+        fun advanceMillis(value: Long) { current = current.plusMillis(value) }
+    }
+
+    private class ManualDeadlineScheduler : SessionDeadlineScheduler {
+        var delayMs: Long? = null
+            private set
+        var closed: Boolean = false
+            private set
+        private var timeout: (() -> Unit)? = null
+
+        override fun schedule(delayMs: Long, onDeadline: () -> Unit): AutoCloseable {
+            check(timeout == null) { "Scheduled more than once" }
+            this.delayMs = delayMs
+            timeout = onDeadline
+            return AutoCloseable { closed = true }
+        }
+
+        fun fire() = checkNotNull(timeout).invoke()
+    }
+
     private class StubWorkspace(
         private val request: SessionRequest,
-        private val taskText: String
+        private val taskText: String,
+        private val clock: Clock = Clock.systemUTC()
     ) : WorkspaceSession {
+        var onRead: () -> Unit = {}
         var verificationCount = 0
         var readCount = 0
         var closed = false
@@ -138,8 +175,9 @@ class SessionControllerUnitTest {
                 ?: throw IllegalArgumentException("Only read is supported by this stub")
             if (read.path != "task.md") throw IllegalArgumentException("Unexpected read path")
             val receipt = "tool-unit-" + (++readCount)
-            val started = Instant.now()
+            val started = clock.instant()
             onStart(receipt, tool.name, started)
+            onRead()
             val data = if (denyRead) null else ToolData.FileText(
                 "task.md", taskText, taskText.toByteArray(Charsets.UTF_8).size, digest(taskText))
             val code = if (denyRead) "TEST_READ_DENIED" else null
@@ -166,12 +204,15 @@ class SessionControllerUnitTest {
     ) : ModelGateway {
         var negotiations = 0
         var turns = 0
+        val deadlines = mutableListOf<Instant>()
         val retryPermissions = mutableListOf<Boolean>()
+        var onNext: (Cancellation, Instant) -> Unit = { _, _ -> }
 
         override fun negotiate(
             config: ModelConfig, cancellation: Cancellation, deadline: Instant
         ): GatewayCapabilities {
             negotiations++
+            deadlines += deadline
             return GatewayCapabilities(setOf("tool_calls"), config.contextTokens, config.maxOutputTokens)
         }
 
@@ -180,7 +221,9 @@ class SessionControllerUnitTest {
             cancellation: Cancellation, deadline: Instant, allowRetry: Boolean
         ): ModelTurn {
             turns++
+            deadlines += deadline
             retryPermissions += allowRetry
+            onNext(cancellation, deadline)
             return respond(task, observed, allowRetry)
         }
     }
@@ -189,6 +232,18 @@ class SessionControllerUnitTest {
         SessionController(request, model, workspaceOpener = WorkspaceOpener { _, audit, start ->
             workspace.attach(audit, start)
         }, eventSinkFactory = eventSinkFactory).run()
+
+    private fun runWithClock(
+        request: SessionRequest, model: StubGateway, workspace: StubWorkspace,
+        clock: Clock, scheduler: ManualDeadlineScheduler,
+        cancellation: Cancellation = Cancellation(clock)
+    ): JsonObject = SessionController(
+        request, cancellation,
+        DefaultRunSessionUseCase(
+            model, WorkspaceOpener { _, audit, start -> workspace.attach(audit, start) },
+            eventSinkFactory, clock, deadlineScheduler = scheduler
+        )
+    ).run()
 
     private fun events(request: SessionRequest): List<JsonObject> {
         // The Session layer can observe event semantics without a physical journal.
@@ -401,6 +456,189 @@ class SessionControllerUnitTest {
         assertEquals(1, entries.count { it.value("type") == "tool.started" })
         assertEquals(1, entries.count { it.value("type") == "tool.completed" })
         assertEquals(2, entries.count { it.value("type") == "llm.response" })
+    }
+
+    @Test fun fixedClockControllerKeepsUtcEventTimestampsAndRequestDeadline() {
+        val now = Instant.parse("2026-10-13T10:00:00Z")
+        val clock = Clock.fixed(now, ZoneOffset.UTC)
+        val scheduler = ManualDeadlineScheduler()
+        val deadline = now.plusSeconds(5)
+        val request = withDeadline(fixture(), deadline)
+        val model = StubGateway()
+        val workspace = StubWorkspace(request, "Read the isolated task", clock)
+
+        val result = runWithClock(request, model, workspace, clock, scheduler)
+
+        assertEquals("succeeded", result.value("status"))
+        assertEquals(now.toString(), result.value("startedAt"))
+        assertEquals(now.toString(), result.value("finishedAt"))
+        assertEquals(0L, result.getValue("durationMs").jsonPrimitive.long)
+        assertEquals(5000L, scheduler.delayMs)
+        assertTrue(scheduler.closed)
+        assertEquals(List(SESSION_MODEL_TURNS + 1) { deadline }, model.deadlines)
+        val entries = events(request)
+        assertTrue(entries.isNotEmpty())
+        assertTrue(entries.all { it.value("timestamp") == now.toString() })
+        val durations = entries.mapNotNull { it["timing"]?.jsonObject
+            ?.getValue("durationMs")?.jsonPrimitive?.long }
+        assertTrue(durations.isNotEmpty())
+        assertTrue(durations.all { it == 0L })
+    }
+
+    @Test fun defaultCancellationInheritsInjectedClockInCompatibilityConstructor() {
+        val instant = Instant.parse("2045-02-02T10:00:00Z")
+        val clock = Clock.fixed(instant, ZoneOffset.UTC)
+        val request = withDeadline(fixture(), instant.plusSeconds(30))
+        val model = StubGateway().apply {
+            // Exercise the same one-argument API as the production gateway:
+            // it must not consult system time when the controller clock is fixed.
+            onNext = { cancellation, deadline -> cancellation.check(deadline) }
+        }
+        val workspace = StubWorkspace(request, "Read the isolated task", clock)
+
+        val result = SessionController(
+            request, model,
+            workspaceOpener = WorkspaceOpener { _, audit, start ->
+                workspace.attach(audit, start)
+            },
+            eventSinkFactory = eventSinkFactory, clock = clock
+        ).run()
+
+        assertEquals("succeeded", result.value("status"))
+        assertEquals(2, model.turns)
+        assertEquals(instant.toString(), result.value("startedAt"))
+        assertEquals(instant.toString(), result.value("finishedAt"))
+        assertTrue(events(request).all { it.value("timestamp") == instant.toString() })
+    }
+
+    @Test fun schedulerFailureClosesJournalWithoutPublishingResult() {
+        val request = fixture()
+        val schedulerFailure = IllegalStateException("Injected watchdog scheduling failure")
+        val scheduler = SessionDeadlineScheduler { _, _ -> throw schedulerFailure }
+        val model = StubGateway()
+        val runtime = DefaultRunSessionUseCase(
+            model, WorkspaceOpener { _, _, _ ->
+                error("Scheduler failure must precede workspace admission")
+            }, eventSinkFactory, deadlineScheduler = scheduler
+        )
+        val thrown = assertFailsWith<IllegalStateException> {
+            runtime(request, Cancellation())
+        }
+
+        assertSame(schedulerFailure, thrown)
+        assertTrue(eventSink.closed)
+        assertEquals(0, model.negotiations)
+        assertFalse(Files.exists(request.output("resultPath")))
+    }
+
+    @Test fun advancingClockControllerAccountsForToolModelAndSessionDurations() {
+        val started = Instant.parse("2026-10-13T10:00:00Z")
+        val clock = MutableClock(started)
+        val scheduler = ManualDeadlineScheduler()
+        val deadline = started.plusSeconds(60)
+        val request = withDeadline(fixture(), deadline)
+        val model = StubGateway { task, seen, _ ->
+            clock.advanceMillis(25)
+            if (seen == null) ModelTurn(ModelDecision.Read(task), ModelUsage(3, 2))
+            else ModelTurn(ModelDecision.Done(seen.first, seen.second), ModelUsage(4, 1))
+        }
+        val workspace = StubWorkspace(request, "Read the isolated task", clock).apply {
+            onRead = { clock.advanceMillis(40) }
+        }
+
+        val result = runWithClock(request, model, workspace, clock, scheduler)
+
+        assertEquals("succeeded", result.value("status"))
+        assertEquals(started.toString(), result.value("startedAt"))
+        assertEquals(started.plusMillis(90).toString(), result.value("finishedAt"))
+        assertEquals(90L, result.getValue("durationMs").jsonPrimitive.long)
+        assertEquals(12000L, scheduler.delayMs) // wall budget precedes request deadline
+        assertEquals(List(SESSION_MODEL_TURNS + 1) { started.plusSeconds(12) }, model.deadlines)
+        assertTrue(scheduler.closed)
+        val entries = events(request)
+        assertEquals(listOf(25L, 25L), entries.filter { it.value("type") == "llm.response" }
+            .map { it.getValue("timing").jsonObject.getValue("durationMs").jsonPrimitive.long })
+        assertEquals(40L, entries.single { it.value("type") == "tool.completed" }
+            .getValue("timing").jsonObject.getValue("durationMs").jsonPrimitive.long)
+        assertEquals(started.plusMillis(90).toString(), entries.last().value("timestamp"))
+        assertTrue(entries.mapNotNull { it["timing"]?.jsonObject
+            ?.getValue("durationMs")?.jsonPrimitive?.long }.all { it >= 0L })
+    }
+
+    @Test fun simultaneousManualExpirationAndCancellationTimeoutWinsBeforeToolDispatch() {
+        val started = Instant.parse("2026-10-13T10:00:00Z")
+        val clock = MutableClock(started)
+        val scheduler = ManualDeadlineScheduler()
+        val cancellation = Cancellation(clock)
+        val request = withDeadline(fixture(), started.plusSeconds(8))
+        val model = StubGateway { task, _, _ ->
+            clock.advanceMillis(8000)
+            cancellation.cancel()
+            scheduler.fire()
+            // Model adapters may consume the interrupt; policy still sees both flags.
+            Thread.interrupted()
+            ModelTurn(ModelDecision.Read(task), ModelUsage(3, 2))
+        }
+        val workspace = StubWorkspace(request, "Read the isolated task", clock)
+
+        val result = try {
+            runWithClock(request, model, workspace, clock, scheduler, cancellation)
+        } finally {
+            Thread.interrupted() // cancel()/expire() interrupt the bound test thread.
+        }
+
+        assertEquals("timed_out", result.value("status"))
+        assertEquals("SESSION_DEADLINE_EXCEEDED",
+            result.getValue("error").jsonObject.value("code"))
+        assertEquals(8000L, result.getValue("durationMs").jsonPrimitive.long)
+        assertEquals(0, workspace.readCount)
+        assertEquals(1, model.turns)
+        assertTrue(scheduler.closed)
+        assertTrue(events(request).none { it.value("type") == "tool.started" })
+    }
+
+    @Test fun cancellationBeforeDeadlineDoesNotBecomeTimeoutWithManualScheduler() {
+        val started = Instant.parse("2026-10-13T10:00:00Z")
+        val clock = Clock.fixed(started, ZoneOffset.UTC)
+        val scheduler = ManualDeadlineScheduler()
+        val cancellation = Cancellation(clock)
+        val request = withDeadline(fixture(), started.plusSeconds(10))
+        val model = StubGateway { task, _, _ ->
+            cancellation.cancel()
+            Thread.interrupted()
+            ModelTurn(ModelDecision.Read(task), ModelUsage(3, 2))
+        }
+        val workspace = StubWorkspace(request, "Read the isolated task", clock)
+        val result = try {
+            runWithClock(request, model, workspace, clock, scheduler, cancellation)
+        } finally {
+            Thread.interrupted()
+        }
+
+        assertEquals("cancelled", result.value("status"))
+        assertEquals("SESSION_CANCELLED", result.getValue("error").jsonObject.value("code"))
+        assertEquals(0, workspace.readCount)
+        assertTrue(scheduler.closed)
+    }
+
+    @Test fun secondToolRequestIsRejectedBeforeTrustedDispatchInFixedTwoTurnFlow() {
+        // With admission requiring maxToolCalls >= 1 and only turn zero
+        // permitting Read, recordTool() cannot deny within protocol v1.
+        // A later multi-tool controller must test quota exhaustion itself.
+        val request = fixture()
+        val model = StubGateway { task, _, _ ->
+            ModelTurn(ModelDecision.Read(task), ModelUsage(3, 2))
+        }
+        val workspace = StubWorkspace(request, "Read the isolated task")
+
+        val result = run(request, model, workspace)
+
+        assertEquals("failed", result.value("status"))
+        assertEquals("INVALID_SESSION_REQUEST", result.getValue("error").jsonObject.value("code"))
+        assertEquals(2, model.turns)
+        assertEquals(1, workspace.readCount)
+        assertEquals(1, events(request).count { it.value("type") == "tool.started" })
+        assertEquals(1, events(request).count { it.value("type") == "tool.completed" })
     }
 
     @Test fun unsupportedProtocolIsRejectedBeforeOpeningWorkspaceOrCallingModel() {

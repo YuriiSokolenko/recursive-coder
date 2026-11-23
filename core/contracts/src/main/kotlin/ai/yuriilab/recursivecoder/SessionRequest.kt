@@ -1,6 +1,7 @@
 package ai.yuriilab.recursivecoder
 
 import java.nio.file.Path
+import java.time.Clock
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.serialization.json.*
@@ -164,10 +165,16 @@ class SessionRequest private constructor(val raw: JsonObject) {
 
 }
 
-/** Snapshot of externally requested cancellation and watchdog timeout. */
+/**
+ * A sample of two independent atomic flags, not an atomic pair: cancel() and
+ * expire() may race between reads. For any observed expiry or reached deadline,
+ * timeout wins over cancellation. A concurrent update missed by one sample is
+ * observed by a subsequent check (or interrupts the bound worker).
+ */
 data class CancellationSignals(val requested: Boolean, val expired: Boolean)
 
-class Cancellation {
+/** The optional clock keeps legacy check(deadline) callers testable. */
+class Cancellation(private val clock: Clock = Clock.systemUTC()) {
     private val requested = AtomicBoolean()
     private val expired = AtomicBoolean()
     private var worker: Thread? = null
@@ -205,9 +212,12 @@ class Cancellation {
     }
 
     fun signals(): CancellationSignals = CancellationSignals(requested.get(), expired.get())
-    fun check(deadline: Instant) {
-        if (expired.get() || !Instant.now().isBefore(deadline)) throw Stopped(true)
-        if (requested.get()) throw Stopped(false)
+
+    /** Samples the injectable clock by default; explicit `now` is deterministic. */
+    fun check(deadline: Instant, now: Instant = clock.instant()) {
+        val sample = signals()
+        if (sample.expired || !now.isBefore(deadline)) throw Stopped(true)
+        if (sample.requested) throw Stopped(false)
     }
 }
 

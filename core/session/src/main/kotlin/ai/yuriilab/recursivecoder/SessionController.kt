@@ -14,15 +14,28 @@ class SessionController(
     val cancellation: Cancellation,
     private val runSession: RunSessionUseCase
 ) {
+    /**
+     * Explicit cancellation compatibility constructor. With a custom clock,
+     * callers must construct the supplied Cancellation with that same clock.
+     */
     constructor(
         request: SessionRequest,
         model: ModelGateway,
-        cancellation: Cancellation = Cancellation(),
+        cancellation: Cancellation,
         workspaceOpener: WorkspaceOpener,
         eventSinkFactory: EventSinkFactory,
         clock: Clock = Clock.systemUTC()
     ) : this(request, cancellation,
         DefaultRunSessionUseCase(model, workspaceOpener, eventSinkFactory, clock))
+
+    /** Omitted cancellation inherits the controller clock, including model checks. */
+    constructor(
+        request: SessionRequest,
+        model: ModelGateway,
+        workspaceOpener: WorkspaceOpener,
+        eventSinkFactory: EventSinkFactory,
+        clock: Clock = Clock.systemUTC()
+    ) : this(request, model, Cancellation(clock), workspaceOpener, eventSinkFactory, clock)
 
     private val finished = CountDownLatch(1)
 

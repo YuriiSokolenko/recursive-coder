@@ -1,6 +1,8 @@
 package ai.yuriilab.recursivecoder
 
+import java.time.Clock
 import java.time.Instant
+import java.time.ZoneOffset
 import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
 import kotlin.test.*
@@ -82,6 +84,25 @@ class SessionPolicyUnitTest {
                 assertEquals(FinishDecision.Denied, SessionLifecyclePolicy.finish(phase, reason))
             }
         }
+    }
+
+    @Test fun injectedCancellationClockAndExplicitTimePreserveTimeoutPrecedence() {
+        val now = Instant.parse("2026-10-13T09:00:00Z")
+        val clock = Clock.fixed(now, ZoneOffset.UTC)
+        val cancellation = Cancellation(clock)
+        val deadline = now.plusMillis(100)
+        cancellation.check(deadline)
+        cancellation.check(deadline, now.plusMillis(99))
+        assertTrue(assertFailsWith<Stopped> { cancellation.check(deadline, deadline) }.timedOut)
+
+        cancellation.cancel()
+        assertFalse(assertFailsWith<Stopped> { cancellation.check(deadline) }.timedOut)
+        cancellation.expire()
+        assertTrue(assertFailsWith<Stopped> { cancellation.check(deadline) }.timedOut)
+        assertEquals(CancellationSignals(true, true), cancellation.signals())
+
+        val laterClock = Cancellation(Clock.fixed(now.plusMillis(100), ZoneOffset.UTC))
+        assertTrue(assertFailsWith<Stopped> { laterClock.check(deadline) }.timedOut)
     }
 
     @Test fun deadlineTakesPrecedenceOverSimultaneousCancellation() {
@@ -202,6 +223,11 @@ class SessionPolicyUnitTest {
 
     @Test fun modelRequestReservationAndToolQuotaAreFailClosed() {
         val empty = SessionBudgetState()
+        assertEquals(2, SESSION_MODEL_TURNS)
+        assertEquals(BudgetDecision.Denied(BudgetDenial.MODEL_REQUESTS),
+            SessionBudgetPolicy.beforeTurn(empty, 3, SESSION_MODEL_TURNS))
+        assertEquals(BudgetDecision.Denied(BudgetDenial.MODEL_REQUESTS),
+            SessionBudgetPolicy.beforeTurn(empty, 3, -1))
         assertEquals(BudgetDecision.Allowed(false), SessionBudgetPolicy.beforeTurn(empty, 2, 0))
         assertEquals(BudgetDecision.Allowed(true), SessionBudgetPolicy.beforeTurn(empty, 3, 0))
         assertEquals(BudgetDecision.Denied(BudgetDenial.MODEL_REQUESTS),

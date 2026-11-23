@@ -7,7 +7,6 @@ import java.nio.file.StandardOpenOption
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
-import java.util.concurrent.Executors
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.SynchronousQueue
@@ -172,6 +171,8 @@ class ResumePreflightRunner(private val maxProbeMillis: Long = 500L) {
  * Session execution state is local to invoke(). The injected optional
  * preflight runner has a bounded worker shared only by invocations using
  * this same DefaultRunSessionUseCase; distinct instances are isolated.
+ * The scheduler argument is a timing test seam; the default is real elapsed
+ * time with one daemon watchdog executor per invocation.
  */
 class DefaultRunSessionUseCase(
     private val model: ModelGateway,
@@ -179,7 +180,8 @@ class DefaultRunSessionUseCase(
     private val eventSinkFactory: EventSinkFactory,
     private val clock: Clock = Clock.systemUTC(),
     private val resumePreflight: SessionResumePreflight = DisabledResumePreflight,
-    private val resumePreflightRunner: ResumePreflightRunner = ResumePreflightRunner()
+    private val resumePreflightRunner: ResumePreflightRunner = ResumePreflightRunner(),
+    private val deadlineScheduler: SessionDeadlineScheduler = RealTimeSessionDeadlineScheduler
 ) : RunSessionUseCase {
 
     /**
@@ -268,11 +270,9 @@ class DefaultRunSessionUseCase(
         var failure: SessionFailure? = null
         val deadline = SessionBudgetPolicy.effectiveDeadline(
             started, request.deadline, request.budgets.longAt("maxWallTimeMs"))
-        val watchdog = Executors.newSingleThreadScheduledExecutor { task ->
-            Thread(task, "session-deadline").apply { isDaemon = true }
-        }
-        watchdog.schedule({ cancellation.expire() },
-            Duration.between(clock.instant(), deadline).toMillis().coerceAtLeast(0), TimeUnit.MILLISECONDS)
+        // Elapsed-time scheduling uses a separate port; the injected Clock still
+        // decides the effective deadline and every cooperative policy gate.
+        var watchdog: AutoCloseable? = null
 
         fun checkActive() {
             when (SessionBudgetPolicy.interruption(cancellation.signals(), clock.instant(), deadline)) {
@@ -313,6 +313,12 @@ class DefaultRunSessionUseCase(
         var eventDigest: String? = null
         var executionFailure: Throwable? = null
         try {
+            // The sink is already open: keep scheduling within this cleanup scope
+            // so an injected scheduler failure cannot leak the event journal.
+            watchdog = deadlineScheduler.schedule(
+                Duration.between(clock.instant(), deadline).toMillis().coerceAtLeast(0),
+                cancellation::expire
+            )
             try {
                 // #104: even an opt-in host preflight may only DENY here.
                 // It must not create resume.lock, publish a fence or launch a
@@ -371,7 +377,7 @@ class DefaultRunSessionUseCase(
                 } ?: Long.MAX_VALUE
                 val maxTotalTokens = request.budgets.longAt("maxTotalTokens")
                 val maxToolCalls = request.budgets.longAt("maxToolCalls")
-                repeat(2) { turn ->
+                repeat(SESSION_MODEL_TURNS) { turn ->
                     checkActive()
                     val permission = SessionBudgetPolicy.beforeTurn(budgetState, maxModelRequests, turn)
                     val allowPreToolRetry = when (permission) {
@@ -410,6 +416,10 @@ class DefaultRunSessionUseCase(
                             if (turn != 0 || decision.path != request.taskPath) refuse("Unexpected fake tool call")
                             checkActive()
                             val relative = workspaceManager!!.taskRelativePath(decision.path)
+                            // Protocol v1 admits maxToolCalls >= 1 and permits only the
+                            // first of two turns to read. A quota denial therefore cannot
+                            // be reached in the current controller flow; a multi-tool flow
+                            // must test this branch before trusted dispatch is expanded.
                             budgetState = when (val charged = SessionBudgetPolicy.recordTool(budgetState, maxToolCalls)) {
                                 is BudgetDecision.Allowed -> charged.value
                                 is BudgetDecision.Denied -> throw Refused(
@@ -455,12 +465,12 @@ class DefaultRunSessionUseCase(
         } catch (e: Throwable) {
             executionFailure = e
         } finally {
-            watchdog.shutdownNow()
             fun recordCleanupFailure(failure: Throwable) {
                 val original = executionFailure
                 if (original == null) executionFailure = failure
                 else if (original !== failure) original.addSuppressed(failure)
             }
+            try { watchdog?.close() } catch (e: Throwable) { recordCleanupFailure(e) }
             try { workspaceManager?.close() } catch (e: Throwable) { recordCleanupFailure(e) }
             try { eventDigest = journal.finish() } catch (e: Throwable) { recordCleanupFailure(e) }
         }
