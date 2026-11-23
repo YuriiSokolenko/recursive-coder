@@ -170,10 +170,40 @@ data class CancellationSignals(val requested: Boolean, val expired: Boolean)
 class Cancellation {
     private val requested = AtomicBoolean()
     private val expired = AtomicBoolean()
-    @Volatile private var worker: Thread? = null
-    fun bind() { worker = Thread.currentThread(); if (requested.get()) worker?.interrupt() }
-    fun cancel() { requested.set(true); worker?.interrupt() }
-    fun expire() { expired.set(true); worker?.interrupt() }
+    private var worker: Thread? = null
+
+    /**
+     * Serialize binding changes with cancellation so no request can interrupt
+     * the worker after unbind returns. A prior cancellation or expiry also interrupts on bind.
+     */
+    @Synchronized fun bind() {
+        worker = Thread.currentThread()
+        if (requested.get() || expired.get()) worker?.interrupt()
+    }
+
+    /**
+     * End interrupt delivery before clearing the flag and performing durable I/O.
+     * Deliberately do not validate thread ownership here: unbind() is also called
+     * from a scheduler finally block, where throwing would skip task completion.
+     */
+    @Synchronized fun unbind() {
+        worker = null
+    }
+
+    /**
+     * Interrupt only on the first request. A runner that consumes the interrupt
+     * must cooperatively observe signals() or check(deadline) to stop; repeated
+     * scheduler polls deliberately do not re-interrupt it during cleanup.
+     */
+    @Synchronized fun cancel() {
+        if (requested.compareAndSet(false, true)) worker?.interrupt()
+    }
+
+    /** Expiry follows the same single-interrupt, cooperative-check policy as cancel(). */
+    @Synchronized fun expire() {
+        if (expired.compareAndSet(false, true)) worker?.interrupt()
+    }
+
     fun signals(): CancellationSignals = CancellationSignals(requested.get(), expired.get())
     fun check(deadline: Instant) {
         if (expired.get() || !Instant.now().isBefore(deadline)) throw Stopped(true)
