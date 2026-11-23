@@ -24,6 +24,8 @@ class TaskStore(directory: Path) : TaskRepository {
     private val snapshot = this.directory.resolve("tasks.json")
     private val temp = this.directory.resolve("tasks.json.tmp")
     private val guardFile = this.directory.resolve(".store.lock")
+    // Set only while this thread owns the real .scheduler.lock OS file lock.
+    private val schedulerLeaseHeld = ThreadLocal.withInitial { false }
 
     /**
      * Fault seam for #162, never installed by production: invoked immediately
@@ -64,8 +66,19 @@ class TaskStore(directory: Path) : TaskRepository {
         FileChannel.open(lockPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE).use { channel ->
             val lock = try { channel.tryLock() } catch (_: OverlappingFileLockException) { null }
             check(lock != null) { "Another scheduler is active" }
-            lock.use { return operation() }
+            lock.use {
+                schedulerLeaseHeld.set(true)
+                try {
+                    return operation()
+                } finally {
+                    schedulerLeaseHeld.remove()
+                }
+            }
         }
+    }
+
+    override fun requireSchedulerLockHeld() {
+        check(schedulerLeaseHeld.get()) { "Scheduler lease required for recovery" }
     }
 
     override fun outputRoot(task: Task): Path = directory.resolve("runs").resolve(task.id)

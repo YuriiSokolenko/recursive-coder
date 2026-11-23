@@ -127,12 +127,82 @@ class TaskOperationsUseCasesTest {
             recover()
             assertEquals(afterRecovery, repository.read { it }, "Recovery must be idempotent")
             assertEquals(TaskState.NEEDS_ATTENTION, queries.show(first.id).state)
+            val beforeStaleInterrupt = repository.read { it }
             assertEquals(TaskState.NEEDS_ATTENTION,
                 interrupt(second.id, "stale-session", "should be ignored").state)
+            assertEquals(beforeStaleInterrupt, repository.read { it },
+                "A stale session must not change any queue fields, reasons, attempts or history")
         }
     }
 
-    @Test fun schedulerUsesInjectedInterfacesNotTaskServiceBusinessMethods() {
+    @Test fun recoveryRequiresCurrentThreadToOwnTheSchedulerLease() {
+        val repository = repository(task("only"))
+        val claim: ClaimNextTaskUseCase = DefaultClaimNextTaskUseCase(repository, fixed)
+        val recover: RecoverInterruptedAttemptsUseCase = DefaultRecoverInterruptedAttemptsUseCase(repository, fixed)
+        assertNotNull(claim(emptySet()))
+        val running = repository.read { it }
+
+        val denied = assertFailsWith<IllegalStateException> { recover() }
+        assertEquals("Scheduler lease required for recovery", denied.message)
+        assertEquals(running, repository.read { it })
+
+        val competitor = Executors.newSingleThreadExecutor()
+        try {
+            repository.withSchedulerLock {
+                val competing = competitor.submit {
+                    val denied = assertFailsWith<IllegalStateException> { recover() }
+                    assertEquals("Scheduler lease required for recovery", denied.message)
+                    val competingLease = assertFailsWith<IllegalStateException> {
+                        repository.withSchedulerLock { error("Concurrent scheduler entered") }
+                    }
+                    assertEquals("Another scheduler is active", competingLease.message)
+                }
+                competing.get(5, TimeUnit.SECONDS)
+                assertEquals(running, repository.read { it })
+                recover()
+                assertEquals(TaskState.NEEDS_ATTENTION, repository.read { it.tasks.single().state })
+                val afterRecovery = repository.read { it }
+                recover()
+                assertEquals(afterRecovery, repository.read { it })
+            }
+        } finally {
+            competitor.shutdownNow()
+        }
+        val expired = assertFailsWith<IllegalStateException> { recover() }
+        assertEquals("Scheduler lease required for recovery", expired.message)
+    }
+
+    @Test fun compatibilityServiceRecoveryAlsoRequiresSchedulerOwnership() {
+        val repository = repository(task("only"))
+        val service = TaskService(repository, fixed)
+        val running = assertNotNull(service.claim())
+        val before = repository.read { it }
+
+        val denied = assertFailsWith<IllegalStateException> { service.recoverInterrupted() }
+        assertEquals("Scheduler lease required for recovery", denied.message)
+        assertEquals(before, repository.read { it })
+
+        repository.withSchedulerLock { service.recoverInterrupted() }
+        val recovered = service.show(running.id)
+        assertEquals(TaskState.NEEDS_ATTENTION, recovered.state)
+        assertEquals(running.sessionId, recovered.sessionId)
+    }
+
+    @Test fun replaceDependenciesRemainsADirectProgrammaticApi() {
+        val repository = repository(task("parent"), task("child"))
+        val replace: ReplaceTaskDependenciesUseCase = DefaultReplaceTaskDependenciesUseCase(repository, fixed)
+
+        val updated = replace("child", listOf("parent"))
+        assertEquals(listOf("parent"), updated.dependencies)
+        assertEquals(TaskState.BLOCKED, updated.state)
+        assertEquals(updated, repository.read { it.tasks.last() })
+
+        val beforeInvalid = repository.read { it }
+        assertFailsWith<IllegalArgumentException> { replace("child", listOf("absent")) }
+        assertEquals(beforeInvalid, repository.read { it }, "Invalid direct edits must roll back")
+    }
+
+    @Test fun schedulerBuildsWithInjectedUseCasesAndFailsRequestProjection() {
         val repository = repository(task("only"))
         val scheduler = TaskScheduler(
             repository = repository,

@@ -47,6 +47,10 @@ class TaskService(
         completeUseCase(id, sessionId, resultStatus)
     fun interruptAttempt(id: String, sessionId: String, reason: String): Task =
         interruptUseCase(id, sessionId, reason)
+    /**
+     * Recover stranded attempts only while this thread owns store.withSchedulerLock.
+     * Unlike the historical compatibility method, unleased calls now fail fast.
+     */
     fun recoverInterrupted(): Unit = recoverUseCase()
     fun requestFor(task: Task): SessionRequest = prepareUseCase(task)
 }

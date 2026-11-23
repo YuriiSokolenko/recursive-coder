@@ -129,6 +129,81 @@ class TaskRepositoryContractTest {
         assertFalse(Files.exists(store.directory.resolve("tasks.json.tmp")))
     }
 
+    @Test fun staleInterruptCannotMutateNewerPersistedAttempt() {
+        val repo = TaskStore(temp.resolve("stale-interrupt"))
+        val initial = Task(id = "only", requestTemplate = "{}", dependencies = emptyList(),
+            priority = 50, state = TaskState.READY)
+        repo.update { TaskMutation(it.copy(tasks = listOf(initial)), Unit) }
+        val claim = DefaultClaimNextTaskUseCase(repo)
+        val interrupt = DefaultInterruptTaskAttemptUseCase(repo)
+        val retry = DefaultRetryTaskUseCase(repo)
+
+        val first = assertNotNull(claim(emptySet()))
+        interrupt(first.id, first.sessionId!!, "scheduler stopped")
+        retry("only")
+        val newer = assertNotNull(claim(emptySet()))
+        assertEquals(2, newer.attempt)
+        val before = repo.read { it }
+        val snapshot = repo.directory.resolve("tasks.json")
+        val beforeBytes = Files.readAllBytes(snapshot)
+
+        assertEquals(newer, interrupt("only", first.sessionId!!, "stale interruption"))
+        assertEquals(before, repo.read { it },
+            "Stale interruption must preserve the full queue snapshot")
+        assertContentEquals(beforeBytes, Files.readAllBytes(snapshot),
+            "Stale interruption must not rewrite the durable snapshot")
+    }
+
+    @Test fun durableRecoveryDeniesMissingForeignAndExpiredSchedulerLeases() {
+        val root = temp.resolve("recovery-lease")
+        val first = TaskStore(root)
+        val second = TaskStore(root)
+        val initial = Task(id = "only", requestTemplate = "{}", dependencies = emptyList(),
+            priority = 50, state = TaskState.READY)
+        first.update { TaskMutation(it.copy(tasks = listOf(initial)), Unit) }
+        assertNotNull(DefaultClaimNextTaskUseCase(first)(emptySet()))
+        val recovery = DefaultRecoverInterruptedAttemptsUseCase(first)
+        val foreignRecovery = DefaultRecoverInterruptedAttemptsUseCase(second)
+        val before = first.read { it }
+        val file = root.resolve("tasks.json")
+        val bytes = Files.readAllBytes(file)
+
+        val missing = assertFailsWith<IllegalStateException> { recovery() }
+        assertEquals("Scheduler lease required for recovery", missing.message)
+        val foreign = assertFailsWith<IllegalStateException> { foreignRecovery() }
+        assertEquals("Scheduler lease required for recovery", foreign.message)
+        assertEquals(before, first.read { it })
+        assertContentEquals(bytes, Files.readAllBytes(file))
+
+        val pool = Executors.newSingleThreadExecutor()
+        try {
+            first.withSchedulerLock {
+                val foreign = assertFailsWith<IllegalStateException> { foreignRecovery() }
+                assertEquals("Scheduler lease required for recovery", foreign.message)
+                val competing = assertFailsWith<IllegalStateException> {
+                    second.withSchedulerLock { error("Competing scheduler acquired OS lock") }
+                }
+                assertEquals("Another scheduler is active", competing.message)
+                pool.submit {
+                    val wrongThread = assertFailsWith<IllegalStateException> { recovery() }
+                    assertEquals("Scheduler lease required for recovery", wrongThread.message)
+                }.get(5, TimeUnit.SECONDS)
+                assertEquals(before, first.read { it })
+                recovery()
+                assertEquals(TaskState.NEEDS_ATTENTION, first.read { it.tasks.single().state })
+            }
+        } finally {
+            pool.shutdownNow()
+        }
+        val expired = assertFailsWith<IllegalStateException> { recovery() }
+        assertEquals("Scheduler lease required for recovery", expired.message)
+        // The same authoritative OS lease can subsequently be acquired by another instance.
+        second.withSchedulerLock {
+            foreignRecovery()
+            assertEquals(TaskState.NEEDS_ATTENTION, second.read { it.tasks.single().state })
+        }
+    }
+
     @Test fun differentFileStoreInstancesCannotHoldSchedulerLeaseSimultaneously() {
         val root = temp.resolve("scheduler-lease")
         val first = TaskStore(root)
@@ -139,6 +214,45 @@ class TaskRepositoryContractTest {
             }
         }
         second.withSchedulerLock { assertFalse(second.read { it.paused }) }
+    }
+
+    @Test fun schedulerLeaseFromAnotherProcessCannotBeBypassedByRecovery() {
+        val repo = TaskStore(temp.resolve("external-scheduler"))
+        val initial = Task(id = "running", requestTemplate = "{}", dependencies = emptyList(),
+            priority = 50, state = TaskState.READY)
+        repo.update { TaskMutation(it.copy(tasks = listOf(initial)), Unit) }
+        assertNotNull(DefaultClaimNextTaskUseCase(repo)(emptySet()))
+        val recover = DefaultRecoverInterruptedAttemptsUseCase(repo)
+        val before = repo.read { it }
+        val beforeBytes = Files.readAllBytes(repo.directory.resolve("tasks.json"))
+        val script = """
+import fcntl, sys
+with open(sys.argv[1], 'a+b', buffering=0) as guard:
+    fcntl.lockf(guard, fcntl.LOCK_EX)
+    print('LOCKED', flush=True)
+    sys.stdin.readline()
+""".trimIndent()
+        val child = ProcessBuilder("python3", "-u", "-c", script,
+            repo.directory.resolve(".scheduler.lock").toString()).start()
+        try {
+            assertEquals("LOCKED", child.inputStream.bufferedReader().readLine())
+            val contended = assertFailsWith<IllegalStateException> {
+                repo.withSchedulerLock { recover() }
+            }
+            assertEquals("Another scheduler is active", contended.message)
+            val missing = assertFailsWith<IllegalStateException> { recover() }
+            assertEquals("Scheduler lease required for recovery", missing.message)
+            assertEquals(before, repo.read { it })
+            assertContentEquals(beforeBytes, Files.readAllBytes(repo.directory.resolve("tasks.json")))
+            child.outputStream.bufferedWriter().use { it.write("\n"); it.flush() }
+            assertTrue(child.waitFor(5, TimeUnit.SECONDS), "Fixture process did not exit")
+            assertEquals(0, child.exitValue())
+        } finally {
+            child.destroyForcibly()
+            child.waitFor(5, TimeUnit.SECONDS)
+        }
+        repo.withSchedulerLock { recover() }
+        assertEquals(TaskState.NEEDS_ATTENTION, repo.read { it.tasks.single().state })
     }
 
     @Test fun osLockHeldBySecondProcessBlocksTaskTransaction() {
