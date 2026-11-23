@@ -1706,6 +1706,122 @@ class LoggedGradleSubprocessTest(unittest.TestCase):
                 self.assertFalse((suite / "daemon").exists())
                 self.assertTrue((original / "daemon" / "9.8.2").exists())
 
+    def test_suite_setup_metrics_and_cleanup_policy_are_private(self):
+        with tempfile.TemporaryDirectory(prefix="ordinary-gradle-home-") as directory:
+            shared = Path(directory)
+            (shared / "init.d").mkdir()
+            (shared / "init.d" / "developer.init.gradle").write_text(
+                "throw new RuntimeException('must not execute')", encoding="utf-8",
+            )
+            artifact = shared / "caches/modules-2/files-2.1/a/b/1/hash/lib.jar"
+            artifact.parent.mkdir(parents=True)
+            artifact.write_bytes(b"private artifact")
+            output = io.StringIO()
+            with redirect_stdout(output):
+                with _create_suite_gradle_home(shared) as isolated:
+                    suite = Path(isolated)
+                    self.assertEqual(
+                        _CACHE_CLEANUP_INIT,
+                        (suite / "init.d/disable-cache-cleanup.init.gradle")
+                        .read_text(encoding="utf-8"),
+                    )
+                    self.assertEqual(
+                        ["disable-cache-cleanup.init.gradle"],
+                        sorted(p.name for p in (suite / "init.d").iterdir()),
+                    )
+                    self.assertFalse((suite / "daemon").exists())
+                    self.assertEqual(
+                        "org.gradle.welcome=never\n",
+                        (suite / "gradle.properties").read_text(encoding="utf-8"),
+                    )
+            self.assertIn("status=ready placement=sibling fallback=none", output.getvalue())
+            self.assertIn("hardlinks=1 hardlink-bytes=16 copies=0 copy-bytes=0", output.getvalue())
+            self.assertTrue((shared / "init.d/developer.init.gradle").exists())
+
+    def test_cross_device_cache_rejected_before_any_artifact_copy(self):
+        with tempfile.TemporaryDirectory(prefix="ordinary-gradle-home-") as directory:
+            shared = Path(directory)
+            artifact = shared / "caches/modules-2/files-2.1/a/b/1/hash/lib.jar"
+            artifact.parent.mkdir(parents=True)
+            artifact.write_bytes(b"do not copy")
+            with mock.patch.object(
+                sys.modules[__name__], "_same_filesystem", return_value=False,
+            ), mock.patch.object(shutil, "copy2") as copy:
+                with self.assertRaisesRegex(RuntimeError, "cross-device"):
+                    _create_suite_gradle_home(shared)
+            copy.assert_not_called()
+            self.assertEqual(b"do not copy", artifact.read_bytes())
+
+    def test_cross_device_hardlink_failure_never_falls_back_to_copy(self):
+        with tempfile.TemporaryDirectory(prefix="ordinary-gradle-home-") as directory:
+            shared = Path(directory)
+            artifact = shared / "caches/modules-2/files-2.1/a/b/1/hash/lib.jar"
+            artifact.parent.mkdir(parents=True)
+            artifact.write_bytes(b"do not copy")
+            with mock.patch.object(os, "link", side_effect=OSError(errno.EXDEV, "cross-device")):
+                with mock.patch.object(shutil, "copy2") as copy:
+                    with self.assertRaisesRegex(RuntimeError, "cross-device"):
+                        _create_suite_gradle_home(shared)
+            copy.assert_not_called()
+
+    def test_small_same_device_copy_fallback_is_measured_and_bounded(self):
+        with tempfile.TemporaryDirectory(prefix="ordinary-gradle-home-") as directory:
+            shared = Path(directory)
+            artifact = shared / "caches/modules-2/files-2.1/a/b/1/hash/lib.jar"
+            artifact.parent.mkdir(parents=True)
+            artifact.write_bytes(b"small")
+            output = io.StringIO()
+            with mock.patch.object(os, "link", side_effect=OSError(errno.EPERM, "no links")):
+                with redirect_stdout(output):
+                    with _create_suite_gradle_home(shared) as isolated:
+                        self.assertEqual(
+                            b"small", (Path(isolated) / artifact.relative_to(shared)).read_bytes(),
+                        )
+            self.assertIn("hardlinks=0 hardlink-bytes=0 copies=1 copy-bytes=5", output.getvalue())
+            with mock.patch.object(os, "link", side_effect=OSError(errno.EPERM, "no links")):
+                with mock.patch.dict(globals(), {"_MAX_ARTIFACT_COPY_BYTES": 4}):
+                    with self.assertRaisesRegex(RuntimeError, "bounded copy fallback"):
+                        _create_suite_gradle_home(shared)
+
+    def test_unwritable_sibling_uses_private_directory_inside_shared_home(self):
+        with tempfile.TemporaryDirectory(prefix="ordinary-gradle-home-") as directory:
+            shared = Path(directory)
+            real_temporary_directory = tempfile.TemporaryDirectory
+
+            def simulate_readonly_parent(*args, **kwargs):
+                if kwargs.get("dir") == shared.parent:
+                    raise PermissionError(errno.EACCES, "parent is read-only")
+                return real_temporary_directory(*args, **kwargs)
+
+            output = io.StringIO()
+            with mock.patch.object(
+                tempfile, "TemporaryDirectory", side_effect=simulate_readonly_parent,
+            ), redirect_stdout(output):
+                with _create_suite_gradle_home(shared) as isolated:
+                    self.assertEqual(shared, Path(isolated).parent)
+            self.assertIn(
+                "placement=inside-shared fallback=sibling:PermissionError", output.getvalue(),
+            )
+
+    def test_gradle_honors_private_cleanup_policy(self):
+        # A real Gradle settings evaluation proves init.d ran before the build.
+        with tempfile.TemporaryDirectory(prefix="gradle-cleanup-probe-") as directory:
+            project = Path(directory)
+            (project / "settings.gradle").write_text(
+                "assert caches.cleanup.toString() == 'DISABLED' : "
+                "'architecture suite cleanup must be disabled'\n"
+                "rootProject.name = 'cache-cleanup-probe'\n",
+                encoding="utf-8",
+            )
+            (project / "build.gradle").write_text("", encoding="utf-8")
+            result = run_logged_gradle(
+                [str(ROOT / "gradlew"), "--daemon", "--offline",
+                 "--console=plain", "help"],
+                cwd=project, scenario="Gradle User Home cleanup policy",
+                phase="cache-policy", sequence=1, timeout=180,
+            )
+            self.assertEqual(0, result.returncode)
+
     def test_daemon_stop_targets_only_private_suite_registry(self):
         with tempfile.TemporaryDirectory(prefix="architecture-daemon-unit-") as directory:
             test_home = mock.Mock()
@@ -1733,27 +1849,24 @@ class LoggedGradleSubprocessTest(unittest.TestCase):
             )
             executable.chmod(0o755)
             output = io.StringIO()
-            with mock.patch.dict(globals(), {"_SUITE_GRADLE_HOME": mock.Mock(name="unused")}):
-                # Substitute a real, unrelated temporary directory so that no
-                # ordinary Gradle daemon or actual Gradle binary is needed.
-                test_home = tempfile.TemporaryDirectory(prefix="gradle-timeout-home-")
-                with mock.patch.dict(globals(), {"_SUITE_GRADLE_HOME": test_home}):
-                    try:
-                        with mock.patch.object(
-                            sys.modules[__name__], "_stop_suite_daemons"
-                        ) as stop:
-                            with redirect_stdout(output):
-                                with self.assertRaisesRegex(AssertionError, "timed out"):
-                                    run_logged_gradle(
-                                        [str(executable), "--daemon"],
-                                        cwd=Path(directory),
-                                        scenario="simulated detached daemon timeout",
-                                        phase="cleanup", sequence=1, timeout=0.5,
-                                    )
-                        stop.assert_called_once()
-                        self.assertIn("timed out", stop.call_args.args[0])
-                    finally:
-                        test_home.cleanup()
+            # One private home substitution; no redundant nested mock.patch.
+            with tempfile.TemporaryDirectory(prefix="gradle-timeout-home-") as home_path:
+                home = mock.Mock()
+                home.name = home_path
+                with mock.patch.dict(globals(), {"_SUITE_GRADLE_HOME": home}):
+                    with mock.patch.object(
+                        sys.modules[__name__], "_stop_suite_daemons"
+                    ) as stop:
+                        with redirect_stdout(output):
+                            with self.assertRaisesRegex(AssertionError, "timed out"):
+                                run_logged_gradle(
+                                    [str(executable), "--daemon"],
+                                    cwd=Path(directory),
+                                    scenario="simulated detached daemon timeout",
+                                    phase="cleanup", sequence=1, timeout=0.5,
+                                )
+                    stop.assert_called_once()
+                    self.assertIn("timed out", stop.call_args.args[0])
 
     def test_combined_stream_and_failure_marker(self):
         log = io.StringIO()
