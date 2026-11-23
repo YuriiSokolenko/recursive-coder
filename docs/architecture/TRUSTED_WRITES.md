@@ -239,9 +239,10 @@ isolation, and ordinary Gradle-based CI is **not** an independent stage check.
      The read-only cache does **not** include Gradle distributions,
      transforms or every kind of plugin/tool state: all must be separately
      host-provisioned and digest-checked before offline execution.
-     Repository `gradle-wrapper.properties` cannot select or download a
-     different distribution; if present, its pinned distribution identity
-     must match the host's digest (or it is ignored and not executed).
+     Always ignore repository `gradle-wrapper.properties` for toolchain
+     selection: the wrapper is never executed, its distribution URL and
+     checksum cannot override the host-pinned Gradle binary, and no wrapper
+     distribution is downloaded.
    - **Maven:** `-o`, a fresh `-Dmaven.repo.local=...` location
      backed by the pinned read-only artifact cache plus a disposable
      writable layer. All build plugins and their transitive dependencies
