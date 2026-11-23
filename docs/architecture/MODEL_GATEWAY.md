@@ -160,13 +160,16 @@ positive token grant and an absolute child deadline. The wrapper:
 - Exposes nonblocking `snapshot()` with metadata-only per-call receipts
   for **accepted, budget-exceeded, late, cancelled, and unconfirmed** attempts,
   observed input/output counters, a conservative in-flight or uncertain-usage
-  reservation and an uncertainty flag. Failed requests without usage have null token counts, never fake zero
-  usage. A concurrent `next` is denied as `MODEL_CALL_IN_FLIGHT`; the
+  reservation and an uncertainty flag. Failed requests without usage
+  have null token counts, never fake zero usage. A concurrent `next`
+  is denied as `MODEL_CALL_IN_FLIGHT`; the
   network call never holds the state monitor. Capability discovery uses a
   separate in-flight operation: it blocks concurrent inference but does
   **not** reserve inference tokens in `snapshot()`. Invalid configured
   request timeouts fail with `MODEL_REQUEST_TIMEOUT_INVALID` before
-  dispatch and record no inference charge.
+  dispatch and record no inference charge. Unlike completion denials,
+  discovery policy denials do not terminally poison the meter; a
+  corrected discovery request can still proceed.
   `accountedTokens` reports observed input-plus-output tokens for confirmed
   responses, including fully metered late/cancelled responses and overruns
   (which can exceed the grant). It reserves `maxOf(grant, observed)` only

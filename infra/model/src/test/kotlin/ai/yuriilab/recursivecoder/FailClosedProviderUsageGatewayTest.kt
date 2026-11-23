@@ -283,6 +283,44 @@ class FailClosedProviderUsageGatewayTest {
         assertEquals(0L, ledger.snapshot().accountedTokens)
     }
 
+    @Test fun invalidDiscoveryTimeoutDoesNotPoisonTheMeter() {
+        val delegate = RecordedGateway { _, _ -> reply() }
+        val ledger = meter(delegate)
+        assertEquals("MODEL_REQUEST_TIMEOUT_INVALID", failureCode {
+            ledger.negotiate(config.copy(requestTimeoutMs = 0), Cancellation(), deadline)
+        })
+        val denied = ledger.snapshot()
+        assertEquals(null, denied.terminalCode)
+        assertFalse(denied.usageUnconfirmed)
+        assertFalse(denied.inFlight)
+        assertEquals(0L, denied.accountedTokens)
+        assertTrue(denied.receipts.isEmpty())
+        assertTrue(delegate.discoveryTimeouts.isEmpty())
+
+        ledger.negotiate(config, Cancellation(), deadline)
+        assertEquals(listOf(1000L), delegate.discoveryTimeouts)
+        assertEquals(0, delegate.calls)
+    }
+
+    @Test fun subMillisecondDiscoveryDeadlineDoesNotPoisonTheMeter() {
+        val delegate = RecordedGateway { _, _ -> reply() }
+        val ledger = meter(delegate)
+        assertEquals("MODEL_DEADLINE_EXCEEDED", failureCode {
+            ledger.negotiate(config, Cancellation(), start.plusNanos(500_000))
+        })
+        val denied = ledger.snapshot()
+        assertEquals(null, denied.terminalCode)
+        assertFalse(denied.usageUnconfirmed)
+        assertFalse(denied.inFlight)
+        assertEquals(0L, denied.accountedTokens)
+        assertTrue(denied.receipts.isEmpty())
+        assertTrue(delegate.discoveryTimeouts.isEmpty())
+
+        ledger.negotiate(config, Cancellation(), deadline)
+        assertEquals(listOf(1000L), delegate.discoveryTimeouts)
+        assertEquals(0, delegate.calls)
+    }
+
     @Test fun exceptionWithNoUsageRecordsAnUnconfirmedReceiptAndSafeCauseCode() {
         val delegate = RecordedGateway { _, _ ->
             throw Refused("MODEL_INSECURE_ENDPOINT", "provider", "/secret/path")

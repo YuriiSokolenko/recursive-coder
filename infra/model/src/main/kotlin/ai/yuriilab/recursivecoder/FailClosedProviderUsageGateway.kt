@@ -128,8 +128,9 @@ class FailClosedProviderUsageGateway(
         val prepared = synchronized(lock) {
             val bounded = gate(config, deadline)
             checkCancellation(cancellation, bounded)
-            // Discovery has no inference charge, but its HTTP request must
-            // still respect the admitted deadline.
+            // Discovery policy denials are nonterminal: no completion was
+            // dispatched, so corrected requests may reuse the token grant.
+            // Discovery HTTP timeouts still respect the admitted deadline.
             val timeout = Duration.between(clock.instant(), bounded).toMillis()
             if (timeout <= 0L) deny("MODEL_DEADLINE_EXCEEDED")
             if (config.requestTimeoutMs <= 0L) deny("MODEL_REQUEST_TIMEOUT_INVALID")
