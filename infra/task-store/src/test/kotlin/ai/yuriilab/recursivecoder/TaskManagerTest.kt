@@ -596,28 +596,36 @@ class TaskManagerTest {
         val store = service.store as TaskStore
         val runningCancellation = AtomicReference<Cancellation?>()
         val durabilityHookObserved = CountDownLatch(1)
+        val lateCancellationFinished = AtomicBoolean(false)
+        val interruptedDuringSync = AtomicBoolean(false)
 
         // The worker's complete() transaction calls this hook immediately before
-        // directory fsync. A concurrent late cancel must not interrupt FileChannel.
+        // directory fsync. Capture observations without asserting inside TaskStore.
         store.directorySyncTestHook = {
             val cancellation = runningCancellation.get()
             if (cancellation != null) {
                 val cancellingThread = thread(name = "late-cancellation") { cancellation.cancel() }
                 cancellingThread.join(5000)
-                assertFalse(cancellingThread.isAlive, "Late cancellation did not finish")
-                assertFalse(Thread.currentThread().isInterrupted,
-                    "Cancellation reached the worker after runner completion")
+                lateCancellationFinished.set(!cancellingThread.isAlive)
+                interruptedDuringSync.set(Thread.currentThread().isInterrupted)
                 durabilityHookObserved.countDown()
             }
         }
         try {
-            val report = TaskScheduler(service, TaskRunner { _, cancellation ->
-                runningCancellation.set(cancellation)
-                "succeeded"
-            }, pollMillis = 10).runUntilIdle()
+            val outcome = runCatching {
+                TaskScheduler(service, TaskRunner { _, cancellation ->
+                    runningCancellation.set(cancellation)
+                    "succeeded"
+                }, pollMillis = 10).runUntilIdle()
+            }
+            assertTrue(durabilityHookObserved.await(5, TimeUnit.SECONDS),
+                "Durable completion hook was not observed")
+            assertTrue(lateCancellationFinished.get(), "Late cancellation did not finish")
+            assertFalse(interruptedDuringSync.get(),
+                "Cancellation reached the worker after runner completion")
+            val report = outcome.getOrThrow()
             assertEquals(1, report.launched)
             assertEquals(1, report.completed)
-            assertTrue(durabilityHookObserved.await(5, TimeUnit.SECONDS))
             assertEquals(TaskState.SUCCEEDED, service.show("completed").state)
         } finally {
             store.directorySyncTestHook = null

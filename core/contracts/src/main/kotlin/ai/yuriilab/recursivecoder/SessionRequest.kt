@@ -174,24 +174,32 @@ class Cancellation {
 
     /**
      * Serialize binding changes with cancellation so no request can interrupt
-     * the worker after unbind returns. A prior cancellation still interrupts on bind.
+     * the worker after unbind returns. A prior cancellation or expiry also interrupts on bind.
      */
     @Synchronized fun bind() {
         worker = Thread.currentThread()
         if (requested.get() || expired.get()) worker?.interrupt()
     }
 
-    /** Leave the interruptible phase before clearing the interrupt flag and doing durable I/O. */
+    /**
+     * End interrupt delivery before clearing the flag and performing durable I/O.
+     * Deliberately do not validate thread ownership here: unbind() is also called
+     * from a scheduler finally block, where throwing would skip task completion.
+     */
     @Synchronized fun unbind() {
-        check(worker == Thread.currentThread()) { "Only the bound worker may unbind cancellation" }
         worker = null
     }
 
-    /** A repeated scheduler poll must not re-interrupt an already-cancelled worker. */
+    /**
+     * Interrupt only on the first request. A runner that consumes the interrupt
+     * must cooperatively observe signals() or check(deadline) to stop; repeated
+     * scheduler polls deliberately do not re-interrupt it during cleanup.
+     */
     @Synchronized fun cancel() {
         if (requested.compareAndSet(false, true)) worker?.interrupt()
     }
 
+    /** Expiry follows the same single-interrupt, cooperative-check policy as cancel(). */
     @Synchronized fun expire() {
         if (expired.compareAndSet(false, true)) worker?.interrupt()
     }

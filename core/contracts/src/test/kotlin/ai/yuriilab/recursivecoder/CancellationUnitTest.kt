@@ -61,4 +61,51 @@ class CancellationUnitTest {
         assertTrue(interruptedAtBind.get(), "Pre-bind cancellation must reach the worker")
         assertFalse(repeatedCancelInterrupted.get(), "Repeated cancel must be idempotent")
     }
+
+    @Test fun preBindExpiryInterruptsAndRepeatedExpireDoesNotReinterrupt() {
+        val cancellation = Cancellation()
+        cancellation.expire()
+        val interruptedAtBind = AtomicBoolean(false)
+        val repeatedExpireInterrupted = AtomicBoolean(true)
+        val worker = thread(name = "prebind-expiry-worker") {
+            cancellation.bind()
+            interruptedAtBind.set(Thread.interrupted())
+            cancellation.expire()
+            repeatedExpireInterrupted.set(Thread.interrupted())
+            cancellation.unbind()
+        }
+        worker.join(5000)
+        assertFalse(worker.isAlive)
+        assertTrue(interruptedAtBind.get(), "Pre-bind expiry must reach the worker")
+        assertFalse(repeatedExpireInterrupted.get(), "Repeated expiry must be idempotent")
+    }
+
+    @Test fun unbindFromAnotherThreadCannotInterruptPreviousWorker() {
+        val cancellation = Cancellation()
+        val bound = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val interrupted = AtomicBoolean(true)
+        val worker = thread(name = "cross-thread-unbind-worker") {
+            cancellation.bind()
+            bound.countDown()
+            try {
+                release.await(5, TimeUnit.SECONDS)
+                interrupted.set(Thread.currentThread().isInterrupted)
+            } finally {
+                release.countDown()
+            }
+        }
+        try {
+            assertTrue(bound.await(5, TimeUnit.SECONDS))
+            cancellation.unbind()
+            cancellation.cancel()
+            release.countDown()
+            worker.join(5000)
+            assertFalse(worker.isAlive)
+            assertFalse(interrupted.get(), "Unbind must stop later interrupts from this token")
+        } finally {
+            release.countDown()
+            worker.join(5000)
+        }
+    }
 }
