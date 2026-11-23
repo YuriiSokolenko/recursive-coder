@@ -34,6 +34,9 @@ object SessionPhaseVocabulary {
 
 internal enum class SessionEndReason { SUCCESS, REFUSAL, CANCELLATION, TIMEOUT, FAILURE }
 
+/** Protocol v1 requires a read turn followed by a confirmation turn. */
+internal const val SESSION_MODEL_TURNS = 2
+
 /**
  * Public, host-safe projection of the core session interruption precedence.
  * Keeps timeout-before-cancel semantics consistent across Kotlin modules
@@ -167,7 +170,7 @@ internal object SessionAdmissionPolicy {
             "read" !in f.allowedTools || "read" in f.deniedTools ||
             f.writablePathCount != 0 || f.immutableInputCount != 0)
             return deny(AdmissionDenial.TOOL_POLICY)
-        if (f.maxToolCalls < 1L || f.maxModelRequests < 2L)
+        if (f.maxToolCalls < 1L || f.maxModelRequests < SESSION_MODEL_TURNS.toLong())
             return deny(AdmissionDenial.BUDGET)
         return AdmissionDecision.Accepted
     }
@@ -214,7 +217,10 @@ internal object SessionBudgetPolicy {
 
     fun deadlineReached(now: Instant, deadline: Instant): Boolean = !now.isBefore(deadline)
 
-    /** Timeout wins when cancellation and deadline expiration race. */
+    /**
+     * Timeout wins for every sample containing expiration or a reached
+     * deadline. CancellationSignals is not an atomic two-flag snapshot.
+     */
     fun interruption(
         signals: CancellationSignals, now: Instant, deadline: Instant
     ): SessionEndReason? = when {
@@ -225,10 +231,11 @@ internal object SessionBudgetPolicy {
 
     /** Reserve one actual HTTP POST for each remaining model turn, including confirmation. */
     fun beforeTurn(state: SessionBudgetState, maxRequests: Long, turn: Int): BudgetDecision<Boolean> {
-        if (turn !in 0..1 || state.modelRequests < 0 || state.modelRequests > maxRequests)
+        if (turn !in 0 until SESSION_MODEL_TURNS ||
+            state.modelRequests < 0 || state.modelRequests > maxRequests)
             return BudgetDecision.Denied(BudgetDenial.MODEL_REQUESTS)
         val remaining = maxRequests - state.modelRequests
-        val turnsRemaining = (2 - turn).toLong()
+        val turnsRemaining = (SESSION_MODEL_TURNS - turn).toLong()
         if (remaining < turnsRemaining) return BudgetDecision.Denied(BudgetDenial.MODEL_REQUESTS)
         return BudgetDecision.Allowed(turn == 0 && remaining > turnsRemaining)
     }

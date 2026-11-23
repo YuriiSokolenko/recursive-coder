@@ -14,15 +14,31 @@ class SessionController(
     val cancellation: Cancellation,
     private val runSession: RunSessionUseCase
 ) {
+    /**
+     * Retains the original JVM constructor/default-argument signature. An
+     * omitted cancellation token inherits the session Clock instead of
+     * silently using the system clock. A supplied token must use the same
+     * Clock, or construction fails before any model or workspace side effect.
+     */
     constructor(
         request: SessionRequest,
         model: ModelGateway,
-        cancellation: Cancellation = Cancellation(),
+        cancellation: Cancellation? = null,
         workspaceOpener: WorkspaceOpener,
         eventSinkFactory: EventSinkFactory,
         clock: Clock = Clock.systemUTC()
-    ) : this(request, cancellation,
+    ) : this(request, cancellationForClock(cancellation, clock),
         DefaultRunSessionUseCase(model, workspaceOpener, eventSinkFactory, clock))
+
+    private companion object {
+        fun cancellationForClock(cancellation: Cancellation?, clock: Clock): Cancellation {
+            val resolved = cancellation ?: Cancellation(clock)
+            require(resolved.usesClock(clock)) {
+                "Cancellation clock must match SessionController clock"
+            }
+            return resolved
+        }
+    }
 
     private val finished = CountDownLatch(1)
 

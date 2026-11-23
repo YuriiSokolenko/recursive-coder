@@ -50,7 +50,10 @@ append-only `events.jsonl` and `diagnostics.json`. Checkpoint/side-effect
 receipts remain null. Existing outputs are not overwritten.
 
 The CLI installs a JVM shutdown hook for SIGTERM/SIGINT and a watchdog that
-interrupts a blocked fake model at its deadline. SIGKILL/power loss cannot
+interrupts a blocked fake model at its deadline. `SessionDeadlineScheduler`
+uses one daemon executor per invocation in production; tests can fire expiry
+manually, while the injected `Clock` remains authoritative for deadline and
+cancellation decisions at every policy gate. SIGKILL/power loss cannot
 finish a terminal result; durable recovery is deferred to issue #10.
 
 ## Explicit scope limitations
