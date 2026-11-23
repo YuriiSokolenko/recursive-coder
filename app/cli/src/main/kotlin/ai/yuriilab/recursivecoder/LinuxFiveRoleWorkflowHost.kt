@@ -277,6 +277,13 @@ class LinuxFiveRoleWorkflowHost(
     // Fault seam at the actual port boundary, never installed by production.
     @Volatile internal var preparationReadTestHook: ((String) -> Unit)? = null
 
+    /**
+     * Deny-only fault seam for #160, never installed by production: returning
+     * true forces the pre-commit graph validation in [advance] to fail. It can
+     * only make advancement stricter, never bypass StageGraphPolicy.
+     */
+    @Volatile internal var advanceValidationDenialTestHook: ((StageGraph) -> Boolean)? = null
+
     override fun readBytes(path: String): ByteArray? {
         if (!ToolAuthorizationPolicy.validDeclaredPath(path) ||
             StageKind.entries.none { kind -> kind != StageKind.REVIEW &&
@@ -894,7 +901,8 @@ class LinuxFiveRoleWorkflowHost(
             dependencies.flatMap { it.outputArtifacts }.toSet()
         )
         val result = graph.copy(stages = graph.stages + newStage)
-        if (StageGraphPolicy.validate(result) != StageGateDecision.Permit) return null
+        if (StageGraphPolicy.validate(result) != StageGateDecision.Permit ||
+            advanceValidationDenialTestHook?.invoke(result) == true) return null
         val frozen = graph.artifacts.filter { it.id in accepted &&
             proof.files.none { changed -> changed.path == it.declaredPath } }
             .associate { it.declaredPath to it.sha256 }

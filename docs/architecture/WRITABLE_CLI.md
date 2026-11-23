@@ -47,8 +47,10 @@ The workflow plan is UTF-8 JSON (version 1, maximum 64 KiB), with exactly:
 - `check`: a host/operator-chosen absolute `executable` and string
   `arguments` (at most 16), run in the existing bubblewrap sandbox as
   `offline-check` after each write. Constant-result binaries (`true`,
-  `false`) are refused by configured and symlink-resolved name, also via
-  `/usr/bin/env` (#163). This is an accident guard, **not** a quality
+  `false`) are refused by configured and symlink-resolved name, and the
+  `env` launcher is refused outright because its options (`-u NAME`, `-S`,
+  `VAR=value`) hide the launched program; name the target executable
+  directly (#163). This is an accident guard, **not** a quality
   guarantee: the operator remains responsible for a check that actually
   exercises the produced artifacts. The same check gates every role; see
   [what checks do and do not prove](TRUSTED_WRITES.md#what-checks-do-and-do-not-prove).

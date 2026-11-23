@@ -245,17 +245,18 @@ internal object WritableWorkflowCli {
                 ?: error("Invalid check argument")
         } ?: error("Invalid check arguments")
         // Accident guard, not a quality guarantee (issue #163): resolve symlinks and
-        // refuse constant-result binaries, including through `env`. The operator
-        // remains responsible for selecting a check that exercises the artifacts.
-        // Multi-call binaries (e.g. coreutils) dispatch on the invoked name, so both
-        // the configured and the resolved file names are checked.
+        // refuse constant-result binaries. Multi-call binaries (e.g. coreutils)
+        // dispatch on the invoked name, so both the configured and the resolved
+        // file names are checked. Command launchers such as `env` are refused
+        // outright: their option grammar (`-u NAME`, `-S`, `VAR=value`, ...) makes
+        // the launched program unparseable here, so the check must name the
+        // target executable directly.
         val constant = setOf("true", "false")
+        val launchers = setOf("env")
         val names = if (executable.isAbsolute && Files.isExecutable(executable))
             setOfNotNull(executable.fileName?.toString(),
                 executable.toRealPath().fileName?.toString()) else emptySet()
-        val viaEnv = arguments.firstOrNull { !it.startsWith("-") }?.substringAfterLast('/')
-        require(names.isNotEmpty() && names.none { it in constant } &&
-            !("env" in names && viaEnv in constant) &&
+        require(names.isNotEmpty() && names.none { it in constant || it in launchers } &&
             arguments.size <= 16 && arguments.all { it.length <= 1024 }) {
             "A meaningful operator-selected isolated check is required"
         }

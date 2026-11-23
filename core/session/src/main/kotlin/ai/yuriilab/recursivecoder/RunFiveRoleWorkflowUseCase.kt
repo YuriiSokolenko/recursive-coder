@@ -26,15 +26,15 @@ data class FiveRoleWorkflowPlan(
 /**
  * Graph-wide token accounting across sequential stages (issue #156). Each stage
  * use case only checks a single invocation against `graph.budget.maxTokens`.
- * Usage that reports model requests but no token counts is unknown and is
- * charged at the full budget (fail closed).
+ * Every stage of this workflow is model-backed, so a committed stage MUST report
+ * at least one model request with both token counts. Anything else, including
+ * an empty `StageRoleUsage()` from a non-conforming executor, is unknown usage
+ * and is charged at the full budget (fail closed).
  */
 internal object FiveRoleTokenBudget {
     /** Returns the new graph-wide total, or null when the budget is exhausted/unknown. */
     fun charge(spent: Long, usage: StageRoleUsage, maxTokens: Long): Long? {
-        if (spent < 0 || spent > maxTokens) return null
-        if (usage.modelRequests <= 0 && usage.inputTokens == null && usage.outputTokens == null)
-            return spent
+        if (spent < 0 || spent > maxTokens || usage.modelRequests < 1) return null
         val input = usage.inputTokens ?: return null
         val output = usage.outputTokens ?: return null
         if (input < 0 || output < 0 || input > maxTokens - spent ||

@@ -130,7 +130,9 @@ class FiveRoleWorkflowCoordinatorUnitTest {
                     StageValidationEvidence(
                         command.graph.stages.single { it.kind == kind }.correlation,
                         requireNotNull(command.graph.stages.single { it.kind == kind }.agentId),
-                        emptyList(), true), StageRoleUsage(1, 100, 30)))
+                        emptyList(), true),
+                    if (prepareMode == "unaccounted-usage") StageRoleUsage()
+                    else StageRoleUsage(1, 100, 30)))
         }
 
         override suspend fun develop(command: DeveloperStageCommand,
@@ -233,7 +235,7 @@ class FiveRoleWorkflowCoordinatorUnitTest {
             return ReviewerStageResult(
                 if (reviewMode == "missing-graph") null else changed,
                 if (reviewMode == "missing-acceptance") null else state.acceptedIds,
-                ReviewerStageOutcome.Accepted(decision, StageRoleUsage()))
+                ReviewerStageOutcome.Accepted(decision, StageRoleUsage(1, 100, 30)))
         }
 
         override fun advance(expected: PreparationStageSnapshot, next: StageKind,
@@ -310,12 +312,22 @@ class FiveRoleWorkflowCoordinatorUnitTest {
         assertEquals(listOf(StageKind.SDD, StageKind.ATDD, StageKind.TDD), f.called)
     }
 
+    /** Review of #165: a non-conforming executor's empty usage must not be free. */
+    @Test fun acceptedStageWithoutAccountedUsageStopsTheWorkflow() = runBlocking {
+        val f = Fixture()
+        f.prepareMode = "unaccounted-usage"
+        expectStopped(f, "GRAPH_TOKEN_BUDGET_EXHAUSTED", StageKind.SDD)
+        assertEquals(listOf(StageKind.SDD), f.called)
+    }
+
     @Test fun unknownOrOverflowingStageUsageIsChargedAsExhaustion() {
         assertEquals(130L, FiveRoleTokenBudget.charge(0, StageRoleUsage(1, 100, 30), 1000))
-        assertEquals(5L, FiveRoleTokenBudget.charge(5, StageRoleUsage(), 1000))
+        // A model-backed stage that reports no accounted request is unknown usage.
+        assertNull(FiveRoleTokenBudget.charge(5, StageRoleUsage(), 1000))
+        assertNull(FiveRoleTokenBudget.charge(5, StageRoleUsage(0, 0, 0), 1000))
         assertNull(FiveRoleTokenBudget.charge(0, StageRoleUsage(1, null, 30), 1000))
         assertNull(FiveRoleTokenBudget.charge(0, StageRoleUsage(1, 100, null), 1000))
-        assertNull(FiveRoleTokenBudget.charge(0, StageRoleUsage(0, -1, 0), 1000))
+        assertNull(FiveRoleTokenBudget.charge(0, StageRoleUsage(1, -1, 0), 1000))
         assertNull(FiveRoleTokenBudget.charge(900, StageRoleUsage(1, 100, 1), 1000))
         assertEquals(1000L, FiveRoleTokenBudget.charge(900, StageRoleUsage(1, 60, 40), 1000))
         assertNull(FiveRoleTokenBudget.charge(0,

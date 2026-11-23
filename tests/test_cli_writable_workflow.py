@@ -658,12 +658,19 @@ class InstalledWritableWorkflowTest(unittest.TestCase):
         self.assert_denial(self.authorized(), "INVALID_WORKFLOW_CONFIGURATION")
 
     def test_constant_result_check_is_refused_through_symlink_or_env(self):
-        # Issue #163: the accident guard resolves symlinks and env indirection.
+        # Issue #163: the accident guard resolves symlinks and refuses launchers
+        # whose option grammar hides the program (`env -u PATH true`, ...).
         link = self.base / "renamed-check"
         link.symlink_to("/usr/bin/true")
+        env_link = self.base / "renamed-launcher"
+        env_link.symlink_to("/usr/bin/env")
         for check in ({"executable": str(link), "arguments": []},
                       {"executable": "/usr/bin/env", "arguments": ["true"]},
-                      {"executable": "/usr/bin/env", "arguments": ["-i", "/bin/false"]}):
+                      {"executable": "/usr/bin/env", "arguments": ["-i", "/bin/false"]},
+                      {"executable": "/usr/bin/env", "arguments": ["-u", "PATH", "/usr/bin/true"]},
+                      {"executable": "/usr/bin/env", "arguments": ["A=1", "/usr/bin/true"]},
+                      {"executable": "/usr/bin/env", "arguments": ["/usr/bin/grep", "-q", "x", "f"]},
+                      {"executable": str(env_link), "arguments": ["-S", "true"]}):
             with self.subTest(check=check):
                 plan, approval = self.fixture()
                 plan["check"] = check

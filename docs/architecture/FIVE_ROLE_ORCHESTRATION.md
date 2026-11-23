@@ -177,8 +177,10 @@ could spend about five times that budget. The coordinator therefore
 accumulates the usage returned by every *committed* stage. It refuses to start
 a stage once the total reaches `maxTokens`, and stops with
 `GRAPH_TOKEN_BUDGET_EXHAUSTED` right after a committed stage whose usage
-overruns it, or whose usage reports model requests without token counts
-(unknown usage is charged at the full budget). The overrunning stage remains
+overruns it. Every stage of this workflow is model-backed, so a committed
+stage must report at least one model request with both token counts; any
+other usage, including an empty `StageRoleUsage()` from a non-conforming
+`StageRoleExecutor`, is unknown and charged at the full budget. The overrunning stage remains
 committed and auditable; one stage can still overrun before it is detected.
 Budgets shared across recursive origins remain the recursive scheduler's
 responsibility.
