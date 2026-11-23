@@ -97,6 +97,7 @@ class RunReviewerStageIntegrationTest {
         var trustedHandoff = handoff(graph)
         var verifiedReceipts = true
         var throwAfterFinish = false
+        var returnUnknownFinish = false
         var refuseFinish = false
         /** Simulates an edit/revocation strictly AFTER the use-case preflight. */
         var onFinishAttempt: (() -> Unit)? = null
@@ -159,20 +160,29 @@ class RunReviewerStageIntegrationTest {
         @Synchronized override fun finishStage(
             lease: ReviewerStageLease, updatedGraph: StageGraph, acceptedIds: Set<ArtifactId>,
             decision: ReviewerDecisionRecord
-        ): Boolean {
+        ): ReviewerFinishResult {
             onFinishAttempt?.invoke()
             // Atomic fake-host commit boundary: re-evaluate receipts AND disk
             // hashes after any concurrent mutation, not just in the use case.
-            if (refuseFinish || !current(lease) ||
-                ReviewerStageFinishPolicy.permits(lease, updatedGraph, acceptedIds,
-                    decision, verifyDeveloperEvidence(lease)) != StageGateDecision.Permit)
-                return false
+            if (!current(lease))
+                return ReviewerFinishResult.Denied("STALE_REVIEW_LEASE")
+            if (refuseFinish)
+                return ReviewerFinishResult.Denied("REVIEW_FINISH_DENIED")
+            if (!frozenAndPostimagesIntact(lease))
+                return ReviewerFinishResult.Denied("FROZEN_INPUT_OR_SOURCE_CHANGED")
+            if (!verifyDeveloperEvidence(lease))
+                return ReviewerFinishResult.Denied("UNVERIFIED_DEVELOPER_EVIDENCE")
+            val gate = ReviewerStageFinishPolicy.permits(
+                lease, updatedGraph, acceptedIds, decision, true)
+            if (gate is StageGateDecision.Deny)
+                return ReviewerFinishResult.Denied(gate.code)
+            if (returnUnknownFinish) return ReviewerFinishResult.Unknown
             graph = updatedGraph
             accepted = acceptedIds
             committedDecision = decision
             active = null
             if (throwAfterFinish) error("CAS committed, response lost")
-            return true
+            return ReviewerFinishResult.Committed
         }
         @Synchronized override fun abortStage(
             lease: ReviewerStageLease, terminal: StageState
@@ -192,12 +202,14 @@ class RunReviewerStageIntegrationTest {
         val requests = mutableListOf<StageRoleRequest>()
         var response = """{"verdict":"ACCEPT","code":"OK","scope":"NONE","evidence":["check:git_diff_check","check:offline","write:write-77"]}"""
         var onExecute: (() -> Unit)? = null
+        var throwsAfterInvocation = false
         var usage = StageRoleUsage(1, 140, 40)
         override suspend fun execute(
             request: StageRoleRequest, events: StageRoleEventSink
         ): StageRoleResult {
             requests += request
             onExecute?.invoke()
+            if (throwsAfterInvocation) error("Provider failed without usage receipt")
             val stage = request.graph.stages.single {
                 it.correlation.stageRunId == request.stageRunId
             }
@@ -378,6 +390,30 @@ class RunReviewerStageIntegrationTest {
             assertIs<ReviewerStageOutcome.Failed>(run(revoked, FakeModel()).outcome).code)
     }
 
+    @Test fun reviewerPromptExplainsEvidenceReferenceGrammar() = runBlocking {
+        val host = FakeHost()
+        val fake = FakeModel()
+        assertIs<ReviewerStageOutcome.Accepted>(run(host, fake).outcome)
+        val prompt = fake.requests.single().instruction
+        assertContains(prompt, "check:<verified-check id>")
+        assertContains(prompt, "write:<verified-write id>")
+        assertContains(prompt, "file:<changed-file path>")
+        assertContains(prompt, "Copy the tag ID/path with its prefix")
+        assertContains(prompt, "Choose exactly one allowed verdict/code/scope triple")
+        assertContains(prompt, "ACCEPT/OK/NONE")
+        assertContains(prompt, "REJECT/IMPLEMENTATION_DEFECT/IMPLEMENTATION_ONLY")
+        assertContains(prompt, "NEEDS_HUMAN/FROZEN_ARTIFACT_CHANGE/FROZEN_INPUTS")
+        assertContains(prompt, "id=\"git_diff_check\"")
+        assertContains(prompt, "id=\"write-77\"")
+
+        val unprefixed = FakeModel().apply {
+            response = """{"verdict":"ACCEPT","code":"OK","scope":"NONE","evidence":["git_diff_check","offline","write-77"]}"""
+        }
+        assertEquals("UNSUPPORTED_REVIEW_EVIDENCE",
+            assertIs<ReviewerStageOutcome.Failed>(
+                run(FakeHost(), unprefixed).outcome).code)
+    }
+
     @Test fun finishCommitRevalidatesFrozenBytesAndReceiptRevocation() = runBlocking {
         val changed = FakeHost()
         changed.onFinishAttempt = {
@@ -385,21 +421,25 @@ class RunReviewerStageIntegrationTest {
         }
         val events = mutableListOf<ReviewerDecisionRecord>()
         val changedResult = run(changed, FakeModel(), events)
-        assertEquals("STALE_REVIEW_LEASE",
-            assertIs<ReviewerStageOutcome.ReconciliationRequired>(
-                changedResult.outcome).code)
+        assertEquals("FROZEN_INPUT_OR_SOURCE_CHANGED",
+            assertIs<ReviewerStageOutcome.Failed>(changedResult.outcome).code)
+        assertEquals(changed.graph, changedResult.graph)
         assertNull(changed.committedDecision)
-        assertEquals(StageState.RUNNING, changed.graph.stages.last().state)
+        assertEquals(StageState.FAILED, changed.graph.stages.last().state)
+        assertNull(changed.active)
+        assertEquals(1, changed.aborted)
         assertTrue(events.isEmpty())
 
         val revoked = FakeHost()
         revoked.onFinishAttempt = { revoked.verifiedReceipts = false }
         val revokedResult = run(revoked, FakeModel())
-        assertEquals("STALE_REVIEW_LEASE",
-            assertIs<ReviewerStageOutcome.ReconciliationRequired>(
-                revokedResult.outcome).code)
+        assertEquals("UNVERIFIED_DEVELOPER_EVIDENCE",
+            assertIs<ReviewerStageOutcome.Failed>(revokedResult.outcome).code)
+        assertEquals(revoked.graph, revokedResult.graph)
         assertNull(revoked.committedDecision)
-        assertEquals(StageState.RUNNING, revoked.graph.stages.last().state)
+        assertEquals(StageState.FAILED, revoked.graph.stages.last().state)
+        assertNull(revoked.active)
+        assertEquals(1, revoked.aborted)
     }
 
     @Test fun invalidOrHumanContradictoryResponseRetainsSpentUsage() = runBlocking {
@@ -412,6 +452,59 @@ class RunReviewerStageIntegrationTest {
             assertIs<ReviewerStageOutcome.Failed>(result.outcome).code)
         assertEquals(model.usage, result.usage)
         assertNull(host.committedDecision)
+    }
+
+    @Test fun definitiveHostDenialLeavesNoFalseAcceptance() = runBlocking {
+        val host = FakeHost().apply { refuseFinish = true }
+        val events = mutableListOf<ReviewerDecisionRecord>()
+        val result = run(host, FakeModel(), events)
+        assertEquals("REVIEW_FINISH_DENIED",
+            assertIs<ReviewerStageOutcome.Failed>(result.outcome).code)
+        assertEquals(host.graph, result.graph)
+        assertEquals(host.accepted, result.hostAcceptedArtifactIds)
+        assertNull(host.committedDecision)
+        assertEquals(StageState.FAILED, host.graph.stages.last().state)
+        assertNull(host.active)
+        assertEquals(1, host.aborted)
+        assertTrue(events.isEmpty())
+    }
+
+    @Test fun staleLeaseAtDefinitiveDenialRequiresReconciliation() = runBlocking {
+        val host = FakeHost()
+        host.onFinishAttempt = { host.active = null }
+        val events = mutableListOf<ReviewerDecisionRecord>()
+        val result = run(host, FakeModel(), events)
+        assertEquals("REVIEW_FINISH_DENIED_STALE",
+            assertIs<ReviewerStageOutcome.ReconciliationRequired>(result.outcome).code)
+        assertNull(result.graph)
+        assertNull(host.committedDecision)
+        assertEquals(StageState.RUNNING, host.graph.stages.last().state)
+        assertEquals(0, host.aborted)
+        assertTrue(events.isEmpty())
+    }
+
+    @Test fun explicitUnknownHostFinishRequiresReconciliation() = runBlocking {
+        val host = FakeHost().apply { returnUnknownFinish = true }
+        val events = mutableListOf<ReviewerDecisionRecord>()
+        val result = run(host, FakeModel(), events)
+        assertEquals("REVIEW_FINISH_UNCONFIRMED",
+            assertIs<ReviewerStageOutcome.ReconciliationRequired>(result.outcome).code)
+        assertNull(result.graph)
+        assertNull(host.committedDecision)
+        assertTrue(events.isEmpty())
+    }
+
+    @Test fun executorExceptionDoesNotInventUnobservableUsage() = runBlocking {
+        val host = FakeHost()
+        val fake = FakeModel().apply { throwsAfterInvocation = true }
+        val result = run(host, fake)
+        assertEquals("REVIEW_STAGE_FAILED",
+            assertIs<ReviewerStageOutcome.Failed>(result.outcome).code)
+        assertEquals(StageRoleUsage(), result.usage)
+        assertNull(result.usage.inputTokens)
+        assertNull(result.usage.outputTokens)
+        assertNull(host.committedDecision)
+        assertEquals(1, host.aborted)
     }
 
     @Test fun unknownHostFinishDoesNotClaimSuccessOrPublishVerdict() = runBlocking {

@@ -37,6 +37,12 @@ A Reviewer proposal is exactly one JSON object with four keys:
 ```
 
 The allowed choices are `ACCEPT`, `REJECT` and `NEEDS_HUMAN`.
+`ReviewerVerdictPolicy` in `:core:contracts` is the single literal
+verdict/code/scope allowlist shared by JSON decoding, host CAS, and the
+Reviewer prompt:
+`ACCEPT/OK/NONE`; `REJECT/IMPLEMENTATION_DEFECT/IMPLEMENTATION_ONLY`;
+`NEEDS_HUMAN/FROZEN_ARTIFACT_CHANGE/FROZEN_INPUTS`; and
+`NEEDS_HUMAN/{EVIDENCE_MISSING,CHECK_FAILED,OTHER_REQUIRES_HUMAN}/NONE`.
 An acceptance requires **every** trusted check ID and the trusted write ID;
 a rejection must cite trusted file/check evidence. All evidence references must
 match the host-retained handoff. Reason codes are allowlisted, not free text.
@@ -62,8 +68,16 @@ model or provider must select it explicitly.
 the verdict matches the pinned Developer manifest and independent actors,
 and no accepted ID or artifact was mutated. The authoritative host must
 run this policy and independently recheck live receipt provenance while
-committing the decision atomically. Any uncertain begin/finish requires
-reconciliation; it is never reported as success.
+committing the decision atomically. The atomic `finishStage` port returns
+`ReviewerFinishResult`: `Committed` confirms the decision, `Denied(code)`
+confirms **no** commit and reports why (stale lease, failed evidence check,
+frozen-input drift, or a policy denial). A still-active lease is immediately
+aborted to a confirmed `FAILED` stage. An unconfirmed abort requires
+reconciliation; stale-lease denials use `REVIEW_FINISH_DENIED_STALE` to
+distinguish an invalidated lease from an uncertain finish. `Unknown` or a
+thrown exception requires reconciliation under #85 even when a commit
+may already have happened. No automatic retry or abort follows an
+unknown finish.
 
 ## Bounded repair routing
 
@@ -101,7 +115,11 @@ These contracts are in-process only and require explicit
 `reviewerStageModule(host)` composition. The default CLI remains read-only.
 
 `ReviewerStageResult.usage` retains validated model usage for rejected, failed,
-and CAS-uncertain post-invocation outcomes. Only the trusted host can confirm
+and CAS-denied or CAS-uncertain post-invocation outcomes. When
+`StageRoleExecutor` throws before returning a `StageRoleResult`, the
+current contract has no authoritative post-exception usage: token totals
+remain unknown, never synthesized. A future authenticated, bounded
+accounting signal is separate work. Only the trusted host can confirm
 an accepted review; in-process preflight reads cannot close the final TOCTOU
 window. Production hosts MUST recheck receipt and byte integrity atomically
 with their compare-and-swap commit.

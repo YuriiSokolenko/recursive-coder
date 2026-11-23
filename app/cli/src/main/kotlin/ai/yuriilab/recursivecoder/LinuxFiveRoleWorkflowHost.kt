@@ -983,16 +983,24 @@ class LinuxFiveRoleWorkflowHost(
 
         override fun finishStage(lease: ReviewerStageLease,
             updatedGraph: StageGraph, acceptedIds: Set<ArtifactId>,
-            decision: ReviewerDecisionRecord): Boolean =
+            decision: ReviewerDecisionRecord): ReviewerFinishResult =
             synchronized(this@LinuxFiveRoleWorkflowHost) {
-                if (!current(lease) || !verifyDeveloperEvidence(lease) ||
-                    ReviewerStageFinishPolicy.permits(lease, updatedGraph,
-                        acceptedIds, decision, true) != StageGateDecision.Permit ||
-                    !frozenIntact()) return@synchronized false
+                if (!current(lease))
+                    return@synchronized ReviewerFinishResult.Denied("STALE_REVIEW_LEASE")
+                if (!frozenIntact())
+                    return@synchronized ReviewerFinishResult.Denied(
+                        "FROZEN_INPUT_OR_SOURCE_CHANGED")
+                if (!verifyDeveloperEvidence(lease))
+                    return@synchronized ReviewerFinishResult.Denied(
+                        "UNVERIFIED_DEVELOPER_EVIDENCE")
+                val gate = ReviewerStageFinishPolicy.permits(lease, updatedGraph,
+                    acceptedIds, decision, true)
+                if (gate is StageGateDecision.Deny)
+                    return@synchronized ReviewerFinishResult.Denied(gate.code)
                 graph = updatedGraph
                 reviewing = null
                 finalReview = decision
-                true
+                ReviewerFinishResult.Committed
             }
 
         override fun abortStage(lease: ReviewerStageLease,

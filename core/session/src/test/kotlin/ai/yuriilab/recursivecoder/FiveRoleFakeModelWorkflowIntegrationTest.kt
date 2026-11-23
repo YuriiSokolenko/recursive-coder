@@ -260,13 +260,16 @@ class FiveRoleFakeModelWorkflowIntegrationTest {
         override fun finishStage(
             lease: ReviewerStageLease, updatedGraph: StageGraph,
             acceptedIds: Set<ArtifactId>, decision: ReviewerDecisionRecord
-        ): Boolean {
-            if (!current(lease) || ReviewerStageFinishPolicy.permits(lease, updatedGraph,
-                    acceptedIds, decision, verifyDeveloperEvidence(lease)) !=
-                StageGateDecision.Permit) return false
+        ): ReviewerFinishResult {
+            if (!current(lease))
+                return ReviewerFinishResult.Denied("STALE_REVIEW_LEASE")
+            val gate = ReviewerStageFinishPolicy.permits(lease, updatedGraph,
+                acceptedIds, decision, verifyDeveloperEvidence(lease))
+            if (gate is StageGateDecision.Deny)
+                return ReviewerFinishResult.Denied(gate.code)
             preparation.graph = updatedGraph
             active = null
-            return true
+            return ReviewerFinishResult.Committed
         }
         override fun abortStage(
             lease: ReviewerStageLease, terminal: StageState

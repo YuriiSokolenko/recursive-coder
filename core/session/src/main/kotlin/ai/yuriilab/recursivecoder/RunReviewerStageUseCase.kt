@@ -103,21 +103,7 @@ class RunReviewerStageUseCase(
             else -> return null
         }
         val code = string("code") ?: return null
-        if (code !in setOf("OK", "IMPLEMENTATION_DEFECT", "FROZEN_ARTIFACT_CHANGE",
-                "EVIDENCE_MISSING", "CHECK_FAILED", "OTHER_REQUIRES_HUMAN")) return null
-        if (verdict == ReviewerDisposition.ACCEPT &&
-            (code != "OK" || scope != ReviewerCorrectionScope.NONE) ||
-            verdict == ReviewerDisposition.REJECT &&
-            (code != "IMPLEMENTATION_DEFECT" ||
-                scope != ReviewerCorrectionScope.IMPLEMENTATION_ONLY) ||
-            verdict == ReviewerDisposition.NEEDS_HUMAN &&
-            (code !in setOf("FROZEN_ARTIFACT_CHANGE", "EVIDENCE_MISSING",
-                "CHECK_FAILED", "OTHER_REQUIRES_HUMAN") ||
-                (code == "FROZEN_ARTIFACT_CHANGE" &&
-                    scope != ReviewerCorrectionScope.FROZEN_INPUTS) ||
-                (code != "FROZEN_ARTIFACT_CHANGE" &&
-                    scope != ReviewerCorrectionScope.NONE)))
-            return null
+        if (!ReviewerVerdictPolicy.isAllowed(verdict, code, scope)) return null
         val values = root["evidence"] as? JsonArray ?: return null
         if (values.isEmpty() || values.size > 32) return null
         val refs = values.map {
@@ -241,12 +227,24 @@ class RunReviewerStageUseCase(
             if (!intact()) return abort("FROZEN_INPUT_OR_SOURCE_CHANGED")
             val prompt = buildString {
                 append(command.instruction)
-                append("\n\nYou are an independent, read-only Reviewer. Return ONLY JSON:")
-                append(" {\"verdict\":\"ACCEPT|REJECT|NEEDS_HUMAN\",")
-                append("\"code\":\"OK|IMPLEMENTATION_DEFECT|FROZEN_ARTIFACT_CHANGE|")
-                append("EVIDENCE_MISSING|CHECK_FAILED|OTHER_REQUIRES_HUMAN\",")
-                append("\"scope\":\"NONE|IMPLEMENTATION_ONLY|FROZEN_INPUTS\",")
-                append("\"evidence\":[\"check:git_diff_check\"]}.")
+                append("\n\nYou are an independent, read-only Reviewer.")
+                append(" Return ONLY a JSON object with exactly these keys:")
+                append(" verdict (string), code (string), scope (string),")
+                append(" evidence (array of trusted evidence-ID strings).")
+                append(" Choose exactly one allowed verdict/code/scope triple: ")
+                append(ReviewerVerdictPolicy.allowedCombinations()
+                    .joinToString("; ") { (verdict, code, scope) ->
+                        "${verdict.name}/$code/${scope.name}"
+                    })
+                append(".")
+                append(" Evidence IDs must be prefixed: ")
+                append(ReviewerEvidenceReferences.CHECK_PREFIX)
+                append("<verified-check id>, ")
+                append(ReviewerEvidenceReferences.WRITE_PREFIX)
+                append("<verified-write id>, or ")
+                append(ReviewerEvidenceReferences.FILE_PREFIX)
+                append("<changed-file path>.")
+                append(" Copy the tag ID/path with its prefix; never use bare IDs.")
                 append(" ACCEPT requires ALL trusted check and write evidence IDs.")
                 append(" REJECT is ONLY for implementation-only corrections.")
                 append(" Frozen specification/test revisions require NEEDS_HUMAN.")
@@ -285,6 +283,8 @@ class RunReviewerStageUseCase(
             if (prompt.toByteArray(Charsets.UTF_8).size > StageRoleLimits.MAX_INSTRUCTION_BYTES)
                 return abort("REVIEW_INPUT_TOO_LARGE")
             checkpoint()?.let { return abort(it) }
+            // StageRoleExecutor has no authenticated usage-bearing exception type.
+            // When it throws, post-exception token usage is unobservable.
             val proposal = roles.execute(StageRoleRequest(
                 ready, id, stage.correlation.requestId, EngineeringRole.REVIEWER,
                 accepted, command.model, prompt, command.deadline, command.cancellation,
@@ -354,8 +354,24 @@ class RunReviewerStageUseCase(
                     ReviewerStageOutcome.ReconciliationRequired("REVIEW_FINISH_UNCONFIRMED"),
                     spentUsage)
             }
-            if (!committed) return ReviewerStageResult(null, null,
-                ReviewerStageOutcome.ReconciliationRequired("STALE_REVIEW_LEASE"), spentUsage)
+            when (committed) {
+                ReviewerFinishResult.Committed -> Unit
+                is ReviewerFinishResult.Denied -> {
+                    // A definite no-commit still may leave a live Reviewer lease.
+                    // Abort if current; if stale, preserve the host's diagnosis
+                    // rather than falsely claiming that the finish was uncertain.
+                    val aborted = abort(committed.code)
+                    if (committed.code == "STALE_REVIEW_LEASE" &&
+                        aborted.outcome is ReviewerStageOutcome.ReconciliationRequired)
+                        return ReviewerStageResult(null, null,
+                            ReviewerStageOutcome.ReconciliationRequired(
+                                "REVIEW_FINISH_DENIED_STALE"), spentUsage)
+                    return aborted
+                }
+                ReviewerFinishResult.Unknown -> return ReviewerStageResult(null, null,
+                    ReviewerStageOutcome.ReconciliationRequired("REVIEW_FINISH_UNCONFIRMED"),
+                    spentUsage)
+            }
             try { decisionEvents.emit(decision) }
             catch (_: Exception) { /* Host CAS remains authoritative. */ }
             val outcome = when (decision.verdict) {

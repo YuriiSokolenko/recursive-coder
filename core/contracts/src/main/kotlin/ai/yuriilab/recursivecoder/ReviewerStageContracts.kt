@@ -8,6 +8,51 @@ package ai.yuriilab.recursivecoder
 enum class ReviewerDisposition { ACCEPT, REJECT, NEEDS_HUMAN }
 enum class ReviewerCorrectionScope { NONE, IMPLEMENTATION_ONLY, FROZEN_INPUTS }
 
+/**
+ * Single allowlist for the Reviewer JSON decoder and the authoritative CAS
+ * finish policy. A model cannot invent codes or choose a wider repair scope.
+ */
+object ReviewerVerdictPolicy {
+    private val allowed = linkedSetOf(
+        Triple(ReviewerDisposition.ACCEPT, "OK", ReviewerCorrectionScope.NONE),
+        Triple(ReviewerDisposition.REJECT, "IMPLEMENTATION_DEFECT",
+            ReviewerCorrectionScope.IMPLEMENTATION_ONLY),
+        Triple(ReviewerDisposition.NEEDS_HUMAN, "FROZEN_ARTIFACT_CHANGE",
+            ReviewerCorrectionScope.FROZEN_INPUTS),
+        Triple(ReviewerDisposition.NEEDS_HUMAN, "EVIDENCE_MISSING",
+            ReviewerCorrectionScope.NONE),
+        Triple(ReviewerDisposition.NEEDS_HUMAN, "CHECK_FAILED",
+            ReviewerCorrectionScope.NONE),
+        Triple(ReviewerDisposition.NEEDS_HUMAN, "OTHER_REQUIRES_HUMAN",
+            ReviewerCorrectionScope.NONE)
+    )
+
+    fun isAllowed(
+        verdict: ReviewerDisposition, code: String, scope: ReviewerCorrectionScope
+    ): Boolean = Triple(verdict, code, scope) in allowed
+
+    /** Preserves a stable ordering for model-facing formatting in :core:session. */
+    fun allowedCombinations(): Set<Triple<ReviewerDisposition, String,
+        ReviewerCorrectionScope>> = allowed.toSet()
+}
+
+/** Exact evidence reference prefixes accepted at the finish gate. */
+object ReviewerEvidenceReferences {
+    const val CHECK_PREFIX = "check:"
+    const val WRITE_PREFIX = "write:"
+    const val FILE_PREFIX = "file:"
+}
+
+/** An Unknown outcome (or a thrown finish) may already have committed. */
+sealed interface ReviewerFinishResult {
+    data object Committed : ReviewerFinishResult
+    /** A definitive no-commit decision, with a trusted host diagnostic code. */
+    data class Denied(val code: String) : ReviewerFinishResult {
+        init { require(code.isNotBlank()) }
+    }
+    data object Unknown : ReviewerFinishResult
+}
+
 data class ReviewerHistoryEntry(
     val correlation: StageCorrelation,
     val role: EngineeringRole,
@@ -89,10 +134,19 @@ interface ReviewerStageHost {
     fun current(lease: ReviewerStageLease): Boolean
     fun readBytes(path: String): ByteArray?
     fun verifyDeveloperEvidence(lease: ReviewerStageLease): Boolean
+    /**
+     * Atomically recheck evidence and commit. Committed confirms persistence;
+     * Denied(code) definitively means no review commit and reports the reason
+     * (the lease may still be active). Unknown means the host cannot determine
+     * whether the commit happened; return it for an indeterminate outcome
+     * (e.g. a lost remote acknowledgement), and
+     * throw only for an unexpected failure. A thrown finish is also treated as
+     * unknown by callers: neither may be retried or auto-aborted.
+     */
     fun finishStage(
         lease: ReviewerStageLease, updatedGraph: StageGraph,
         acceptedIds: Set<ArtifactId>, decision: ReviewerDecisionRecord
-    ): Boolean
+    ): ReviewerFinishResult
     fun abortStage(lease: ReviewerStageLease, terminal: StageState): ReviewerStageSnapshot?
 }
 
@@ -137,33 +191,26 @@ object ReviewerStageFinishPolicy {
                     ReviewerDisposition.REJECT -> ReviewVerdict.REQUEST_CHANGES
                     ReviewerDisposition.NEEDS_HUMAN -> ReviewVerdict.REJECT
                 })) return deny("REVIEW_IDENTITY_MISMATCH")
-        if (decision.verdict == ReviewerDisposition.ACCEPT &&
-            (after.state != StageState.ACCEPTED ||
-                decision.scope != ReviewerCorrectionScope.NONE ||
-                decision.reasonCode != "OK"))
-            return deny("INVALID_ACCEPTANCE")
-        if (decision.verdict != ReviewerDisposition.ACCEPT &&
-            (after.state != StageState.REJECTED ||
-                (decision.verdict == ReviewerDisposition.REJECT &&
-                    (decision.scope != ReviewerCorrectionScope.IMPLEMENTATION_ONLY ||
-                        decision.reasonCode != "IMPLEMENTATION_DEFECT")) ||
-                (decision.verdict == ReviewerDisposition.NEEDS_HUMAN &&
-                    (decision.reasonCode !in setOf("FROZEN_ARTIFACT_CHANGE",
-                        "EVIDENCE_MISSING", "CHECK_FAILED", "OTHER_REQUIRES_HUMAN") ||
-                        (decision.reasonCode == "FROZEN_ARTIFACT_CHANGE" &&
-                            decision.scope != ReviewerCorrectionScope.FROZEN_INPUTS) ||
-                        (decision.reasonCode != "FROZEN_ARTIFACT_CHANGE" &&
-                            decision.scope != ReviewerCorrectionScope.NONE)))))
-            return deny("INVALID_REJECTION")
+        val invalidCode = if (decision.verdict == ReviewerDisposition.ACCEPT)
+            "INVALID_ACCEPTANCE" else "INVALID_REJECTION"
+        val targetState = if (decision.verdict == ReviewerDisposition.ACCEPT)
+            StageState.ACCEPTED else StageState.REJECTED
+        if (!ReviewerVerdictPolicy.isAllowed(
+                decision.verdict, decision.reasonCode, decision.scope
+            ) || after.state != targetState)
+            return deny(invalidCode)
         val checkIds = handoff.validation.requiredChecks.map { it.checkId }
-        val refs = (handoff.changedFiles.map { "file:" + it.path } +
-            checkIds.map { "check:" + it } +
-            listOf("write:" + handoff.writeToolId)).toSet()
+        val refs = (handoff.changedFiles.map {
+            ReviewerEvidenceReferences.FILE_PREFIX + it.path
+        } + checkIds.map {
+            ReviewerEvidenceReferences.CHECK_PREFIX + it
+        } + listOf(ReviewerEvidenceReferences.WRITE_PREFIX + handoff.writeToolId)).toSet()
         if (decision.evidenceIds.isEmpty() || !refs.containsAll(decision.evidenceIds))
             return deny("UNSUPPORTED_REVIEW_EVIDENCE")
         if (decision.verdict == ReviewerDisposition.ACCEPT &&
             !decision.evidenceIds.containsAll(
-                checkIds.map { "check:" + it } + ("write:" + handoff.writeToolId)
+                checkIds.map { ReviewerEvidenceReferences.CHECK_PREFIX + it } +
+                    (ReviewerEvidenceReferences.WRITE_PREFIX + handoff.writeToolId)
             )) return deny("INCOMPLETE_REVIEW_EVIDENCE")
         if (StageGraphPolicy.validate(next) != StageGateDecision.Permit)
             return deny("INVALID_REVIEW_GRAPH")
