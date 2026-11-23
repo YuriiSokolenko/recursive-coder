@@ -30,16 +30,31 @@ A 60-second idle timeout and a suite-scoped `--quiet --stop` on exit/timeout
 target only suite daemons. The isolated properties suppress Gradle's welcome
 banner without changing the repository configuration.
 
-The home is normally a temporary sibling of the resolved developer Gradle home,
-on the **same filesystem** as the shared dependency cache. If the sibling
-directory cannot be created, the suite tries a private child of the shared home,
-then the system temporary directory. When an artifact cache would cross a
-filesystem boundary, it **fails explicitly** rather than quietly copying
-multi-GB artifacts into a potentially tmpfs-backed `/tmp`. Other hardlink
+By default the home lives below `<resolved GRADLE_USER_HOME parent>/.architecture-gradle-homes/`
+on the **same filesystem** as the shared dependency cache, not directly in
+`$HOME`. The hidden parent is private (mode 0700 on POSIX) and rejects
+symlinks, junctions and unsafe ownership or permissions. On startup the suite
+removes only positively marked directories older than 72 hours whose owning
+POSIX process is no longer running on the same host. Other files, unknown
+directories, live processes and other hosts are never pruned. Windows skips
+automatic stale-home removal unless liveness can be established safely, so
+an interrupted run may require manual cleanup of this hidden parent.
+
+Set `ARCHITECTURE_GRADLE_HOME_PARENT=/existing/writable/path` to try an
+explicit base directory **first**, creating its own private
+`.architecture-gradle-homes/` underneath; use a filesystem holding
+`caches/modules-2/files-2.1` if the artifact cache is mounted separately.
+If an attempted location raises `OSError` (for example, permissions), the
+suite tries the sibling location, then a private child of the shared home,
+then a private subdirectory under the system temp location. The last fallback
+will normally fail the artifact-device check if `/tmp` is on tmpfs and the
+cache contains artifacts. A cross-device cache always **fails explicitly**
+rather than silently copying multi-GB artifacts into RAM. Other hardlink
 failures may copy up to a total of 128 MiB; exceeding the cap fails explicitly.
-The `[architecture-suite-home]` log reports placement, location fallback,
-setup elapsed time and hardlinked/copied file counts and byte totals,
-including partial metrics on setup failure. Timings are informational only.
+The `[architecture-suite-home]` log reports placement, attempted-location
+fallbacks, setup elapsed time and hardlinked/copied file counts and byte totals.
+Failures to allocate any home also log their attempted fallbacks. Timings are
+informational only.
 
 **This is not full cache isolation.** The content-addressed
 `caches/modules-2/files-2.1` artifacts are hardlinked (or explicitly copied)
@@ -47,8 +62,9 @@ so the architecture security guard still validates canonical paths and hashes.
 Other selected cache paths, including dependency resolution metadata and the
 local build cache, intentionally point to the **developer's shared cache**.
 The suite's own Gradle 9 `init.d` script sets
-`settings.caches { cleanup = Cleanup.DISABLED }` in a `beforeSettings` hook,
-preventing **suite-initiated Gradle User Home cache cleanup** from pruning
+`settings.caches { cleanup = Cleanup.DISABLED }` in a `beforeSettings` hook.
+A real-Gradle probe checks the effective `settings.caches.cleanup.get()`
+value is `DISABLED`, not merely that the init script ran, preventing **suite-initiated Gradle User Home cache cleanup** from pruning
 shared cache entries. Ordinary Gradle access to shared cache metadata is still
 possible, as is cleanup initiated independently by the developer's other
 Gradle processes. The suite does not promise read-only shared caches.
