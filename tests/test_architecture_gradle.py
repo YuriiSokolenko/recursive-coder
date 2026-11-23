@@ -1,6 +1,7 @@
 """Regression checks for architecture rules using temporary Gradle init scripts."""
 
 import atexit
+import errno
 from collections import defaultdict
 from contextlib import redirect_stdout
 import io
@@ -30,6 +31,36 @@ _FIXTURE_COPIES: list[tuple[str, float]] = []
 _SUITE_GRADLE_HOME: tempfile.TemporaryDirectory[str] | None = None
 _DAEMON_IDLE_TIMEOUT_MS = 60_000
 _DAEMON_STOP_TIMEOUT_S = 20
+# Never duplicate an entire developer cache after a hardlink failure.
+_MAX_ARTIFACT_COPY_BYTES = 128 * 1024 * 1024
+_CACHE_CLEANUP_INIT = (
+    "beforeSettings { settings ->\n"
+    "    settings.caches.cleanup = Cleanup.DISABLED\n"
+    "}\n"
+)
+
+
+def _same_filesystem(source: Path, destination: Path) -> bool:
+    """Check both devices before traversing the content-addressed artifact tree."""
+    return source.stat().st_dev == destination.stat().st_dev
+
+
+def _private_suite_home(shared_home: Path):
+    """Prefer the cache's own filesystem; report permission-related fallbacks."""
+    locations = [("sibling", shared_home.parent)]
+    if shared_home.is_dir():
+        locations.append(("inside-shared", shared_home))
+    locations.append(("system-temp", None))
+    failures = []
+    for mode, directory in locations:
+        try:
+            return (tempfile.TemporaryDirectory(
+                prefix="architecture-gradle-home-", dir=directory,
+            ), mode, failures)
+        except OSError as error:
+            failures.append(f"{mode}:{type(error).__name__}")
+    raise OSError(f"No writable location for private Gradle home: {failures}")
+
 
 
 def _link_shared_cache(source: Path, destination: Path) -> None:
@@ -46,20 +77,50 @@ def _link_shared_cache(source: Path, destination: Path) -> None:
         )
 
 
-def _immutable_cache_file(source: str, destination: str) -> str:
-    """Hardlink artifact bytes when possible; copy across distinct filesystems."""
-    try:
-        os.link(source, destination)
-    except OSError:
-        shutil.copy2(source, destination)
-    return destination
-
-
 def _create_suite_gradle_home(shared_home: Path) -> tempfile.TemporaryDirectory[str]:
-    """Use a private daemon registry and canonical cache paths for vetted jars."""
-    home = tempfile.TemporaryDirectory(prefix="architecture-gradle-home-")
+    """Private daemons/init scripts, with vetted artifacts and cache metadata shared."""
+    started = time.monotonic()
+    shared = shared_home.expanduser().resolve()
+    home, placement, failures = _private_suite_home(shared)
+    hardlinks = hardlink_bytes = copies = copy_bytes = 0
+
+    def link_artifact(source: str, destination: str) -> str:
+        nonlocal hardlinks, hardlink_bytes, copies, copy_bytes
+        size = os.stat(source).st_size
+        try:
+            os.link(source, destination)
+        except OSError as error:
+            if error.errno == errno.EXDEV:
+                raise RuntimeError(
+                    "Architecture artifact cache is cross-device; refusing "
+                    "to copy it into the private Gradle home"
+                ) from error
+            if copy_bytes + size > _MAX_ARTIFACT_COPY_BYTES:
+                raise RuntimeError(
+                    "Architecture artifact cache hardlink failed and bounded "
+                    f"copy fallback exceeds {_MAX_ARTIFACT_COPY_BYTES} bytes"
+                ) from error
+            # Small explicit same-filesystem fallback for unavailable hardlinks.
+            shutil.copy2(source, destination)
+            copies += 1
+            copy_bytes += size
+        else:
+            hardlinks += 1
+            hardlink_bytes += size
+        return destination
+
+    def report(status: str) -> None:
+        print(
+            f"[architecture-suite-home] status={status} placement={placement} "
+            f"fallback={','.join(failures) if failures else 'none'} "
+            f"hardlinks={hardlinks} hardlink-bytes={hardlink_bytes} "
+            f"copies={copies} copy-bytes={copy_bytes} "
+            f"elapsed={time.monotonic() - started:.2f}s",
+            flush=True,
+        )
+
     try:
-        source = shared_home.expanduser().resolve() / "caches"
+        source = shared / "caches"
         if source.is_dir():
             dest = Path(home.name) / "caches"
             dest.mkdir()
@@ -72,18 +133,33 @@ def _create_suite_gradle_home(shared_home: Path) -> tempfile.TemporaryDirectory[
                 for module_entry in entry.iterdir():
                     module_dest = target / module_entry.name
                     if module_entry.name == "files-2.1" and module_entry.is_dir():
-                        # The architecture guard deliberately verifies canonical
-                        # jar paths under gradleUserHome, in addition to SHA-1
-                        # content. A symlink of files-2.1 would fail that check.
-                        # Gradle's content-addressed artifact files are immutable,
-                        # so hardlinks preserve the exact verified bytes cheaply.
+                        # The security guard checks canonical artifact paths
+                        # beneath the private Gradle User Home, not symlinks.
+                        if not _same_filesystem(module_entry, Path(home.name)):
+                            raise RuntimeError(
+                                "Architecture artifact cache is cross-device; "
+                                "refusing a bulk copy into the private Gradle home. "
+                                "Use a writable directory on the cache filesystem."
+                            )
                         shutil.copytree(
-                            module_entry, module_dest, copy_function=_immutable_cache_file,
+                            module_entry, module_dest, copy_function=link_artifact,
                         )
                     else:
                         _link_shared_cache(module_entry.resolve(), module_dest)
+        # Gradle 9 cleanup configuration belongs in the private init.d. Do
+        # not execute ordinary developer init scripts or share daemon state.
+        init_dir = Path(home.name) / "init.d"
+        init_dir.mkdir()
+        (init_dir / "disable-cache-cleanup.init.gradle").write_text(
+            _CACHE_CLEANUP_INIT, encoding="utf-8",
+        )
+        (Path(home.name) / "gradle.properties").write_text(
+            "org.gradle.welcome=never\n", encoding="utf-8",
+        )
+        report("ready")
         return home
     except BaseException:
+        report("failed")
         home.cleanup()
         raise
 
@@ -103,7 +179,7 @@ def _stop_suite_daemons(reason: str) -> None:
     print(f"[architecture-daemon] stopping isolated daemons: {reason}", flush=True)
     try:
         result = subprocess.run(
-            [str(ROOT / "gradlew"), "--stop"],
+            [str(ROOT / "gradlew"), "--quiet", "--stop"],
             cwd=ROOT,
             env={**os.environ, "GRADLE_USER_HOME": _SUITE_GRADLE_HOME.name},
             capture_output=True,
@@ -1642,7 +1718,7 @@ class LoggedGradleSubprocessTest(unittest.TestCase):
                     _stop_suite_daemons("unit timeout")
             invoke.assert_called_once()
             args, kwargs = invoke.call_args
-            self.assertEqual([str(ROOT / "gradlew"), "--stop"], args[0])
+            self.assertEqual([str(ROOT / "gradlew"), "--quiet", "--stop"], args[0])
             self.assertEqual(directory, kwargs["env"]["GRADLE_USER_HOME"])
             self.assertEqual(_DAEMON_STOP_TIMEOUT_S, kwargs["timeout"])
             self.assertFalse(kwargs["check"])
