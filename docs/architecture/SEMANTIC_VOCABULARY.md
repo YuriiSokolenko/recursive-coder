@@ -36,9 +36,10 @@ sources and `SessionPolicyCoverageUnitTest` covers invalid attempts,
 `Long.MAX_VALUE` and denial precedence (see
 `schedulerAttemptMustBePositive`, `cliAttemptMustBeExactlyOne` and
 `schedulerAttemptDenialsPreserveResumePreflightPrecedence`).
-`SessionProtocolTest` pins the new constant values. `TaskRequestMapperUnitTest`
+`SessionProtocolTest` pins the new constant values. `TaskRequestMapperIntegrationTest`
 reparses actual mapper output for first, repeated and maximum Int attempts,
 and verifies that nonpositive attempts fail with the exact validation diagnostic.
+The path-free malformed-envelope checks remain in `TaskRequestMapperUnitTest`.
 The shared first-attempt constant is the protocol minimum; CLI currently admits
 only that attempt. If source-specific admission bounds diverge, keep them in
 admission policy rather than changing the protocol minimum.
