@@ -1495,6 +1495,42 @@ class ArchitectureConfigurationCacheRegressionTest(_GradleOutputAssertions):
         if "Reusing configuration cache." not in restored.stdout:
             self.assert_cache_hit(fixture, scenario=scenario)
 
+    def assert_cache_invalidation_reason(self, output: str, input_pattern: str) -> None:
+        self.assert_gradle_regex(
+            output.replace("\\", "/"),
+            r"(?m)^Calculating task graph as configuration cache cannot be reused because "
+            r"[^\n]*(?:" + input_pattern + r")[^\n]*$",
+        )
+
+    def test_cache_reason_requires_expected_input_on_reason_line(self):
+        expected = r"(?<![\w/.-])core/build\.gradle\.kts(?![\w/.-])"
+        reason = "Calculating task graph as configuration cache cannot be reused because "
+        self.assert_cache_invalidation_reason(
+            reason + "file 'core/build.gradle.kts' has been added.", expected
+        )
+        self.assert_cache_invalidation_reason(
+            reason + "file 'core\\build.gradle.kts' has changed.", expected
+        )
+        for unrelated in (
+            reason + "file 'core/tasks/build.gradle.kts' has changed.",
+            reason + "file 'other/core/build.gradle.kts' has changed.",
+            reason + "file 'core/buildXgradleXkts' has changed.",
+            reason + "file 'settings.gradle.kts' has changed.\ncore/build.gradle.kts",
+        ):
+            with self.subTest(output=unrelated), self.assertRaises(AssertionError):
+                self.assert_cache_invalidation_reason(unrelated, expected)
+
+        alternatives = r"gradle\.properties|architectureFixtureIllegalEdge"
+        self.assert_cache_invalidation_reason(
+            reason + "Gradle property 'architectureFixtureIllegalEdge' has changed.",
+            alternatives,
+        )
+        with self.assertRaises(AssertionError):
+            self.assert_cache_invalidation_reason(
+                reason + "file 'settings.gradle.kts' has changed.\n"
+                "architectureFixtureIllegalEdge", alternatives,
+            )
+
     def assert_cache_invalidated(
         self, fixture: Path, diagnostic: str, input_pattern: str, *, scenario: str
     ) -> None:
@@ -1510,11 +1546,7 @@ class ArchitectureConfigurationCacheRegressionTest(_GradleOutputAssertions):
         self.assert_gradle_not_contains("Reusing configuration cache.", rejected.stdout)
         # Name the changed input in the invalidation reason, rather than
         # matching an unrelated Gradle progress message.
-        self.assert_gradle_regex(
-            rejected.stdout.replace("\\", "/"),
-            r"Calculating task graph as configuration cache cannot be reused because [^\n]*"
-            + input_pattern,
-        )
+        self.assert_cache_invalidation_reason(rejected.stdout, input_pattern)
 
     def test_early_realization_captures_later_subproject_edge_on_cache_hit(self):
         # Root-project evaluation precedes :core:tasks evaluation. Realizing the
@@ -1663,7 +1695,7 @@ class ArchitectureConfigurationCacheRegressionTest(_GradleOutputAssertions):
                 self.assert_cache_invalidated(
                     fixture,
                     "Forbidden compiler-wide TrustedRunningBoundaryApi opt-in",
-                    r"core/tasks/build\\.gradle\\.kts|build.gradle.kts",
+                    r"(?<![\w/.-])core/tasks/build\.gradle\.kts(?![\w/.-])",
                     scenario="changed module compiler opt-in",
                 )
             finally:
@@ -1694,7 +1726,7 @@ class ArchitectureConfigurationCacheRegressionTest(_GradleOutputAssertions):
                 self.assert_cache_invalidated(
                     fixture,
                     "Unclassified module :core",
-                    r"core/build\.gradle\.kts|build\.gradle\.kts",
+                    r"(?<![\w/.-])core/build\.gradle\.kts(?![\w/.-])",
                     scenario="parent script created",
                 )
                 again = self.check_architecture(
@@ -1761,7 +1793,10 @@ class ArchitectureConfigurationCacheRegressionTest(_GradleOutputAssertions):
                             rejected.stdout,
                         )
                         self.assert_gradle_contains("has changed", rejected.stdout)
-                        self.assert_gradle_contains(relative.as_posix(), rejected.stdout.replace("\\", "/"))
+                        self.assert_cache_invalidation_reason(
+                            rejected.stdout,
+                            r"(?<![\w/.-])" + re.escape(relative.as_posix()) + r"(?![\w/.-])",
+                        )
                         self.assert_gradle_not_contains("Reusing configuration cache.", rejected.stdout)
                     finally:
                         build_file.write_text(original, encoding="utf-8")

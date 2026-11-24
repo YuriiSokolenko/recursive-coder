@@ -29,24 +29,28 @@ gradle.projectsEvaluated {
         // Build model inspection takes place during configuration only. Sources are
         // wired as actual compile-task FileCollections, including generated roots.
         // Compiler options are tracked as primitive MapProperty inputs/providers.
-        // Read both conventional script names through tracked Gradle providers.
-        // In particular, a previously scriptless aggregator (:core, :infra, etc.)
-        // must invalidate the configuration cache when its build script appears.
-        // The selected buildFile also covers custom paths set by settings scripts.
-        fun trackedBuildScript(project: org.gradle.api.Project): String? {
-            val selected = project.layout.file(project.providers.provider { project.buildFile })
-            val selectedText = project.providers.fileContents(selected).asText.orNull
-            val kotlinText = project.providers.fileContents(
-                project.layout.projectDirectory.file("build.gradle.kts"),
-            ).asText.orNull
-            val groovyText = project.providers.fileContents(
-                project.layout.projectDirectory.file("build.gradle"),
-            ).asText.orNull
-            return selectedText ?: kotlinText ?: groovyText
+        // Track the selected script and both conventional candidates, including
+        // absent files, so adding a script to a scriptless parent invalidates the
+        // cache. Conventional candidates are a conservative classification
+        // signal even when settings selects a custom script; they need not be
+        // executed by Gradle. Only the selected script is inspected as build code.
+        data class BuildScripts(val present: Boolean, val selectedText: String?)
+        fun trackedBuildScripts(project: org.gradle.api.Project): BuildScripts {
+            val selected = project.buildFile.toPath().toAbsolutePath().normalize().toFile()
+            val candidates = listOf(
+                selected,
+                project.projectDir.resolve("build.gradle.kts"),
+                project.projectDir.resolve("build.gradle"),
+            ).map { it.toPath().toAbsolutePath().normalize().toFile() }.distinct()
+            val contents = candidates.associateWith { candidate ->
+                val file = project.layout.file(project.providers.provider { candidate })
+                project.providers.fileContents(file).asText.orNull
+            }
+            return BuildScripts(contents.values.any { it != null }, contents[selected])
         }
-        val scripts = rootProject.allprojects.associateWith(::trackedBuildScript)
+        val scripts = rootProject.allprojects.associateWith(::trackedBuildScripts)
         val modules = rootProject.allprojects.filter { project ->
-            project != rootProject && (project.childProjects.isEmpty() || scripts[project] != null)
+            project != rootProject && (project.childProjects.isEmpty() || scripts.getValue(project).present)
         }.sortedBy { it.path }
         modulePaths.set(modules.map { it.path })
         checkoutRoot.set(rootProject.rootDir.canonicalPath)
@@ -101,7 +105,7 @@ gradle.projectsEvaluated {
             val scriptPluginMutation = Regex(
                 """\b(?:project\s*\.\s*)?apply\s*(?:\(\s*from\s*=|\{\s*from\s*\()""",
             )
-            scripts[project]?.let { script ->
+            scripts.getValue(project).selectedText?.let { script ->
                 if (buildscriptMutation.containsMatchIn(script)) {
                     invalidRepositories += "${project.path}:explicit buildscript repository or dependency mutation"
                 }
