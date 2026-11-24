@@ -210,6 +210,11 @@ class ArchitectureGraphTest {
             home.deleteRecursively()
         }
         assertEquals(6, TrustedRunningOptInPolicy.approvedSourcePaths.size)
+        assertEquals(TrustedRunningOptInPolicy.approvedSourcePaths,
+            TrustedRunningOptInPolicy.approvedSourceSha256.keys)
+        assertTrue(TrustedRunningOptInPolicy.approvedSourceSha256.values.all {
+            it.matches(Regex("[0-9a-f]{64}"))
+        })
     }
 
     @Test

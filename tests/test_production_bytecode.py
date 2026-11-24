@@ -72,7 +72,7 @@ class ProductionBytecodeGateTest(unittest.TestCase):
         target = (ledger, callback.name, descriptor)
         info = SimpleNamespace(name=ledger, module="infra/journal",
                                annotations=[], methods=entries + [callback],
-                               interfaces=[], superclass="java/lang/Object", flags=0,
+                               interfaces=[], superclass="java/lang/Object", flags=0x0010,
                                method_references={target}, method_handle_references={target})
         self.assertEqual([], c3_boundary_violations(info))
         callback.flags = 0x0009  # public static is not a private helper
@@ -111,6 +111,48 @@ class ProductionBytecodeGateTest(unittest.TestCase):
         info.name = package + "DefaultRunSessionUseCase"
         info.module = "core/tasks"
         self.assertTrue(any("unapproved module" in x for x in c3_boundary_violations(info)))
+
+    def test_c3_exact_owner_guard_requires_final_classes(self):
+        package = "ai/yuriilab/recursivecoder/"
+        marker = SimpleNamespace(name=package + "TrustedRunningBoundaryApi", values={})
+        for name, module, class_marked, method_names in (
+            ("DefaultRunSessionUseCase", "core/session", False, ["publishTrustedAcceptedRunning"]),
+            ("DurableSessionEventLedger", "infra/journal", False,
+             ["appendTrustedAcceptedRunning$journal", "appendTrustedRunningWithFault$journal"]),
+            ("DurableAcceptedRunningHandoff", "infra/journal", True, []),
+        ):
+            with self.subTest(name=name):
+                info = SimpleNamespace(
+                    name=package + name, module=module, flags=0x0010,
+                    annotations=[marker] if class_marked else [],
+                    methods=[SimpleNamespace(name=m, annotations=[marker]) for m in method_names],
+                    interfaces=[], superclass="java/lang/Object",
+                    method_references=set(), method_handle_references=set())
+                self.assertEqual([], c3_boundary_violations(info))
+                info.flags = 0
+                self.assertTrue(any("C3 class must be final" in x
+                                    for x in c3_boundary_violations(info)))
+
+    def test_c3_synthetic_wrapper_body_does_not_exempt_privileged_call(self):
+        package = "ai/yuriilab/recursivecoder/"
+        marker = SimpleNamespace(name=package + "TrustedRunningBoundaryApi", values={})
+        for name, module, class_marked, entry in (
+            ("DefaultRunSessionUseCase", "core/session", False, "publishTrustedAcceptedRunning"),
+            ("DurableAcceptedRunningHandoff", "infra/journal", True, "publish"),
+        ):
+            with self.subTest(name=name):
+                owner = package + name
+                # A synthetic default/bridge body still references the real entry.
+                # Do not grant the declaring class a general self-call exemption.
+                info = SimpleNamespace(
+                    name=owner, module=module, flags=0x0010,
+                    annotations=[marker] if class_marked else [],
+                    methods=[SimpleNamespace(name=entry, annotations=[marker])]
+                    if not class_marked else [],
+                    interfaces=[], superclass="java/lang/Object",
+                    method_references={(owner, entry, "()V")}, method_handle_references=set())
+                self.assertTrue(any("Unapproved C3 JVM call" in x
+                                    for x in c3_boundary_violations(info)))
 
     def test_c3_port_supertype_and_implementation_escape_are_denied(self):
         package = "ai/yuriilab/recursivecoder/"

@@ -136,10 +136,28 @@ object TrustedRunningOptInPolicy {
             listOf("appendTrustedAcceptedRunning", "appendTrustedRunningWithFault"),
     )
 
-    /** Exact reviewed paths, not source-content digests. */
+    /** Exact reviewed paths for declaration checks; all must also be pinned. */
     val approvedSourcePaths: Set<String> = approvedTargets.keys.toSet()
 
-    // The declaration must retain the compiler error-level opt-in. The compiled
+    /** SHA-256 over exact UTF-8 source bytes; see TRUSTED_C3_REVIEW.md for review records. */
+    val approvedSourceSha256: Map<String, String> = mapOf(
+        "core/session/src/main/kotlin/ai/yuriilab/recursivecoder/SessionRuntime.kt" to
+            "a48ec483e9c19dd116ff77ff09c456fb45b1eef9440a2a0c269504e0c3f1f310",
+        "core/session/src/main/kotlin/ai/yuriilab/recursivecoder/TrustedRunningBoundaryPolicy.kt" to
+            "8a4f30fd26e6058e10a4684e495e2fce0083da6b75f64eb49cf04af61ec49a60",
+        "core/session/src/main/kotlin/ai/yuriilab/recursivecoder/TrustedSessionPreExecutionHost.kt" to
+            "da9512f54c0b32fe84eda6186d0a7b240dfdb415662f581b8b1ba70efbdd3546",
+        "infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/DurableAcceptedRunningHandoff.kt" to
+            "507690ca1822059a2ab4d8c96bde5bfaf3cbcbadb63d77a48dae961e0b176b8c",
+        "infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/DurableRuntimeAcceptedRunningHost.kt" to
+            "6ee179a41a653b9f231732890f66e36c18a5dbdbf9cdaaa6181bdb482272b9b8",
+        "infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/DurableSessionEventLedger.kt" to
+            "93cdf2a420ab4624332f2f612eed318f88a78747feb6ae593851832e1315426f",
+    )
+
+    // The declaration must retain the compiler error-level opt-in.
+    // The canonical argument and annotation order is intentional: other shapes
+    // require review, even if a reordered declaration would compile identically. The compiled
     // class verifier independently checks its annotation and approved JVM edges.
     private val markerDeclaration = Regex(
         """@RequiresOptIn\s*\(\s*message\s*=\s*"[^"\r\n]*"\s*,\s*level\s*=\s*RequiresOptIn\.Level\.ERROR\s*\)\s*""" +

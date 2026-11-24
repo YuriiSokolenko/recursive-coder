@@ -138,6 +138,7 @@ _C3_LEDGER_CALLBACK = re.compile(r"appendTrustedAcceptedRunning\$lambda\$[0-9]+"
 _C3_LEDGER_CALLBACK_DESCRIPTOR = "(Ljava/lang/String;)Lkotlin/Unit;"
 _ACC_PRIVATE = 0x0002
 _ACC_STATIC = 0x0008
+_ACC_FINAL = 0x0010
 
 
 def _is_ledger_callback(info, target, name, descriptor):
@@ -173,12 +174,15 @@ def c3_boundary_violations(info):
                     ("Ljava/lang/annotation/ElementType;", "TYPE"),
                     ("Ljava/lang/annotation/ElementType;", "METHOD")}):
             issues.append("C3 marker must retain ERROR opt-in and CLASS retention/targets")
+    # Exact constant-pool owner checks depend on these classes staying final.
+    if owner in {_C3_RUNTIME, _C3_LEDGER, _C3_HANDOFF} and not info.flags & _ACC_FINAL:
+        issues.append(f"C3 class must be final: {owner}")
     # Forbid supertype laundering: only the exact final adapter implements the
     # port, and neither the port nor that adapter may gain another supertype.
     if owner == _C3_PORT and (info.interfaces or info.superclass != "java/lang/Object"):
         issues.append("C3 port has an unexpected supertype")
     if owner == _C3_HOST and (info.interfaces != [_C3_PORT] or
-                              info.superclass != "java/lang/Object" or not info.flags & 0x0010):
+                              info.superclass != "java/lang/Object" or not info.flags & _ACC_FINAL):
         issues.append("C3 host must be final and implement only the marked port")
     if owner != _C3_HOST and _C3_PORT in info.interfaces:
         issues.append(f"Unapproved C3 port implementation: {owner}")
