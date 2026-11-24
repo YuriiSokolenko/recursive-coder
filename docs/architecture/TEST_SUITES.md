@@ -127,7 +127,8 @@ The architecture regression suite runs real injected Gradle dependency-edge,
 cycle, and configuration-cache negative cases. The reused, suite-private Gradle
 daemon introduced in [PR #168](https://github.com/YuriiSokolenko/recursive-coder/pull/168)
 replaced repeated **cold** Gradle starts without removing any of the 93 actual
-Gradle invocations measured at PR #168 head `b15e47b`. Scenario-specific subprocess deadlines are bounded (normally
+Gradle invocations measured at PR #168 head `b15e47b`. Scenario-specific subprocess
+deadlines are bounded (normally
 180 seconds, or 240 seconds for more expensive compile/configuration cases),
 and the runner streams combined stdout/stderr with scenario, phase and timeout
 markers; a timeout stops only its private daemon registry. These are ceilings,
@@ -166,7 +167,8 @@ defence in depth after Gradle succeeds. Existing mandatory sandbox markers and
 pure-unit evidence remain separate. The contracts job tests the evidence checker
 and checks lexicographic contiguous imports in the eight issue #36 classes;
 this deliberately does not impose a new repository-wide formatting policy.
-The independently installed CLI and protocol suites remain unchanged. The unfiltered `test` task remains intact. The production
+The independently installed CLI and protocol suites remain unchanged. The unfiltered
+`test` task remains intact. The production
 `installDist` build runs in the isolated bytecode-build job and is verified
 before CLI E2E; the full JVM tasks run on their own clean runner after that
 verifier succeeds. Compilation artifacts are intentionally **not shared** across

@@ -4,10 +4,13 @@ import argparse
 from collections import Counter
 import importlib.util
 from pathlib import Path
+import struct
 import sys
 from xml.etree import ElementTree as ET
 
 
+# Keep this baseline in sync with the product-module allowlist in checkArchitecture.
+# Source discovery also catches new conventional test source sets.
 MODULES = (
     "agent/runtime", "app/cli", "core/contracts", "core/session", "core/tasks",
     "infra/journal", "infra/model", "infra/task-store", "infra/workspace",
@@ -22,7 +25,7 @@ IMPORT_FILES = (
 TARGETS = ("test", "integrationTest", "e2eTest")
 
 
-def expected_targets(root):
+def load_tier_classifier():
     # Reuse the existing compiled annotation classifier rather than guessing
     # tiers from test filenames or source text. Isolated Python needs an explicit
     # sibling module import.
@@ -31,6 +34,11 @@ def expected_targets(root):
     guard = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = guard
     spec.loader.exec_module(guard)
+    return guard
+
+
+def expected_targets(root):
+    guard = load_tier_classifier()
     result = {}
     modules = set(MODULES) | guard.test_source_modules(root)
     for module in sorted(modules):
@@ -81,6 +89,7 @@ def read_cases(directory):
 
 
 def verify(root, expected):
+    # Fail closed if classifier output loses a whole focused tier globally.
     if not expected or set().union(*expected.values()) != set(TARGETS):
         raise ValueError("Expected inventory must cover all three JVM targets")
     for module, targets in sorted(expected.items()):
@@ -121,7 +130,7 @@ def main():
             verify_imports(args.root)
         else:
             verify(args.root, expected_targets(args.root))
-    except (OSError, ValueError, ET.ParseError) as error:
+    except (OSError, ValueError, IndexError, struct.error, ET.ParseError) as error:
         print(f"JUnit evidence check failed: {error}", file=sys.stderr)
         return 1
     return 0
