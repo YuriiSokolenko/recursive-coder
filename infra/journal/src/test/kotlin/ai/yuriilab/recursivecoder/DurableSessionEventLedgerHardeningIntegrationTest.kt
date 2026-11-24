@@ -285,6 +285,33 @@ class DurableSessionEventLedgerHardeningIntegrationTest {
             }.code)
     }
 
+    @Test fun replayRejectsNumericSessionIdEvenWhenRootActorAndChainMatch() {
+        val path = ledger("numeric-session-id")
+        // Establish the real lock file; inspection must never create it.
+        DurableSessionEventLedger.create(path, workspace()).use { }
+        val valid = SessionEventJournal.frame(
+            sessionId = "1", traceId = "trace-one", requestId = "request-one",
+            sequence = 1, timestamp = now, type = "session.transition",
+            status = "completed", transition = "accepted" to "running",
+            actor = SessionEventActor("agent-1"),
+            extra = buildJsonObject { put("graphId", "graph-root") }
+        )
+        val invalid = JsonObject(valid + ("sessionId" to JsonPrimitive(1)))
+        // Replay validates physical framing, not lifecycle or execution authority.
+        // Use an independent chain hash and change only the JSON value type.
+        fun writeFrame(event: JsonObject) {
+            Files.write(path, "RCLDG1\n".toByteArray(Charsets.US_ASCII) +
+                framed(event.toString().toByteArray(Charsets.UTF_8)))
+        }
+        writeFrame(valid)
+        assertEquals(valid, DurableSessionEventLedger.inspect(path).events.single())
+        writeFrame(invalid)
+        assertEquals("LEDGER_EVENT_INVALID",
+            assertFailsWith<SessionLedgerUnconfirmed> {
+                DurableSessionEventLedger.inspect(path)
+            }.code)
+    }
+
     @Test fun replayEventCeilingRefusesExcessEvenWithWellFormedFrames() {
         val path = ledger("replay-cap")
         DurableSessionEventLedger.create(path, workspace()).use {
