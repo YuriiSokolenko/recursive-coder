@@ -5,9 +5,10 @@ Status: **retain source pins; add structural and JVM verification**. The
 migration at `c383735` and recommended keeping the pins. It was posted from
 the owner's account; it is not independent human approval. The pin retirement
 proposal is deferred under #207. PR #206 was squash-merged at `cc338ee`;
-PR #208 remains based on that tree. The owner must review and accept any
-new pin baseline before merge. Do not close #194 or #207 solely because
-this branch exists.
+PR #208 was squash-merged at `191170451c01259f0fee14860852c4ec1678d7ee`
+with all six source pins retained. Owner acceptance of that baseline is not
+independent human approval. Future pin baselines require explicit review;
+#207 remains open.
 
 ## Source pin review ledger
 
@@ -72,8 +73,8 @@ It cannot authenticate arbitrary compiler/CI/verification code controlled by
 the same contributor, external dependency behavior or an attacker with runner
 or repository-admin privileges. A whole-file hash likewise could not protect
 transitive dependency changes. These are review obligations, not claims of
-behavioral equivalence. The six source pins remain mandatory in PR #208 as
-well as on dev; the reviewed digest updates are visible in the diff. The JVM
+behavioral equivalence. The six source pins remain mandatory on dev; the reviewed digest updates
+are visible in PR #208. The JVM
 check supplements, not replaces, them. In particular, a new unmarked path to
 the private privileged append implementation, weaker transition validation,
 or an unmarked helper leaking authority requires a source-pin change, even
@@ -112,6 +113,54 @@ prevent a contributor from editing the pins themselves.
 No changes to journal/checkpoint digests, HMAC, effect evidence, distribution
 checksums, dependency or CI toolchain integrity are intended. Protocol v1
 and durable formats remain unchanged.
+
+## Follow-up behavioral oracle (#207)
+
+The pure unit tests in `TrustedRunningBoundaryPolicyUnitTest` exercise
+literal wire records, not production emitters, field constants or expected
+values obtained from the implementation. The additional cases cover:
+
+- Removal of each required field and each required nested actor, metadata
+  and transition key; unexpected null keys, populated execution actor slots,
+  mismatched session/root identity and a present null timing field.
+- The transitive `ToolAuthorizationPolicy.validHostIdentifier` grammar:
+  independent positive ASCII cases and the 160-character limit, plus
+  disallowed leading punctuation, separators, whitespace, non-ASCII and
+  overlong values.
+- A literal pre-execution prefix and exactly one final running edge;
+  missing, duplicate and trailing edges and unsupported checkpoint phases;
+  all known non-pre-execution event kinds and an unknown kind on either
+  side of the accepted edge.
+
+These are regression oracles for selected changes to the shared vocabulary,
+identifier policy and pre-execution policy; they are not mutation-testing
+results or a proof of arbitrary dependency behavior. They do not replace
+durable evidence, physical framing, identity/sequence, integration or fault
+checks. Production sources, dependency edges, pin digests and the compiled
+guard are unchanged by this follow-up.
+
+### Operational gate for pin retirement
+
+Ruleset 27857731 was re-read on 2026-11-24 after #208 merged. It remains
+active with all six required checks, strict current-base policy and no
+bypass actors, but still requires zero approvals, no code-owner review, no
+last-push approval and no dismissal of stale reviews. Classic branch
+protection remains unreadable (HTTP 403). The connected integration cannot
+establish independent human approval or change ruleset settings.
+
+Before proposing removal of the six pins, a repository administrator must
+identify an eligible reviewer independent of the author/latest pusher,
+enable at least one required approval, require approval of the latest
+reviewable push, and dismiss stale approvals or establish equivalent
+protected review. Require code-owner review with eligible independent
+owners for the protected sources, transitive policy and verification
+surface. Preserve the existing PR and CI requirements and verify effective
+rules, including bypasses, on dev. Record the exact reviewed candidate
+revision and approval evidence; re-review subsequent changes. A change
+to this document or green CI cannot satisfy those external conditions.
+Retain the pins and keep #207 open until the conditions are established
+and the residual method-body and dependency guarantees are independently
+reviewed.
 
 ## Vocabulary audit
 
