@@ -45,7 +45,7 @@ internal object InstalledRecursiveEvidencePolicy {
             child.manifest.declaredPath != target.path)
             return "CHILD_ARTIFACT_PATH_MISMATCH"
         if (parent.manifest.sha256 != child.manifest.sha256)
-            return "CHILD_ARTIFACT_DIGEST_MISMATCH"
+            return RecursiveDenialCodes.CHILD_ARTIFACT_DIGEST_MISMATCH
         if (parent.writtenPostimages != child.writtenPostimages)
             return "CHILD_WRITTEN_POSTIMAGES_MISMATCH"
         if (kind == StageKind.DEVELOP) {
@@ -156,7 +156,7 @@ internal object InstalledRecursiveAdmissionPolicy {
         limits: RecursiveLimits, now: Instant
     ): RecursiveDecision {
         if (!now.isBefore(limits.deadline))
-            return RecursiveDecision.Denied("GLOBAL_DEADLINE")
+            return RecursiveDecision.Denied(RecursiveDenialCodes.GLOBAL_DEADLINE)
         val budget = grant.graph.budget
         val root = RecursiveNode(
             grant.graph.correlation.graphId, grant.stageRunId,
@@ -212,12 +212,12 @@ internal suspend fun runInstalledOriginIntegration(
     execute()
 } catch (cancelled: CancellationException) {
     markUncertain()
-    audit("ORIGIN_CANCELLED")
+    audit(RecursiveDenialCodes.ORIGIN_CANCELLED)
     throw cancelled
 } catch (_: Exception) {
     markUncertain()
-    audit("ORIGIN_EXECUTION_UNCONFIRMED")
-    TwoOriginRecursiveOutcome.Stopped(null, "ORIGIN_EXECUTION_UNCONFIRMED")
+    audit(RecursiveDenialCodes.ORIGIN_EXECUTION_UNCONFIRMED)
+    TwoOriginRecursiveOutcome.Stopped(null, RecursiveDenialCodes.ORIGIN_EXECUTION_UNCONFIRMED)
 }
 
 internal class InstalledRecursiveWorkflow(
@@ -544,7 +544,7 @@ internal class InstalledRecursiveWorkflow(
                 Instant.now(), origin.admitted.deadline).toMillis()
             if (remaining <= 0L)
                 return@RecursiveStageExecutor RecursiveExecutionOutcome.Denied(
-                    "STAGE_DEADLINE")
+                    RecursiveDenialCodes.STAGE_DEADLINE)
             val admission = context.requestChild(RecursiveChildProposal(
                 config.requestId, context.graphId, context.stageRunId,
                 context.origin, "child-task-" + origin.kind.name.lowercase(),
@@ -572,7 +572,7 @@ internal class InstalledRecursiveWorkflow(
                         measured.tokens > origin.admitted.granted.tokens ||
                         measured.toolCalls > origin.admitted.granted.toolCalls)
                         return@RecursiveStageExecutor RecursiveExecutionOutcome.Failed(
-                            "CHILD_USAGE_UNCONFIRMED")
+                            InstalledChildDenialCodes.CHILD_USAGE_UNCONFIRMED)
                     if (measured.toolCalls < requiredChildChecks.size + 1L)
                         return@RecursiveStageExecutor RecursiveExecutionOutcome.Failed(
                             "CHILD_TOOL_USAGE_UNCONFIRMED")
@@ -631,8 +631,8 @@ internal class InstalledRecursiveWorkflow(
             // A child may have written or committed before the exception.
             // Never label its host state as an ordinary safe denial.
             uncertainChildExecution = true
-            auditUnintegratedAttempts("CHILD_EXECUTION_UNCONFIRMED")
-            return "CHILD_EXECUTION_UNCONFIRMED"
+            auditUnintegratedAttempts(InstalledChildDenialCodes.CHILD_EXECUTION_UNCONFIRMED)
+            return InstalledChildDenialCodes.CHILD_EXECUTION_UNCONFIRMED
         }
         if (produced != null) {
             auditUnintegratedAttempts(produced)

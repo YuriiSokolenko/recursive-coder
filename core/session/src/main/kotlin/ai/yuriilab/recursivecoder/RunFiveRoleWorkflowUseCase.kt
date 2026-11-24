@@ -273,7 +273,7 @@ class RunFiveRoleWorkflowUseCase(
                                 }
                             })
                         is PreparationStageOutcome.AwaitingHuman ->
-                            return stop(kind, "HUMAN_APPROVAL_REQUIRED", done.graph?.let { graph ->
+                            return stop(kind, StageDenialCodes.HUMAN_APPROVAL_REQUIRED, done.graph?.let { graph ->
                                 done.hostAcceptedArtifactIds?.let { ids ->
                                     PreparationStageSnapshot(graph, ids)
                                 }

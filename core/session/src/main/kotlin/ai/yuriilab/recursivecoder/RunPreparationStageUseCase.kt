@@ -308,7 +308,7 @@ class RunPreparationStageUseCase(
             }
             if (proposed.isBlank() || proposed.toByteArray(Charsets.UTF_8).size >
                 StageRoleLimits.MAX_PROPOSAL_BYTES)
-                return terminal("MODEL_INVALID_RESPONSE")
+                return terminal(ModelDenialCodes.MODEL_INVALID_RESPONSE)
             val authority = lease.authority
             val snapshot = captureHostCall {
                 withContext(blockingDispatcher) { authority.current() }
@@ -376,7 +376,7 @@ class RunPreparationStageUseCase(
             val bytes = outputRead.getOrElse { return terminal(StageDenialCodes.OUTPUT_READ_UNAVAILABLE) }
                 ?: return terminal(StageDenialCodes.ARTIFACT_MISSING)
             if (inputsVerified == HostReadVerification.UNAVAILABLE) return terminal(StageDenialCodes.INPUT_READ_UNAVAILABLE)
-            val outputKind = kind.output ?: return terminal("INVALID_STAGE_OUTPUT")
+            val outputKind = kind.output ?: return terminal(StageDenialCodes.INVALID_STAGE_OUTPUT)
             val candidate = StageArtifactManifest(command.artifactId, outputKind,
                 command.outputPath, digest(bytes), kind.role, id, 1L,
                 ArtifactApproval.DRAFT, ArtifactFreeze.EDITABLE)
@@ -421,7 +421,7 @@ class RunPreparationStageUseCase(
             if (decision == PreparationApproval.HUMAN_REVIEW_REQUIRED)
                 return finish(lease, draft, accepted,
                     PreparationStageOutcome.AwaitingHuman(candidate), events, candidate,
-                    "HUMAN_APPROVAL_REQUIRED",
+                    StageDenialCodes.HUMAN_APPROVAL_REQUIRED,
                     pending = PreparationPendingApproval(validation, proposal.usage))
             val frozen = candidate.copy(approval = ArtifactApproval.ACCEPTED,
                 freeze = ArtifactFreeze.FROZEN)
@@ -472,7 +472,7 @@ class RunPreparationStageUseCase(
             PreparationStageOutcome.Denied(code))
         val stage = expectedGraph.stages.firstOrNull {
             it.correlation.stageRunId == stageRunId
-        } ?: return denied("UNKNOWN_STAGE")
+        } ?: return denied(StageDenialCodes.UNKNOWN_STAGE)
         if (stage.kind !in kinds || stage.state != StageState.RUNNING ||
             stage.outputArtifacts.size != 1) return denied("NO_PENDING_HUMAN_APPROVAL")
         val candidate = expectedGraph.artifacts.singleOrNull {
@@ -560,7 +560,7 @@ class RunPreparationStageUseCase(
             if (decision == PreparationApproval.HUMAN_REVIEW_REQUIRED)
                 return finish(lease, expectedGraph, acceptedIds,
                     PreparationStageOutcome.AwaitingHuman(candidate), events, candidate,
-                    "HUMAN_APPROVAL_REQUIRED", pending = pending)
+                    StageDenialCodes.HUMAN_APPROVAL_REQUIRED, pending = pending)
             if (decision == PreparationApproval.REJECT) {
                 val rejected = transition(expectedGraph, stageRunId, StageState.REJECTED,
                     acceptedIds) ?: return failed("STAGE_REJECTION_FAILED")

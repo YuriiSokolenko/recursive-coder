@@ -413,7 +413,7 @@ class RunDeveloperStageUseCase(
                 outputTokens > command.graph.budget.maxTokens - inputTokens)
                 return terminal("INVALID_DEVELOPER_USAGE")
             if (proposed.isBlank() || proposed.toByteArray(Charsets.UTF_8).size >
-                StageRoleLimits.MAX_PROPOSAL_BYTES) return terminal("MODEL_INVALID_RESPONSE")
+                StageRoleLimits.MAX_PROPOSAL_BYTES) return terminal(ModelDenialCodes.MODEL_INVALID_RESPONSE)
             val writes = decode(proposed, targets)
                 ?: return terminal("INVALID_DEVELOPER_PROPOSAL")
             val changed = writes.mapIndexed { index, operation ->

@@ -9,7 +9,7 @@ import kotlinx.serialization.json.*
 class Refused(val code: String, val category: String, val explanation: String) : RuntimeException(explanation)
 class Stopped(val timedOut: Boolean) : RuntimeException()
 
-fun refuse(message: String): Nothing = throw Refused("INVALID_SESSION_REQUEST", "validation", message)
+fun refuse(message: String): Nothing = throw Refused("INVALID_SESSION_REQUEST", SessionDiagnosticCategories.VALIDATION, message)
 fun JsonObject.objectAt(key: String): JsonObject = this[key] as? JsonObject ?: refuse("Invalid object: $key")
 fun JsonObject.textAt(key: String): String =
     (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.content ?: refuse("Invalid string: $key")

@@ -41,9 +41,9 @@ object RecursiveChildIntegrationPolicy {
         reservedParentArtifacts: List<StageArtifactManifest> = emptyList(),
         integratedNested: Map<GraphId, IntegratedChildResults> = emptyMap()
     ): ChildIntegrationDecision {
-        val parent = snapshot.node(parentId) ?: return deny("UNKNOWN_PARENT")
+        val parent = snapshot.node(parentId) ?: return deny(RecursiveDenialCodes.UNKNOWN_PARENT)
         if (parent.state != RecursiveNodeState.RUNNING)
-            return deny("PARENT_NOT_RUNNING")
+            return deny(RecursiveDenialCodes.PARENT_NOT_RUNNING)
         val children = snapshot.nodes.filter { it.parentGraphId == parentId }
         val byId = children.associateBy { it.graphId }
         if (receiptsByChild.keys != byId.keys) return deny("MISSING_CHILD_EVIDENCE")
@@ -72,7 +72,7 @@ object RecursiveChildIntegrationPolicy {
         val accepted = mutableListOf<VerifiedChildArtifact>()
         fun addReceipt(receipt: VerifiedChildArtifact): ChildIntegrationDecision.Denied? {
             val producer = snapshot.node(receipt.childGraphId)
-                ?: return ChildIntegrationDecision.Denied("UNKNOWN_CHILD_ARTIFACT")
+                ?: return ChildIntegrationDecision.Denied(RecursiveDenialCodes.UNKNOWN_CHILD_ARTIFACT)
             val manifest = receipt.manifest
             if (manifest.producerStageRunId != producer.stageRunId ||
                 manifest.ownerRole != producer.origin.role ||
@@ -84,7 +84,7 @@ object RecursiveChildIntegrationPolicy {
                 return ChildIntegrationDecision.Denied("CHILD_ARTIFACT_UNACCEPTED")
             if (!sha256.matches(manifest.sha256) ||
                 receipt.observedSha256 != manifest.sha256)
-                return ChildIntegrationDecision.Denied("CHILD_ARTIFACT_DIGEST_MISMATCH")
+                return ChildIntegrationDecision.Denied(RecursiveDenialCodes.CHILD_ARTIFACT_DIGEST_MISMATCH)
             if (manifest.declaredPath !in producer.writablePaths ||
                 manifest.declaredPath !in parent.writablePaths ||
                 manifest.declaredPath in parent.frozenPaths ||
@@ -121,12 +121,12 @@ object RecursiveChildIntegrationPolicy {
                     }
                     ancestor = snapshot.node(ancestor.parentGraphId!!)
                 }
-                if (!belongsToChild) return deny("UNKNOWN_CHILD_ARTIFACT")
+                if (!belongsToChild) return deny(RecursiveDenialCodes.UNKNOWN_CHILD_ARTIFACT)
                 addReceipt(receipt)?.let { return it }
             }
             val receipts = receiptsByChild.getValue(id)
             if (child.origin != StageKind.REVIEW && receipts.isEmpty())
-                return deny("CHILD_ARTIFACT_MISSING")
+                return deny(RecursiveDenialCodes.CHILD_ARTIFACT_MISSING)
             // An accepted stage has exactly one output manifest; Reviewer has none.
             // Never admit a second artifact smuggled under an otherwise valid stage.
             val expected = if (child.origin == StageKind.REVIEW) 0 else 1

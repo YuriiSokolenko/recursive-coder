@@ -127,4 +127,33 @@ class SessionResultMapperIntegrationTest {
             assertEquals(message, failure.message)
         }
     }
+    @Test fun sharedDenialCodesAndCategoriesAreProjectedToJson() {
+        val request = request()
+        data class Case(
+            val failure: SessionFailure,
+            val expectedCode: String,
+            val expectedCategory: String
+        )
+        val cases = listOf(
+            Case(SessionFailure(ModelDenialCodes.MODEL_INVALID_RESPONSE,
+                SessionDiagnosticCategories.PROVIDER, "Safe refusal"),
+                "MODEL_INVALID_RESPONSE", "provider"),
+            Case(SessionFailure(ModelDenialCodes.TOKEN_BUDGET_EXCEEDED,
+                SessionDiagnosticCategories.POLICY, "Safe refusal"),
+                "TOKEN_BUDGET_EXCEEDED", "policy"),
+            Case(SessionFailure("FUTURE_ADAPTER_CODE",
+                SessionDiagnosticCategories.PROVIDER, "Safe refusal"),
+                "FUTURE_ADAPTER_CODE", "provider")
+        )
+        cases.forEach { case ->
+            val result = completed(request).copy(outcome = SessionOutcome.FAILED,
+                failure = case.failure)
+            val error = Json.parseToJsonElement(SessionResultMapper.encode(result, request).toString())
+                .jsonObject.objectAt("error")
+            assertEquals(case.expectedCode, error.textAt("code"))
+            assertEquals(case.expectedCategory, error.textAt("category"))
+            assertEquals("Safe refusal", error.textAt("safeMessage"))
+            assertEquals(JsonPrimitive(false), error.getValue("retryable"))
+        }
+    }
 }
