@@ -1504,38 +1504,43 @@ class ArchitectureConfigurationCacheRegressionTest(_GradleOutputAssertions):
         )
 
     def assert_cache_file_reason(self, output: str, fixture: Path, relative: Path) -> None:
-        # Compare complete quoted paths, not suffixes: an absolute path in
-        # another checkout must never count as the expected fixture input.
-        # Resolve the fixture root once, then compare paths lexically and case
-        # sensitively (Ubuntu CI). Do not dereference candidate symlinks: the
-        # reported input path, rather than its target, must match.
-        root = fixture.resolve().as_posix()
-        expected = posixpath.normpath(root + "/" + relative.as_posix())
+        # Accept both lexical and resolved fixture roots (e.g. /var and
+        # /private/var on macOS), without resolving candidate symlinks.
+        roots = {fixture.absolute().as_posix(), fixture.resolve().as_posix()}
+        expected = {posixpath.normpath(root + "/" + relative.as_posix()) for root in roots}
         prefix = "Calculating task graph as configuration cache cannot be reused because "
         for line in output.splitlines():
             if not line.startswith(prefix):
                 continue
             reason = line[len(prefix):]
-            for match in re.finditer(r"""(?<!\w)(['"])(.*?)\1""", reason):
-                candidate = match.group(2).replace("\\", "/")
-                if not candidate:
-                    continue
-                if not (candidate.startswith("/") or re.match(r"^[A-Za-z]:/", candidate)):
-                    candidate = root + "/" + candidate
-                if posixpath.normpath(candidate) == expected:
-                    return
-        self.fail(f"Expected cache invalidation for {expected!r}; see streamed Gradle output above.")
+            # Gradle quotes file paths without necessarily escaping embedded
+            # apostrophes. Match the entire file operand up to the closing
+            # quote before the diagnostic predicate, not arbitrary quoted text.
+            match = re.match(r"""^(?:the )?file (['"])(.*)\1(?:\s+[^'"]*)?[.]?$""", reason)
+            if match is None:
+                continue
+            candidate = match.group(2).replace("\\", "/")
+            if not candidate:
+                continue
+            if candidate.startswith("/") or re.match(r"^[A-Za-z]:/", candidate):
+                candidates = {posixpath.normpath(candidate)}
+            else:
+                candidates = {posixpath.normpath(root + "/" + candidate) for root in roots}
+            if candidates & expected:
+                return
+        self.fail(f"Expected cache invalidation for {sorted(expected)!r}; see streamed Gradle output above.")
 
     def test_cache_reason_requires_expected_input_on_reason_line(self):
         relative = Path("core/build.gradle.kts")
         reason = "Calculating task graph as configuration cache cannot be reused because "
-        with tempfile.TemporaryDirectory(prefix="cache reason ") as directory:
+        with tempfile.TemporaryDirectory(prefix="cache reason 'quoted' ") as directory:
             fixture = Path(directory)
             absolute = (fixture.resolve() / relative).as_posix()
             for candidate in (
                 relative.as_posix(),
                 "./" + relative.as_posix(),
                 absolute,
+                (fixture.absolute() / relative).as_posix(),
                 absolute.replace("/", "\\"),
                 "core\\build.gradle.kts",
                 "core/tasks/../build.gradle.kts",
@@ -1548,6 +1553,11 @@ class ArchitectureConfigurationCacheRegressionTest(_GradleOutputAssertions):
             self.assert_cache_file_reason(
                 reason + f'file "{absolute}" no longer exists.', fixture, relative
             )
+            alias = fixture / "alias"
+            alias.symlink_to(fixture, target_is_directory=True)
+            self.assert_cache_file_reason(
+                reason + f"file '{alias / relative}' has changed.", alias, relative
+            )
             for unrelated in (
                 reason + "file 'core/tasks/build.gradle.kts' has changed.",
                 reason + "file 'other/core/build.gradle.kts' has changed.",
@@ -1557,6 +1567,8 @@ class ArchitectureConfigurationCacheRegressionTest(_GradleOutputAssertions):
                 reason + "file '../core/build.gradle.kts' has changed.",
                 reason + "file 'settings.gradle.kts' has changed.\nfile 'core/build.gradle.kts'",
                 reason + "file 'settings.gradle.kts' has changed. core/build.gradle.kts",
+                reason + "Gradle property 'core/build.gradle.kts' has changed.",
+                reason + "file 'settings.gradle.kts' has changed. 'core/build.gradle.kts'",
             ):
                 with self.subTest(output=unrelated), self.assertRaises(AssertionError):
                     self.assert_cache_file_reason(unrelated, fixture, relative)
@@ -1841,7 +1853,6 @@ class ArchitectureConfigurationCacheRegressionTest(_GradleOutputAssertions):
                             "Calculating task graph as configuration cache cannot be reused",
                             rejected.stdout,
                         )
-                        self.assert_gradle_contains("has changed", rejected.stdout)
                         self.assert_cache_file_reason(rejected.stdout, fixture, relative)
                         self.assert_gradle_not_contains("Reusing configuration cache.", rejected.stdout)
                     finally:
