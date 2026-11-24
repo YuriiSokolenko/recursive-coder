@@ -2,6 +2,13 @@
 
 Issue #25 makes the accepted architecture direction executable without modifying the production runtime, CLI or Session Protocol v1.
 
+## Task and Session policy coverage audit (#37)
+
+See [Task and Session pure-policy unit coverage](TASK_SESSION_UNIT_COVERAGE.md)
+for the reviewable test-to-invariant matrix of the extracted Task/Session
+policies, new pure boundary tables, and the adapter coverage deliberately
+retained in integration/E2E.
+
 ## Dependency graph verification
 
 Run `./gradlew checkArchitecture` or `./gradlew checkArchitecture --configuration-cache` (Gradle 9.8.2). The first configuration-cache run stores the task graph; the second reuses it. CI verifies both messages explicitly. This inspects every declared Gradle project dependency across production and test configurations, including future test fixtures. It rejects project dependency cycles even when an edge is declared only in `testImplementation`.
