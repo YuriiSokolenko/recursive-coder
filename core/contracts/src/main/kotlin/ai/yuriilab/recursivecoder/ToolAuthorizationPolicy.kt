@@ -110,7 +110,7 @@ object ToolAuthorizationPolicy {
     fun admitReadOnlyPolicy(facts: ReadPolicyFacts): ToolAuthorizationDecision =
         if (facts.mode != ToolPolicyModes.READ_ONLY || facts.allowedTools.any { it !in knownReadTools } ||
             facts.writablePathsPresent || facts.immutableInputsPresent)
-            ToolAuthorizationDecision.Deny("UNSUPPORTED_TOOL_POLICY")
+            ToolAuthorizationDecision.Deny(ToolDenialCodes.UNSUPPORTED_TOOL_POLICY)
         else ToolAuthorizationDecision.Permit
 
     fun authorizeRead(facts: ReadAuthorizationFacts): ToolAuthorizationDecision {
@@ -129,13 +129,13 @@ object ToolAuthorizationPolicy {
     fun authorizeWrite(facts: WriteAuthorizationFacts): ToolAuthorizationDecision {
         val path = facts.declaredPath
         if (!validDeclaredPath(path))
-            return ToolAuthorizationDecision.Deny("INVALID_TOOL_PATH")
+            return ToolAuthorizationDecision.Deny(ToolDenialCodes.INVALID_TOOL_PATH)
         val parts = path.lowercase().split('/')
         val name = parts.last()
         if (parts.any { it in protectedSegments } ||
             name.startsWith(".env") || name.endsWith(".key") || name.endsWith(".pem") ||
             name.endsWith(".p12") || name.endsWith(".jks") || name in protectedFiles)
-            return ToolAuthorizationDecision.Deny("PROTECTED_PATH")
+            return ToolAuthorizationDecision.Deny(ToolDenialCodes.PROTECTED_PATH)
 
         val allowed = when (facts.actorRole) {
             EngineeringRole.SDD -> path.startsWith("specs/")
@@ -145,12 +145,12 @@ object ToolAuthorizationPolicy {
             EngineeringRole.REVIEWER, null -> false
         }
         if (!allowed || facts.operationKind == null)
-            return ToolAuthorizationDecision.Deny("ROLE_NOT_AUTHORIZED")
+            return ToolAuthorizationDecision.Deny(ToolDenialCodes.ROLE_NOT_AUTHORIZED)
         if (facts.actorRole == EngineeringRole.DEVELOPER &&
             (developerTestSuffix.matches(name) || developerTestConfiguration(parts)))
-            return ToolAuthorizationDecision.Deny("PROTECTED_PATH")
+            return ToolAuthorizationDecision.Deny(ToolDenialCodes.PROTECTED_PATH)
         if (facts.withinSubmodule)
-            return ToolAuthorizationDecision.Deny("SUBMODULE_BOUNDARY")
+            return ToolAuthorizationDecision.Deny(ToolDenialCodes.SUBMODULE_BOUNDARY)
         if (facts.trackedGitMode != null && facts.trackedGitMode !in setOf("100644", "100755"))
             return ToolAuthorizationDecision.Deny("NONREGULAR_GIT_ENTRY")
         if (path in facts.immutableArtifactPaths && path !in facts.independentlyReviewedPaths)
@@ -166,7 +166,7 @@ object ToolAuthorizationPolicy {
             facts.actorRole == null || facts.paths.isEmpty())
             return ToolAuthorizationDecision.Deny("INVALID_REVIEW_AUTHORIZATION")
         if (facts.paths.any { !validDeclaredPath(it) || it !in facts.approvedArtifactPaths })
-            return ToolAuthorizationDecision.Deny("INVALID_WRITE_POLICY")
+            return ToolAuthorizationDecision.Deny(ToolDenialCodes.INVALID_WRITE_POLICY)
         return ToolAuthorizationDecision.Permit
     }
 

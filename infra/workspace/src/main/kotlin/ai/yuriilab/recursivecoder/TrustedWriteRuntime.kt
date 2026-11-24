@@ -141,13 +141,13 @@ class TrustedWriteRuntime private constructor(
             // SecureDirectoryStream is unavailable on the standard macOS provider.
             // Never silently downgrade to path-based or followable filesystem operations.
             if (!System.getProperty("os.name").startsWith("Linux"))
-                fail("SANDBOX_UNAVAILABLE")
+                fail(WorkspaceDenialCodes.SANDBOX_UNAVAILABLE)
             if (!ToolAuthorizationPolicy.validHostIdentifier(policy.sessionId) || !gitPattern.matches(policy.baselineHead) ||
                 policy.branch.isBlank() || policy.maxToolCalls !in 1..10_000 ||
                 policy.requiredChecks.isEmpty() ||
                 policy.requiredChecks.any { it != StageCheckIds.GIT_DIFF_CHECK && it !in policy.checks } ||
                 policy.checks.keys.any { !ToolAuthorizationPolicy.validHostIdentifier(it) || it == StageCheckIds.GIT_DIFF_CHECK })
-                fail("INVALID_WRITE_POLICY")
+                fail(ToolDenialCodes.INVALID_WRITE_POLICY)
             // Reject unwinnable Developer sessions before taking a workspace lease
             // or changing files. The trusted host, not the model, chooses test checks.
             ToolAuthorizationPolicy.admitRequiredChecks(policy.role, policy.requiredChecks)
@@ -161,37 +161,37 @@ class TrustedWriteRuntime private constructor(
             }
             if (policy.approvedArtifacts.any { (path, hash) ->
                     !validPath(path) || !shaPattern.matches(hash)
-                }) fail("INVALID_WRITE_POLICY")
+                }) fail(ToolDenialCodes.INVALID_WRITE_POLICY)
             if (policy.checks.values.any {
                     !it.executable.isAbsolute || !Files.isRegularFile(it.executable) ||
                         !Files.isExecutable(it.executable) || it.timeoutMs !in 100..120_000 ||
                         it.maxOutputBytes !in 1..65536 || it.arguments.any { arg -> '\u0000' in arg }
                 }) fail("INVALID_CHECK_POLICY")
-            if (!policy.root.isAbsolute || Files.isSymbolicLink(policy.root)) fail("INVALID_WORKSPACE")
-            val root = try { policy.root.toRealPath() } catch (_: Exception) { fail("INVALID_WORKSPACE") }
+            if (!policy.root.isAbsolute || Files.isSymbolicLink(policy.root)) fail(WorkspaceDenialCodes.INVALID_WORKSPACE)
+            val root = try { policy.root.toRealPath() } catch (_: Exception) { fail(WorkspaceDenialCodes.INVALID_WORKSPACE) }
             if (!Files.isDirectory(root.resolve(".git"), LinkOption.NOFOLLOW_LINKS) ||
-                Files.isSymbolicLink(root.resolve(".git"))) fail("UNSUPPORTED_WORKSPACE")
-            if (!gitExecutable.isAbsolute || !Files.isExecutable(gitExecutable)) fail("GIT_UNAVAILABLE")
+                Files.isSymbolicLink(root.resolve(".git"))) fail(WorkspaceDenialCodes.UNSUPPORTED_WORKSPACE)
+            if (!gitExecutable.isAbsolute || !Files.isExecutable(gitExecutable)) fail(WorkspaceDenialCodes.GIT_UNAVAILABLE)
             val git = RestrictedGit(root, gitExecutable)
             if (Path.of(git.text(4096, "rev-parse", "--show-toplevel")).toRealPath() != root ||
                 Path.of(git.text(4096, "rev-parse", "--absolute-git-dir")).toRealPath() !=
-                    root.resolve(".git").toRealPath()) fail("UNSUPPORTED_WORKSPACE")
+                    root.resolve(".git").toRealPath()) fail(WorkspaceDenialCodes.UNSUPPORTED_WORKSPACE)
             val config = git.text(256 * 1024, "config", "--local", "--list")
             if (config.lineSequence().map { it.substringBefore('=').lowercase() }.any {
                     it.startsWith("filter.") || it.startsWith("include.") ||
                         it.startsWith("includeif.") || it.startsWith("core.fsmonitor") ||
                         it.startsWith("core.hookspath") || it.startsWith("diff.external") ||
                         it.matches(Regex("diff\\..*\\.(command|textconv)"))
-                }) fail("UNSAFE_GIT_CONFIGURATION")
+                }) fail(WorkspaceDenialCodes.UNSAFE_GIT_CONFIGURATION)
             if (git.text(4096, "rev-parse", "HEAD") != policy.baselineHead ||
                 git.text(4096, "branch", "--show-current") != policy.branch)
-                fail("WORKSPACE_BASELINE_MISMATCH")
+                fail(WorkspaceDenialCodes.WORKSPACE_BASELINE_MISMATCH)
             val tracked = git.text(4 * 1024 * 1024, "ls-tree", "-r", "-z", "--full-tree", "HEAD")
                 .split('\u0000').filter(String::isNotEmpty).associate { entry ->
                     val tab = entry.indexOf('\t')
-                    if (tab < 0) fail("UNSUPPORTED_GIT_TREE")
+                    if (tab < 0) fail(WorkspaceDenialCodes.UNSUPPORTED_GIT_TREE)
                     val header = entry.substring(0, tab).split(' ')
-                    if (header.size != 3 || !validPath(entry.substring(tab + 1))) fail("UNSUPPORTED_GIT_TREE")
+                    if (header.size != 3 || !validPath(entry.substring(tab + 1))) fail(WorkspaceDenialCodes.UNSUPPORTED_GIT_TREE)
                     entry.substring(tab + 1) to header[0]
                 }
             if (tracked.size > 50_000 || gitStatus(git).isNotEmpty()) fail("DIRTY_WORKSPACE")
@@ -200,24 +200,24 @@ class TrustedWriteRuntime private constructor(
             if (tracked.keys.groupBy(::folded).any { (_, paths) -> paths.size > 1 })
                 fail("PATH_CASE_COLLISION")
             val rootKey = Files.readAttributes(root, BasicFileAttributes::class.java).fileKey()
-                ?: fail("SANDBOX_UNAVAILABLE")
+                ?: fail(WorkspaceDenialCodes.SANDBOX_UNAVAILABLE)
             val gitKey = Files.readAttributes(root.resolve(".git"), BasicFileAttributes::class.java).fileKey()
-                ?: fail("SANDBOX_UNAVAILABLE")
+                ?: fail(WorkspaceDenialCodes.SANDBOX_UNAVAILABLE)
             Files.newDirectoryStream(root).use {
-                if (it !is SecureDirectoryStream<*>) fail("SANDBOX_UNAVAILABLE")
+                if (it !is SecureDirectoryStream<*>) fail(WorkspaceDenialCodes.SANDBOX_UNAVAILABLE)
             }
             val locks = try {
-                if (!lockDirectory.isAbsolute || Files.isSymbolicLink(lockDirectory)) fail("WORKSPACE_LOCK_UNAVAILABLE")
+                if (!lockDirectory.isAbsolute || Files.isSymbolicLink(lockDirectory)) fail(WorkspaceDenialCodes.WORKSPACE_LOCK_UNAVAILABLE)
                 Files.createDirectories(lockDirectory)
                 lockDirectory.toRealPath()
-            } catch (_: Exception) { fail("WORKSPACE_LOCK_UNAVAILABLE") }
-            if (locks.startsWith(root) || root.startsWith(locks)) fail("WORKSPACE_LOCK_UNAVAILABLE")
+            } catch (_: Exception) { fail(WorkspaceDenialCodes.WORKSPACE_LOCK_UNAVAILABLE) }
+            if (locks.startsWith(root) || root.startsWith(locks)) fail(WorkspaceDenialCodes.WORKSPACE_LOCK_UNAVAILABLE)
             val lockFile = locks.resolve(sha(root.toString().toByteArray()) + ".lock")
             val channel = try {
                 FileChannel.open(lockFile, StandardOpenOption.CREATE, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)
-            } catch (_: Exception) { fail("WORKSPACE_LOCK_UNAVAILABLE") }
+            } catch (_: Exception) { fail(WorkspaceDenialCodes.WORKSPACE_LOCK_UNAVAILABLE) }
             val lock = try { channel.tryLock() } catch (_: Exception) { null }
-            if (lock == null) { channel.close(); fail("WORKSPACE_LOCKED") }
+            if (lock == null) { channel.close(); fail(WorkspaceDenialCodes.WORKSPACE_LOCKED) }
             try {
                 val policyHash = sha(listOf(policy.sessionId, policy.baselineHead, policy.branch,
                     policy.role.name, policy.approvedArtifacts.toSortedMap().toString(),
@@ -241,7 +241,7 @@ class TrustedWriteRuntime private constructor(
             if (configured != null) return Path.of(configured)
             return System.getenv("PATH").orEmpty().split(java.io.File.pathSeparatorChar)
                 .asSequence().filter(String::isNotBlank).map { Path.of(it).resolve("git") }
-                .firstOrNull { it.isAbsolute && Files.isExecutable(it) } ?: fail("GIT_UNAVAILABLE")
+                .firstOrNull { it.isAbsolute && Files.isExecutable(it) } ?: fail(WorkspaceDenialCodes.GIT_UNAVAILABLE)
         }
 
         private fun validPath(path: String): Boolean =
@@ -294,12 +294,12 @@ class TrustedWriteRuntime private constructor(
         if (closed || poisoned || !lease.isValid) fail("WRITE_SESSION_INVALID")
         if (Files.readAttributes(root, BasicFileAttributes::class.java).fileKey() != rootKey ||
             Files.readAttributes(root.resolve(".git"), BasicFileAttributes::class.java).fileKey() != gitKey)
-            fail("WORKSPACE_REPLACED")
+            fail(WorkspaceDenialCodes.WORKSPACE_REPLACED)
         if (git.text(4096, "rev-parse", "HEAD") != policy.baselineHead ||
             git.text(4096, "branch", "--show-current") != policy.branch)
-            fail("WORKSPACE_BASELINE_MISMATCH")
+            fail(WorkspaceDenialCodes.WORKSPACE_BASELINE_MISMATCH)
         if (sha(git.text(256 * 1024, "config", "--local", "--list").toByteArray()) != configHash)
-            fail("GIT_CONFIGURATION_CHANGED")
+            fail(WorkspaceDenialCodes.GIT_CONFIGURATION_CHANGED)
         val currentIndex = try { indexFingerprint(git) }
             catch (_: Refused) { fail("INDEX_MUTATION_DENIED") }
         if (currentIndex != indexHash) fail("INDEX_MUTATION_DENIED")
@@ -326,12 +326,12 @@ class TrustedWriteRuntime private constructor(
      * symlinks. Parent directories must already exist (no implicit recursive mkdir).
      */
     private fun <T> withParent(path: String, operation: (SecureDirectoryStream<Path>, Path) -> T): T {
-        if (!validPath(path)) fail("INVALID_TOOL_PATH")
+        if (!validPath(path)) fail(ToolDenialCodes.INVALID_TOOL_PATH)
         Files.newDirectoryStream(root).use { stream ->
             @Suppress("UNCHECKED_CAST")
-            var cursor = stream as? SecureDirectoryStream<Path> ?: fail("SANDBOX_UNAVAILABLE")
+            var cursor = stream as? SecureDirectoryStream<Path> ?: fail(WorkspaceDenialCodes.SANDBOX_UNAVAILABLE)
             if (cursor.getFileAttributeView(BasicFileAttributeView::class.java)
-                    .readAttributes().fileKey() != rootKey) fail("WORKSPACE_REPLACED")
+                    .readAttributes().fileKey() != rootKey) fail(WorkspaceDenialCodes.WORKSPACE_REPLACED)
             val opened = mutableListOf<SecureDirectoryStream<Path>>()
             try {
                 val parts = path.split('/')
@@ -339,10 +339,10 @@ class TrustedWriteRuntime private constructor(
                     // On case-insensitive volumes, merely asking for a differently cased
                     // component may resolve the wrong directory. Require exact spelling.
                     if (cursor.none { it.fileName.toString() == part })
-                        fail("UNSAFE_PATH_COMPONENT")
+                        fail(WorkspaceDenialCodes.UNSAFE_PATH_COMPONENT)
                     val next = try {
                         cursor.newDirectoryStream(Path.of(part), LinkOption.NOFOLLOW_LINKS)
-                    } catch (_: Exception) { fail("UNSAFE_PATH_COMPONENT") }
+                    } catch (_: Exception) { fail(WorkspaceDenialCodes.UNSAFE_PATH_COMPONENT) }
                     opened.add(next)
                     cursor = next
                 }
@@ -363,9 +363,9 @@ class TrustedWriteRuntime private constructor(
             dir.getFileAttributeView(name, BasicFileAttributeView::class.java,
                 LinkOption.NOFOLLOW_LINKS).readAttributes()
         } catch (_: NoSuchFileException) { null }
-        catch (_: Exception) { fail("UNSAFE_FILE") }
+        catch (_: Exception) { fail(WorkspaceDenialCodes.UNSAFE_FILE) }
         if (attrs == null) null else {
-            if (!attrs.isRegularFile || attrs.size() > MAX_FILE_BYTES) fail("UNSAFE_FILE")
+            if (!attrs.isRegularFile || attrs.size() > MAX_FILE_BYTES) fail(WorkspaceDenialCodes.UNSAFE_FILE)
             try {
                 dir.newByteChannel(name, setOf<OpenOption>(StandardOpenOption.READ,
                     LinkOption.NOFOLLOW_LINKS)).use { channel ->
@@ -383,7 +383,7 @@ class TrustedWriteRuntime private constructor(
                     output.toByteArray()
                 }
             } catch (e: Refused) { throw e }
-            catch (_: Exception) { fail("UNSAFE_FILE") }
+            catch (_: Exception) { fail(WorkspaceDenialCodes.UNSAFE_FILE) }
         }
     }
 
@@ -440,8 +440,8 @@ class TrustedWriteRuntime private constructor(
     fun apply(operations: List<WriteOperation>, claimedToolId: String? = null): WriteToolOutcome {
         val id = nextId(WRITE_TOOL_NAME)
         return try {
-            if (claimedToolId != null) fail("FORGED_TOOL_ID")
-            if (sequence > policy.maxToolCalls) fail("TOOL_QUOTA_EXCEEDED")
+            if (claimedToolId != null) fail(ToolDenialCodes.FORGED_TOOL_ID)
+            if (sequence > policy.maxToolCalls) fail(ToolDenialCodes.TOOL_QUOTA_EXCEEDED)
             if (operations.isEmpty() || operations.size > 8 ||
                 operations.map { folded(it.path) }.distinct().size != operations.size)
                 fail("INVALID_WRITE_BATCH")
@@ -468,7 +468,7 @@ class TrustedWriteRuntime private constructor(
                         val (exit, _) = git.inspect(4096, "check-ignore", "--no-index", "--", op.path)
                         if (exit == 0) fail("GIT_IGNORED_PATH")
                         if (exit != 1) fail("GIT_IGNORE_INSPECTION_DENIED")
-                        if ('\u0000' in op.content) fail("BINARY_FILE_DENIED")
+                        if ('\u0000' in op.content) fail(WorkspaceDenialCodes.BINARY_FILE_DENIED)
                         if (op.content.toByteArray(StandardCharsets.UTF_8).size > MAX_FILE_BYTES)
                             fail("FILE_SIZE_LIMIT")
                     }
@@ -476,7 +476,7 @@ class TrustedWriteRuntime private constructor(
                         if (before == null || op.path !in tracked ||
                             !shaPattern.matches(op.expectedSha256) ||
                             sha(before) != op.expectedSha256) fail("EDIT_PRECONDITION_FAILED")
-                        if ('\u0000' in op.content) fail("BINARY_FILE_DENIED")
+                        if ('\u0000' in op.content) fail(WorkspaceDenialCodes.BINARY_FILE_DENIED)
                         if (op.content.toByteArray(StandardCharsets.UTF_8).size > MAX_FILE_BYTES)
                             fail("FILE_SIZE_LIMIT")
                     }
@@ -536,7 +536,7 @@ class TrustedWriteRuntime private constructor(
      */
     private fun runIsolated(check: TrustedCheck) {
         val sandbox = Path.of("/usr/bin/bwrap")
-        if (!Files.isExecutable(sandbox)) fail("SANDBOX_UNAVAILABLE")
+        if (!Files.isExecutable(sandbox)) fail(WorkspaceDenialCodes.SANDBOX_UNAVAILABLE)
         val temp = Files.createTempDirectory("recursive-coder-check-")
         try {
             val argv = mutableListOf(sandbox.toString(), "--die-with-parent", "--new-session",
@@ -556,7 +556,7 @@ class TrustedWriteRuntime private constructor(
             val process = try {
                 ProcessBuilder(argv).directory(root.toFile()).redirectErrorStream(true)
                     .apply { environment().clear() }.start()
-            } catch (_: Exception) { fail("SANDBOX_UNAVAILABLE") }
+            } catch (_: Exception) { fail(WorkspaceDenialCodes.SANDBOX_UNAVAILABLE) }
             val reader = Executors.newSingleThreadExecutor {
                 Thread(it, "trusted-check-output").apply { isDaemon = true }
             }
@@ -621,8 +621,8 @@ class TrustedWriteRuntime private constructor(
     fun runCheck(checkId: String, claimedToolId: String? = null): CheckOutcome {
         val id = nextId(RUN_CHECK_TOOL_NAME)
         return try {
-            if (claimedToolId != null) fail("FORGED_TOOL_ID")
-            if (sequence > policy.maxToolCalls) fail("TOOL_QUOTA_EXCEEDED")
+            if (claimedToolId != null) fail(ToolDenialCodes.FORGED_TOOL_ID)
+            if (sequence > policy.maxToolCalls) fail(ToolDenialCodes.TOOL_QUOTA_EXCEEDED)
             val manifest = verifyState()
             ToolAuthorizationPolicy.authorizeCheck(checkId, policy.checks.keys)
                 .deniedCode?.let(::fail)

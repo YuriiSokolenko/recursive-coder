@@ -105,10 +105,10 @@ internal object SessionLifecyclePolicy {
 internal enum class AdmissionDenial(val code: String, val category: String, val message: String) {
     PROTOCOL("UNSUPPORTED_PROTOCOL", "protocol", "Unsupported protocol version"),
     INVOCATION("UNSUPPORTED_INVOCATION", "protocol", "Unsupported invocation source or attempt"),
-    RESUME("UNSUPPORTED_RESUME", "checkpoint", "Resume is not supported"),
+    RESUME(SessionDenialCodes.UNSUPPORTED_RESUME, "checkpoint", "Resume is not supported"),
     CAPABILITY("UNSUPPORTED_CAPABILITY", "protocol", "Required capability is unavailable"),
-    MODEL("UNSUPPORTED_MODEL", "provider", "Unsupported model provider or configuration"),
-    TOOL_POLICY("UNSUPPORTED_TOOL_POLICY", "policy", "Only read-only task access is supported"),
+    MODEL(ModelDenialCodes.UNSUPPORTED_MODEL, "provider", "Unsupported model provider or configuration"),
+    TOOL_POLICY(ToolDenialCodes.UNSUPPORTED_TOOL_POLICY, "policy", "Only read-only task access is supported"),
     BUDGET("INSUFFICIENT_BUDGET", "policy", "Two model turns and one read are required")
 }
 

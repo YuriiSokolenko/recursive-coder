@@ -101,8 +101,8 @@ class RunPreparationStageUseCase(
     private fun stopped(command: PreparationStageCommand): String? {
         val signals = command.cancellation.signals()
         return when {
-            signals.expired || !Instant.now(clock).isBefore(command.deadline) -> "ROLE_TIMED_OUT"
-            signals.requested -> "ROLE_CANCELLED"
+            signals.expired || !Instant.now(clock).isBefore(command.deadline) -> StageDenialCodes.ROLE_TIMED_OUT
+            signals.requested -> StageDenialCodes.ROLE_CANCELLED
             else -> null
         }
     }
@@ -153,11 +153,11 @@ class RunPreparationStageUseCase(
             }
         } catch (_: Exception) {
             return PreparationStageResult(null, null,
-                PreparationStageOutcome.ReconciliationRequired("STAGE_FINISH_UNCONFIRMED"))
+                PreparationStageOutcome.ReconciliationRequired(StageDenialCodes.STAGE_FINISH_UNCONFIRMED))
         }
         if (!committed)
             return PreparationStageResult(null, null,
-                PreparationStageOutcome.ReconciliationRequired("STALE_STAGE_LEASE"))
+                PreparationStageOutcome.ReconciliationRequired(StageDenialCodes.STALE_STAGE_LEASE))
         emit(events, graph, lease.stageRunId, manifest, code)
         return PreparationStageResult(graph, accepted, outcome)
     }
@@ -170,7 +170,7 @@ class RunPreparationStageUseCase(
             withContext(NonCancellable + blockingDispatcher) { host.abortStage(lease, terminal) }
         } catch (_: Exception) { null }
             ?: return PreparationStageResult(null, null,
-                PreparationStageOutcome.ReconciliationRequired("STAGE_ABORT_UNCONFIRMED"))
+                PreparationStageOutcome.ReconciliationRequired(StageDenialCodes.STAGE_ABORT_UNCONFIRMED))
         emit(events, snapshot.graph, lease.stageRunId, code = code)
         return PreparationStageResult(snapshot.graph, snapshot.acceptedIds,
             PreparationStageOutcome.Failed(code))
@@ -198,13 +198,13 @@ class RunPreparationStageUseCase(
         if (ToolAuthorizationPolicy.authorizeWrite(WriteAuthorizationFacts(
                 kind.role, WriteOperationKind.CREATE, command.outputPath
             )) != ToolAuthorizationDecision.Permit)
-            return denied("ROLE_NOT_AUTHORIZED")
-        if (command.instruction.isBlank()) return denied("EMPTY_STAGE_INSTRUCTION")
+            return denied(ToolDenialCodes.ROLE_NOT_AUTHORIZED)
+        if (command.instruction.isBlank()) return denied(StageDenialCodes.EMPTY_STAGE_INSTRUCTION)
         val ready = when (stage.state) {
             StageState.CREATED -> transition(original, id, StageState.READY, accepted)
-                ?: return denied("STAGE_NOT_READY")
+                ?: return denied(StageDenialCodes.STAGE_NOT_READY)
             StageState.READY -> original
-            else -> return denied("STAGE_NOT_READY")
+            else -> return denied(StageDenialCodes.STAGE_NOT_READY)
         }
         val admission = StageGraphPolicy.admitStage(ready, id, accepted)
         if (admission is StageGateDecision.Deny) return denied(admission.code)
@@ -218,11 +218,11 @@ class RunPreparationStageUseCase(
         }
         for ((artifact, read) in inputData) {
             if (read.isFailure) continue
-            val bytes = read.getOrThrow() ?: return denied("ARTIFACT_MISSING")
-            if (digest(bytes) != artifact.sha256) return denied("ARTIFACT_DIGEST_MISMATCH")
-            if (utf8(bytes) == null) return denied("ARTIFACT_ENCODING_INVALID")
+            val bytes = read.getOrThrow() ?: return denied(StageDenialCodes.ARTIFACT_MISSING)
+            if (digest(bytes) != artifact.sha256) return denied(StageDenialCodes.ARTIFACT_DIGEST_MISMATCH)
+            if (utf8(bytes) == null) return denied(StageDenialCodes.ARTIFACT_ENCODING_INVALID)
         }
-        if (inputData.any { it.second.isFailure }) return denied("INPUT_READ_UNAVAILABLE")
+        if (inputData.any { it.second.isFailure }) return denied(StageDenialCodes.INPUT_READ_UNAVAILABLE)
         val instruction = buildString {
             append(command.instruction)
             for ((artifact, read) in inputData) {
@@ -234,7 +234,7 @@ class RunPreparationStageUseCase(
             }
         }
         if (instruction.toByteArray(Charsets.UTF_8).size > StageRoleLimits.MAX_INSTRUCTION_BYTES)
-            return denied("STAGE_INPUT_TOO_LARGE")
+            return denied(StageDenialCodes.STAGE_INPUT_TOO_LARGE)
         stopped(command)?.let { return denied(it) }
 
         // The authoritative host must atomically claim this attempt before
@@ -247,8 +247,8 @@ class RunPreparationStageUseCase(
             }
         } catch (_: Exception) {
             return PreparationStageResult(null, null,
-                PreparationStageOutcome.ReconciliationRequired("STAGE_BEGIN_UNCONFIRMED"))
-        } ?: return denied("STAGE_ADMISSION_REVOKED")
+                PreparationStageOutcome.ReconciliationRequired(StageDenialCodes.STAGE_BEGIN_UNCONFIRMED))
+        } ?: return denied(StageDenialCodes.STAGE_ADMISSION_REVOKED)
         val running = lease.graph
         val activeStage = running.stages.firstOrNull { it.correlation.stageRunId == id }
         val validLease = try {
@@ -261,7 +261,7 @@ class RunPreparationStageUseCase(
         } catch (_: Exception) { false }
         if (!validLease)
             return withContext(NonCancellable) {
-                abort(lease, StageState.FAILED, "INVALID_STAGE_LEASE", events)
+                abort(lease, StageState.FAILED, StageDenialCodes.INVALID_STAGE_LEASE, events)
             }
         emit(events, running, id)
 
@@ -280,11 +280,11 @@ class RunPreparationStageUseCase(
             stopped(command)?.let { return it }
             val current = captureHostCall {
                 withContext(blockingDispatcher) { host.current(lease) }
-            }.getOrElse { return "STAGE_AUTHORITY_UNAVAILABLE" }
-            return if (current) null else "STALE_STAGE_LEASE"
+            }.getOrElse { return StageDenialCodes.STAGE_AUTHORITY_UNAVAILABLE }
+            return if (current) null else StageDenialCodes.STALE_STAGE_LEASE
         }
         suspend fun halted(code: String): PreparationStageResult = terminal(code,
-            if (code == "ROLE_CANCELLED" || code == "ROLE_TIMED_OUT")
+            if (code == StageDenialCodes.ROLE_CANCELLED || code == StageDenialCodes.ROLE_TIMED_OUT)
                 StageState.CANCELLED else StageState.FAILED)
 
         try {
@@ -298,13 +298,13 @@ class RunPreparationStageUseCase(
             checkpoint()?.let { return halted(it) }
             if (proposal.correlation != stage.correlation ||
                 proposal.role != kind.role || proposal.agentId != stage.agentId)
-                return terminal("ROLE_RESULT_IDENTITY_MISMATCH")
+                return terminal(StageDenialCodes.ROLE_RESULT_IDENTITY_MISMATCH)
             val proposed = when (val outcome = proposal.outcome) {
                 is StageRoleOutcome.Proposed -> outcome.text
                 is StageRoleOutcome.Denied -> return terminal(outcome.code, rejected = true)
                 is StageRoleOutcome.Failed -> return terminal(outcome.code)
-                StageRoleOutcome.Cancelled -> return halted("ROLE_CANCELLED")
-                StageRoleOutcome.TimedOut -> return halted("ROLE_TIMED_OUT")
+                StageRoleOutcome.Cancelled -> return halted(StageDenialCodes.ROLE_CANCELLED)
+                StageRoleOutcome.TimedOut -> return halted(StageDenialCodes.ROLE_TIMED_OUT)
             }
             if (proposed.isBlank() || proposed.toByteArray(Charsets.UTF_8).size >
                 StageRoleLimits.MAX_PROPOSAL_BYTES)
@@ -312,17 +312,17 @@ class RunPreparationStageUseCase(
             val authority = lease.authority
             val snapshot = captureHostCall {
                 withContext(blockingDispatcher) { authority.current() }
-            }.getOrElse { return terminal("STAGE_AUTHORITY_UNAVAILABLE") }
-                ?: return terminal("STAGE_AUTHORITY_UNAVAILABLE")
+            }.getOrElse { return terminal(StageDenialCodes.STAGE_AUTHORITY_UNAVAILABLE) }
+                ?: return terminal(StageDenialCodes.STAGE_AUTHORITY_UNAVAILABLE)
             if (snapshot.graph != running || snapshot.stageRunId != id ||
                 snapshot.requestId != stage.correlation.requestId ||
                 snapshot.hostAcceptedArtifactIds != accepted ||
                 !live(lease, snapshot))
-                return terminal("STAGE_AUTHORITY_MISMATCH")
+                return terminal(StageDenialCodes.STAGE_AUTHORITY_MISMATCH)
             val checks = snapshot.requiredChecks
             if (StageCheckIds.GIT_DIFF_CHECK !in checks || checks.none { it != StageCheckIds.GIT_DIFF_CHECK } ||
                 checks.any { it != StageCheckIds.GIT_DIFF_CHECK && it !in snapshot.checks })
-                return terminal("STAGE_CHECKS_REQUIRED")
+                return terminal(StageDenialCodes.STAGE_CHECKS_REQUIRED)
             checkpoint()?.let { return halted(it) }
             val open = withContext(blockingDispatcher) { tools.open(authority) }
             if (open is StageToolOpenResult.Denied) return terminal(open.code)
@@ -336,51 +336,51 @@ class RunPreparationStageUseCase(
                     if (checkDenial != null) return@withContext null
                     val write = session.write(listOf(StageWrite.Create(command.outputPath, proposed)))
                     if (!write.permitted) {
-                        checkDenial = write.deniedCode ?: "STAGE_WRITE_FAILED"
+                        checkDenial = write.deniedCode ?: StageDenialCodes.STAGE_WRITE_FAILED
                         return@withContext null
                     }
                     for (check in checks.sorted()) {
                         checkDenial = checkpoint() ?: if (!live(lease, snapshot))
-                            "STALE_STAGE_AUTHORITY" else null
+                            StageDenialCodes.STALE_STAGE_AUTHORITY else null
                         if (checkDenial != null) return@withContext null
                         val evidence = session.runCheck(check)
                         if (!evidence.passed) {
-                            checkDenial = evidence.deniedCode ?: "STAGE_CHECK_FAILED"
+                            checkDenial = evidence.deniedCode ?: StageDenialCodes.STAGE_CHECK_FAILED
                             return@withContext null
                         }
                     }
                     checkDenial = checkpoint() ?: if (!live(lease, snapshot))
-                        "STALE_STAGE_AUTHORITY" else null
+                        StageDenialCodes.STALE_STAGE_AUTHORITY else null
                     if (checkDenial != null) return@withContext null
                     session.verify()
                 }
             }
             checkpoint()?.let { return halted(it) }
-            if (!live(lease, snapshot)) return terminal("STALE_STAGE_AUTHORITY")
-            if (validation == null) return terminal(checkDenial ?: "STAGE_TOOL_VALIDATION_FAILED")
+            if (!live(lease, snapshot)) return terminal(StageDenialCodes.STALE_STAGE_AUTHORITY)
+            if (validation == null) return terminal(checkDenial ?: StageDenialCodes.STAGE_TOOL_VALIDATION_FAILED)
             if (!validation.successful || validation.correlation != stage.correlation ||
                 validation.actor != stage.agentId ||
                 validation.requiredChecks.map { it.checkId }.toSet() != checks ||
                 validation.requiredChecks.any { !it.passed })
-                return terminal(validation.deniedCode ?: "STAGE_VALIDATION_FAILED")
+                return terminal(validation.deniedCode ?: StageDenialCodes.STAGE_VALIDATION_FAILED)
             val outputRead = captureHostCall {
                 withContext(blockingDispatcher) { host.readBytes(command.outputPath) }
             }
             val inputsVerified = verifyInputs(running, stage)
             val intended = proposed.toByteArray(Charsets.UTF_8)
             if (outputRead.isSuccess) {
-                val output = outputRead.getOrThrow() ?: return terminal("ARTIFACT_MISSING")
-                if (!output.contentEquals(intended)) return terminal("ARTIFACT_DIGEST_MISMATCH")
+                val output = outputRead.getOrThrow() ?: return terminal(StageDenialCodes.ARTIFACT_MISSING)
+                if (!output.contentEquals(intended)) return terminal(StageDenialCodes.ARTIFACT_DIGEST_MISMATCH)
             }
             if (inputsVerified == HostReadVerification.CHANGED) return terminal("FROZEN_INPUT_CHANGED")
-            val bytes = outputRead.getOrElse { return terminal("OUTPUT_READ_UNAVAILABLE") }
-                ?: return terminal("ARTIFACT_MISSING")
-            if (inputsVerified == HostReadVerification.UNAVAILABLE) return terminal("INPUT_READ_UNAVAILABLE")
+            val bytes = outputRead.getOrElse { return terminal(StageDenialCodes.OUTPUT_READ_UNAVAILABLE) }
+                ?: return terminal(StageDenialCodes.ARTIFACT_MISSING)
+            if (inputsVerified == HostReadVerification.UNAVAILABLE) return terminal(StageDenialCodes.INPUT_READ_UNAVAILABLE)
             val outputKind = kind.output ?: return terminal("INVALID_STAGE_OUTPUT")
             val candidate = StageArtifactManifest(command.artifactId, outputKind,
                 command.outputPath, digest(bytes), kind.role, id, 1L,
                 ArtifactApproval.DRAFT, ArtifactFreeze.EDITABLE)
-            if (!live(lease, snapshot)) return terminal("STALE_STAGE_AUTHORITY")
+            if (!live(lease, snapshot)) return terminal(StageDenialCodes.STALE_STAGE_AUTHORITY)
             val decision = try {
                 withContext(blockingDispatcher) {
                     val remaining = Duration.between(Instant.now(clock), command.deadline).toMillis()
@@ -390,9 +390,9 @@ class RunPreparationStageUseCase(
             } catch (failure: Exception) {
                 ensureHostCallerActive(failure)
                 stopped(command)?.let { return halted(it) }
-                return terminal("HOST_APPROVAL_UNAVAILABLE")
+                return terminal(StageDenialCodes.HOST_APPROVAL_UNAVAILABLE)
             }
-            if (decision == null) return halted("ROLE_TIMED_OUT")
+            if (decision == null) return halted(StageDenialCodes.ROLE_TIMED_OUT)
             checkpoint()?.let { return halted(it) }
             val afterRead = captureHostCall {
                 withContext(blockingDispatcher) { host.readBytes(command.outputPath) }
@@ -404,10 +404,10 @@ class RunPreparationStageUseCase(
             if (inputStatus == HostReadVerification.CHANGED ||
                 (afterRead.isSuccess && afterRead.getOrThrow()?.contentEquals(bytes) != true))
                 return terminal("STALE_ARTIFACT_APPROVAL")
-            if (afterRead.isFailure) return terminal("OUTPUT_READ_UNAVAILABLE")
-            if (inputStatus == HostReadVerification.UNAVAILABLE) return terminal("INPUT_READ_UNAVAILABLE")
+            if (afterRead.isFailure) return terminal(StageDenialCodes.OUTPUT_READ_UNAVAILABLE)
+            if (inputStatus == HostReadVerification.UNAVAILABLE) return terminal(StageDenialCodes.INPUT_READ_UNAVAILABLE)
             if (decision == PreparationApproval.REJECT)
-                return terminal("HOST_REJECTED", StageState.REJECTED, rejected = true)
+                return terminal(StageDenialCodes.HOST_REJECTED, StageState.REJECTED, rejected = true)
 
             val draft = running.copy(
                 stages = running.stages.map {
@@ -417,7 +417,7 @@ class RunPreparationStageUseCase(
                 artifacts = running.artifacts + candidate
             )
             if (StageGraphPolicy.validate(draft) != StageGateDecision.Permit)
-                return terminal("INVALID_STAGE_MANIFEST")
+                return terminal(StageDenialCodes.INVALID_STAGE_MANIFEST)
             if (decision == PreparationApproval.HUMAN_REVIEW_REQUIRED)
                 return finish(lease, draft, accepted,
                     PreparationStageOutcome.AwaitingHuman(candidate), events, candidate,
@@ -430,7 +430,7 @@ class RunPreparationStageUseCase(
             })
             val acceptedIds = accepted + frozen.id
             val completed = transition(approved, id, StageState.ACCEPTED, acceptedIds)
-                ?: return terminal("STAGE_ACCEPTANCE_DENIED")
+                ?: return terminal(StageDenialCodes.STAGE_ACCEPTANCE_DENIED)
             return finish(lease, completed, acceptedIds,
                 PreparationStageOutcome.Accepted(frozen, validation, proposal.usage),
                 events, frozen)
@@ -441,7 +441,7 @@ class RunPreparationStageUseCase(
                 return terminal("PREPARATION_STAGE_FAILED")
             }
             withContext(NonCancellable) {
-                try { terminal("ROLE_CANCELLED", StageState.CANCELLED) }
+                try { terminal(StageDenialCodes.ROLE_CANCELLED, StageState.CANCELLED) }
                 catch (cleanup: Exception) {
                     if (cleanup !== cancelled) cancelled.addSuppressed(cleanup)
                 }
@@ -487,7 +487,7 @@ class RunPreparationStageUseCase(
         } catch (_: Exception) {
             return PreparationStageResult(null, null,
                 PreparationStageOutcome.ReconciliationRequired("HUMAN_APPROVAL_BEGIN_UNCONFIRMED"))
-        } ?: return denied("STAGE_ADMISSION_REVOKED")
+        } ?: return denied(StageDenialCodes.STAGE_ADMISSION_REVOKED)
         val pending = lease.pendingApproval
         val validation = pending?.validation
         val validHumanLease = try {
@@ -540,7 +540,7 @@ class RunPreparationStageUseCase(
                 }
             } catch (failure: Exception) {
                 ensureHostCallerActive(failure)
-                return failed(stoppedHuman() ?: "HOST_APPROVAL_UNAVAILABLE")
+                return failed(stoppedHuman() ?: StageDenialCodes.HOST_APPROVAL_UNAVAILABLE)
             }
             if (decision == null) return failed("HUMAN_APPROVAL_TIMED_OUT")
             stoppedHuman()?.let { return failed(it) }
@@ -565,7 +565,7 @@ class RunPreparationStageUseCase(
                 val rejected = transition(expectedGraph, stageRunId, StageState.REJECTED,
                     acceptedIds) ?: return failed("STAGE_REJECTION_FAILED")
                 return finish(lease, rejected, acceptedIds,
-                    PreparationStageOutcome.Denied("HOST_REJECTED"), events, candidate, "HOST_REJECTED")
+                    PreparationStageOutcome.Denied(StageDenialCodes.HOST_REJECTED), events, candidate, StageDenialCodes.HOST_REJECTED)
             }
             val frozen = candidate.copy(approval = ArtifactApproval.ACCEPTED,
                 freeze = ArtifactFreeze.FROZEN)
@@ -574,7 +574,7 @@ class RunPreparationStageUseCase(
             })
             val accepted = acceptedIds + frozen.id
             val completed = transition(graph, stageRunId, StageState.ACCEPTED, accepted)
-                ?: return failed("STAGE_ACCEPTANCE_DENIED")
+                ?: return failed(StageDenialCodes.STAGE_ACCEPTANCE_DENIED)
             return finish(lease, completed, accepted,
                 PreparationStageOutcome.Accepted(frozen, approvedEvidence, originalUsage),
                 events, frozen)

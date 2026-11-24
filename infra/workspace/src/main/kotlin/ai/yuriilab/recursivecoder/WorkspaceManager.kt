@@ -72,26 +72,26 @@ class WorkspaceManager private constructor(
                     request.policy["writablePaths"]!!.jsonArray.isNotEmpty(),
                     (request.policy["immutableInputs"] as? JsonArray)?.isNotEmpty() == true
                 )).deniedCode != null)
-                throw Refused("UNSUPPORTED_TOOL_POLICY", "policy", "Unsupported workspace tool policy")
+                throw Refused(ToolDenialCodes.UNSUPPORTED_TOOL_POLICY, "policy", "Unsupported workspace tool policy")
             val root = try {
                 if (Files.isSymbolicLink(request.rootPath)) throw IllegalArgumentException()
                 request.rootPath.toRealPath()
             } catch (_: Exception) {
-                throw Refused("INVALID_WORKSPACE", "policy", "Workspace root cannot be resolved")
+                throw Refused(WorkspaceDenialCodes.INVALID_WORKSPACE, "policy", "Workspace root cannot be resolved")
             }
             if (!Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS) ||
                 !Files.isDirectory(root.resolve(".git"), LinkOption.NOFOLLOW_LINKS) ||
                 Files.isSymbolicLink(root.resolve(".git")))
-                throw Refused("UNSUPPORTED_WORKSPACE", "policy", "Only regular local Git working trees are supported")
+                throw Refused(WorkspaceDenialCodes.UNSUPPORTED_WORKSPACE, "policy", "Only regular local Git working trees are supported")
             if (!gitExecutable.isAbsolute || !Files.isRegularFile(gitExecutable) || !Files.isExecutable(gitExecutable))
-                throw Refused("GIT_UNAVAILABLE", "policy", "Configured Git binary is unavailable")
+                throw Refused(WorkspaceDenialCodes.GIT_UNAVAILABLE, "policy", "Configured Git binary is unavailable")
             // Do not depend on a model-provided PATH, HOME, Git config, hooks or environment.
             val git = RestrictedGit(root, gitExecutable)
             val checkedRoot = git.text(4096, "rev-parse", "--show-toplevel")
             val checkedGitDir = git.text(4096, "rev-parse", "--absolute-git-dir")
             if (Path.of(checkedRoot).toRealPath() != root ||
                 Path.of(checkedGitDir).toRealPath() != root.resolve(".git").toRealPath())
-                throw Refused("UNSUPPORTED_WORKSPACE", "policy", "Nested, bare or linked worktrees are not supported")
+                throw Refused(WorkspaceDenialCodes.UNSUPPORTED_WORKSPACE, "policy", "Nested, bare or linked worktrees are not supported")
             // Git read-only commands can otherwise invoke repository-defined clean/process filters.
             // Treat any local command-capable Git configuration as unsupported for this milestone.
             val localConfig = git.text(256 * 1024, "config", "--local", "--list")
@@ -102,24 +102,24 @@ class WorkspaceManager private constructor(
                         key.matches(Regex("diff\\..*\\.command")) ||
                         key.matches(Regex("diff\\..*\\.textconv"))
                 })
-                throw Refused("UNSAFE_GIT_CONFIGURATION", "policy",
+                throw Refused(WorkspaceDenialCodes.UNSAFE_GIT_CONFIGURATION, "policy",
                     "Repository Git configuration may execute external commands")
             val head = git.text(4096, "rev-parse", "HEAD")
             val currentBranch = git.text(4096, "branch", "--show-current")
             if (head != request.workspace["baselineSha"]!!.jsonPrimitive.content ||
                 head != request.workspace["headSha"]!!.jsonPrimitive.content)
-                throw Refused("WORKSPACE_BASELINE_MISMATCH", "policy", "Workspace HEAD changed")
+                throw Refused(WorkspaceDenialCodes.WORKSPACE_BASELINE_MISMATCH, "policy", "Workspace HEAD changed")
             if (currentBranch.isBlank() ||
                 currentBranch != request.workspace["branch"]?.jsonPrimitive?.content)
                 throw Refused("WORKSPACE_BRANCH_MISMATCH", "policy", "Workspace branch is unavailable or changed")
             val rootKey = Files.readAttributes(root, BasicFileAttributes::class.java).fileKey()
             val gitKey = Files.readAttributes(root.resolve(".git"), BasicFileAttributes::class.java).fileKey()
             if (rootKey == null || gitKey == null)
-                throw Refused("SANDBOX_UNAVAILABLE", "policy", "Filesystem identity is unavailable")
+                throw Refused(WorkspaceDenialCodes.SANDBOX_UNAVAILABLE, "policy", "Filesystem identity is unavailable")
             // Test descriptor-based traversal support before admitting a session.
             Files.newDirectoryStream(root).use {
                 if (it !is SecureDirectoryStream<*>)
-                    throw Refused("SANDBOX_UNAVAILABLE", "policy", "Race-safe directory access is unavailable")
+                    throw Refused(WorkspaceDenialCodes.SANDBOX_UNAVAILABLE, "policy", "Race-safe directory access is unavailable")
             }
             val patterns = try {
                 request.policy["protectedPaths"]!!.jsonArray.map {
@@ -136,9 +136,9 @@ class WorkspaceManager private constructor(
                     val tab = entry.indexOf('\t')
                     val metadata = if (tab < 0) emptyList() else entry.substring(0, tab).split(' ')
                     if (metadata.size != 3 || metadata[0] !in setOf("100644", "100755", "120000", "160000"))
-                        throw Refused("UNSUPPORTED_GIT_TREE", "policy", "Unexpected Git tree entry")
+                        throw Refused(WorkspaceDenialCodes.UNSUPPORTED_GIT_TREE, "policy", "Unexpected Git tree entry")
                     val path = entry.substring(tab + 1)
-                    if (!validRelative(path)) throw Refused("UNSUPPORTED_GIT_TREE", "policy", "Unsafe Git tree path")
+                    if (!validRelative(path)) throw Refused(WorkspaceDenialCodes.UNSUPPORTED_GIT_TREE, "policy", "Unsafe Git tree path")
                     path to metadata[0]
                 }
             if (tree.size > 50000) throw Refused("WORKSPACE_TOO_LARGE", "policy", "Git tree exceeds the supported limit")
@@ -151,21 +151,21 @@ class WorkspaceManager private constructor(
                 if (Files.isSymbolicLink(lockDirectory)) throw IllegalArgumentException()
                 lockDirectory.toRealPath()
             } catch (_: Exception) {
-                throw Refused("WORKSPACE_LOCK_UNAVAILABLE", "policy", "Trusted lock directory is unavailable")
+                throw Refused(WorkspaceDenialCodes.WORKSPACE_LOCK_UNAVAILABLE, "policy", "Trusted lock directory is unavailable")
             }
             if (locks.startsWith(root))
-                throw Refused("WORKSPACE_LOCK_UNAVAILABLE", "policy", "Lock directory must be outside workspace")
+                throw Refused(WorkspaceDenialCodes.WORKSPACE_LOCK_UNAVAILABLE, "policy", "Lock directory must be outside workspace")
             val lockName = sha256(root.toString().toByteArray(StandardCharsets.UTF_8)) + ".lock"
             val channel = try {
                 FileChannel.open(locks.resolve(lockName),
                     setOf<OpenOption>(StandardOpenOption.CREATE, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS))
             } catch (_: Exception) {
-                throw Refused("WORKSPACE_LOCK_UNAVAILABLE", "policy", "Cannot open workspace lease")
+                throw Refused(WorkspaceDenialCodes.WORKSPACE_LOCK_UNAVAILABLE, "policy", "Cannot open workspace lease")
             }
             val lease = try { channel.tryLock() } catch (_: Exception) { null }
             if (lease == null) {
                 channel.close()
-                throw Refused("WORKSPACE_LOCKED", "policy", "Workspace already has an active session")
+                throw Refused(WorkspaceDenialCodes.WORKSPACE_LOCKED, "policy", "Workspace already has an active session")
             }
             try {
                 val manager = WorkspaceManager(root, request.workspace["workspaceId"]!!.jsonPrimitive.content,
@@ -207,7 +207,7 @@ class WorkspaceManager private constructor(
             val search = System.getenv("PATH").orEmpty().split(java.io.File.pathSeparatorChar)
             return search.asSequence().filter { it.isNotEmpty() }.map { Path.of(it).resolve("git") }
                 .firstOrNull { it.isAbsolute && Files.isRegularFile(it) && Files.isExecutable(it) }
-                ?: throw Refused("GIT_UNAVAILABLE", "policy", "Git binary was not found on host PATH")
+                ?: throw Refused(WorkspaceDenialCodes.GIT_UNAVAILABLE, "policy", "Git binary was not found on host PATH")
         }
 
         private fun sha256(bytes: ByteArray): String =
@@ -218,13 +218,13 @@ class WorkspaceManager private constructor(
         if (closed || !lock.isValid) deny("WORKSPACE_LOCK_LOST")
         if (sha256(git.text(256 * 1024, "config", "--local", "--list")
                 .toByteArray(StandardCharsets.UTF_8)) != gitConfigHash)
-            deny("GIT_CONFIGURATION_CHANGED")
+            deny(WorkspaceDenialCodes.GIT_CONFIGURATION_CHANGED)
         if (Files.readAttributes(root, BasicFileAttributes::class.java).fileKey() != rootKey ||
             Files.readAttributes(root.resolve(".git"), BasicFileAttributes::class.java).fileKey() != gitKey)
-            deny("WORKSPACE_REPLACED")
+            deny(WorkspaceDenialCodes.WORKSPACE_REPLACED)
         if (git.text(4096, "rev-parse", "HEAD") != baselineHead ||
             git.text(4096, "branch", "--show-current") != branch)
-            deny("WORKSPACE_BASELINE_MISMATCH")
+            deny(WorkspaceDenialCodes.WORKSPACE_BASELINE_MISMATCH)
     }
 
     private fun deny(code: String): Nothing =
@@ -232,8 +232,8 @@ class WorkspaceManager private constructor(
 
     private fun relative(path: String, allowRoot: Boolean = false): String {
         if (allowRoot && path.isEmpty()) return ""
-        if (!validRelative(path)) deny("INVALID_TOOL_PATH")
-        if (path.split('/').any { it.equals(".git", ignoreCase = true) }) deny("PROTECTED_PATH")
+        if (!validRelative(path)) deny(ToolDenialCodes.INVALID_TOOL_PATH)
+        if (path.split('/').any { it.equals(".git", ignoreCase = true) }) deny(ToolDenialCodes.PROTECTED_PATH)
         return path
     }
 
@@ -265,9 +265,9 @@ class WorkspaceManager private constructor(
 
     private fun authorized(path: String) {
         relative(path)
-        if (protected(path)) deny("PROTECTED_PATH")
+        if (protected(path)) deny(ToolDenialCodes.PROTECTED_PATH)
         if (tree.any { (entry, mode) -> mode == "160000" && path.startsWith("$entry/") })
-            deny("SUBMODULE_BOUNDARY")
+            deny(ToolDenialCodes.SUBMODULE_BOUNDARY)
         if (tree[path] !in setOf("100644", "100755")) deny("UNTRACKED_OR_NONREGULAR_FILE")
     }
 
@@ -275,17 +275,17 @@ class WorkspaceManager private constructor(
         authorized(path)
         Files.newDirectoryStream(root).use { initial ->
             @Suppress("UNCHECKED_CAST")
-            var cursor = initial as? SecureDirectoryStream<Path> ?: deny("SANDBOX_UNAVAILABLE")
+            var cursor = initial as? SecureDirectoryStream<Path> ?: deny(WorkspaceDenialCodes.SANDBOX_UNAVAILABLE)
             if (cursor.getFileAttributeView(BasicFileAttributeView::class.java)
                     .readAttributes().fileKey() != rootKey)
-                deny("WORKSPACE_REPLACED")
+                deny(WorkspaceDenialCodes.WORKSPACE_REPLACED)
             val descendants = mutableListOf<SecureDirectoryStream<Path>>()
             try {
                 val parts = path.split('/')
                 for (part in parts.dropLast(1)) {
                     val next = try {
                         cursor.newDirectoryStream(Path.of(part), LinkOption.NOFOLLOW_LINKS)
-                    } catch (_: Exception) { deny("UNSAFE_PATH_COMPONENT") }
+                    } catch (_: Exception) { deny(WorkspaceDenialCodes.UNSAFE_PATH_COMPONENT) }
                     descendants.add(next)
                     cursor = next
                 }
@@ -293,8 +293,8 @@ class WorkspaceManager private constructor(
                 val attributes = try {
                     cursor.getFileAttributeView(file, BasicFileAttributeView::class.java,
                         LinkOption.NOFOLLOW_LINKS).readAttributes()
-                } catch (_: Exception) { deny("UNSAFE_FILE") }
-                if (!attributes.isRegularFile || attributes.size() > maxReadBytes) deny("UNSAFE_FILE")
+                } catch (_: Exception) { deny(WorkspaceDenialCodes.UNSAFE_FILE) }
+                if (!attributes.isRegularFile || attributes.size() > maxReadBytes) deny(WorkspaceDenialCodes.UNSAFE_FILE)
                 val bytes = try {
                     cursor.newByteChannel(file,
                         setOf<OpenOption>(StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)).use { channel ->
@@ -312,7 +312,7 @@ class WorkspaceManager private constructor(
                         output.toByteArray()
                     }
                 } catch (e: Refused) { throw e }
-                catch (_: Exception) { deny("UNSAFE_FILE") }
+                catch (_: Exception) { deny(WorkspaceDenialCodes.UNSAFE_FILE) }
                 return bytes
             } finally {
                 descendants.asReversed().forEach { it.close() }
@@ -323,9 +323,9 @@ class WorkspaceManager private constructor(
     private fun decode(bytes: ByteArray): String = try {
         StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
             .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(bytes)).toString()
-            .also { if ('\u0000' in it) deny("BINARY_FILE_DENIED") }
+            .also { if ('\u0000' in it) deny(WorkspaceDenialCodes.BINARY_FILE_DENIED) }
     } catch (e: Refused) { throw e }
-    catch (_: Exception) { deny("BINARY_FILE_DENIED") }
+    catch (_: Exception) { deny(WorkspaceDenialCodes.BINARY_FILE_DENIED) }
 
     /** Internal admission check. This does not consume the model's tool-call allowance. */
     /**
@@ -363,8 +363,8 @@ class WorkspaceManager private constructor(
         var data: ToolData? = null
         var size = 0
         try {
-            if (claimedExecutionId != null) deny("FORGED_TOOL_ID")
-            if (calls > maxCalls) deny("TOOL_QUOTA_EXCEEDED")
+            if (claimedExecutionId != null) deny(ToolDenialCodes.FORGED_TOOL_ID)
+            if (calls > maxCalls) deny(ToolDenialCodes.TOOL_QUOTA_EXCEEDED)
             ToolAuthorizationPolicy.authorizeRead(ReadAuthorizationFacts(
                 tool.name, allowed, denied
             )).deniedCode?.let(::deny)
@@ -377,7 +377,7 @@ class WorkspaceManager private constructor(
                 }
                 is WorkspaceTool.ListFiles -> {
                     val directory = relative(tool.directory, allowRoot = true)
-                    if (directory.isNotEmpty() && protected(directory)) deny("PROTECTED_PATH")
+                    if (directory.isNotEmpty() && protected(directory)) deny(ToolDenialCodes.PROTECTED_PATH)
                     val prefix = if (directory.isEmpty()) "" else "$directory/"
                     val paths = tree.keys.asSequence().filter {
                         it.startsWith(prefix) && permittedPath(it)
@@ -405,8 +405,8 @@ class WorkspaceManager private constructor(
                     var scanned = 0
                     var examined = 0
                     var truncated = false
-                    val skippable = setOf("UNSAFE_FILE", "UNSAFE_PATH_COMPONENT",
-                        "READ_LIMIT_EXCEEDED", "BINARY_FILE_DENIED")
+                    val skippable = setOf(WorkspaceDenialCodes.UNSAFE_FILE, WorkspaceDenialCodes.UNSAFE_PATH_COMPONENT,
+                        "READ_LIMIT_EXCEEDED", WorkspaceDenialCodes.BINARY_FILE_DENIED)
                     scan@ for (path in candidates) {
                         if (examined >= 256 || scanned >= 1024 * 1024) {
                             truncated = true
@@ -424,7 +424,7 @@ class WorkspaceManager private constructor(
                         val text = try {
                             decode(bytes)
                         } catch (e: Refused) {
-                            if (e.code != "BINARY_FILE_DENIED") throw e
+                            if (e.code != WorkspaceDenialCodes.BINARY_FILE_DENIED) throw e
                             skipped++
                             continue@scan
                         }

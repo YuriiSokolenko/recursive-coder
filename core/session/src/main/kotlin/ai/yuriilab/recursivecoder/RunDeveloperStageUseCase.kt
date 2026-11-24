@@ -113,8 +113,8 @@ class RunDeveloperStageUseCase(
     private fun stopped(command: DeveloperStageCommand): String? {
         val signals = command.cancellation.signals()
         return when {
-            signals.expired || !Instant.now(clock).isBefore(command.deadline) -> "ROLE_TIMED_OUT"
-            signals.requested -> "ROLE_CANCELLED"
+            signals.expired || !Instant.now(clock).isBefore(command.deadline) -> StageDenialCodes.ROLE_TIMED_OUT
+            signals.requested -> StageDenialCodes.ROLE_CANCELLED
             else -> null
         }
     }
@@ -154,10 +154,10 @@ class RunDeveloperStageUseCase(
             }
         } catch (_: Exception) {
             return DeveloperStageResult(null, null,
-                DeveloperStageOutcome.ReconciliationRequired("STAGE_FINISH_UNCONFIRMED", workspaceMayBeDirty))
+                DeveloperStageOutcome.ReconciliationRequired(StageDenialCodes.STAGE_FINISH_UNCONFIRMED, workspaceMayBeDirty))
         }
         if (!committed) return DeveloperStageResult(null, null,
-            DeveloperStageOutcome.ReconciliationRequired("STALE_STAGE_LEASE", workspaceMayBeDirty))
+            DeveloperStageOutcome.ReconciliationRequired(StageDenialCodes.STALE_STAGE_LEASE, workspaceMayBeDirty))
         emit(events, graph, lease.stageRunId, manifest, code)
         return DeveloperStageResult(graph, accepted, outcome)
     }
@@ -170,7 +170,7 @@ class RunDeveloperStageUseCase(
             withContext(NonCancellable + blockingDispatcher) { host.abortStage(lease, state) }
         } catch (_: Exception) { null }
             ?: return DeveloperStageResult(null, null,
-                DeveloperStageOutcome.ReconciliationRequired("STAGE_ABORT_UNCONFIRMED", workspaceMayBeDirty))
+                DeveloperStageOutcome.ReconciliationRequired(StageDenialCodes.STAGE_ABORT_UNCONFIRMED, workspaceMayBeDirty))
         emit(events, snapshot.graph, lease.stageRunId, code = code)
         return DeveloperStageResult(snapshot.graph, snapshot.acceptedIds,
             DeveloperStageOutcome.Failed(code, workspaceMayBeDirty))
@@ -250,12 +250,12 @@ class RunDeveloperStageUseCase(
                 )) != ToolAuthorizationDecision.Permit)
                 return denied("DEVELOPER_TARGET_NOT_AUTHORIZED")
         }
-        if (command.instruction.isBlank()) return denied("EMPTY_STAGE_INSTRUCTION")
+        if (command.instruction.isBlank()) return denied(StageDenialCodes.EMPTY_STAGE_INSTRUCTION)
         val ready = when (stage.state) {
             StageState.CREATED -> transition(original, id, StageState.READY, accepted)
-                ?: return denied("STAGE_NOT_READY")
+                ?: return denied(StageDenialCodes.STAGE_NOT_READY)
             StageState.READY -> original
-            else -> return denied("STAGE_NOT_READY")
+            else -> return denied(StageDenialCodes.STAGE_NOT_READY)
         }
         val admission = StageGraphPolicy.admitStage(ready, id, accepted)
         if (admission is StageGateDecision.Deny) return denied(admission.code)
@@ -293,22 +293,22 @@ class RunDeveloperStageUseCase(
         }
         for ((artifact, read) in inputReads) {
             if (read.isFailure) {
-                preflightDenials += "INPUT_READ_UNAVAILABLE"
+                preflightDenials += StageDenialCodes.INPUT_READ_UNAVAILABLE
                 continue
             }
             val bytes = read.getOrThrow()
             when {
-                bytes == null -> preflightDenials += "ARTIFACT_MISSING"
+                bytes == null -> preflightDenials += StageDenialCodes.ARTIFACT_MISSING
                 sha(bytes) != artifact.sha256 ->
-                    preflightDenials += "ARTIFACT_DIGEST_MISMATCH"
+                    preflightDenials += StageDenialCodes.ARTIFACT_DIGEST_MISMATCH
                 utf8(bytes) == null ->
-                    preflightDenials += "ARTIFACT_ENCODING_INVALID"
+                    preflightDenials += StageDenialCodes.ARTIFACT_ENCODING_INVALID
             }
         }
         val preflightPriority = listOf(
             "STALE_TARGET_BASELINE", "CREATE_TARGET_EXISTS", "TARGET_ENCODING_INVALID",
-            "ARTIFACT_MISSING", "ARTIFACT_DIGEST_MISMATCH", "ARTIFACT_ENCODING_INVALID",
-            "TARGET_READ_UNAVAILABLE", "INPUT_READ_UNAVAILABLE"
+            StageDenialCodes.ARTIFACT_MISSING, StageDenialCodes.ARTIFACT_DIGEST_MISMATCH, StageDenialCodes.ARTIFACT_ENCODING_INVALID,
+            "TARGET_READ_UNAVAILABLE", StageDenialCodes.INPUT_READ_UNAVAILABLE
         )
         preflightPriority.firstOrNull { it in preflightDenials }?.let { return denied(it) }
         val instruction = buildString {
@@ -338,7 +338,7 @@ class RunDeveloperStageUseCase(
             }
         }
         if (instruction.toByteArray(Charsets.UTF_8).size > StageRoleLimits.MAX_INSTRUCTION_BYTES)
-            return denied("STAGE_INPUT_TOO_LARGE")
+            return denied(StageDenialCodes.STAGE_INPUT_TOO_LARGE)
         stopped(command)?.let { return denied(it) }
         val lease = try {
             withContext(NonCancellable + blockingDispatcher) {
@@ -346,8 +346,8 @@ class RunDeveloperStageUseCase(
             }
         } catch (_: Exception) {
             return DeveloperStageResult(null, null,
-                DeveloperStageOutcome.ReconciliationRequired("STAGE_BEGIN_UNCONFIRMED", false))
-        } ?: return denied("STAGE_ADMISSION_REVOKED")
+                DeveloperStageOutcome.ReconciliationRequired(StageDenialCodes.STAGE_BEGIN_UNCONFIRMED, false))
+        } ?: return denied(StageDenialCodes.STAGE_ADMISSION_REVOKED)
         val running = lease.graph
         val validLease = try {
             running == update(ready, id, StageState.RUNNING) &&
@@ -356,7 +356,7 @@ class RunDeveloperStageUseCase(
                 withContext(NonCancellable + blockingDispatcher) { host.current(lease) }
         } catch (_: Exception) { false }
         if (!validLease) return withContext(NonCancellable) {
-            abort(lease, StageState.FAILED, "INVALID_STAGE_LEASE", events, false)
+            abort(lease, StageState.FAILED, StageDenialCodes.INVALID_STAGE_LEASE, events, false)
         }
         emit(events, running, id)
         var workspaceMayBeDirty = false
@@ -377,11 +377,11 @@ class RunDeveloperStageUseCase(
             if (stopped(command) != null) return stopped(command)
             val current = captureHostCall {
                 withContext(blockingDispatcher) { host.current(lease) }
-            }.getOrElse { return "STAGE_AUTHORITY_UNAVAILABLE" }
-            return if (current) null else "STALE_STAGE_LEASE"
+            }.getOrElse { return StageDenialCodes.STAGE_AUTHORITY_UNAVAILABLE }
+            return if (current) null else StageDenialCodes.STALE_STAGE_LEASE
         }
         suspend fun halted(code: String): DeveloperStageResult = terminal(code,
-            if (code == "ROLE_CANCELLED" || code == "ROLE_TIMED_OUT")
+            if (code == StageDenialCodes.ROLE_CANCELLED || code == StageDenialCodes.ROLE_TIMED_OUT)
                 StageState.CANCELLED else StageState.FAILED)
 
         try {
@@ -394,13 +394,13 @@ class RunDeveloperStageUseCase(
             checkpoint()?.let { return halted(it) }
             if (proposal.correlation != stage.correlation ||
                 proposal.role != EngineeringRole.DEVELOPER || proposal.agentId != stage.agentId)
-                return terminal("ROLE_RESULT_IDENTITY_MISMATCH")
+                return terminal(StageDenialCodes.ROLE_RESULT_IDENTITY_MISMATCH)
             val proposed = when (val outcome = proposal.outcome) {
                 is StageRoleOutcome.Proposed -> outcome.text
                 is StageRoleOutcome.Denied -> return terminal(outcome.code)
                 is StageRoleOutcome.Failed -> return terminal(outcome.code)
-                StageRoleOutcome.Cancelled -> return halted("ROLE_CANCELLED")
-                StageRoleOutcome.TimedOut -> return halted("ROLE_TIMED_OUT")
+                StageRoleOutcome.Cancelled -> return halted(StageDenialCodes.ROLE_CANCELLED)
+                StageRoleOutcome.TimedOut -> return halted(StageDenialCodes.ROLE_TIMED_OUT)
             }
             val usage = proposal.usage
             // Copy cross-module nullable properties into stable locals for smart casts.
@@ -429,17 +429,17 @@ class RunDeveloperStageUseCase(
             val authority = lease.authority
             val snapshot = captureHostCall {
                 withContext(blockingDispatcher) { authority.current() }
-            }.getOrElse { return terminal("STAGE_AUTHORITY_UNAVAILABLE") }
-                ?: return terminal("STAGE_AUTHORITY_UNAVAILABLE")
+            }.getOrElse { return terminal(StageDenialCodes.STAGE_AUTHORITY_UNAVAILABLE) }
+                ?: return terminal(StageDenialCodes.STAGE_AUTHORITY_UNAVAILABLE)
             if (snapshot.graph != running || snapshot.stageRunId != id ||
                 snapshot.requestId != stage.correlation.requestId ||
                 snapshot.hostAcceptedArtifactIds != accepted ||
-                !live(lease, snapshot)) return terminal("STAGE_AUTHORITY_MISMATCH")
+                !live(lease, snapshot)) return terminal(StageDenialCodes.STAGE_AUTHORITY_MISMATCH)
             val checks = snapshot.requiredChecks
             if (ToolAuthorizationPolicy.admitRequiredChecks(EngineeringRole.DEVELOPER, checks)
                     != ToolAuthorizationDecision.Permit ||
                 checks.any { it != StageCheckIds.GIT_DIFF_CHECK && it !in snapshot.checks })
-                return terminal("STAGE_CHECKS_REQUIRED")
+                return terminal(StageDenialCodes.STAGE_CHECKS_REQUIRED)
             checkpoint()?.let { return halted(it) }
             val opened = withContext(blockingDispatcher) { tools.open(authority) }
             if (opened is StageToolOpenResult.Denied) return terminal(opened.code)
@@ -458,30 +458,30 @@ class RunDeveloperStageUseCase(
                     workspaceMayBeDirty = true
                     val write = session.write(writes + StageWrite.Create(command.manifestPath, manifestText))
                     if (!write.permitted) {
-                        checkDenial = write.deniedCode ?: "STAGE_WRITE_FAILED"
+                        checkDenial = write.deniedCode ?: StageDenialCodes.STAGE_WRITE_FAILED
                         return@withContext null
                     }
                     writeToolId = write.toolId
                     for (check in checks.sorted()) {
                         checkDenial = checkpoint() ?: if (!live(lease, snapshot))
-                            "STALE_STAGE_AUTHORITY" else null
+                            StageDenialCodes.STALE_STAGE_AUTHORITY else null
                         if (checkDenial != null) return@withContext null
                         val evidence = session.runCheck(check)
                         if (!evidence.passed) {
-                            checkDenial = evidence.deniedCode ?: "STAGE_CHECK_FAILED"
+                            checkDenial = evidence.deniedCode ?: StageDenialCodes.STAGE_CHECK_FAILED
                             return@withContext null
                         }
                         checked += evidence
                     }
                     checkDenial = checkpoint() ?: if (!live(lease, snapshot))
-                        "STALE_STAGE_AUTHORITY" else null
+                        StageDenialCodes.STALE_STAGE_AUTHORITY else null
                     if (checkDenial != null) return@withContext null
                     session.verify()
                 }
             }
             checkpoint()?.let { return halted(it) }
-            if (!live(lease, snapshot)) return terminal("STALE_STAGE_AUTHORITY")
-            if (verified == null) return terminal(checkDenial ?: "STAGE_TOOL_VALIDATION_FAILED")
+            if (!live(lease, snapshot)) return terminal(StageDenialCodes.STALE_STAGE_AUTHORITY)
+            if (verified == null) return terminal(checkDenial ?: StageDenialCodes.STAGE_TOOL_VALIDATION_FAILED)
             if (!verified.successful || verified.correlation != stage.correlation ||
                 verified.actor != stage.agentId || verified.requiredChecks != checked ||
                 checked.map { it.checkId }.toSet() != checks ||
@@ -489,7 +489,7 @@ class RunDeveloperStageUseCase(
                 checked.map { it.manifestHash }.toSet().size != 1 ||
                 checked.map { it.toolId }.toSet().size != checked.size ||
                 writeToolId == null || writeToolId in checked.map { it.toolId })
-                return terminal("STAGE_VALIDATION_FAILED")
+                return terminal(StageDenialCodes.STAGE_VALIDATION_FAILED)
 
             suspend fun verificationFailure(): String? {
                 val outputChecks: List<Pair<String, (ByteArray?) -> Boolean>> = changed.map { file ->
@@ -510,8 +510,8 @@ class RunDeveloperStageUseCase(
                 }
                 return when {
                     HostReadVerification.CHANGED in listOf(output, input) -> "FROZEN_INPUT_OR_OUTPUT_CHANGED"
-                    output == HostReadVerification.UNAVAILABLE -> "OUTPUT_READ_UNAVAILABLE"
-                    input == HostReadVerification.UNAVAILABLE -> "INPUT_READ_UNAVAILABLE"
+                    output == HostReadVerification.UNAVAILABLE -> StageDenialCodes.OUTPUT_READ_UNAVAILABLE
+                    input == HostReadVerification.UNAVAILABLE -> StageDenialCodes.INPUT_READ_UNAVAILABLE
                     else -> null
                 }
             }
@@ -520,7 +520,7 @@ class RunDeveloperStageUseCase(
                 StageArtifactKind.IMPLEMENTATION, command.manifestPath,
                 sha(manifestText.toByteArray(Charsets.UTF_8)), EngineeringRole.DEVELOPER,
                 id, 1L, ArtifactApproval.DRAFT, ArtifactFreeze.EDITABLE)
-            if (!live(lease, snapshot)) return terminal("STALE_STAGE_AUTHORITY")
+            if (!live(lease, snapshot)) return terminal(StageDenialCodes.STALE_STAGE_AUTHORITY)
             val decision = try {
                 withContext(blockingDispatcher) {
                     val remaining = Duration.between(Instant.now(clock), command.deadline).toMillis()
@@ -530,17 +530,17 @@ class RunDeveloperStageUseCase(
             } catch (failure: Exception) {
                 ensureHostCallerActive(failure)
                 stopped(command)?.let { return halted(it) }
-                return terminal("HOST_APPROVAL_UNAVAILABLE")
+                return terminal(StageDenialCodes.HOST_APPROVAL_UNAVAILABLE)
             }
-            if (decision == null) return halted("ROLE_TIMED_OUT")
+            if (decision == null) return halted(StageDenialCodes.ROLE_TIMED_OUT)
             checkpoint()?.let { return halted(it) }
             val verification = verificationFailure()
-            if (!live(lease, snapshot)) return terminal("STALE_STAGE_AUTHORITY")
+            if (!live(lease, snapshot)) return terminal(StageDenialCodes.STALE_STAGE_AUTHORITY)
             verification?.let { return terminal(it) }
             if (decision == PreparationApproval.HUMAN_REVIEW_REQUIRED)
                 return terminal("DEVELOPER_HUMAN_APPROVAL_REQUIRED")
             if (decision == PreparationApproval.REJECT)
-                return terminal("HOST_REJECTED", StageState.REJECTED)
+                return terminal(StageDenialCodes.HOST_REJECTED, StageState.REJECTED)
 
             val draft = running.copy(
                 stages = running.stages.map {
@@ -550,7 +550,7 @@ class RunDeveloperStageUseCase(
                 artifacts = running.artifacts + candidate
             )
             if (StageGraphPolicy.validate(draft) != StageGateDecision.Permit)
-                return terminal("INVALID_STAGE_MANIFEST")
+                return terminal(StageDenialCodes.INVALID_STAGE_MANIFEST)
             val frozen = candidate.copy(approval = ArtifactApproval.ACCEPTED,
                 freeze = ArtifactFreeze.FROZEN)
             val approved = draft.copy(artifacts = draft.artifacts.map {
@@ -558,7 +558,7 @@ class RunDeveloperStageUseCase(
             })
             val acceptedIds = accepted + frozen.id
             val completed = transition(approved, id, StageState.ACCEPTED, acceptedIds)
-                ?: return terminal("STAGE_ACCEPTANCE_DENIED")
+                ?: return terminal(StageDenialCodes.STAGE_ACCEPTANCE_DENIED)
             return finish(lease, completed, acceptedIds, DeveloperStageOutcome.Accepted(
                 frozen, changed, requireNotNull(writeToolId), verified, usage
             ), events, frozen, workspaceMayBeDirty = workspaceMayBeDirty)
@@ -569,7 +569,7 @@ class RunDeveloperStageUseCase(
                 return terminal("DEVELOPER_STAGE_FAILED")
             }
             withContext(NonCancellable) {
-                try { terminal("ROLE_CANCELLED", StageState.CANCELLED) }
+                try { terminal(StageDenialCodes.ROLE_CANCELLED, StageState.CANCELLED) }
                 catch (cleanup: Exception) {
                     if (cleanup !== cancelled) cancelled.addSuppressed(cleanup)
                 }

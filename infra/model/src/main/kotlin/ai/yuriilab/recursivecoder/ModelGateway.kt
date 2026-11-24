@@ -22,12 +22,12 @@ object ModelGateways {
             override fun negotiate(
                 config: ModelConfig, cancellation: Cancellation, deadline: Instant
             ): GatewayCapabilities =
-                throw Refused("UNSUPPORTED_MODEL", "provider", "Unknown model provider")
+                throw Refused(ModelDenialCodes.UNSUPPORTED_MODEL, "provider", "Unknown model provider")
             override fun next(
                 config: ModelConfig, task: Path, observed: Pair<Int, String>?,
                 cancellation: Cancellation, deadline: Instant, allowRetry: Boolean
             ): ModelTurn =
-                throw Refused("UNSUPPORTED_MODEL", "provider", "Unknown model provider")
+                throw Refused(ModelDenialCodes.UNSUPPORTED_MODEL, "provider", "Unknown model provider")
         }
     }
 }
@@ -37,7 +37,7 @@ class FakeModel(private val delayMs: Long = 0) : ModelGateway {
     override fun negotiate(config: ModelConfig, cancellation: Cancellation, deadline: Instant): GatewayCapabilities {
         if (config.provider != ModelProviderIds.FAKE || config.modelId != ModelProviderIds.FAKE_MODEL_ID ||
             config.features != setOf(ModelFeatureIds.TOOL_CALLS))
-            throw Refused("UNSUPPORTED_MODEL", "provider", "Unsupported fake model configuration")
+            throw Refused(ModelDenialCodes.UNSUPPORTED_MODEL, "provider", "Unsupported fake model configuration")
         cancellation.check(deadline)
         return GatewayCapabilities(setOf(ModelFeatureIds.TOOL_CALLS), config.contextTokens, config.maxOutputTokens)
     }
@@ -72,10 +72,10 @@ class OpenAICompatibleGateway(
 
     override fun negotiate(config: ModelConfig, cancellation: Cancellation, deadline: Instant): GatewayCapabilities {
         if (config.modelId in setOf(".", ".."))
-            throw Refused("UNSUPPORTED_MODEL", "provider", "Invalid model identifier")
+            throw Refused(ModelDenialCodes.UNSUPPORTED_MODEL, "provider", "Invalid model identifier")
         if (config.provider != ModelProviderIds.OPENAI_COMPATIBLE || ModelFeatureIds.TOOL_CALLS !in config.features ||
             !supported.containsAll(config.features) || config.maxOutputTokens >= config.contextTokens)
-            throw Refused("UNSUPPORTED_MODEL", "provider", "Unsupported model feature selection")
+            throw Refused(ModelDenialCodes.UNSUPPORTED_MODEL, "provider", "Unsupported model feature selection")
         val response = send(client(config), request(config, "models/" + encode(config.modelId), "GET", null),
             config, cancellation, deadline, retryable = true)
         val record = parseObject(response.body)

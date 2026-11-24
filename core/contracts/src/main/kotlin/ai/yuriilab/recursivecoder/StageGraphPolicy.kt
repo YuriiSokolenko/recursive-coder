@@ -171,7 +171,7 @@ object StageGraphPolicy {
         if (graph.state != StageGraphState.RUNNING)
             return deny("GRAPH_NOT_RUNNING")
         if (stage.state != StageState.READY || stage.supersededBy != null)
-            return deny("STAGE_NOT_READY")
+            return deny(StageDenialCodes.STAGE_NOT_READY)
         if (stage.agentId == null)
             return deny("MISSING_STAGE_ACTOR")
         val stages = graph.stages.associateBy { it.correlation.stageRunId }

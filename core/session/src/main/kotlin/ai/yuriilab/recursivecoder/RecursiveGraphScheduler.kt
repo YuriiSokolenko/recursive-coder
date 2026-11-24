@@ -495,7 +495,7 @@ class RecursiveGraphScheduler(
                 val node = snapshot.node(id)
                     ?: return@synchronized null to RecursiveExecutionOutcome.Denied("UNKNOWN_STAGE")
                 val denial = when {
-                    node.state != RecursiveNodeState.READY -> "STAGE_NOT_READY"
+                    node.state != RecursiveNodeState.READY -> StageDenialCodes.STAGE_NOT_READY
                     !clock.instant().isBefore(limits.deadline) -> "GLOBAL_DEADLINE"
                     !clock.instant().isBefore(node.deadline) -> "STAGE_DEADLINE"
                     node.dependencies.any {

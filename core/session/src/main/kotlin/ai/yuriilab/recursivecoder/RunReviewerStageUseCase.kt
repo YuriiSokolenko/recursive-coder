@@ -83,8 +83,8 @@ class RunReviewerStageUseCase(
     private fun stopped(command: ReviewerStageCommand): String? {
         val signals = command.cancellation.signals()
         return when {
-            signals.expired || !Instant.now(clock).isBefore(command.deadline) -> "ROLE_TIMED_OUT"
-            signals.requested -> "ROLE_CANCELLED"
+            signals.expired || !Instant.now(clock).isBefore(command.deadline) -> StageDenialCodes.ROLE_TIMED_OUT
+            signals.requested -> StageDenialCodes.ROLE_CANCELLED
             else -> null
         }
     }
@@ -134,7 +134,7 @@ class RunReviewerStageUseCase(
             it.correlation.stageRunId == id && it.kind == StageKind.REVIEW &&
                 it.supersededBy == null && it.review == null
         } ?: return denied("UNSUPPORTED_REVIEW_STAGE")
-        if (command.instruction.isBlank()) return denied("EMPTY_STAGE_INSTRUCTION")
+        if (command.instruction.isBlank()) return denied(StageDenialCodes.EMPTY_STAGE_INSTRUCTION)
         val ready = when (stage.state) {
             StageState.CREATED -> {
                 val transition = StageGraphPolicy.authorizeStageTransition(
@@ -146,7 +146,7 @@ class RunReviewerStageUseCase(
                 })
             }
             StageState.READY -> original
-            else -> return denied("STAGE_NOT_READY")
+            else -> return denied(StageDenialCodes.STAGE_NOT_READY)
         }
         val gate = StageGraphPolicy.admitStage(ready, id, accepted)
         if (gate is StageGateDecision.Deny) return denied(gate.code)
@@ -167,8 +167,8 @@ class RunReviewerStageUseCase(
          */
         suspend fun abort(
             code: String,
-            terminal: StageState = if (code == "ROLE_TIMED_OUT" ||
-                code == "ROLE_CANCELLED") StageState.CANCELLED else StageState.FAILED,
+            terminal: StageState = if (code == StageDenialCodes.ROLE_TIMED_OUT ||
+                code == StageDenialCodes.ROLE_CANCELLED) StageState.CANCELLED else StageState.FAILED,
             denialCode: String? = null
         ): ReviewerStageResult {
             val snapshot = try {
@@ -273,8 +273,8 @@ class RunReviewerStageUseCase(
                 append(" Frozen specification/test revisions require NEEDS_HUMAN.")
                 for (artifact in requiredInputs + manifest) {
                     val bytes = host.readBytes(artifact.declaredPath)
-                        ?: return abort("ARTIFACT_MISSING")
-                    val body = utf8(bytes) ?: return abort("ARTIFACT_ENCODING_INVALID")
+                        ?: return abort(StageDenialCodes.ARTIFACT_MISSING)
+                    val body = utf8(bytes) ?: return abort(StageDenialCodes.ARTIFACT_ENCODING_INVALID)
                     append("\n<artifact kind=\"").append(artifact.kind.name)
                         .append("\" sha256=\"").append(artifact.sha256).append("\">\n")
                     append(escaped(body)).append("\n</artifact>")
@@ -331,8 +331,8 @@ class RunReviewerStageUseCase(
                 is StageRoleOutcome.Proposed -> outcome.text
                 is StageRoleOutcome.Denied -> return abort("REVIEW_ROLE_DENIED")
                 is StageRoleOutcome.Failed -> return abort("REVIEW_ROLE_FAILED")
-                StageRoleOutcome.Cancelled -> return abort("ROLE_CANCELLED")
-                StageRoleOutcome.TimedOut -> return abort("ROLE_TIMED_OUT")
+                StageRoleOutcome.Cancelled -> return abort(StageDenialCodes.ROLE_CANCELLED)
+                StageRoleOutcome.TimedOut -> return abort(StageDenialCodes.ROLE_TIMED_OUT)
             }
             val usage = proposal.usage
             val inputTokens = usage.inputTokens
@@ -406,7 +406,7 @@ class RunReviewerStageUseCase(
             return ReviewerStageResult(updated, accepted, outcome, spentUsage)
         } catch (cancelled: CancellationException) {
             withContext(NonCancellable) {
-                try { abort("ROLE_CANCELLED") }
+                try { abort(StageDenialCodes.ROLE_CANCELLED) }
                 catch (cleanup: Exception) {
                     if (cleanup !== cancelled) cancelled.addSuppressed(cleanup)
                 }
