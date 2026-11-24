@@ -28,6 +28,8 @@
 
 Production dependencies point from the composition root and adapters toward the core contracts; no core module depends on the CLI, Koog, or the HTTP model implementation. The concrete workspace opener, model provider and JSONL EventSink are injected by `:app:cli` using Koin factories and constructor injection; the opt-in durable ledger, [atomic checkpoint store](SESSION_CHECKPOINTS.md) and [fenced admission](FENCED_RESUME.md) are not wired into the default CLI; see also [durable event ledger](DURABLE_EVENT_LEDGER.md). Koin is not present in any core module. The scheduler accepts a `TaskRunner` instead of constructing a model adapter. Session Protocol JSON Schema and fixtures remain at the repository root under `contracts/v1/` and continue to be validated independently by Node/Python CI.
 
+The [semantic vocabulary inventory](SEMANTIC_VOCABULARY.md) (#194) documents the ownership convention for shared protocol and domain literals without adding module dependencies or coupling independent schema checks to Kotlin definitions.
+
 ## Shared JVM package audit and JPMS migration boundary (issue #52)
 
 All nine product Gradle modules place Kotlin production classes in

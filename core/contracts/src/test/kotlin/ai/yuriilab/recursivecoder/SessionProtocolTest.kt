@@ -19,6 +19,14 @@ class SessionProtocolTest {
     }
 
     @Test
+    fun invocationVocabularyRetainsV1WireValues() {
+        // Independent literals intentionally detect accidental wire changes.
+        assertEquals("cli", SessionProtocol.INVOCATION_SOURCE_CLI)
+        assertEquals("scheduler", SessionProtocol.INVOCATION_SOURCE_SCHEDULER)
+        assertEquals(1L, SessionProtocol.FIRST_INVOCATION_ATTEMPT)
+    }
+
+    @Test
     fun terminalResultCodecRejectsUnknownStatusesSafely() {
         val expected = mapOf(
             "succeeded" to SessionOutcome.SUCCEEDED,

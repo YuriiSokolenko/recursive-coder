@@ -14,6 +14,16 @@ Keep task execution, session state, authorization, tool runtime, checkpoints, an
 
 Documentation describing planned behavior must explicitly distinguish it from working functionality.
 
+## Semantic constants and wire vocabulary
+
+- Put shared Session Protocol vocabulary in `:core:contracts`, preferably next to the corresponding contract (for example, `SessionProtocol`). Define domain values in the owning domain, and keep implementation-only constants private or internal to the adapter or build tool that owns them.
+- Reuse existing typed values or enums for closed domain sets; explicitly encode stable wire strings at boundaries and reject unsupported values according to the existing policy. A schema-reserved value does not imply runtime support.
+- Extract repeated literals when they represent the same semantic value or invariant, not just because their spelling or number happens to match. Avoid generic constants containers and new dependencies across architectural boundaries.
+- Keep independent schema examples, compatibility assertions, negative fixtures and test oracles literal so that unintended changes are visible. Human-facing prose, self-explanatory local values, and independently owned external API keys need no shared constant.
+- Keep build and tooling vocabulary in its own ownership boundary; do not import production Kotlin definitions into Python or JavaScript verifiers. Review drift across languages using independent tests, not shared expected values.
+
+See the [semantic vocabulary inventory](docs/architecture/SEMANTIC_VOCABULARY.md) for the staged cleanup tracked by #194.
+
 ## JVM test tiers
 
 Every JUnit Jupiter test must have an effective `@Tag("unit")`, `@Tag("integration")` or `@Tag("e2e")`. Apply it to the test class for a uniform suite, or to individual methods when appropriate. Pure `unit` tests use only in-memory inputs and fakes; anything invoking a file, Git, HTTP, socket, subprocess or Koog belongs to a higher tier. A class tagged `integration` may give one method `e2e`; the focused integration suite excludes that method.

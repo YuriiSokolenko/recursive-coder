@@ -4,7 +4,7 @@ import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
 import kotlin.test.*
 
-/** No disk, model or CLI is required to verify Task protocol boundary failures. */
+/** No disk, model or CLI is required to verify Task submission boundary failures. */
 @Tag("unit")
 class TaskRequestMapperUnitTest {
     @Test fun invalidInboundEnvelopesAreRejectedBeforeCreatingTasks() {
