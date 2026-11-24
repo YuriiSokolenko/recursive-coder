@@ -131,6 +131,24 @@ def _c3_method_name(owner, name):
     return name
 
 
+# Kotlin's no-op fault callback is lowered to a private static lambda body.
+# It is not an alternative privileged entry. Keep this exception confined to
+# a real declaration of that exact helper shape in the ledger itself.
+_C3_LEDGER_CALLBACK = re.compile(r"appendTrustedAcceptedRunning\$lambda\$[0-9]+")
+_C3_LEDGER_CALLBACK_DESCRIPTOR = "(Ljava/lang/String;)Lkotlin/Unit;"
+_ACC_PRIVATE = 0x0002
+_ACC_STATIC = 0x0008
+
+
+def _is_ledger_callback(info, target, name, descriptor):
+    return (info.name == target == _C3_LEDGER and
+            descriptor == _C3_LEDGER_CALLBACK_DESCRIPTOR and
+            any(m.name == name and m.descriptor == descriptor and
+                m.flags & (_ACC_PRIVATE | _ACC_STATIC) == (_ACC_PRIVATE | _ACC_STATIC) and
+                not any(a.name == _C3_MARKER for a in m.annotations)
+                for m in info.methods))
+
+
 def c3_boundary_violations(info):
     issues = []
     owner = info.name
@@ -165,6 +183,10 @@ def c3_boundary_violations(info):
     if owner != _C3_HOST and _C3_PORT in info.interfaces:
         issues.append(f"Unapproved C3 port implementation: {owner}")
     for target, name, descriptor in sorted(info.method_references | info.method_handle_references):
+        if target == _C3_LEDGER and _C3_LEDGER_CALLBACK.fullmatch(name):
+            if not _is_ledger_callback(info, target, name, descriptor):
+                issues.append(f"Unapproved C3 JVM callback: {owner} -> {target}.{name}{descriptor}")
+            continue
         key = (target, _c3_method_name(target, name))
         if key in _C3_CALLERS and owner not in _C3_CALLERS[key]:
             issues.append(f"Unapproved C3 JVM call: {owner} -> {target}.{name}{descriptor}")

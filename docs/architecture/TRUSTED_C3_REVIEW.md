@@ -2,8 +2,8 @@
 
 Status: **proposal requiring independent security review**, not approval to remove
 the existing source pins from dev. Review the security controls and the subsequent
-constant migration separately. This branch depends on #206; merge/rebase order is
-#206 first, then the reviewed replacement candidate. Do not close #194 or #207
+constant migration separately. PR #206 has been squash-merged into dev at
+`cc338ee`; this candidate is rebased onto that exact tree. Do not close #194 or #207
 solely because this branch exists.
 
 ## Threat model and inventory
@@ -27,7 +27,9 @@ runner write access cannot be made safe by a check in that same repository.
 Expected compiled call edges: runtime to marked port, host adapter to marked
 handoff, handoff to ledger trusted append, ledger to its own marked fault seam.
 No ordinary production caller of the runtime entry or C3 host constructor is
-approved. The module graph remains core:session -> core:contracts and
+approved. The ledger's Kotlin-generated no-op callback may only be referenced
+by the ledger itself with a matching private static method declaration and
+exact callback descriptor; it does not exempt the privileged append entry. The module graph remains core:session -> core:contracts and
 infra:journal -> core:session/core:contracts; no new production edges.
 
 ## Existing guarantee and proposed replacement

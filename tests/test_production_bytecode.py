@@ -56,6 +56,46 @@ class ProductionBytecodeGateTest(unittest.TestCase):
                             "TrustedSessionRunningHost.publishAcceptedRunning" in x
                             for x in issues), issues)
 
+    def test_c3_ledger_callback_requires_private_static_same_class_declaration(self):
+        package = "ai/yuriilab/recursivecoder/"
+        ledger = package + "DurableSessionEventLedger"
+        marker = SimpleNamespace(name=package + "TrustedRunningBoundaryApi", values={})
+        descriptor = "(Ljava/lang/String;)Lkotlin/Unit;"
+        callback = SimpleNamespace(name="appendTrustedAcceptedRunning$lambda$0",
+                                   descriptor=descriptor, flags=0x000a, annotations=[])
+        entries = [
+            SimpleNamespace(name="appendTrustedAcceptedRunning$journal",
+                            annotations=[marker], descriptor="()V", flags=1),
+            SimpleNamespace(name="appendTrustedRunningWithFault$journal",
+                            annotations=[marker], descriptor="()V", flags=1),
+        ]
+        target = (ledger, callback.name, descriptor)
+        info = SimpleNamespace(name=ledger, module="infra/journal",
+                               annotations=[], methods=entries + [callback],
+                               interfaces=[], superclass="java/lang/Object", flags=0,
+                               method_references={target}, method_handle_references={target})
+        self.assertEqual([], c3_boundary_violations(info))
+        callback.flags = 0x0009  # public static is not a private helper
+        self.assertTrue(any("Unapproved C3 JVM callback" in x
+                            for x in c3_boundary_violations(info)))
+        callback.flags = 0x000a
+        info.methods = entries
+        self.assertTrue(any("Unapproved C3 JVM callback" in x
+                            for x in c3_boundary_violations(info)))
+        info.name = package + "DurableAcceptedRunningHandoff"
+        info.annotations = [marker]
+        info.methods = []
+        self.assertTrue(any("Unapproved C3 JVM callback" in x
+                            for x in c3_boundary_violations(info)))
+        # The real privileged method is not exempted for a ledger self-call.
+        info.name = ledger
+        info.annotations = []
+        info.methods = entries
+        info.method_references = {(ledger, "appendTrustedAcceptedRunning$journal", "()V")}
+        info.method_handle_references = set()
+        self.assertTrue(any("Unapproved C3 JVM call" in x
+                            for x in c3_boundary_violations(info)))
+
     def test_c3_jvm_direct_and_method_handle_calls_are_denied(self):
         package = "ai/yuriilab/recursivecoder/"
         target = (package + "TrustedSessionRunningHost", "publishAcceptedRunning", "()V")
