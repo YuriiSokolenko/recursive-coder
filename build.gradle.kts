@@ -13,9 +13,22 @@ val testTierGuard = tasks.register<Exec>("checkTestTiers") {
     workingDir(rootDir)
     commandLine("python3", "tools/check_test_tiers.py", "--root", rootDir.absolutePath)
 }
+// The root check lifecycle runs this single guard after testClasses in every JVM
+// subproject; no per-module check dependency is needed. Legacy test is unfiltered.
+tasks.named("check") { dependsOn(testTierGuard) }
+
 gradle.projectsEvaluated {
     val javaModules = rootProject.subprojects.filter { it.plugins.hasPlugin("java") }
         .sortedBy { it.path }
+    tasks.register("printTestTierModules") {
+        group = "verification"
+        // Independent project inventory: every configured project with a
+        // testClasses task, not the guard's javaModules selection.
+        val expected = rootProject.subprojects
+            .filter { "testClasses" in it.tasks.names }
+            .map { it.path + ":testClasses" }.sorted()
+        doLast { expected.forEach { println("TEST_TIER_MODULE=" + it) } }
+    }
     testTierGuard.configure {
         javaModules.forEach { module ->
             dependsOn(module.tasks.named("testClasses"))

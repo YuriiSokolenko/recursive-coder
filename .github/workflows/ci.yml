@@ -45,8 +45,38 @@ jobs:
           python3 --version
       - name: Require locked root and standalone build-logic dependencies
         run: python3 -I tools/check_dependency_verification.py
-      - name: Verify architecture and run pure unit tests
-        run: ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g checkArchitecture checkTestTiers unitTest --stacktrace
+      - name: Verify architecture, root check and pure unit tests
+        # checkTestTiers is a dependency of the single root check; -x test
+        # preserves the separate full unfiltered JVM/sandbox job.
+        run: ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g checkArchitecture check unitTest -x test --stacktrace
+      - name: Assert root check schedules test-tier verification exactly once
+        run: |
+          ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --offline --console=plain check --dry-run > "$RUNNER_TEMP/check-task-plan.log"
+          ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --offline --console=plain -q printTestTierModules > "$RUNNER_TEMP/check-expected-modules.log"
+          ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --offline --console=plain :checkTestTiers --dry-run > "$RUNNER_TEMP/guard-task-plan.log"
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          plan = (Path(os.environ["RUNNER_TEMP"]) / "check-task-plan.log").read_text()
+          guard_plan = (Path(os.environ["RUNNER_TEMP"]) / "guard-task-plan.log").read_text()
+          count = sum(line.strip() == ":checkTestTiers SKIPPED" for line in plan.splitlines())
+          if count != 1:
+              raise SystemExit(f"Root Gradle check must schedule checkTestTiers once; found {count}")
+          expected = {
+              line.removeprefix("TEST_TIER_MODULE=")
+              for line in (Path(os.environ["RUNNER_TEMP"]) / "check-expected-modules.log").read_text().splitlines()
+              if line.startswith("TEST_TIER_MODULE=")
+          }
+          actual = {
+              line.strip().removesuffix(" SKIPPED")
+              for line in guard_plan.splitlines()
+              if line.strip().endswith(":testClasses SKIPPED")
+          }
+          if not expected or actual != expected:
+              raise SystemExit(f"Wrong testClasses graph: missing={sorted(expected - actual)}, unexpected={sorted(actual - expected)}")
+          print("Verified root check schedules one guard and the guard alone schedules all testClasses")
+          PY
       - name: Prove trusted running host opt-in at the Kotlin compiler boundary
         run: ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g :infra:journal:verifyRunningHostOptIn --stacktrace
       - name: Test independent architecture graph verifier
@@ -60,6 +90,8 @@ jobs:
           grep -F 'Reusing configuration cache.' /tmp/architecture-cache-second.log
       - name: Reject illegal edges, cycles and stale configuration-cache snapshots
         run: python3 -m unittest discover -s tests -p 'test_architecture_gradle.py' -v
+      - name: Validate actual Kotlin-generated test tier fixtures
+        run: ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g :core:contracts:checkKotlinTierFixtures --stacktrace
       - name: Validate test tier guard against negative bytecode fixtures
         run: |
           python3 - <<'PY'
