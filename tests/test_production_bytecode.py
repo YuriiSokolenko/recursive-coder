@@ -12,7 +12,8 @@ from zipfile import ZipFile
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 from check_production_bytecode import (
-    compiled_classes, validate_launch_scripts, validate_module_jar, violations_for_class
+    c3_boundary_violations, compiled_classes, validate_launch_scripts, validate_module_jar,
+    violations_for_class
 )
 
 
@@ -33,6 +34,151 @@ class ProductionBytecodeGateTest(unittest.TestCase):
                                 text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         return self.classes / "Example.class"
+
+    def test_c3_compiler_emitted_calls_and_handles_are_rejected(self):
+        source = self.module / "C3Fixture.java"
+        source.write_text("""
+            package ai.yuriilab.recursivecoder;
+            interface TrustedSessionRunningHost { void publishAcceptedRunning(); }
+            class C3Fixture {
+                void direct(TrustedSessionRunningHost host) { host.publishAcceptedRunning(); }
+                Runnable indirect(TrustedSessionRunningHost host) {
+                    return host::publishAcceptedRunning;
+                }
+            }
+        """, encoding="utf-8")
+        result = subprocess.run(["javac", "-d", str(self.classes), str(source)],
+                                text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        cls = self.classes / "ai/yuriilab/recursivecoder/C3Fixture.class"
+        issues = violations_for_class(cls, "core/tasks")
+        self.assertTrue(any("Unapproved C3 JVM call" in x and
+                            "TrustedSessionRunningHost.publishAcceptedRunning" in x
+                            for x in issues), issues)
+
+    def test_c3_ledger_callback_requires_private_static_same_class_declaration(self):
+        package = "ai/yuriilab/recursivecoder/"
+        ledger = package + "DurableSessionEventLedger"
+        marker = SimpleNamespace(name=package + "TrustedRunningBoundaryApi", values={})
+        descriptor = "(Ljava/lang/String;)Lkotlin/Unit;"
+        callback = SimpleNamespace(name="appendTrustedAcceptedRunning$lambda$0",
+                                   descriptor=descriptor, flags=0x000a, annotations=[])
+        entries = [
+            SimpleNamespace(name="appendTrustedAcceptedRunning$journal",
+                            annotations=[marker], descriptor="()V", flags=1),
+            SimpleNamespace(name="appendTrustedRunningWithFault$journal",
+                            annotations=[marker], descriptor="()V", flags=1),
+        ]
+        target = (ledger, callback.name, descriptor)
+        info = SimpleNamespace(name=ledger, module="infra/journal",
+                               annotations=[], methods=entries + [callback],
+                               interfaces=[], superclass="java/lang/Object", flags=0x0010,
+                               method_references={target}, method_handle_references={target})
+        self.assertEqual([], c3_boundary_violations(info))
+        callback.flags = 0x0009  # public static is not a private helper
+        self.assertTrue(any("Unapproved C3 JVM callback" in x
+                            for x in c3_boundary_violations(info)))
+        callback.flags = 0x000a
+        info.methods = entries
+        self.assertTrue(any("Unapproved C3 JVM callback" in x
+                            for x in c3_boundary_violations(info)))
+        info.name = package + "DurableAcceptedRunningHandoff"
+        info.annotations = [marker]
+        info.methods = []
+        self.assertTrue(any("Unapproved C3 JVM callback" in x
+                            for x in c3_boundary_violations(info)))
+        # The real privileged method is not exempted for a ledger self-call.
+        info.name = ledger
+        info.annotations = []
+        info.methods = entries
+        info.method_references = {(ledger, "appendTrustedAcceptedRunning$journal", "()V")}
+        info.method_handle_references = set()
+        self.assertTrue(any("Unapproved C3 JVM call" in x
+                            for x in c3_boundary_violations(info)))
+
+    def test_c3_jvm_direct_and_method_handle_calls_are_denied(self):
+        package = "ai/yuriilab/recursivecoder/"
+        target = (package + "TrustedSessionRunningHost", "publishAcceptedRunning", "()V")
+        info = SimpleNamespace(name=package + "OrdinaryCaller", module="core/session",
+                               annotations=[], methods=[], interfaces=[],
+                               superclass="java/lang/Object", flags=0,
+                               method_references={target}, method_handle_references=set())
+        self.assertTrue(any("Unapproved C3 JVM call" in x for x in c3_boundary_violations(info)))
+        info.method_references = set()
+        info.method_handle_references = {target}
+        self.assertTrue(any("Unapproved C3 JVM call" in x for x in c3_boundary_violations(info)))
+        # A familiar owner in the wrong module is not approved.
+        info.name = package + "DefaultRunSessionUseCase"
+        info.module = "core/tasks"
+        self.assertTrue(any("unapproved module" in x for x in c3_boundary_violations(info)))
+
+    def test_c3_exact_owner_guard_requires_final_classes(self):
+        package = "ai/yuriilab/recursivecoder/"
+        marker = SimpleNamespace(name=package + "TrustedRunningBoundaryApi", values={})
+        for name, module, class_marked, method_names in (
+            ("DefaultRunSessionUseCase", "core/session", False, ["publishTrustedAcceptedRunning"]),
+            ("DurableSessionEventLedger", "infra/journal", False,
+             ["appendTrustedAcceptedRunning$journal", "appendTrustedRunningWithFault$journal"]),
+            ("DurableAcceptedRunningHandoff", "infra/journal", True, []),
+        ):
+            with self.subTest(name=name):
+                info = SimpleNamespace(
+                    name=package + name, module=module, flags=0x0010,
+                    annotations=[marker] if class_marked else [],
+                    methods=[SimpleNamespace(name=m, annotations=[marker]) for m in method_names],
+                    interfaces=[], superclass="java/lang/Object",
+                    method_references=set(), method_handle_references=set())
+                self.assertEqual([], c3_boundary_violations(info))
+                info.flags = 0
+                self.assertTrue(any("C3 class must be final" in x
+                                    for x in c3_boundary_violations(info)))
+
+    def test_c3_synthetic_wrapper_body_does_not_exempt_privileged_call(self):
+        package = "ai/yuriilab/recursivecoder/"
+        marker = SimpleNamespace(name=package + "TrustedRunningBoundaryApi", values={})
+        for name, module, class_marked, entry in (
+            ("DefaultRunSessionUseCase", "core/session", False, "publishTrustedAcceptedRunning"),
+            ("DurableAcceptedRunningHandoff", "infra/journal", True, "publish"),
+        ):
+            with self.subTest(name=name):
+                owner = package + name
+                # A synthetic default/bridge body still references the real entry.
+                # Do not grant the declaring class a general self-call exemption.
+                info = SimpleNamespace(
+                    name=owner, module=module, flags=0x0010,
+                    annotations=[marker] if class_marked else [],
+                    methods=[SimpleNamespace(name=entry, annotations=[marker])]
+                    if not class_marked else [],
+                    interfaces=[], superclass="java/lang/Object",
+                    method_references={(owner, entry, "()V")}, method_handle_references=set())
+                self.assertTrue(any("Unapproved C3 JVM call" in x
+                                    for x in c3_boundary_violations(info)))
+
+    def test_c3_port_supertype_and_implementation_escape_are_denied(self):
+        package = "ai/yuriilab/recursivecoder/"
+        port = package + "TrustedSessionRunningHost"
+        marker = SimpleNamespace(name=package + "TrustedRunningBoundaryApi", values={})
+        info = SimpleNamespace(name=port, module="core/session", annotations=[marker],
+                               methods=[], interfaces=[], superclass="java/lang/Object",
+                               flags=0, method_references=set(), method_handle_references=set())
+        self.assertEqual([], c3_boundary_violations(info))
+        info.interfaces = ["example/Unmarked"]
+        self.assertTrue(any("unexpected supertype" in x for x in c3_boundary_violations(info)))
+        info.name = package + "UnmarkedWrapper"
+        info.annotations = []
+        info.interfaces = [port]
+        self.assertTrue(any("Unapproved C3 port implementation" in x
+                            for x in c3_boundary_violations(info)))
+
+    def test_c3_compiled_marker_cannot_be_removed_or_downgraded(self):
+        package = "ai/yuriilab/recursivecoder/"
+        info = SimpleNamespace(name=package + "TrustedRunningBoundaryApi", module="core/session",
+                               annotations=[], methods=[], interfaces=[],
+                               superclass="java/lang/Object", flags=0,
+                               method_references=set(), method_handle_references=set())
+        self.assertTrue(any("ERROR opt-in" in x for x in c3_boundary_violations(info)))
+        info.name = package + "DefaultRunSessionUseCase"
+        self.assertTrue(any("method markers" in x for x in c3_boundary_violations(info)))
 
     def test_kotlin_class_literal_equivalent_is_caught_at_jvm_level(self):
         cls = self.compile("""
@@ -167,6 +313,8 @@ class ProductionBytecodeGateTest(unittest.TestCase):
 
     def test_kotlin_callable_reflection_is_denied_but_metadata_is_allowed(self):
         info = SimpleNamespace(
+            name="Example", module="core/tasks", annotations=[], methods=[],
+            interfaces=[], superclass="java/lang/Object", flags=0,
             references={"kotlin/reflect/KClass"},
             method_references={("kotlin/reflect/KCallable", "call",
                                 "([Ljava/lang/Object;)Ljava/lang/Object;")},

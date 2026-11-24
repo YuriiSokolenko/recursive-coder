@@ -136,21 +136,40 @@ object TrustedRunningOptInPolicy {
             listOf("appendTrustedAcceptedRunning", "appendTrustedRunningWithFault"),
     )
 
-    /** SHA-256 over exact UTF-8 file bytes. Any edit needs a trusted-boundary review. */
+    /** Exact reviewed paths for declaration checks; all must also be pinned. */
+    val approvedSourcePaths: Set<String> = approvedTargets.keys.toSet()
+
+    /** SHA-256 over exact UTF-8 source bytes; see TRUSTED_C3_REVIEW.md for review records. */
     val approvedSourceSha256: Map<String, String> = mapOf(
         "core/session/src/main/kotlin/ai/yuriilab/recursivecoder/SessionRuntime.kt" to
-            "a8e310eb60caa2f9c56a710c5ef1e5fc866351da636aef1bfa8c582517c4296b",
+            "a48ec483e9c19dd116ff77ff09c456fb45b1eef9440a2a0c269504e0c3f1f310",
         "core/session/src/main/kotlin/ai/yuriilab/recursivecoder/TrustedRunningBoundaryPolicy.kt" to
-            "f06db73cf6e29ae5ce6add2f1e9d4a9b05a3b6e33756367027812fa37687df35",
+            "8a4f30fd26e6058e10a4684e495e2fce0083da6b75f64eb49cf04af61ec49a60",
         "core/session/src/main/kotlin/ai/yuriilab/recursivecoder/TrustedSessionPreExecutionHost.kt" to
             "da9512f54c0b32fe84eda6186d0a7b240dfdb415662f581b8b1ba70efbdd3546",
         "infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/DurableAcceptedRunningHandoff.kt" to
-            "740501efc1bcbd90422d47d0d444d8283e2684b16b39453874e9c61bfa0bad25",
+            "507690ca1822059a2ab4d8c96bde5bfaf3cbcbadb63d77a48dae961e0b176b8c",
         "infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/DurableRuntimeAcceptedRunningHost.kt" to
-            "7d89e7fd4a8362efdb6de602f6869f1a692550e863b8a109b5286abac8c4149e",
+            "6ee179a41a653b9f231732890f66e36c18a5dbdbf9cdaaa6181bdb482272b9b8",
         "infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/DurableSessionEventLedger.kt" to
-            "80aa979779f95c94e75f4e3373e94163b7660d94986e671b968d7ec7c222a898",
+            "93cdf2a420ab4624332f2f612eed318f88a78747feb6ae593851832e1315426f",
     )
+
+    // The declaration must retain the compiler error-level opt-in.
+    // The canonical argument and annotation order is intentional: other shapes
+    // require review, even if a reordered declaration would compile identically. The compiled
+    // class verifier independently checks its annotation and approved JVM edges.
+    private val markerDeclaration = Regex(
+        """@RequiresOptIn\s*\(\s*message\s*=\s*"[^"\r\n]*"\s*,\s*level\s*=\s*RequiresOptIn\.Level\.ERROR\s*\)\s*""" +
+            """@Retention\(AnnotationRetention\.BINARY\)\s*""" +
+            """@Target\(AnnotationTarget\.CLASS\s*,\s*AnnotationTarget\.FUNCTION\)\s*""" +
+            """annotation\s+class\s+TrustedRunningBoundaryApi\b""",
+    )
+
+    fun reviewedSourceShapeValid(source: String, path: String): Boolean =
+        path in approvedSourcePaths &&
+            !forbiddenInProduction(source, path) &&
+            (path != declarationFile || markerDeclaration.containsMatchIn(source))
 
     private val reviewedMarkerLine = Regex(
         """\s*(?:@TrustedRunningBoundaryApi|annotation\s+class\s+TrustedRunningBoundaryApi)\s*""",

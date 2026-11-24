@@ -23,11 +23,11 @@ internal object DurableAcceptedRunningHandoff {
         fun text(name: String) = (event[name] as? JsonPrimitive)?.content
         return TrustedRunningBoundaryPolicy.step(event, source.phase) ==
             SessionPhaseVocabulary.runningWire &&
-            (event["sequence"] as? JsonPrimitive)?.intOrNull == next &&
-            text("sessionId") == source.sessionId &&
-            text("traceId") == source.traceId &&
-            text("eventId") == SessionEventJournal.eventId(source.sessionId, next) &&
-            text("causationId") ==
+            (event[SessionEventFields.SEQUENCE] as? JsonPrimitive)?.intOrNull == next &&
+            text(SessionEnvelopeFields.SESSION_ID) == source.sessionId &&
+            text(SessionEnvelopeFields.TRACE_ID) == source.traceId &&
+            text(SessionEventFields.EVENT_ID) == SessionEventJournal.eventId(source.sessionId, next) &&
+            text(SessionEventFields.CAUSATION_ID) ==
                 SessionEventJournal.eventId(source.sessionId, source.journalSequence) &&
             FencedGraphMetadataPolicy.permittedFencedGraphMetadata(
                 event, source.binding.graphId)

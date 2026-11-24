@@ -71,17 +71,24 @@ abstract class CheckArchitectureTask : DefaultTask() {
             forbiddenGroups = forbiddenFrameworkGroups.get(),
         ).toMutableList()
         val root = File(checkoutRoot.get()).canonicalFile.toPath()
-        val pinnedInputs = reviewedC3Sources.files.map { it.canonicalFile.toPath() }.toSet()
-        TrustedRunningOptInPolicy.approvedSourceSha256.toSortedMap().forEach { (relative, sha256) ->
+        val reviewedInputs = reviewedC3Sources.files.map { it.canonicalFile.toPath() }.toSet()
+        val sourcePins = TrustedRunningOptInPolicy.approvedSourceSha256
+        if (sourcePins.keys != TrustedRunningOptInPolicy.approvedSourcePaths) {
+            problems += "Trusted C3 source pin inventory differs from reviewed paths"
+        }
+        TrustedRunningOptInPolicy.approvedSourcePaths.sorted().forEach { relative ->
             val source = root.resolve(relative).toFile()
-            if (source.canonicalFile.toPath() !in pinnedInputs || !source.isFile) {
+            if (source.canonicalFile.toPath() !in reviewedInputs || !source.isFile) {
                 problems += "Missing trusted C3 source pin: $relative"
             } else {
+                val bytes = source.readBytes()
                 val actual = MessageDigest.getInstance("SHA-256")
-                    .digest(source.readBytes())
+                    .digest(bytes)
                     .joinToString("") { byte -> "%02x".format(byte.toInt() and 255) }
-                if (actual != sha256)
+                if (actual != sourcePins[relative])
                     problems += "Trusted C3 source content changed; independent review and pin update required: $relative"
+                if (!TrustedRunningOptInPolicy.reviewedSourceShapeValid(bytes.toString(Charsets.UTF_8), relative))
+                    problems += "Invalid trusted C3 declaration or source shape: $relative"
             }
         }
 

@@ -91,13 +91,119 @@ def forbidden_jdk_owner(owner: str) -> bool:
     return False
 
 
+# C3 authority is checked independently of the Kotlin vocabulary and source
+# declarations. Names here are JVM identities, not production constants.
+_C3_PACKAGE = "ai/yuriilab/recursivecoder/"
+_C3_MARKER = _C3_PACKAGE + "TrustedRunningBoundaryApi"
+_C3_RUNTIME = _C3_PACKAGE + "DefaultRunSessionUseCase"
+_C3_PORT = _C3_PACKAGE + "TrustedSessionRunningHost"
+_C3_HOST = _C3_PACKAGE + "DurableRuntimeAcceptedRunningHost"
+_C3_HANDOFF = _C3_PACKAGE + "DurableAcceptedRunningHandoff"
+_C3_LEDGER = _C3_PACKAGE + "DurableSessionEventLedger"
+_C3_MARKED_CLASSES = {_C3_PORT, _C3_HOST, _C3_HANDOFF}
+_C3_MODULES = {
+    _C3_MARKER: "core/session", _C3_RUNTIME: "core/session",
+    _C3_PORT: "core/session", _C3_HOST: "infra/journal",
+    _C3_HANDOFF: "infra/journal", _C3_LEDGER: "infra/journal",
+}
+_C3_MARKED_METHODS = {
+    _C3_RUNTIME: {"publishTrustedAcceptedRunning"},
+    _C3_LEDGER: {"appendTrustedAcceptedRunning", "appendTrustedRunningWithFault"},
+}
+# No production caller of the host-only entry point or constructor is approved.
+# A class-level allowlist is deliberately not a proof of behavior inside a body.
+_C3_CALLERS = {
+    (_C3_RUNTIME, "publishTrustedAcceptedRunning"): set(),
+    (_C3_PORT, "publishAcceptedRunning"): {_C3_RUNTIME},
+    (_C3_HOST, "publishAcceptedRunning"): set(),
+    (_C3_HOST, "<init>"): set(),
+    (_C3_HANDOFF, "publish"): {_C3_HOST},
+    (_C3_LEDGER, "appendTrustedAcceptedRunning"): {_C3_HANDOFF},
+    (_C3_LEDGER, "appendTrustedRunningWithFault"): {_C3_LEDGER},
+}
+
+
+def _c3_method_name(owner, name):
+    # Kotlin internal functions carry a module suffix in JVM bytecode.
+    # Treat every such spelling as the privileged entry, not a new exemption.
+    if owner == _C3_LEDGER:
+        return name.split("$", 1)[0]
+    return name
+
+
+# Kotlin's no-op fault callback is lowered to a private static lambda body.
+# It is not an alternative privileged entry. Keep this exception confined to
+# a real declaration of that exact helper shape in the ledger itself.
+_C3_LEDGER_CALLBACK = re.compile(r"appendTrustedAcceptedRunning\$lambda\$[0-9]+")
+_C3_LEDGER_CALLBACK_DESCRIPTOR = "(Ljava/lang/String;)Lkotlin/Unit;"
+_ACC_PRIVATE = 0x0002
+_ACC_STATIC = 0x0008
+_ACC_FINAL = 0x0010
+
+
+def _is_ledger_callback(info, target, name, descriptor):
+    return (info.name == target == _C3_LEDGER and
+            descriptor == _C3_LEDGER_CALLBACK_DESCRIPTOR and
+            any(m.name == name and m.descriptor == descriptor and
+                m.flags & (_ACC_PRIVATE | _ACC_STATIC) == (_ACC_PRIVATE | _ACC_STATIC) and
+                not any(a.name == _C3_MARKER for a in m.annotations)
+                for m in info.methods))
+
+
+def c3_boundary_violations(info):
+    issues = []
+    owner = info.name
+    annotated = {a.name: a.values for a in info.annotations}
+    location = _C3_MODULES.get(owner)
+    if location and tuple(Path(info.module).parts[-2:]) != tuple(location.split("/")):
+        issues.append(f"C3 class in unapproved module: {owner}")
+    if (_C3_MARKER in annotated) != (owner in _C3_MARKED_CLASSES):
+        issues.append(f"Unexpected C3 class marker: {owner}")
+    marked_methods = [_c3_method_name(owner, m.name) for m in info.methods
+                      if any(a.name == _C3_MARKER for a in m.annotations)]
+    expected = _C3_MARKED_METHODS.get(owner, set())
+    if set(marked_methods) != expected or len(marked_methods) != len(expected):
+        issues.append(f"Unexpected C3 method markers: {owner}")
+    if owner == _C3_MARKER:
+        opt_in = annotated.get("kotlin/RequiresOptIn", {})
+        retention = annotated.get("java/lang/annotation/Retention", {})
+        target = annotated.get("java/lang/annotation/Target", {})
+        if (opt_in.get("level") != ("Lkotlin/RequiresOptIn$Level;", "ERROR") or
+                retention.get("value") != ("Ljava/lang/annotation/RetentionPolicy;", "CLASS") or
+                set(target.get("value", [])) != {
+                    ("Ljava/lang/annotation/ElementType;", "TYPE"),
+                    ("Ljava/lang/annotation/ElementType;", "METHOD")}):
+            issues.append("C3 marker must retain ERROR opt-in and CLASS retention/targets")
+    # Exact constant-pool owner checks depend on these classes staying final.
+    if owner in {_C3_RUNTIME, _C3_LEDGER, _C3_HANDOFF} and not info.flags & _ACC_FINAL:
+        issues.append(f"C3 class must be final: {owner}")
+    # Forbid supertype laundering: only the exact final adapter implements the
+    # port, and neither the port nor that adapter may gain another supertype.
+    if owner == _C3_PORT and (info.interfaces or info.superclass != "java/lang/Object"):
+        issues.append("C3 port has an unexpected supertype")
+    if owner == _C3_HOST and (info.interfaces != [_C3_PORT] or
+                              info.superclass != "java/lang/Object" or not info.flags & _ACC_FINAL):
+        issues.append("C3 host must be final and implement only the marked port")
+    if owner != _C3_HOST and _C3_PORT in info.interfaces:
+        issues.append(f"Unapproved C3 port implementation: {owner}")
+    for target, name, descriptor in sorted(info.method_references | info.method_handle_references):
+        if target == _C3_LEDGER and _C3_LEDGER_CALLBACK.fullmatch(name):
+            if not _is_ledger_callback(info, target, name, descriptor):
+                issues.append(f"Unapproved C3 JVM callback: {owner} -> {target}.{name}{descriptor}")
+            continue
+        key = (target, _c3_method_name(target, name))
+        if key in _C3_CALLERS and owner not in _C3_CALLERS[key]:
+            issues.append(f"Unapproved C3 JVM call: {owner} -> {target}.{name}{descriptor}")
+    return issues
+
+
 def violations_for_class(path: Path, module: str) -> list[str]:
     """Inspect class, method and MethodHandle references fail-closed."""
     try:
         info = parse_class(path, module)
     except (ClassFormatError, ValueError, IndexError, TypeError) as error:
         return [f"{path}: invalid JVM class: {error}"]
-    issues = []
+    issues = c3_boundary_violations(info)
     for owner in sorted(info.references):
         if (forbidden_jdk_owner(owner) or
                 (owner not in COMPILER_BOOTSTRAP_TYPES and

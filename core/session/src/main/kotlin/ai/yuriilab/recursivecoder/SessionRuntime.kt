@@ -33,22 +33,22 @@ private fun canonicalDestination(path: Path): Path {
 
 /** Extract transport fields once; no trusted I/O or adapter decisions occur here. */
 private fun SessionRequest.admissionFacts(): SessionAdmissionFacts = SessionAdmissionFacts(
-    supportedProtocol = SessionProtocol.supports(raw.textAt("version")),
-    invocationSource = invocation.textAt("source"),
-    attempt = invocation.longAt("attempt"),
-    resumeMode = raw.objectAt("resume").textAt("mode"),
-    fenceGeneration = raw.objectAt("resume").longAt("fenceGeneration"),
-    requiredCapabilities = raw.stringsAt("requiredCapabilities").toSet(),
-    provider = model.textAt("provider"),
-    modelId = model.textAt("modelId"),
-    modelFeatures = model.stringsAt("features").toSet(),
-    toolPolicyMode = policy.textAt("mode"),
-    allowedTools = policy.stringsAt("allowedTools").toSet(),
-    deniedTools = policy.stringsAt("deniedTools").toSet(),
-    writablePathCount = policy.stringsAt("writablePaths").size,
-    immutableInputCount = (policy["immutableInputs"] as? JsonArray)?.size ?: 0,
-    maxToolCalls = budgets.longAt("maxToolCalls"),
-    maxModelRequests = budgets["maxModelRequests"]?.let { budgets.longAt("maxModelRequests") }
+    supportedProtocol = SessionProtocol.supports(raw.textAt(SessionEnvelopeFields.VERSION)),
+    invocationSource = invocation.textAt(InvocationFields.SOURCE),
+    attempt = invocation.longAt(InvocationFields.ATTEMPT),
+    resumeMode = raw.objectAt(SessionRequestFields.RESUME).textAt(SessionResumeFields.MODE),
+    fenceGeneration = raw.objectAt(SessionRequestFields.RESUME).longAt(SessionResumeFields.FENCE_GENERATION),
+    requiredCapabilities = raw.stringsAt(SessionRequestFields.REQUIRED_CAPABILITIES).toSet(),
+    provider = model.textAt(ModelConfigFields.PROVIDER),
+    modelId = model.textAt(ModelConfigFields.MODEL_ID),
+    modelFeatures = model.stringsAt(ModelConfigFields.FEATURES).toSet(),
+    toolPolicyMode = policy.textAt(ToolPolicyFields.MODE),
+    allowedTools = policy.stringsAt(ToolPolicyFields.ALLOWED_TOOLS).toSet(),
+    deniedTools = policy.stringsAt(ToolPolicyFields.DENIED_TOOLS).toSet(),
+    writablePathCount = policy.stringsAt(ToolPolicyFields.WRITABLE_PATHS).size,
+    immutableInputCount = (policy[ToolPolicyFields.IMMUTABLE_INPUTS] as? JsonArray)?.size ?: 0,
+    maxToolCalls = budgets.longAt(SessionBudgetFields.MAX_TOOL_CALLS),
+    maxModelRequests = budgets[SessionBudgetFields.MAX_MODEL_REQUESTS]?.let { budgets.longAt(SessionBudgetFields.MAX_MODEL_REQUESTS) }
         ?: Long.MAX_VALUE
 )
 
@@ -63,7 +63,7 @@ private fun SessionRequest.admit(workspaceOpener: WorkspaceOpener,
     // Trusted task bytes, hash and workspace identity are verified only by this adapter.
     val manager = workspaceOpener.open(this, onAudit, onStart)
     try {
-        manager.verifyTask(taskPath, task.objectAt("taskInputRef").textAt("sha256"))
+        manager.verifyTask(taskPath, task.objectAt(TaskInputFields.TASK_INPUT_REF).textAt(SessionArtifactReferenceFields.SHA256))
         return manager
     } catch (e: Exception) {
         manager.close()
@@ -92,7 +92,7 @@ sealed interface SessionResumePreflightDenial {
     }
 
     data object NotEnabled : SessionResumePreflightDenial {
-        override val code: String = "UNSUPPORTED_RESUME"
+        override val code: String = SessionDenialCodes.UNSUPPORTED_RESUME
         override val safeDetail: String = "Resume is not supported"
     }
 
@@ -208,7 +208,7 @@ class DefaultRunSessionUseCase(
         }
         val now = clock.instant()
         val deadline = SessionBudgetPolicy.effectiveDeadline(
-            now, request.deadline, request.budgets.longAt("maxWallTimeMs"))
+            now, request.deadline, request.budgets.longAt(SessionBudgetFields.MAX_WALL_TIME_MS))
         SessionInterruptionGate.stopped(cancellation.signals(), now, deadline)
             ?.let { throw it }
         // No post-handoff execution or terminal write is permitted here.
@@ -239,7 +239,7 @@ class DefaultRunSessionUseCase(
         }
         val now = clock.instant()
         val deadline = SessionBudgetPolicy.effectiveDeadline(
-            now, request.deadline, request.budgets.longAt("maxWallTimeMs"))
+            now, request.deadline, request.budgets.longAt(SessionBudgetFields.MAX_WALL_TIME_MS))
         SessionInterruptionGate.stopped(cancellation.signals(), now, deadline)
             ?.let { throw it }
         return host.publishAcceptedRunning(request, cancellation, deadline, clock)
@@ -251,25 +251,25 @@ class DefaultRunSessionUseCase(
         // Never open or truncate existing output files. A later recovery milestone owns replay.
         val outputRoot = request.outputRoot
         val workspaceCanonical = try { request.rootPath.toRealPath() } catch (_: Exception) {
-            throw Refused("INVALID_WORKSPACE", "policy", "Cannot resolve workspace")
+            throw Refused(WorkspaceDenialCodes.INVALID_WORKSPACE, "policy", "Cannot resolve workspace")
         }
         if (canonicalDestination(outputRoot).startsWith(workspaceCanonical) ||
             Files.isSymbolicLink(outputRoot))
             throw Refused("UNSAFE_OUTPUT_PATH", "policy", "Session output must be outside the workspace")
         Files.createDirectories(outputRoot)
-        val targetPaths = listOf("eventsPath", "resultPath", "diagnosticsPath").map { request.output(it) }
+        val targetPaths = listOf(SessionOutputFields.EVENTS_PATH, SessionOutputFields.RESULT_PATH, SessionOutputFields.DIAGNOSTICS_PATH).map { request.output(it) }
         if (targetPaths.any { !it.startsWith(outputRoot) || Files.exists(it, LinkOption.NOFOLLOW_LINKS) })
             throw Refused("OUTPUT_ALREADY_EXISTS", "policy", "Output paths are unavailable")
         targetPaths.forEach { target ->
             if (target.parent != outputRoot) throw Refused("UNSAFE_OUTPUT_PATH", "policy", "Nested outputs are unsupported")
         }
         val journal = SessionEventJournal(request.sessionId, request.traceId, request.requestId,
-            clock, eventSinkFactory.open(request.output("eventsPath")))
+            clock, eventSinkFactory.open(request.output(SessionOutputFields.EVENTS_PATH)))
         var state = SessionPhase.CREATED
         var finalOutcome: SessionOutcome? = null
         var failure: SessionFailure? = null
         val deadline = SessionBudgetPolicy.effectiveDeadline(
-            started, request.deadline, request.budgets.longAt("maxWallTimeMs"))
+            started, request.deadline, request.budgets.longAt(SessionBudgetFields.MAX_WALL_TIME_MS))
         // Elapsed-time scheduling uses a separate port; the injected Clock still
         // decides the effective deadline and every cooperative policy gate.
         var watchdog: AutoCloseable? = null
@@ -282,25 +282,25 @@ class DefaultRunSessionUseCase(
             }
         }
 
-        fun transition(to: SessionPhase, eventStatus: String = "completed") {
+        fun transition(to: SessionPhase, eventStatus: String = SessionEventStatuses.COMPLETED) {
             check(SessionLifecyclePolicy.transition(state, to) == PhaseDecision.Allowed) {
                 "Illegal session phase transition: $state -> $to"
             }
-            journal.append("session.transition", eventStatus, state.wire to to.wire)
+            journal.append(SessionEventKinds.SESSION_TRANSITION, eventStatus, state.wire to to.wire)
             state = to
         }
 
-        fun finish(reason: SessionEndReason, eventStatus: String = "completed") {
+        fun finish(reason: SessionEndReason, eventStatus: String = SessionEventStatuses.COMPLETED) {
             check(finalOutcome == null) { "Session already has a terminal outcome" }
             val completion = SessionLifecyclePolicy.finish(state, reason)
             check(completion is FinishDecision.Completed) { "Illegal terminal session transition" }
             for (phase in completion.transitions) {
                 if (phase == SessionPhase.CANCELLING) {
-                    transition(phase, "cancelled")
+                    transition(phase, SessionEventStatuses.CANCELLED)
                 } else {
                     if (reason != SessionEndReason.SUCCESS)
                         journal.append(if (reason == SessionEndReason.REFUSAL &&
-                                state == SessionPhase.CREATED) "policy.denied" else "session.error",
+                                state == SessionPhase.CREATED) SessionEventKinds.POLICY_DENIED else SessionEventKinds.SESSION_ERROR,
                             eventStatus)
                     transition(phase, eventStatus)
                 }
@@ -324,7 +324,7 @@ class DefaultRunSessionUseCase(
                 // It must not create resume.lock, publish a fence or launch a
                 // model/tool. Runtime execution after fenced admission is gated
                 // on a separately reviewed #105 authenticated effect protocol.
-                if (request.raw.objectAt("resume").textAt("mode") == "resume") {
+                if (request.raw.objectAt(SessionRequestFields.RESUME).textAt(SessionResumeFields.MODE) == SessionResumeModes.RESUME) {
                     val earlier = SessionResumePreflightPolicy.earlierDenial(
                         request.admissionFacts())
                     if (earlier != null)
@@ -344,8 +344,8 @@ class DefaultRunSessionUseCase(
                 }
                 workspaceManager = request.admit(workspaceOpener,
                     onAudit = { audit ->
-                        journal.append(if (audit.permitted) "tool.completed" else "policy.denied",
-                            if (audit.permitted) "completed" else "denied",
+                        journal.append(if (audit.permitted) SessionEventKinds.TOOL_COMPLETED else SessionEventKinds.POLICY_DENIED,
+                            if (audit.permitted) SessionEventStatuses.COMPLETED else SessionEventStatuses.DENIED,
                             toolId = audit.receiptId, started = audit.started,
                             extra = buildJsonObject {
                                 put("tool", audit.tool)
@@ -356,27 +356,27 @@ class DefaultRunSessionUseCase(
                             })
                     },
                     onStart = { receipt, tool, startedAt ->
-                        journal.append("tool.started", "started", toolId = receipt, started = startedAt,
+                        journal.append(SessionEventKinds.TOOL_STARTED, SessionEventStatuses.STARTED, toolId = receipt, started = startedAt,
                             extra = buildJsonObject { put("tool", tool); put("receiptId", receipt) })
                     }
                 )
                 checkActive()
                 val capabilities = model.negotiate(config, cancellation, deadline)
-                journal.append("llm.capabilities", "completed", extra = buildJsonObject {
+                journal.append(SessionEventKinds.LLM_CAPABILITIES, SessionEventStatuses.COMPLETED, extra = buildJsonObject {
                     put("contextTokens", capabilities.contextTokens)
                     put("maxOutputTokens", capabilities.maxOutputTokens)
                     put("features", capabilities.features.sorted().joinToString(","))
                 })
                 transition(SessionPhase.ADMITTED)
                 transition(SessionPhase.RUNNING)
-                journal.append("agent.started", "started")
+                journal.append(SessionEventKinds.AGENT_STARTED, SessionEventStatuses.STARTED)
                 var observed: Pair<Int, String>? = null
                 // Only actual inference POSTs count; discovery GETs are not model requests.
-                val maxModelRequests = request.budgets["maxModelRequests"]?.let {
-                    request.budgets.longAt("maxModelRequests")
+                val maxModelRequests = request.budgets[SessionBudgetFields.MAX_MODEL_REQUESTS]?.let {
+                    request.budgets.longAt(SessionBudgetFields.MAX_MODEL_REQUESTS)
                 } ?: Long.MAX_VALUE
-                val maxTotalTokens = request.budgets.longAt("maxTotalTokens")
-                val maxToolCalls = request.budgets.longAt("maxToolCalls")
+                val maxTotalTokens = request.budgets.longAt(SessionBudgetFields.MAX_TOTAL_TOKENS)
+                val maxToolCalls = request.budgets.longAt(SessionBudgetFields.MAX_TOOL_CALLS)
                 repeat(SESSION_MODEL_TURNS) { turn ->
                     checkActive()
                     val permission = SessionBudgetPolicy.beforeTurn(budgetState, maxModelRequests, turn)
@@ -386,7 +386,7 @@ class DefaultRunSessionUseCase(
                             permission.reason.code, "policy", "Model request budget exhausted")
                     }
                     val modelStart = clock.instant()
-                    journal.append("llm.request", "started", started = modelStart,
+                    journal.append(SessionEventKinds.LLM_REQUEST, SessionEventStatuses.STARTED, started = modelStart,
                         extra = buildJsonObject { put("provider", config.provider); put("turn", turn + 1) })
                     val response = try {
                         model.next(config, request.taskPath, observed, cancellation, deadline, allowPreToolRetry)
@@ -400,7 +400,7 @@ class DefaultRunSessionUseCase(
                         is BudgetDecision.Denied -> throw Refused(
                             charged.reason.code, "policy", charged.reason.message)
                     }
-                    journal.append("llm.response", "completed", started = modelStart,
+                    journal.append(SessionEventKinds.LLM_RESPONSE, SessionEventStatuses.COMPLETED, started = modelStart,
                         extra = buildJsonObject {
                             put("provider", config.provider)
                             put("turn", turn + 1)
@@ -430,7 +430,7 @@ class DefaultRunSessionUseCase(
                                 throw Refused(outcome.deniedCode!!, "policy", "Read-only tool denied")
                             val read = outcome.data as? ToolData.FileText
                                 ?: throw Refused("TOOL_RESULT_INVALID", "policy", "Unexpected tool result")
-                            if (read.sha256 != request.task.objectAt("taskInputRef").textAt("sha256"))
+                            if (read.sha256 != request.task.objectAt(TaskInputFields.TASK_INPUT_REF).textAt(SessionArtifactReferenceFields.SHA256))
                                 throw Refused("TASK_CHANGED", "policy", "Task changed during execution")
                             observed = read.bytes to read.sha256
                         }
@@ -443,7 +443,7 @@ class DefaultRunSessionUseCase(
                     }
                 }
                 checkActive()
-                journal.append("agent.completed", "completed")
+                journal.append(SessionEventKinds.AGENT_COMPLETED, SessionEventStatuses.COMPLETED)
                 finish(SessionEndReason.SUCCESS)
             } catch (e: EventSinkFailure) {
                 // A journal failure makes even an otherwise successful session unverifiable.
@@ -451,16 +451,16 @@ class DefaultRunSessionUseCase(
                 throw e
             } catch (e: Refused) {
                 failure = SessionFailure(e.code, e.category, e.explanation)
-                finish(SessionEndReason.REFUSAL, "denied")
+                finish(SessionEndReason.REFUSAL, SessionEventStatuses.DENIED)
             } catch (e: Stopped) {
                 failure = SessionFailure(if (e.timedOut) "SESSION_DEADLINE_EXCEEDED" else "SESSION_CANCELLED",
                     if (e.timedOut) "timeout" else "cancellation",
                     if (e.timedOut) "Session deadline exceeded" else "Session cancelled")
                 finish(if (e.timedOut) SessionEndReason.TIMEOUT else SessionEndReason.CANCELLATION,
-                    if (e.timedOut) "timed_out" else "cancelled")
+                    if (e.timedOut) SessionEventStatuses.TIMED_OUT else SessionEventStatuses.CANCELLED)
             } catch (_: Exception) {
                 failure = SessionFailure("SESSION_EXECUTION_FAILED", "infrastructure", "Session execution failed")
-                finish(SessionEndReason.FAILURE, "failed")
+                finish(SessionEndReason.FAILURE, SessionEventStatuses.FAILED)
             }
         } catch (e: Throwable) {
             executionFailure = e
@@ -478,7 +478,7 @@ class DefaultRunSessionUseCase(
 
         val finishedAt = clock.instant()
         val outcome = checkNotNull(finalOutcome)
-        val diagnosticsPath = request.output("diagnosticsPath")
+        val diagnosticsPath = request.output(SessionOutputFields.DIAGNOSTICS_PATH)
         val diagnostics = SessionResultMapper.diagnostics(request.sessionId, outcome, journal.sequence.toLong())
         val diagnosticsContent = diagnostics.toString()
         // Validate the full terminal result before publishing any diagnostics or result file.
@@ -487,7 +487,7 @@ class DefaultRunSessionUseCase(
             startedAt = started,
             finishedAt = finishedAt,
             lastEventSeq = journal.sequence.toLong(),
-            eventLog = SessionArtifact(request.output("eventsPath"), checkNotNull(eventDigest)),
+            eventLog = SessionArtifact(request.output(SessionOutputFields.EVENTS_PATH), checkNotNull(eventDigest)),
             diagnostics = SessionResultMapper.artifact(diagnosticsPath, diagnosticsContent),
             failure = failure,
             usage = budgetState
@@ -495,7 +495,7 @@ class DefaultRunSessionUseCase(
         val protocol = completed.toSessionProtocolJson(request)
         Files.writeString(diagnosticsPath, diagnosticsContent,
             StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
-        Files.writeString(request.output("resultPath"), protocol.toString(),
+        Files.writeString(request.output(SessionOutputFields.RESULT_PATH), protocol.toString(),
             StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
         return SessionExecutionResult(outcome, protocol)
     }

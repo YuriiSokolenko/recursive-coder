@@ -68,6 +68,32 @@ class TrustedRunningBoundaryPolicyUnitTest {
         assertNull(TrustedRunningBoundaryPolicy.step(root, "running"))
     }
 
+    @Test fun literalWireEventCannotTurnMetadataIntoExecutionAuthority() {
+        // The oracle is independent of the production emitter and vocabulary.
+        val event = Json.parseToJsonElement("""
+            {
+              "type": "session.transition", "status": "completed",
+              "sessionId": "sess-one",
+              "actor": {"agentId": "agent-sess-one", "parentAgentId": null,
+                        "childAgentId": null, "toolExecutionId": null, "childSessionId": null},
+              "metadata": {"graphId": "graph-root"},
+              "transition": {"from": "accepted", "to": "running"}
+            }
+        """.trimIndent()).jsonObject
+        assertEquals("running", TrustedRunningBoundaryPolicy.step(event, "accepted"))
+        assertNull(PreExecutionPhasePolicy.step(event, "accepted"))
+        assertNull(TrustedRunningBoundaryPolicy.step(
+            JsonObject(event + ("status" to JsonPrimitive("started"))), "accepted"))
+        assertNull(TrustedRunningBoundaryPolicy.step(
+            JsonObject(event + ("metadata" to buildJsonObject {
+                put("graphId", "graph-root")
+                put("effectState", "completed")
+            })), "accepted"))
+        assertNull(TrustedRunningBoundaryPolicy.step(
+            JsonObject(event + ("metadata" to buildJsonObject { put("graphId", 1) })),
+            "accepted"))
+    }
+
     @Test fun anyPreviousExecutionEventPoisonsRunningHistory() {
         val c1 = frame(1, "checkpoint.saved")
         val c2 = frame(2, "session.transition", "created" to "accepted")

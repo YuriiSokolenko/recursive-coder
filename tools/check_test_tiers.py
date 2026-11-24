@@ -63,6 +63,7 @@ class Member:
     name: str
     descriptor: str
     annotations: list
+    flags: int = 0
 
 
 @dataclass
@@ -176,18 +177,18 @@ def parse_class(path, module):
     interfaces = [class_name(data.u2()) for _ in range(data.u2())]
     fields = []
     for _ in range(data.u2()):
-        data.u2()
+        member_flags = data.u2()
         field_name = utf(data.u2())
         descriptor = utf(data.u2())
         annotations, _ = attributes(data)
-        fields.append(Member(field_name, descriptor, annotations))
+        fields.append(Member(field_name, descriptor, annotations, member_flags))
     methods = []
     for _ in range(data.u2()):
-        data.u2()
+        member_flags = data.u2()
         method_name = utf(data.u2())
         descriptor = utf(data.u2())
         annotations, _ = attributes(data)
-        methods.append(Member(method_name, descriptor, annotations))
+        methods.append(Member(method_name, descriptor, annotations, member_flags))
     annotations, source = attributes(data)
     references = {class_name(i) for i, item in enumerate(cp) if item and item[0] == 7}
     # JVM object types can occur only in descriptors, without CONSTANT_Class

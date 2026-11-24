@@ -25,3 +25,10 @@
 /.gitattributes @YuriiSokolenko
 
 /tests/ @YuriiSokolenko
+
+# C3 replacement: transitive policy, adapters, test oracles and contract vocabulary.
+/core/ @YuriiSokolenko
+/infra/ @YuriiSokolenko
+/agent/ @YuriiSokolenko
+/app/ @YuriiSokolenko
+/contracts/ @YuriiSokolenko

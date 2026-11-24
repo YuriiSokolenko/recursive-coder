@@ -433,12 +433,14 @@ file-based dependencies on production configurations, and explicitly registered
 entry points are conservatively denied in production Kotlin source; JNI and
 other dynamic or generated execution paths still require separate review.
 
-All six trusted C3 implementation/source files have exact SHA-256 content pins
-in `TrustedRunningOptInPolicy`. Any change, even without a changed annotation,
-fails `checkArchitecture` until reviewed and the pinned hash is explicitly
-updated. `.github/CODEOWNERS` documents required owners; mandatory approvals
-require repository branch-protection/ruleset configuration and must be
-verified separately.
+All six reviewed C3 source paths retain whole-file SHA-256 pins in
+`TrustedRunningOptInPolicy`. Any edit, including harmless formatting, fails
+`checkArchitecture` until explicitly reviewed and the pin updated. Additional
+marker shape checks and the production JVM verifier check the compiled
+error-level marker, marked classes/methods, finality of C3 classes, port
+inheritance and allowed C3 method references. These are defense in depth, not
+a replacement for the pins. See [Trusted C3 review](TRUSTED_C3_REVIEW.md) for
+the exact digest ledger, review requirements and limits.
 
 **Limit:** this verifier checks the compile configuration as seen by
 `checkArchitecture`. Mutations made in later `KotlinCompile.doFirst`
@@ -563,15 +565,18 @@ system tooling cryptographically authenticated. This is still a CI boundary,
 not a sandbox, mandatory CODEOWNERS approval, or authenticated base commit
 policy; run the final review independently before merging.
 
-Six trusted C3 source paths have `.gitattributes` `eol=lf` entries
-to make raw SHA-256 stable across Windows, Linux and macOS. The compiler
+The six trusted C3 source paths retain `.gitattributes` `eol=lf` entries
+to make raw source-content SHA-256 stable across checkouts. The compiler
 classpath pins exactly KGP **2.4.21**; updating Kotlin requires updating
 the reviewed compiler-artifact baseline and re-running the complete guard.
 Compiler option `-P` is rejected intentionally and broadly.
 
 CODEOWNERS covers C3 files, build logic, Gradle settings and wrappers,
 workflow definitions, compiler fixtures, architecture verification scripts
-and its own policy. **CODEOWNERS is advisory in this solo repository**:
-`dev` has no branch protection or rulesets, and PR authors cannot
-approve their own changes. Independent security review and content pins
-remain required before manually merging.
+and its own policy. **CODEOWNERS approval remains advisory**: active ruleset
+`27857731` targets the default branch (`dev`), requires PRs and all six CI
+checks, but requires zero approving reviews and does not require code-owner
+approval or approval of the last push. PR authors cannot approve their own
+changes. Independent security review remains mandatory before accepting the
+proposed retirement of the source pins under #207. See [Trusted C3 review](TRUSTED_C3_REVIEW.md).
+PR #208 retains the pins and does not change repository enforcement.

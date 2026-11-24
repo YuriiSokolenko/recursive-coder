@@ -209,10 +209,32 @@ class ArchitectureGraphTest {
         } finally {
             home.deleteRecursively()
         }
-        assertEquals(6, TrustedRunningOptInPolicy.approvedSourceSha256.size)
+        assertEquals(6, TrustedRunningOptInPolicy.approvedSourcePaths.size)
+        assertEquals(TrustedRunningOptInPolicy.approvedSourcePaths,
+            TrustedRunningOptInPolicy.approvedSourceSha256.keys)
         assertTrue(TrustedRunningOptInPolicy.approvedSourceSha256.values.all {
             it.matches(Regex("[0-9a-f]{64}"))
         })
+    }
+
+    @Test
+    fun reviewedMarkerMustKeepErrorLevelAndBinaryRetention() {
+        val path = "core/session/src/main/kotlin/ai/yuriilab/recursivecoder/TrustedRunningBoundaryPolicy.kt"
+        val source = """
+            @RequiresOptIn(message = "Host only", level = RequiresOptIn.Level.ERROR)
+            @Retention(AnnotationRetention.BINARY)
+            @Target(AnnotationTarget.CLASS, AnnotationTarget.FUNCTION)
+            annotation class TrustedRunningBoundaryApi
+        """.trimIndent()
+        assertTrue(TrustedRunningOptInPolicy.reviewedSourceShapeValid(source, path))
+        assertTrue(TrustedRunningOptInPolicy.reviewedSourceShapeValid(source + "\n// Harmless edit", path))
+        assertFalse(TrustedRunningOptInPolicy.reviewedSourceShapeValid(
+            source.replace("Level.ERROR", "Level.WARNING"), path))
+        assertFalse(TrustedRunningOptInPolicy.reviewedSourceShapeValid(
+            source.replace("AnnotationRetention.BINARY", "AnnotationRetention.SOURCE"), path))
+        assertFalse(TrustedRunningOptInPolicy.reviewedSourceShapeValid(
+            source.replace("@Target(AnnotationTarget.CLASS, AnnotationTarget.FUNCTION)", ""), path))
+        assertFalse(TrustedRunningOptInPolicy.reviewedSourceShapeValid(source, "other/" + path))
     }
 
     @Test

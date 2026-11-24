@@ -31,29 +31,29 @@ object TrustedRunningBoundaryPolicy {
      */
     fun step(event: JsonObject, currentPhase: String): String? {
         if (currentPhase != accepted ||
-            (event["type"] as? JsonPrimitive)?.content != "session.transition" ||
-            (event["status"] as? JsonPrimitive)?.content != "completed" ||
-            event["timing"] != null) return null
+            (event[SessionEventFields.TYPE] as? JsonPrimitive)?.content != SessionEventKinds.SESSION_TRANSITION ||
+            (event[SessionEventFields.STATUS] as? JsonPrimitive)?.content != SessionEventStatuses.COMPLETED ||
+            event[SessionEventFields.TIMING] != null) return null
 
-        val actor = event["actor"] as? JsonObject ?: return null
-        val id = actor["agentId"] as? JsonPrimitive ?: return null
-        val sessionId = (event["sessionId"] as? JsonPrimitive)?.content ?: return null
+        val actor = event[SessionEventFields.ACTOR] as? JsonObject ?: return null
+        val id = actor[SessionEventActorFields.AGENT_ID] as? JsonPrimitive ?: return null
+        val sessionId = (event[SessionEnvelopeFields.SESSION_ID] as? JsonPrimitive)?.content ?: return null
         if (!id.isString || id.content != "agent-" + sessionId ||
-            actor.keys != setOf("agentId", "parentAgentId", "childAgentId",
-                "toolExecutionId", "childSessionId") ||
-            actor.any { (key, value) -> key != "agentId" && value != JsonNull })
+            actor.keys != setOf(SessionEventActorFields.AGENT_ID, SessionEventActorFields.PARENT_AGENT_ID, SessionEventActorFields.CHILD_AGENT_ID,
+                SessionEventActorFields.TOOL_EXECUTION_ID, SessionEventActorFields.CHILD_SESSION_ID) ||
+            actor.any { (key, value) -> key != SessionEventActorFields.AGENT_ID && value != JsonNull })
             return null
 
-        val metadata = event["metadata"] as? JsonObject ?: return null
-        if (metadata.keys != setOf("graphId")) return null
-        val graphId = metadata["graphId"] as? JsonPrimitive ?: return null
+        val metadata = event[SessionEventFields.METADATA] as? JsonObject ?: return null
+        if (metadata.keys != setOf(StageEventMetadataFields.GRAPH_ID)) return null
+        val graphId = metadata[StageEventMetadataFields.GRAPH_ID] as? JsonPrimitive ?: return null
         if (!graphId.isString || !ToolAuthorizationPolicy.validHostIdentifier(graphId.content))
             return null
 
-        val edge = event["transition"] as? JsonObject ?: return null
-        if (edge.keys != setOf("from", "to") ||
-            (edge["from"] as? JsonPrimitive)?.content != accepted ||
-            (edge["to"] as? JsonPrimitive)?.content != running)
+        val edge = event[SessionEventFields.TRANSITION] as? JsonObject ?: return null
+        if (edge.keys != setOf(SessionEventTransitionFields.FROM, SessionEventTransitionFields.TO) ||
+            (edge[SessionEventTransitionFields.FROM] as? JsonPrimitive)?.content != accepted ||
+            (edge[SessionEventTransitionFields.TO] as? JsonPrimitive)?.content != running)
             return null
         return running
     }
