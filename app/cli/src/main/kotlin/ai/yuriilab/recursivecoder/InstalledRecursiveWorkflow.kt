@@ -286,7 +286,7 @@ internal class InstalledRecursiveWorkflow(
         val accounted = if (attempt.schedulerCharged) observed
             else attempt.meter.accounted(failed = true)
         try {
-            journal?.append("session.error", "failed",
+            journal?.append(SessionEventKinds.SESSION_ERROR, SessionEventStatuses.FAILED,
                 correlationId = attempt.admitted.requestId,
                 extra = buildJsonObject {
                     put("childResourceAudit", auditType)
@@ -659,7 +659,7 @@ internal class InstalledRecursiveWorkflow(
                 // Preserve the exact cause and join it to the child's resource
                 // audit via the admitted host-generated request correlation.
                 try {
-                    journal?.append("session.error", "failed",
+                    journal?.append(SessionEventKinds.SESSION_ERROR, SessionEventStatuses.FAILED,
                         correlationId = stopped.origin?.let { attempts[it] }?.admitted?.requestId
                             ?: second.admitted.requestId,
                         extra = buildJsonObject {

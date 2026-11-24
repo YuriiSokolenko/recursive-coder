@@ -43,7 +43,7 @@ class DurableRuntimeAcceptedRunningHost(
         val matchesIdentity = try {
             c2.sessionId == request.sessionId &&
                 c2.traceId == request.traceId &&
-                c2.taskId == request.task.textAt("taskId")
+                c2.taskId == request.task.textAt(TaskInputFields.TASK_ID)
         } catch (_: Exception) {
             false
         }
@@ -57,11 +57,11 @@ class DurableRuntimeAcceptedRunningHost(
             requestId = request.requestId,
             sequence = c2.journalSequence + 1,
             timestamp = clock.instant(),
-            type = "session.transition",
-            status = "completed",
+            type = SessionEventKinds.SESSION_TRANSITION,
+            status = SessionEventStatuses.COMPLETED,
             transition = SessionPhaseVocabulary.acceptedWire to
                 SessionPhaseVocabulary.runningWire,
-            extra = buildJsonObject { put("graphId", c2.binding.graphId) }
+            extra = buildJsonObject { put(StageEventMetadataFields.GRAPH_ID, c2.binding.graphId) }
         )
         // Cooperative deadline/cancellation stop before an uncertain append.
         // A later physical I/O failure is never proof that C3 was absent.

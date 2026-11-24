@@ -45,10 +45,10 @@ internal annotation class LedgerTestFaultInjection
  */
 internal object FencedGraphMetadataPolicy {
     fun permittedFencedGraphMetadata(event: JsonObject, rootGraphId: String): Boolean {
-        val metadata = event["metadata"] ?: return true
+        val metadata = event[SessionEventFields.METADATA] ?: return true
         val obj = metadata as? JsonObject ?: return false
-        if ("parentGraphId" in obj || "childGraphId" in obj) return false
-        val graph = obj["graphId"] ?: return true
+        if (StageEventMetadataFields.PARENT_GRAPH_ID in obj || StageEventMetadataFields.CHILD_GRAPH_ID in obj) return false
+        val graph = obj[StageEventMetadataFields.GRAPH_ID] ?: return true
         return graph is JsonPrimitive && graph.isString && graph.content == rootGraphId
     }
 }
@@ -158,38 +158,38 @@ class DurableSessionEventLedger private constructor(
         private val NUMBER_KEYS = setOf(
             "bytes", "inputTokens", "outputTokens", "contextTokens",
             "maxOutputTokens", "attempts", "turn", "httpStatus", "modelRequests",
-            "evidenceCount", "grantTokens", "grantToolCalls", "spentTokens",
-            "spentToolCalls", "delegatedTokens", "delegatedToolCalls",
+            "evidenceCount", StageEventMetadataFields.GRANT_TOKENS, StageEventMetadataFields.GRANT_TOOL_CALLS, StageEventMetadataFields.SPENT_TOKENS,
+            StageEventMetadataFields.SPENT_TOOL_CALLS, StageEventMetadataFields.DELEGATED_TOKENS, StageEventMetadataFields.DELEGATED_TOOL_CALLS,
             "observedTokens", "observedToolCalls", "accountedTokens", "accountedToolCalls",
             // Read-only #105 effect-projection envelope (NOT executor authority).
-            "effectFenceGeneration", "effectRecordSequence"
+            EffectEvidenceFields.EFFECT_FENCE_GENERATION, EffectEvidenceFields.EFFECT_RECORD_SEQUENCE
         )
         private val BOOLEAN_KEYS = setOf(
             "physicalCompleted", "usageUncertain", "requiresReconciliation",
             "schedulerChargeRecorded"
         )
         private val SHA_KEYS = setOf("sha256", "artifactSha256", "reviewedSha256",
-            "effectInputSha256", "effectRecordMacSha256", "effectObservedStateSha256")
+            EffectEvidenceFields.EFFECT_INPUT_SHA256, EffectEvidenceFields.EFFECT_RECORD_MAC_SHA256, EffectEvidenceFields.EFFECT_OBSERVED_STATE_SHA256)
         private val ID_KEYS = setOf(
-            "receiptId", "graphId", "parentGraphId", "childGraphId",
-            "stageRunId", "requestId", "artifactId", "budgetScopeGraphId",
-            "effectOperationId"
+            "receiptId", StageEventMetadataFields.GRAPH_ID, StageEventMetadataFields.PARENT_GRAPH_ID, StageEventMetadataFields.CHILD_GRAPH_ID,
+            StageEventMetadataFields.STAGE_RUN_ID, "requestId", "artifactId", StageEventMetadataFields.BUDGET_SCOPE_GRAPH_ID,
+            EffectEvidenceFields.EFFECT_OPERATION_ID
         )
         private val TEXT_KEYS = setOf(
-            "tool", "provider", "features", "deniedCode", "recursiveEvent",
-            "roleEvent", "origin", "role", "kind", "stageState",
+            "tool", "provider", "features", "deniedCode", StageEventMetadataFields.RECURSIVE_EVENT,
+            StageEventMetadataFields.ROLE_EVENT, "origin", StageEventMetadataFields.ROLE, "kind", StageEventMetadataFields.STAGE_STATE,
             "approval", "verdict", "reasonCode", "scope", "code",
             "childResourceAudit", "recursiveStopCode",
-            "effectKind", "effectState", "effectErrorCode"
+            EffectEvidenceFields.EFFECT_KIND, EffectEvidenceFields.EFFECT_STATE, EffectEvidenceFields.EFFECT_ERROR_CODE
         )
         private val SAFE_EVENT_TYPES = setOf(
-            "session.transition", "session.resumed", "agent.started",
-            "agent.completed", "llm.capabilities", "llm.request", "llm.response",
-            "tool.started", "tool.completed", "checkpoint.saved", "policy.denied",
-            "session.error", "redaction.applied"
+            SessionEventKinds.SESSION_TRANSITION, SessionEventKinds.SESSION_RESUMED, SessionEventKinds.AGENT_STARTED,
+            SessionEventKinds.AGENT_COMPLETED, SessionEventKinds.LLM_CAPABILITIES, SessionEventKinds.LLM_REQUEST, SessionEventKinds.LLM_RESPONSE,
+            SessionEventKinds.TOOL_STARTED, SessionEventKinds.TOOL_COMPLETED, SessionEventKinds.CHECKPOINT_SAVED, SessionEventKinds.POLICY_DENIED,
+            SessionEventKinds.SESSION_ERROR, SessionEventKinds.REDACTION_APPLIED
         )
         private val SAFE_STATUSES = setOf(
-            "started", "completed", "failed", "denied", "cancelled", "timed_out"
+            SessionEventStatuses.STARTED, SessionEventStatuses.COMPLETED, SessionEventStatuses.FAILED, SessionEventStatuses.DENIED, SessionEventStatuses.CANCELLED, SessionEventStatuses.TIMED_OUT
         )
         private val PHASES = setOf("created", "accepted", "running",
             "checkpointing", "resuming", "paused", "succeeded", "failed",
@@ -335,56 +335,56 @@ class DurableSessionEventLedger private constructor(
         private fun metadataSafe(event: JsonObject) {
             if (!event.keys.all { it in ROOT_FIELDS })
                 throw SessionLedgerUnconfirmed("LEDGER_UNSUPPORTED_FIELDS")
-            val redaction = event["redaction"] as? JsonObject
+            val redaction = event[SessionEventFields.REDACTION] as? JsonObject
                 ?: throw SessionLedgerUnconfirmed("LEDGER_REDACTION_REQUIRED")
-            if (redaction.keys != setOf("mode", "removedFields") ||
-                (redaction["mode"] as? JsonPrimitive)?.content != "metadata-only" ||
-                redaction["removedFields"] !is JsonArray ||
-                (redaction["removedFields"] as JsonArray).any {
+            if (redaction.keys != setOf(SessionEventRedactionFields.MODE, SessionEventRedactionFields.REMOVED_FIELDS) ||
+                (redaction[SessionEventRedactionFields.MODE] as? JsonPrimitive)?.content != SessionEventRedactionMode.METADATA_ONLY ||
+                redaction[SessionEventRedactionFields.REMOVED_FIELDS] !is JsonArray ||
+                (redaction[SessionEventRedactionFields.REMOVED_FIELDS] as JsonArray).any {
                     it !is JsonPrimitive || !it.isString || it.content !in REMOVED_FIELDS
                 })
                 throw SessionLedgerUnconfirmed("LEDGER_REDACTION_REQUIRED")
 
-            val actor = event["actor"] as? JsonObject
+            val actor = event[SessionEventFields.ACTOR] as? JsonObject
                 ?: throw SessionLedgerUnconfirmed("LEDGER_EVENT_INVALID")
-            if ("agentId" !in actor || actor.keys.any { it !in setOf("agentId",
-                    "parentAgentId", "childAgentId", "toolExecutionId", "childSessionId") } ||
-                !identifier(actor["agentId"]) ||
-                actor.any { (key, value) -> key != "agentId" && value != JsonNull &&
+            if (SessionEventActorFields.AGENT_ID !in actor || actor.keys.any { it !in setOf(SessionEventActorFields.AGENT_ID,
+                    SessionEventActorFields.PARENT_AGENT_ID, SessionEventActorFields.CHILD_AGENT_ID, SessionEventActorFields.TOOL_EXECUTION_ID, SessionEventActorFields.CHILD_SESSION_ID) } ||
+                !identifier(actor[SessionEventActorFields.AGENT_ID]) ||
+                actor.any { (key, value) -> key != SessionEventActorFields.AGENT_ID && value != JsonNull &&
                     !identifier(value) })
                 throw SessionLedgerUnconfirmed("LEDGER_SENSITIVE_ACTOR")
 
-            event["transition"]?.let {
+            event[SessionEventFields.TRANSITION]?.let {
                 val transition = it as? JsonObject
                     ?: throw SessionLedgerUnconfirmed("LEDGER_SENSITIVE_TRANSITION")
-                if (transition.keys != setOf("from", "to") ||
+                if (transition.keys != setOf(SessionEventTransitionFields.FROM, SessionEventTransitionFields.TO) ||
                     transition.values.any { value ->
                         value !is JsonPrimitive || !value.isString || value.content !in PHASES
                     })
                     throw SessionLedgerUnconfirmed("LEDGER_SENSITIVE_TRANSITION")
             }
-            event["timing"]?.let {
+            event[SessionEventFields.TIMING]?.let {
                 val timing = it as? JsonObject
                     ?: throw SessionLedgerUnconfirmed("LEDGER_SENSITIVE_TIMING")
-                val started = timing["startedAt"] as? JsonPrimitive
-                val duration = timing["durationMs"] as? JsonPrimitive
-                if (timing.keys != setOf("startedAt", "durationMs") ||
+                val started = timing[SessionEventTimingFields.STARTED_AT] as? JsonPrimitive
+                val duration = timing[SessionEventTimingFields.DURATION_MS] as? JsonPrimitive
+                if (timing.keys != setOf(SessionEventTimingFields.STARTED_AT, SessionEventTimingFields.DURATION_MS) ||
                     started == null || !started.isString ||
                     runCatching { Instant.parse(started.content) }.isFailure ||
                     duration?.longOrNull == null || duration.longOrNull!! < 0 ||
                     duration.isString)
                     throw SessionLedgerUnconfirmed("LEDGER_SENSITIVE_TIMING")
             }
-            val metadata = event["metadata"] ?: return
+            val metadata = event[SessionEventFields.METADATA] ?: return
             val obj = metadata as? JsonObject
                 ?: throw SessionLedgerUnconfirmed("LEDGER_UNSUPPORTED_METADATA")
             // Reserve the entire effect* namespace. No producer may durably
             // append a stray/partial/wrong-event effect envelope. Even a
             // complete envelope is only metadata, NOT execution authority.
             if (EffectEvidenceEnvelopePolicy.hasReservedKey(obj)) {
-                val type = (event["type"] as? JsonPrimitive)
+                val type = (event[SessionEventFields.TYPE] as? JsonPrimitive)
                     ?.takeIf { it.isString }?.content
-                val status = (event["status"] as? JsonPrimitive)
+                val status = (event[SessionEventFields.STATUS] as? JsonPrimitive)
                     ?.takeIf { it.isString }?.content
                 if (!EffectEvidenceEnvelopePolicy.validForEvent(type, status, obj))
                     throw SessionLedgerUnconfirmed("LEDGER_EFFECT_ENVELOPE_INVALID")
@@ -409,26 +409,26 @@ class DurableSessionEventLedger private constructor(
 
         private fun validate(event: JsonObject, expectedSequence: Int, previousId: String?) {
             metadataSafe(event)
-            if ((event["kind"] as? JsonPrimitive)?.content != "session-event" ||
-                (event["version"] as? JsonPrimitive)?.content != SessionProtocol.VERSION ||
-                (event["sequence"] as? JsonPrimitive)?.intOrNull != expectedSequence)
+            if ((event[SessionEnvelopeFields.KIND] as? JsonPrimitive)?.content != SessionEnvelopeKinds.EVENT ||
+                (event[SessionEnvelopeFields.VERSION] as? JsonPrimitive)?.content != SessionProtocol.VERSION ||
+                (event[SessionEventFields.SEQUENCE] as? JsonPrimitive)?.intOrNull != expectedSequence)
                 throw SessionLedgerUnconfirmed("LEDGER_EVENT_VERSION_OR_SEQUENCE")
-            val session = (event["sessionId"] as? JsonPrimitive)?.content
+            val session = (event[SessionEnvelopeFields.SESSION_ID] as? JsonPrimitive)?.content
                 ?: throw SessionLedgerUnconfirmed("LEDGER_IDENTITY_MISSING")
-            val id = (event["eventId"] as? JsonPrimitive)?.content
+            val id = (event[SessionEventFields.EVENT_ID] as? JsonPrimitive)?.content
             if (id != SessionEventJournal.eventId(session, expectedSequence) ||
-                (previousId == null && event["causationId"] != JsonNull) ||
-                (previousId != null && (event["causationId"] as? JsonPrimitive)?.content != previousId))
+                (previousId == null && event[SessionEventFields.CAUSATION_ID] != JsonNull) ||
+                (previousId != null && (event[SessionEventFields.CAUSATION_ID] as? JsonPrimitive)?.content != previousId))
                 throw SessionLedgerUnconfirmed("LEDGER_EVENT_CHAIN_INVALID")
-            if (!identifier(event["sessionId"]) ||
-                !identifier(event["traceId"]) ||
-                !identifier(event["correlationId"]) ||
-                event["timestamp"] !is JsonPrimitive ||
+            if (!identifier(event[SessionEnvelopeFields.SESSION_ID]) ||
+                !identifier(event[SessionEnvelopeFields.TRACE_ID]) ||
+                !identifier(event[SessionEventFields.CORRELATION_ID]) ||
+                event[SessionEventFields.TIMESTAMP] !is JsonPrimitive ||
                 runCatching {
-                    Instant.parse((event["timestamp"] as JsonPrimitive).content)
+                    Instant.parse((event[SessionEventFields.TIMESTAMP] as JsonPrimitive).content)
                 }.isFailure ||
-                (event["type"] as? JsonPrimitive)?.content !in SAFE_EVENT_TYPES ||
-                (event["status"] as? JsonPrimitive)?.content !in SAFE_STATUSES)
+                (event[SessionEventFields.TYPE] as? JsonPrimitive)?.content !in SAFE_EVENT_TYPES ||
+                (event[SessionEventFields.STATUS] as? JsonPrimitive)?.content !in SAFE_STATUSES)
                 throw SessionLedgerUnconfirmed("LEDGER_EVENT_INVALID")
         }
 
@@ -492,12 +492,12 @@ class DurableSessionEventLedger private constructor(
                         throw SessionLedgerUnconfirmed("LEDGER_HASH_MISMATCH")
                     val event = decode(payload)
                     validate(event, sequence, previousId)
-                    val observedIdentity = (event["sessionId"] as JsonPrimitive).content to
-                        (event["traceId"] as JsonPrimitive).content
+                    val observedIdentity = (event[SessionEnvelopeFields.SESSION_ID] as JsonPrimitive).content to
+                        (event[SessionEnvelopeFields.TRACE_ID] as JsonPrimitive).content
                     if (identity != null && identity != observedIdentity)
                         throw SessionLedgerUnconfirmed("LEDGER_IDENTITY_CHANGED")
                     identity = observedIdentity
-                    previousId = (event["eventId"] as JsonPrimitive).content
+                    previousId = (event[SessionEventFields.EVENT_ID] as JsonPrimitive).content
                     previousHash = digest
                     events.add(event)
                 }
@@ -664,7 +664,7 @@ class DurableSessionEventLedger private constructor(
                     file, writerChannel, owner, lock, lease, expected.binding.graphId)
                 writer.committedSequence = verified.lastSequence
                 writer.lastEventId = verified.events.lastOrNull()
-                    ?.get("eventId")?.jsonPrimitive?.content
+                    ?.get(SessionEventFields.EVENT_ID)?.jsonPrimitive?.content
                 writer.committedIdentity = expected.sessionId to expected.traceId
                 writer.committedPhase = admittedPhase
                 writer.lastDigest = try {
@@ -916,8 +916,8 @@ class DurableSessionEventLedger private constructor(
             requireReopenCheckpointCapacity(channel.position(), payload.size)
         requireAppendCapacity(committedSequence, channel.position(), payload.size)
         validate(event, next, lastEventId)
-        val identity = (event["sessionId"] as JsonPrimitive).content to
-            (event["traceId"] as JsonPrimitive).content
+        val identity = (event[SessionEnvelopeFields.SESSION_ID] as JsonPrimitive).content to
+            (event[SessionEnvelopeFields.TRACE_ID] as JsonPrimitive).content
         if (committedIdentity != null && committedIdentity != identity)
             throw SessionLedgerUnconfirmed("LEDGER_IDENTITY_CHANGED")
         val hash = chain(lastDigest, payload)
@@ -934,7 +934,7 @@ class DurableSessionEventLedger private constructor(
                 writeFully(channel, frame.copyOfRange(4, frame.size))
                 afterPhase("record-written")
             }
-            pending = (event["eventId"] as JsonPrimitive).content to hash
+            pending = (event[SessionEventFields.EVENT_ID] as JsonPrimitive).content to hash
             pendingIdentity = identity
         } catch (e: Throwable) {
             poisoned = true
