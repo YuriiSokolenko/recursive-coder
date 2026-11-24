@@ -15,11 +15,11 @@ and `core/session/src/test/kotlin/ai/yuriilab/recursivecoder/`, respectively.
 | Decision / invariant | Baseline unit test (#26) | Gap case (#37) |
 | --- | --- | --- |
 | All allowed and denied phase edges; reason/history timestamps; input immutability | `TaskPolicyUnitTest.legalTransitionsAreTableDrivenAndTimestamped`, `illegalTransitionsAreRejectedBeforeChangingState`, `unchangedReasonDoesNotAppendHistoryButChangedAttentionReasonDoes` | `TaskPolicyCoverageUnitTest.transitionMatrixCoversEveryDeclaredEdgeAndEveryDeniedEdge` checks the complete state-pair table, including same-state reason updates |
-| Unique IDs, dependency validity, acyclicity, topological ordering | `dependencyGraphIsTopologicalAndRejectsInvalidEdits`, `iterativeGraphHandlesLargeDependencyChainsAndCycles` | `storedScalarInvariantsRejectInvalidSnapshotsWithoutAdapters` checks persisted scalar domain constraints |
-| Enqueue validation, dependency edits, immediate DAG readiness | `enqueuingAndChangingDependenciesRejectInvalidDomainInputs`, `dependencyFailurePropagatesAndRetryWakesDependentsInOneDecision` | `dependencyReadinessAndFailurePropagationCoverPrerequisiteStates` includes success, queued, running, failed, cancelled and attention prerequisites; `dependencyEditsArePermittedOnlyBeforeFirstAttempt` covers a valid edit and a denied edit after execution |
+| Unique IDs, dependency validity, acyclicity, topological ordering | `dependencyGraphIsTopologicalAndRejectsInvalidEdits`, `iterativeGraphHandlesLargeDependencyChainsAndCycles` | `storedScalarInvariantsRejectInvalidSnapshotsWithoutAdapters` checks accepted and denied persisted scalar domain boundaries |
+| Enqueue validation, dependency edits, immediate DAG readiness | `enqueuingAndChangingDependenciesRejectInvalidDomainInputs`, `dependencyFailurePropagatesAndRetryWakesDependentsInOneDecision` | `dependencyReadinessAndFailurePropagationCoverPrerequisiteStates` includes success, queued, running, failed, cancelled and attention prerequisites; `firstFailedPrerequisiteFollowsDeclaredDependencyOrder` pins failure reason precedence; `dependencyEditsArePermittedOnlyBeforeFirstAttempt` covers a valid edit and a denied edit after execution |
 | Deterministic priority/FIFO and starvation relief | `priorityAndFIFOOrderingIsDeterministic`, `oldestTaskIsSelectedOnEveryEighthDispatchEvenWithHighPriorityArrivals`, `waitCreditIsCappedAndExcludedRunningTaskCannotBeReclaimed` | `eighthDispatchOldestSelectionAndExclusionsAreDeterministic` checks both sides of eighth-dispatch boundaries, exclusions, wait credit and no-dispatch behavior |
 | Pause/resume keeps original ready ordering | `pauseResumePreservesOnlyAlreadyReadyPositions` | Existing table covers ready vs blocked when paused and dependency completion while paused; no new policy gap found |
-| Retry, cancellation, ownership and late result fencing | `cancellationAndLateCompletionCannotOverrideTerminalStateOrNewOwner`, `recoveryRequiresAttentionWithoutReplayingSessions` | `cancelAllAndManualRetryFenceStaleCompletionAndKeepQueuePaused` covers active/terminal global cancellation, retry under pause, owner clearing and stale completion |
+| Retry, cancellation, ownership and late result fencing | `cancellationAndLateCompletionCannotOverrideTerminalStateOrNewOwner`, `recoveryRequiresAttentionWithoutReplayingSessions` | `cancelAllAndManualRetryFenceStaleCompletionAndKeepQueuePaused` covers active/terminal global cancellation, retry under pause, owner clearing, stale completion and successful current-owner completion |
 | All terminal session outcomes map to Task dispositions | `everyTerminalSessionOutcomeHasAnExplicitTaskDisposition` | Existing complete outcome table; no new policy gap found |
 | Bounded transition history | `boundedHistoryRetainsMostRecent128EventsWithDeterministicTimes` | Existing pruning and chronological-tail assertions; no new policy gap found |
 
@@ -28,12 +28,12 @@ and `core/session/src/test/kotlin/ai/yuriilab/recursivecoder/`, respectively.
 | Decision / invariant | Baseline unit test (#28) | Gap case (#37) |
 | --- | --- | --- |
 | Lifecycle legal/illegal edges, one terminal result, cancellation/timeout paths | `SessionPolicyUnitTest.onlyDeclaredLifecycleTransitionsAreLegal`, `aTerminalOutcomeCannotBeOverwrittenByCancellationTimeoutOrFailure`, `cancellationTimeoutAndDenialHaveDeterministicPathsFromEveryNonterminalPhase` | Existing exhaustive transition and nonterminal reason matrices; no duplicate test added |
-| Admission: protocol, invocation, resume, capability, provider, tools, budget | `admissionDeniesUnsupportedInvocationsCapabilitiesModelAndUnsafePolicies` | `SessionPolicyCoverageUnitTest.admissionDenialPrecedenceIsStableWhenMultipleInputsAreInvalid` tests overlapping errors; `admissionBoundariesCoverModelAndToolPolicyVariants` adds provider/tool/counter variants |
+| Admission: protocol, invocation, resume, capability, provider, tools, budget | `admissionDeniesUnsupportedInvocationsCapabilitiesModelAndUnsafePolicies` | `SessionPolicyCoverageUnitTest.admissionDenialPrecedenceIsStableWhenMultipleInputsAreInvalid` tests overlapping errors; `admissionBoundariesCoverModelAndToolPolicyVariants` adds provider/tool/counter variants; `schedulerAttemptRangeIsNotValidatedByPureAdmission` characterizes the existing scheduler attempt handling |
 | Resume preflight does not convert unsupported resume into later denials | `resumeProbePreservesProtocolV1PrecedenceAcrossLaterDenials`, `resumeFilesystemDetailAcceptsOnlySafeHostVolumeIdentifiers` | `admissionDenialPrecedenceIsStableWhenMultipleInputsAreInvalid` includes a simultaneous resume/capability refusal |
 | Two-turn model request reservation and retry quota | `modelRequestReservationAndToolQuotaAreFailClosed` | `modelTurnReservationHandlesExactCapacityAndInvalidCounters` checks exact/quota, negative counters and invalid turn indices; `recordedModelUsageRespectsTokenAndRequestEdgesWithoutOverflow` checks retry enabled/disabled and Long boundaries |
 | Token observation accounting, unknown usage, overflow/negative fail closed | `tokenAccountingRejectsOverLimitNegativeAndOverflowWithoutSideEffects` | `recordedModelUsageRespectsTokenAndRequestEdgesWithoutOverflow` checks exact capacity, combined usage, negative prior counters, overflow-sized usage and cumulative accounting |
 | Tool-call consumption before dispatch, fail-closed at quota | `modelRequestReservationAndToolQuotaAreFailClosed` | `toolQuotaGuardsZeroNegativeExactAndLongMaxBoundaries` covers negative, zero, exact and Long.MAX_VALUE counters |
-| Explicit deadline and timeout-before-cancellation precedence | `effectiveDeadlineRespectsTheEarlierOfRequestAndWallBudget`, `deadlineTakesPrecedenceOverSimultaneousCancellation`, `injectedCancellationClockAndExplicitTimePreserveTimeoutPrecedence` | `interruptionMatrixMakesTimeoutDominantAtAndAfterDeadline` enumerates both signal flags before/on/after deadline and checks the public host gate |
+| Explicit deadline and timeout-before-cancellation precedence | `effectiveDeadlineRespectsTheEarlierOfRequestAndWallBudget`, `deadlineTakesPrecedenceOverSimultaneousCancellation`, `injectedCancellationClockAndExplicitTimePreserveTimeoutPrecedence` | `interruptionMatrixMakesTimeoutDominantAtAndAfterDeadline` enumerates both signal flags before/on/after deadline and checks all three public host-gate outcomes (no interruption, cancellation, timeout) |
 | Protocol-result diagnostics are mapped from typed outcomes | `SessionResultMapperUnitTest.diagnosticMessagesAreFixedAndDoNotIncorporateInboundRequestText` | Existing complete typed-outcome table; no new policy gap found |
 
 ## Tier and adapter boundary
@@ -55,8 +55,13 @@ existing integration/E2E owners:
 - `contracts/v1/session-v1.test.mjs` and installed Python CLI suites:
   Session Protocol v1 envelopes, event ordering and adapter validation.
 
-Remaining gaps are **integration concerns**, not missing branches in the
-extracted pure Task/Session policies: actual worker scheduling races and
+The pure admission policy currently accepts scheduler attempts of zero and
+negative values when all other facts are valid. The characterization test
+pins that existing behavior, not a new authorization guarantee; protocol
+validation and trusted caller constraints are separate. Tightening admission
+would require a separate behavior-changing issue.
+
+Remaining integration concerns include actual worker scheduling races and
 persistent recovery, model/gateway wire errors, filesystem boundary checks,
 sandbox effects, and installed CLI/protocol conformance. They must not be
 substituted with mock-heavy pure tests. This audit asserts no numerical

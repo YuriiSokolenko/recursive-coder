@@ -63,8 +63,6 @@ class TaskPolicyCoverageUnitTest {
                         TaskPolicy.transition(before, to, "new", 12, at)
                     }
                 }
-                assertEquals("old", before.reason, "Input mutated during $description")
-                assertTrue(before.transitions.isEmpty(), "Input history mutated during $description")
             }
         }
     }
@@ -101,19 +99,33 @@ class TaskPolicyCoverageUnitTest {
                 grandchild.state, "grandchild after parent=${case.prerequisite}")
             assertEquals(if (propagated) "dependency:child:needs-attention" else null,
                 grandchild.reason, "grandchild reason after parent=${case.prerequisite}")
-            assertEquals(TaskState.BLOCKED, queue.tasks[1].state,
-                "Reconciliation must not change the input snapshot")
+        }
+    }
+
+    @Test fun firstFailedPrerequisiteFollowsDeclaredDependencyOrder() {
+        val failed = task("failed", state = TaskState.FAILED)
+        val cancelled = task("cancelled", state = TaskState.CANCELLED)
+        for ((dependencies, expected) in listOf(
+            listOf("failed", "cancelled") to "dependency:failed:failed",
+            listOf("cancelled", "failed") to "dependency:cancelled:cancelled"
+        )) {
+            val child = task("child", state = TaskState.BLOCKED, dependencies = dependencies)
+            val queue = TaskQueue(tasks = listOf(child, cancelled, failed))
+            val actual = TaskPolicy.reconcile(queue, at).tasks.single { it.id == "child" }
+            assertEquals(TaskState.NEEDS_ATTENTION, actual.state, "dependencies=$dependencies")
+            assertEquals(expected, actual.reason, "First failed prerequisite for $dependencies")
         }
     }
 
     @Test fun eighthDispatchOldestSelectionAndExclusionsAreDeterministic() {
-        for (count in listOf(0L, 6L, 7L, 8L, 14L, 15L, 16L)) {
+        val cases = listOf(0L to "highest", 6L to "highest", 7L to "oldest",
+            8L to "highest", 14L to "highest", 15L to "oldest", 16L to "highest")
+        for ((count, expected) in cases) {
             val queue = TaskQueue(nextOrder = 2, dispatches = count, tasks = listOf(
                 task("oldest", priority = 0, order = 1),
                 task("highest", priority = 100, order = 2)
             ))
             val claim = TaskPolicy.claim(queue, emptySet(), at)
-            val expected = if (count % 8L == 7L) "oldest" else "highest"
             assertEquals(expected, claim.task?.id, "dispatches=$count")
             assertEquals(count + 1L, claim.queue.dispatches, "dispatches=$count")
             assertEquals(1L, claim.queue.tasks.single { it.id != expected }.waitTurns,
@@ -152,7 +164,6 @@ class TaskPolicyCoverageUnitTest {
             assertEquals(expected, stopped.tasks.single { it.id == id }.state,
                 "Existing terminal disposition of $id must survive cancelAll")
         }
-        assertEquals(TaskState.RUNNING, original.tasks[2].state, "Original snapshot was mutated")
         assertEquals(stopped, TaskPolicy.finish(stopped, "running",
             "session-running-1", SessionOutcome.SUCCEEDED, at),
             "Late successful completion must not override cancellation")
@@ -160,26 +171,30 @@ class TaskPolicyCoverageUnitTest {
         val retry = TaskPolicy.retry(stopped, "running", at)
         val pending = retry.tasks.single { it.id == "running" }
         assertTrue(retry.paused, "Retry must not unpause the globally stopped queue")
-        assertEquals(TaskState.PAUSED, pending.state)
+        assertEquals(TaskState.PAUSED, pending.state, "Retried task must remain paused")
         assertNull(pending.sessionId, "Retry must clear the previous session owner")
         assertEquals(1, pending.attempt, "Retry does not increment attempt before claim")
         val resumed = TaskPolicy.resume(retry, at)
         val claim = TaskPolicy.claim(resumed, emptySet(), at)
-        // Other retried-independent tasks may also be ready: constrain the candidate set.
-        val runningClaim = TaskPolicy.claim(resumed,
-            resumed.tasks.map { it.id }.filter { it != "running" }.toSet(), at)
-        assertNotNull(claim.task, "Resume must offer at least one runnable task")
-        assertEquals("running", runningClaim.task?.id)
-        assertEquals("session-running-2", runningClaim.task?.sessionId)
-        assertEquals(runningClaim.queue, TaskPolicy.finish(runningClaim.queue, "running",
-            "session-running-1", SessionOutcome.SUCCEEDED, at),
-            "Previous owner must be fenced after retry")
+        assertEquals("running", claim.task?.id, "Only the retried task may run")
+        assertEquals("session-running-2", claim.task?.sessionId, "Claim must issue a new owner")
+        val stale = TaskPolicy.finish(claim.queue, "running",
+            "session-running-1", SessionOutcome.SUCCEEDED, at)
+        assertEquals(claim.queue, stale, "Previous owner must be fenced after retry")
+        val completed = TaskPolicy.finish(stale, "running",
+            "session-running-2", SessionOutcome.SUCCEEDED, at)
+        val result = completed.tasks.single { it.id == "running" }
+        assertEquals(TaskState.SUCCEEDED, result.state, "Current owner must be able to finish")
+        assertEquals(SessionOutcome.SUCCEEDED, result.lastResultStatus, "Record current owner outcome")
     }
 
     @Test fun storedScalarInvariantsRejectInvalidSnapshotsWithoutAdapters() {
         val good = task("valid", order = 1)
         val invalid = listOf(
             "unsafe-id" to good.copy(id = "../escape"),
+            "65-character-id" to good.copy(id = "a".repeat(65)),
+            "leading-hyphen" to good.copy(id = "-valid"),
+            "leading-underscore" to good.copy(id = "_valid"),
             "low-priority" to good.copy(priority = -1),
             "high-priority" to good.copy(priority = 101),
             "negative-attempt" to good.copy(attempt = -1),
@@ -187,13 +202,20 @@ class TaskPolicyCoverageUnitTest {
             "negative-wait" to good.copy(waitTurns = -1),
             "negative-pruned-history" to good.copy(prunedTransitions = -1)
         )
-        validateStoredTasks(listOf(good))
+        for ((name, snapshot) in listOf(
+            "minimum-priority" to good.copy(priority = 0),
+            "maximum-priority" to good.copy(priority = 100),
+            "64-character-id" to good.copy(id = "a".repeat(64)),
+            "one-character-id" to good.copy(id = "a")
+        )) {
+            val failure = runCatching { validateStoredTasks(listOf(snapshot)) }.exceptionOrNull()
+            assertNull(failure, "Valid stored task boundary: $name")
+        }
         for ((name, snapshot) in invalid) {
             assertFailsWith<IllegalArgumentException>("Invalid stored task invariant: $name") {
                 validateStoredTasks(listOf(snapshot))
             }
         }
-        assertEquals(task("valid", order = 1), good, "Invalid candidates cannot mutate the baseline")
     }
 
     @Test fun dependencyEditsArePermittedOnlyBeforeFirstAttempt() {

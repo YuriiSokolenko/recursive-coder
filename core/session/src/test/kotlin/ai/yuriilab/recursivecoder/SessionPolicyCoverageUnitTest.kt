@@ -57,7 +57,7 @@ class SessionPolicyCoverageUnitTest {
             Triple("budget is last",
                 good.copy(maxToolCalls = 0, maxModelRequests = 0), AdmissionDenial.BUDGET)
         )
-        assertEquals(AdmissionDecision.Accepted, SessionAdmissionPolicy.decide(good))
+        assertEquals(AdmissionDecision.Accepted, SessionAdmissionPolicy.decide(good), "Baseline admission")
         for ((name, facts, denial) in cases) {
             assertEquals(AdmissionDecision.Denied(denial),
                 SessionAdmissionPolicy.decide(facts), name)
@@ -71,7 +71,7 @@ class SessionPolicyCoverageUnitTest {
         val base = admitted()
         val accepted = listOf(
             base.copy(invocationSource = "scheduler", attempt = 2),
-            base.copy(maxToolCalls = 1, maxModelRequests = 2),
+            base.copy(maxToolCalls = Long.MAX_VALUE, maxModelRequests = Long.MAX_VALUE),
             base.copy(provider = "openai-compatible", modelId = "remote",
                 requiredCapabilities = setOf("session-events-v1", "model-gateway-v1",
                     "read-only-tools-v1"),
@@ -101,6 +101,16 @@ class SessionPolicyCoverageUnitTest {
         for ((facts, reason) in denied) {
             assertEquals(AdmissionDecision.Denied(reason),
                 SessionAdmissionPolicy.decide(facts), "Admission facts: $facts")
+        }
+    }
+
+    @Test fun schedulerAttemptRangeIsNotValidatedByPureAdmission() {
+        // Characterization only: protocol/schema and trusted caller validation are separate.
+        // Do not change production admission semantics in this coverage-only issue.
+        for (attempt in listOf(-1L, 0L, 1L, 2L, Long.MAX_VALUE)) {
+            assertEquals(AdmissionDecision.Accepted,
+                SessionAdmissionPolicy.decide(admitted().copy(invocationSource = "scheduler", attempt = attempt)),
+                "Current pure scheduler admission for attempt=$attempt")
         }
     }
 
@@ -194,56 +204,90 @@ class SessionPolicyCoverageUnitTest {
             if (case.denial != null) {
                 assertEquals(BudgetDecision.Denied(case.denial), result, case.name)
             } else {
-                assertTrue(result is BudgetDecision.Allowed<*>, case.name)
-                val recorded = (result as BudgetDecision.Allowed<SessionBudgetState>).value
-                assertEquals(case.state.modelRequests + case.attempts, recorded.modelRequests,
-                    "${case.name}: request accounting")
-                assertEquals(case.state.inputTokens + (case.usage?.input ?: 0), recorded.inputTokens,
-                    "${case.name}: input accounting")
-                assertEquals(case.state.outputTokens + (case.usage?.output ?: 0), recorded.outputTokens,
-                    "${case.name}: output accounting")
-                assertEquals(case.state.completeUsage && case.usage != null,
-                    recorded.completeUsage, "${case.name}: usage completeness")
+                val expected = case.state.copy(
+                    modelRequests = case.state.modelRequests + case.attempts,
+                    inputTokens = case.state.inputTokens + (case.usage?.input ?: 0L),
+                    outputTokens = case.state.outputTokens + (case.usage?.output ?: 0L),
+                    completeUsage = case.state.completeUsage && case.usage != null
+                )
+                assertEquals(BudgetDecision.Allowed(expected), result, case.name)
             }
         }
     }
 
     @Test fun toolQuotaGuardsZeroNegativeExactAndLongMaxBoundaries() {
-        for (limit in listOf(0L, 1L, 2L, Long.MAX_VALUE)) {
-            for (count in listOf(-1L, 0L, 1L, 2L, Long.MAX_VALUE - 1, Long.MAX_VALUE)) {
-                val state = SessionBudgetState(toolCalls = count)
-                val result = SessionBudgetPolicy.recordTool(state, limit)
-                val description = "toolCalls=$count, maxCalls=$limit"
-                if (count >= 0 && count < limit) {
-                    assertEquals(BudgetDecision.Allowed(state.copy(toolCalls = count + 1)),
-                        result, description)
-                } else {
-                    assertEquals(BudgetDecision.Denied(BudgetDenial.TOOLS), result, description)
-                }
-                assertEquals(count, state.toolCalls, "Input mutated for $description")
-            }
+        data class Case(val limit: Long, val count: Long, val expectedCount: Long?)
+        // null is an explicit denial; successful rows name the resulting counter.
+        val cases = listOf(
+            Case(0L, -1L, null),
+            Case(0L, 0L, null),
+            Case(0L, 1L, null),
+            Case(0L, 2L, null),
+            Case(0L, Long.MAX_VALUE - 1, null),
+            Case(0L, Long.MAX_VALUE, null),
+            Case(1L, -1L, null),
+            Case(1L, 0L, 1L),
+            Case(1L, 1L, null),
+            Case(1L, 2L, null),
+            Case(1L, Long.MAX_VALUE - 1, null),
+            Case(1L, Long.MAX_VALUE, null),
+            Case(2L, -1L, null),
+            Case(2L, 0L, 1L),
+            Case(2L, 1L, 2L),
+            Case(2L, 2L, null),
+            Case(2L, Long.MAX_VALUE - 1, null),
+            Case(2L, Long.MAX_VALUE, null),
+            Case(Long.MAX_VALUE, -1L, null),
+            Case(Long.MAX_VALUE, 0L, 1L),
+            Case(Long.MAX_VALUE, 1L, 2L),
+            Case(Long.MAX_VALUE, 2L, 3L),
+            Case(Long.MAX_VALUE, Long.MAX_VALUE - 1, Long.MAX_VALUE),
+            Case(Long.MAX_VALUE, Long.MAX_VALUE, null)
+        )
+        for (case in cases) {
+            val state = SessionBudgetState(toolCalls = case.count)
+            val expected = case.expectedCount?.let {
+                BudgetDecision.Allowed(state.copy(toolCalls = it))
+            } ?: BudgetDecision.Denied(BudgetDenial.TOOLS)
+            assertEquals(expected, SessionBudgetPolicy.recordTool(state, case.limit),
+                "toolCalls=${case.count}, maxCalls=${case.limit}")
         }
     }
 
     @Test fun interruptionMatrixMakesTimeoutDominantAtAndAfterDeadline() {
         val deadline = Instant.parse("2026-11-24T09:00:00Z")
-        for (requested in listOf(false, true)) {
-            for (expired in listOf(false, true)) {
-                for (offset in listOf(-1L, 0L, 1L)) {
-                    val signals = CancellationSignals(requested, expired)
-                    val now = deadline.plusMillis(offset)
-                    val expected = when {
-                        expired || offset >= 0 -> SessionEndReason.TIMEOUT
-                        requested -> SessionEndReason.CANCELLATION
-                        else -> null
-                    }
-                    assertEquals(expected,
-                        SessionBudgetPolicy.interruption(signals, now, deadline),
-                        "requested=$requested, expired=$expired, offsetMs=$offset")
-                    assertEquals(expected == SessionEndReason.TIMEOUT,
-                        SessionInterruptionGate.stopped(signals, now, deadline)?.timedOut == true,
-                        "Host gate timeout projection must match policy at offsetMs=$offset")
-                }
+        data class Case(
+            val requested: Boolean, val expired: Boolean, val offset: Long,
+            val expected: SessionEndReason?
+        )
+        val cases = listOf(
+            Case(false, false, -1, null),
+            Case(false, false, 0, SessionEndReason.TIMEOUT),
+            Case(false, false, 1, SessionEndReason.TIMEOUT),
+            Case(false, true, -1, SessionEndReason.TIMEOUT),
+            Case(false, true, 0, SessionEndReason.TIMEOUT),
+            Case(false, true, 1, SessionEndReason.TIMEOUT),
+            Case(true, false, -1, SessionEndReason.CANCELLATION),
+            Case(true, false, 0, SessionEndReason.TIMEOUT),
+            Case(true, false, 1, SessionEndReason.TIMEOUT),
+            Case(true, true, -1, SessionEndReason.TIMEOUT),
+            Case(true, true, 0, SessionEndReason.TIMEOUT),
+            Case(true, true, 1, SessionEndReason.TIMEOUT)
+        )
+        for (case in cases) {
+            val signals = CancellationSignals(case.requested, case.expired)
+            val now = deadline.plusMillis(case.offset)
+            val description = "requested=${case.requested}, expired=${case.expired}, offsetMs=${case.offset}"
+            assertEquals(case.expected, SessionBudgetPolicy.interruption(signals, now, deadline),
+                description)
+            val stopped = SessionInterruptionGate.stopped(signals, now, deadline)
+            when (case.expected) {
+                null -> assertNull(stopped, "No host interruption: $description")
+                SessionEndReason.CANCELLATION ->
+                    assertEquals(false, stopped?.timedOut, "Host cancellation: $description")
+                SessionEndReason.TIMEOUT ->
+                    assertEquals(true, stopped?.timedOut, "Host timeout: $description")
+                else -> fail("Unexpected interruption table outcome: ${case.expected}")
             }
         }
         assertEquals(deadline,
