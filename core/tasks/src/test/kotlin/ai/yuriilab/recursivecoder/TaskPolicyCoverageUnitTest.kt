@@ -252,9 +252,53 @@ class TaskPolicyCoverageUnitTest {
             assertEquals(Int.MAX_VALUE, terminal.attempt)
             assertEquals(outcome, terminal.lastResultStatus)
             assertEquals(running.sessionId, terminal.sessionId)
-            assertFailsWith<IllegalArgumentException> { TaskPolicy.retry(finished, running.id, at) }
+            val expectedReason = if (outcome == SessionOutcome.SUCCEEDED)
+                "Only terminal/attention tasks can be retried" else "attempt counter exhausted"
+            val rejection = assertFailsWith<IllegalArgumentException> {
+                TaskPolicy.retry(finished, running.id, at)
+            }
+            assertEquals(expectedReason, rejection.message, outcome.wire)
             assertNull(TaskPolicy.claim(finished, emptySet(), at).task)
         }
+    }
+
+    @Test fun exhaustedLegacyDependencyAttentionRejectsRetryBeforePrerequisiteCheck() {
+        val parent = task("parent", state = TaskState.FAILED)
+        val child = task("child", state = TaskState.NEEDS_ATTENTION, order = 2,
+            dependencies = listOf(parent.id), attempt = Int.MAX_VALUE,
+            reason = "dependency:parent:failed")
+        val queue = TaskQueue(nextOrder = 2, tasks = listOf(child, parent))
+        validateStoredTasks(queue.tasks)
+
+        // Exercise retry directly on a legacy snapshot, before reconciliation.
+        assertEquals("attempt counter exhausted", assertFailsWith<IllegalArgumentException> {
+            TaskPolicy.retry(queue, child.id, at)
+        }.message)
+        val belowLimit = queue.copy(tasks = listOf(child.copy(attempt = Int.MAX_VALUE - 1), parent))
+        assertEquals("Retry the failed prerequisite first; this task is blocked by a dependency",
+            assertFailsWith<IllegalArgumentException> {
+                TaskPolicy.retry(belowLimit, child.id, at)
+            }.message)
+    }
+
+    @Test fun unattemptedDependentCanBeRepointedToReplacementForExhaustedTask() {
+        val exhausted = task("old", attempt = Int.MAX_VALUE)
+        val child = task("child", state = TaskState.BLOCKED, order = 2,
+            dependencies = listOf(exhausted.id))
+        val queue = TaskPolicy.reconcile(TaskQueue(nextOrder = 2, tasks = listOf(child, exhausted)), at)
+        assertEquals("dependency:old:needs-attention", queue.tasks.first().reason)
+
+        val replacement = TaskPolicy.enqueue(queue, "replacement", "{}", 50, emptyList(), at)
+        val repointed = TaskPolicy.replaceDependencies(replacement, child.id, listOf("replacement"), at)
+        assertEquals(TaskState.BLOCKED, repointed.tasks.first().state)
+        assertEquals(listOf("replacement"), repointed.tasks.first().dependencies)
+        val claim = TaskPolicy.claim(repointed, emptySet(), at)
+        val running = assertNotNull(claim.task)
+        assertEquals("replacement", running.id)
+        val finished = TaskPolicy.finish(claim.queue, running.id, running.sessionId!!,
+            SessionOutcome.SUCCEEDED, at)
+        assertEquals(child.id, TaskPolicy.claim(finished, emptySet(), at).task?.id)
+        assertEquals(queue.tasks[1], finished.tasks[1])
     }
 
     @Test fun exhaustedQueuedTasksAreQuarantinedWithoutConsumingDispatchOrBlockingOthers() {

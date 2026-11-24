@@ -218,17 +218,22 @@ internal object TaskPolicy {
         val current = queue.tasks[index]
         require(current.state in setOf(TaskState.FAILED, TaskState.CANCELLED,
             TaskState.NEEDS_ATTENTION)) { "Only terminal/attention tasks can be retried" }
+        require(current.attempt < Int.MAX_VALUE) { ATTEMPT_EXHAUSTED }
         require(current.state != TaskState.NEEDS_ATTENTION ||
             current.reason?.startsWith("dependency:") != true) {
             "Retry the failed prerequisite first; this task is blocked by a dependency"
         }
-        require(current.attempt < Int.MAX_VALUE) { ATTEMPT_EXHAUSTED }
         // The old session is historical; the next claim creates a different owner ID.
         val update = transition(current.copy(sessionId = null), TaskState.BLOCKED,
             "manual retry", queue.nextOrder, at)
         return reconcile(queue.replace(index, update.task, update.nextOrder), at)
     }
 
+    /**
+     * Reconcile exhausted queued tasks before selection. The checked increment is
+     * a last-resort invariant guard: if reconciliation ever fails to exclude an
+     * exhausted candidate, arithmetic failure aborts the caller's transaction.
+     */
     fun claim(queue: TaskQueue, excludedTaskIds: Set<String>, at: String): TaskClaim {
         val ready = reconcile(queue, at)
         if (ready.paused) return TaskClaim(ready, null)

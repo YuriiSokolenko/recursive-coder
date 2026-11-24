@@ -697,7 +697,6 @@ class TaskManagerTest {
             persistedTask.getValue("prunedTransitions").jsonPrimitive.long)
     }
 
-
     @Test fun exhaustedAttemptsPersistAcrossClaimsRecoveryAndRejectedRetries() {
         val first = service()
         first.enqueue(request("exhausted"), priority = 100)

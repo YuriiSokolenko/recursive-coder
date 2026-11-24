@@ -165,9 +165,18 @@ cover denial, contention, recovery, and stale-session fencing.
   remain schedulable. A final running attempt may finish normally; recovery
   retains the interrupted owner and reason without replay. Retry at the limit
   fails before mutation, regardless of whether the final attempt failed,
-  was cancelled or requires attention. Use a new task identity for further
-  work; the counter is never reset or wrapped. No store or protocol migration
-  is required.
+  was cancelled or requires attention. For retry-eligible states, exhaustion
+  takes precedence over dependency attention, even in legacy snapshots.
+  Use a new task identity for further work; the counter is never reset or
+  wrapped. To unblock dependents that have never been claimed (`attempt == 0`),
+  enqueue a replacement prerequisite and update their dependencies using
+  the programmatic `ReplaceTaskDependenciesUseCase` or
+  `TaskService.replaceDependencies` (not a CLI command). They become ready
+  when their new prerequisites succeed. Otherwise cancel the affected
+  dependent tasks and enqueue replacements with new identities and the
+  corrected dependency graph, after reconciling any prior attempt effects.
+  Retrying the exhausted prerequisite cannot unblock its dependents.
+  No store or protocol migration is required.
 
 ## Ordering, durability, and recovery
 
