@@ -1516,18 +1516,25 @@ class ArchitectureConfigurationCacheRegressionTest(_GradleOutputAssertions):
             # Gradle quotes file paths without necessarily escaping embedded
             # apostrophes. Match the entire file operand up to the closing
             # quote before the diagnostic predicate, not arbitrary quoted text.
-            match = re.match(r"""^(?:the )?file (['"])(.*)\1(?:\s+[^'"]*)?[.]?$""", reason)
+            match = re.fullmatch(r"""file (['"])(.*)\1\s+[^'"]+""", reason)
             if match is None:
                 continue
             candidate = match.group(2).replace("\\", "/")
             if not candidate:
                 continue
             if candidate.startswith("/") or re.match(r"^[A-Za-z]:/", candidate):
-                candidates = {posixpath.normpath(candidate)}
+                candidates = (candidate,)
             else:
-                candidates = {posixpath.normpath(root + "/" + candidate) for root in roots}
-            if candidates & expected:
-                return
+                candidates = tuple(root + "/" + candidate for root in roots)
+            for path in candidates:
+                normalized = posixpath.normpath(path)
+                # Unescaped quotes make a synthetic multi-operand message
+                # ambiguous. Never let ".." erase a quoted component and
+                # turn such a message into a matching path.
+                if any(path.count(quote) != normalized.count(quote) for quote in ("'", '"')):
+                    continue
+                if normalized in expected:
+                    return
         self.fail(f"Expected cache invalidation for {sorted(expected)!r}; see streamed Gradle output above.")
 
     def test_cache_reason_requires_expected_input_on_reason_line(self):
@@ -1545,7 +1552,13 @@ class ArchitectureConfigurationCacheRegressionTest(_GradleOutputAssertions):
                 "core\\build.gradle.kts",
                 "core/tasks/../build.gradle.kts",
             ):
-                for change in ("has changed", "has been added", "was removed"):
+                for change in (
+                    "has changed",
+                    "has been removed",
+                    "has been replaced by a directory",
+                    "has been added",
+                    "was removed",
+                ):
                     with self.subTest(candidate=candidate, change=change):
                         self.assert_cache_file_reason(
                             reason + f"file '{candidate}' {change}.", fixture, relative
@@ -1553,6 +1566,8 @@ class ArchitectureConfigurationCacheRegressionTest(_GradleOutputAssertions):
             self.assert_cache_file_reason(
                 reason + f'file "{absolute}" no longer exists.', fixture, relative
             )
+            # The reported lexical alias is accepted without dereferencing
+            # candidate symlinks; only the fixture roots are resolved.
             alias = fixture / "alias"
             alias.symlink_to(fixture, target_is_directory=True)
             self.assert_cache_file_reason(
@@ -1569,6 +1584,8 @@ class ArchitectureConfigurationCacheRegressionTest(_GradleOutputAssertions):
                 reason + "file 'settings.gradle.kts' has changed. core/build.gradle.kts",
                 reason + "Gradle property 'core/build.gradle.kts' has changed.",
                 reason + "file 'settings.gradle.kts' has changed. 'core/build.gradle.kts'",
+                reason + "file 'settings.gradle.kts' has changed. '/../core/build.gradle.kts' has changed.",
+                reason + 'file "settings.gradle.kts" has changed. "/../core/build.gradle.kts" has changed.',
             ):
                 with self.subTest(output=unrelated), self.assertRaises(AssertionError):
                     self.assert_cache_file_reason(unrelated, fixture, relative)
