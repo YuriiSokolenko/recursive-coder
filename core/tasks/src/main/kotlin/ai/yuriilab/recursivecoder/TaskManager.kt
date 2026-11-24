@@ -93,9 +93,6 @@ class TaskScheduler(
         val cancellation: Cancellation,
         val future: Future<*>
     )
-    private companion object {
-        const val STOPPED_ATTEMPT_REASON = "scheduler stopped: reconcile unfinished attempt before retry"
-    }
 
     private val stopping = AtomicBoolean(false)
     private val active = ConcurrentHashMap<String, RunningAttempt>()
@@ -116,7 +113,9 @@ class TaskScheduler(
     }
 
     fun runUntilIdle(concurrency: Int = TaskSchedulerConcurrency.DEFAULT): SchedulerReport {
-        require(concurrency in TaskSchedulerConcurrency.MIN..TaskSchedulerConcurrency.MAX) { "Concurrency must be 1..32" }
+        require(concurrency in TaskSchedulerConcurrency.MIN..TaskSchedulerConcurrency.MAX) {
+            "Concurrency must be ${TaskSchedulerConcurrency.MIN}..${TaskSchedulerConcurrency.MAX}"
+        }
         require(pollMillis in 1..1000)
         return repository.withSchedulerLock {
             if (stopping.get()) return@withSchedulerLock SchedulerReport(0, 0, queries.isPaused())
@@ -209,6 +208,10 @@ class TaskScheduler(
             }
             SchedulerReport(launched, completed, queries.isPaused())
         }
+    }
+
+    private companion object {
+        const val STOPPED_ATTEMPT_REASON = "scheduler stopped: reconcile unfinished attempt before retry"
     }
 }
 

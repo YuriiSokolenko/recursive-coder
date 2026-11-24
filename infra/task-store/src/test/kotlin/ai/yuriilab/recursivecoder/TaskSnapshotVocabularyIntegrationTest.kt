@@ -39,6 +39,8 @@ class TaskSnapshotVocabularyIntegrationTest {
 
     @Test fun allTaskStatesAndSessionOutcomesRoundTripThroughStore() {
         val store = TaskStore(temp)
+        // Deliberately synthetic combinations and self-transitions exercise only the
+        // persistence codec, not TaskPolicy's reachable lifecycle or transition rules.
         for (state in TaskState.entries) {
             for (outcome in SessionOutcome.entries) {
                 val task = expectedTask().copy(state = state, lastResultStatus = outcome,
@@ -50,16 +52,22 @@ class TaskSnapshotVocabularyIntegrationTest {
         }
     }
 
-    @Test fun unknownStateAtEverySnapshotPositionRejectsReadAndWriteWithoutClobbering() {
+    @Test fun unknownStateOrOutcomeRejectsReadAndWriteWithoutClobbering() {
         val store = TaskStore(temp)
         val path = temp.resolve("tasks.json")
-        for (field in listOf("\"state\":\"failed\"", "\"from\":\"running\"", "\"to\":\"failed\"")) {
+        val invalidFields = mapOf(
+            "\"state\":\"failed\"" to "Unknown task state",
+            "\"from\":\"running\"" to "Unknown task state",
+            "\"to\":\"failed\"" to "Unknown task state",
+            "\"lastResultStatus\":\"timed_out\"" to "Unsupported session result status"
+        )
+        for ((field, expectedCause) in invalidFields) {
             val poisoned = snapshot.replace(field, field.substringBefore(':') + ":\"unknown\"")
             assertNotEquals(snapshot, poisoned)
             Files.writeString(path, poisoned)
             val readFailure = assertFailsWith<IllegalStateException> { store.read { it } }
             assertEquals("Corrupt task store; refusing to overwrite it", readFailure.message)
-            assertEquals("Unknown task state", readFailure.cause?.message)
+            assertEquals(expectedCause, readFailure.cause?.message, field)
             assertFailsWith<IllegalStateException> {
                 store.update<Unit> { fail("Corrupt snapshot must not reach mutation callback") }
             }

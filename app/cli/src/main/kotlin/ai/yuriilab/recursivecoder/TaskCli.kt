@@ -208,7 +208,7 @@ private class EnqueueTask(private val tasks: TasksCommand) : CliktCommand(name =
     override fun help(context: Context) = "Add a SessionRequest v1 to the durable task queue."
 
     private val requestPath by argument("REQUEST").convert { Path.of(it) }
-    private val priorityOptions by option("--priority", help = "Task priority (default 50; validated by the enqueue Use Case).")
+    private val priorityOptions by option("--priority", help = "Task priority (default ${TaskPriority.DEFAULT}; validated by the enqueue Use Case).")
         .int().multiple()
     private val dependencyOptions by option("--depends-on", help = "Comma-separated existing task IDs.")
         .convert { value ->
@@ -283,7 +283,7 @@ private class CancelAllTasks(private val tasks: TasksCommand) : CliktCommand(nam
 private class RunTasks(private val tasks: TasksCommand) : CliktCommand(name = "run") {
     override fun help(context: Context) = "Run the foreground scheduler until it is idle or paused."
 
-    private val concurrencyOptions by option("--concurrency", help = "Maximum parallel sessions (1..32).")
+    private val concurrencyOptions by option("--concurrency", help = "Maximum parallel sessions (${TaskSchedulerConcurrency.MIN}..${TaskSchedulerConcurrency.MAX}).")
         .int().multiple()
 
     override fun run() {

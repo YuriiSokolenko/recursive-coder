@@ -38,5 +38,5 @@ object TaskSchedulerConcurrency {
 }
 
 internal fun requireTaskPriority(priority: Int) {
-    require(priority in TaskPriority.MIN..TaskPriority.MAX) { "Priority must be 0..100" }
+    require(priority in TaskPriority.MIN..TaskPriority.MAX) { "Priority must be ${TaskPriority.MIN}..${TaskPriority.MAX}" }
 }
