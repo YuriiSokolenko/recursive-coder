@@ -178,7 +178,7 @@ internal object ResumeFenceStorage {
 
     private fun body(generation: Long, previous: String?, checkpoint: String,
                      authority: String, session: String, trace: String, policy: String) =
-        listOf("RCFEN1", generation.toString(), previous ?: "-", checkpoint,
+        listOf(FENCE_FORMAT_MARKER, generation.toString(), previous ?: "-", checkpoint,
             authority, session, trace, policy).joinToString("\n", postfix = "\n")
 
     private fun decode(path: Path): ResumeFenceRecord {
@@ -186,7 +186,7 @@ internal object ResumeFenceStorage {
             Files.size(path) !in 1L..1024L) fail("RESUME_FENCE_CORRUPT")
         val raw = Files.readAllBytes(path).toString(StandardCharsets.UTF_8)
         val fields = raw.split("\n")
-        if (fields.size != 10 || fields.last() != "" || fields[0] != "RCFEN1")
+        if (fields.size != 10 || fields.last() != "" || fields[0] != FENCE_FORMAT_MARKER)
             fail("RESUME_FENCE_VERSION_UNSUPPORTED")
         val generation = fields[1].toLongOrNull() ?: fail("RESUME_FENCE_CORRUPT")
         val previous = fields[2].takeUnless { it == "-" }
@@ -638,7 +638,7 @@ object SessionResumeAdmission {
         // withAdmissionEvidence under resume.lock. Never remove the first one:
         // unsupported mounts must not cause resume.lock creation or fence changes.
         ResumeLocalFileStorePolicy.requireSupportedPaths(dir, ledgerPath, fileStoreType)
-        val lockPath = dir.resolve("resume.lock")
+        val lockPath = dir.resolve(RESUME_LOCK_NAME)
         if (!heldLocks.add(lockPath)) fail("RESUME_LEASE_HELD")
         var owner: FileChannel? = null
         var lock: FileLock? = null
@@ -742,3 +742,5 @@ object SessionResumeAdmission {
         }
     }
 }
+
+private const val FENCE_FORMAT_MARKER = "RCFEN1"

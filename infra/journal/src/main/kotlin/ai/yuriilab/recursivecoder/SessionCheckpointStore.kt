@@ -249,7 +249,7 @@ object SessionCheckpointCodec {
         validate(s)
         val b = s.binding
         val root = buildJsonObject {
-            put("kind", "host-checkpoint")
+            put("kind", CHECKPOINT_KIND)
             put("version", when {
                 s.effectReconciliation != null -> 3
                 s.effectJournalHead != null -> 2
@@ -378,7 +378,7 @@ object SessionCheckpointCodec {
             val root = obj(Json.parseToJsonElement(decoded))
             val version = long(root, "version")
             if (version !in setOf(1L, 2L, 3L) ||
-                string(root, "kind") != "host-checkpoint")
+                string(root, "kind") != CHECKPOINT_KIND)
                 throw CheckpointUnconfirmed("CHECKPOINT_VERSION_UNSUPPORTED")
             val keys = arrayOf("kind", "version", "sequence", "previousSha256",
                 "binding", "sessionId", "traceId", "phase", "taskId", "taskAttempt",
@@ -540,7 +540,7 @@ object SessionCheckpointStore {
         checkedDirectory(directory, context.workspaceRoot, LinuxCheckpointOwner::effectiveUid)
 
     private fun <T> withLease(directory: Path, create: Boolean, block: () -> T): T {
-        val lockPath = directory.resolve("checkpoint.lock")
+        val lockPath = directory.resolve(CHECKPOINT_LOCK_NAME)
         if (!heldLocks.add(lockPath)) refuse("CHECKPOINT_LEASE_HELD")
         var owner: FileChannel? = null
         var lock: java.nio.channels.FileLock? = null
@@ -668,11 +668,11 @@ object SessionCheckpointStore {
         for (file in files) {
             val name = file.fileName.toString()
             when {
-                name == "checkpoint.lock" -> {
+                name == CHECKPOINT_LOCK_NAME -> {
                     if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS))
                         refuse("CHECKPOINT_UNSAFE_LOCK")
                 }
-                name == "resume.lock" -> {
+                name == RESUME_LOCK_NAME -> {
                     if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS))
                         refuse("CHECKPOINT_UNSAFE_LOCK")
                 }
@@ -1609,3 +1609,5 @@ object SessionCheckpointStore {
     fun requireResumeAdmission(@Suppress("UNUSED_PARAMETER") checkpoint: VerifiedSessionCheckpoint): Nothing =
         throw CheckpointUnconfirmed("CHECKPOINT_RESUME_DENIED")
 }
+
+private const val CHECKPOINT_KIND = "host-checkpoint"

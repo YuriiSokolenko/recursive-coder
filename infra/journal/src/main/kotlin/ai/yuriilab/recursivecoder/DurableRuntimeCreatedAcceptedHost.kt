@@ -48,9 +48,9 @@ internal object RuntimeTrustedHandoffChecks {
                     ledgerPath.toAbsolutePath().normalize() &&
                 request.rootPath.toRealPath() == context.workspaceRoot.toRealPath() &&
                 request.workspace.textAt("headSha") == context.gitHead &&
-                request.policy.textAt("policySha256") == context.policySha256 &&
-                request.raw.objectAt("resume").textAt("mode") == "fresh" &&
-                request.raw.objectAt("resume").longAt("fenceGeneration") == 1L
+                request.policy.textAt(ToolPolicyFields.POLICY_SHA256) == context.policySha256 &&
+                request.raw.objectAt(SessionRequestFields.RESUME).textAt(SessionResumeFields.MODE) == "fresh" &&
+                request.raw.objectAt(SessionRequestFields.RESUME).longAt(SessionResumeFields.FENCE_GENERATION) == 1L
         } catch (_: Exception) {
             false
         }

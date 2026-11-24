@@ -141,7 +141,6 @@ internal data class ResumeReconciliationAudit(
 )
 
 internal object ResumeFenceAnchor {
-    private const val MAX = 256
     private val SHA = Regex("[0-9a-f]{64}")
     private val TEMP_SUFFIX = Regex("[a-f0-9-]{36}\\.tmp")
     private fun tempPrefix(ledger: Path) =
@@ -153,7 +152,7 @@ internal object ResumeFenceAnchor {
             String.format(Locale.ROOT, "%012d.rcaudit", generation)
     private fun auditBody(gen: Long, fence: String, anchor: String, checkpoint: String,
                           policy: String, operator: String, approved: Boolean, at: String) =
-        listOf("RCAUD1", gen.toString(), fence, anchor, checkpoint, policy,
+        listOf(AUDIT_FORMAT_MARKER, gen.toString(), fence, anchor, checkpoint, policy,
             operator, approved.toString(), at).joinToString("\n", postfix = "\n")
     private fun fail(code: String): Nothing = throw SessionResumeUnconfirmed(code)
     private fun parent(ledger: Path): Path {
@@ -196,7 +195,7 @@ internal object ResumeFenceAnchor {
     private fun name(ledger: Path, gen: Long) =
         prefix(ledger) + String.format(Locale.ROOT, "%012d.rca", gen)
     private fun body(gen: Long, fence: String, previous: String?) =
-        listOf("RCANCH1", gen.toString(), fence, previous ?: "-").joinToString("\n", postfix = "\n")
+        listOf(ANCHOR_FORMAT_MARKER, gen.toString(), fence, previous ?: "-").joinToString("\n", postfix = "\n")
     private fun digest(content: String) =
         SessionCheckpointCodec.sha256(content.toByteArray(StandardCharsets.UTF_8))
 
@@ -205,11 +204,11 @@ internal object ResumeFenceAnchor {
             Files.size(path) !in 1L..512L) fail("RESUME_FENCE_ANCHOR_MISMATCH")
         val raw = Files.readAllBytes(path).toString(StandardCharsets.UTF_8)
         val parts = raw.split("\n")
-        if (parts.size != 6 || parts[0] != "RCANCH1" || parts.last() != "")
+        if (parts.size != 6 || parts[0] != ANCHOR_FORMAT_MARKER || parts.last() != "")
             fail("RESUME_FENCE_ANCHOR_MISMATCH")
         val gen = parts[1].toLongOrNull() ?: fail("RESUME_FENCE_ANCHOR_MISMATCH")
         val previous = parts[3].takeUnless { it == "-" }
-        if (gen !in 1L..MAX.toLong() || !SHA.matches(parts[2]) ||
+        if (gen !in 1L..ResumeFenceStorage.MAX_FENCES.toLong() || !SHA.matches(parts[2]) ||
             (gen == 1L) != (previous == null) ||
             (previous != null && !SHA.matches(previous)) ||
             raw != body(gen, parts[2], previous) + parts[4] + "\n" ||
@@ -227,11 +226,11 @@ internal object ResumeFenceAnchor {
                 Files.size(file) !in 1L..2048L) fail("RESUME_FENCE_AUDIT_UNCONFIRMED")
             val raw = Files.readAllBytes(file).toString(StandardCharsets.UTF_8)
             val parts = raw.split("\n")
-            if (parts.size != 11 || parts[0] != "RCAUD1" || parts.last() != "")
+            if (parts.size != 11 || parts[0] != AUDIT_FORMAT_MARKER || parts.last() != "")
                 fail("RESUME_FENCE_AUDIT_UNCONFIRMED")
             val generation = parts[1].toLongOrNull()
                 ?: fail("RESUME_FENCE_AUDIT_UNCONFIRMED")
-            if (generation !in 1L..MAX.toLong() ||
+            if (generation !in 1L..ResumeFenceStorage.MAX_FENCES.toLong() ||
                 !listOf(parts[2], parts[3], parts[4], parts[5], parts[9]).all(SHA::matches) ||
                 !ToolAuthorizationPolicy.validHostIdentifier(parts[6]) ||
                 parts[7] != "true" ||
@@ -433,7 +432,7 @@ internal object ResumeFenceAnchor {
             val directory = parent(ledger)
             val priorCount = head?.generation ?: 0L
             if (proposed.generation != priorCount + 1L ||
-                proposed.generation !in 1L..MAX.toLong())
+                proposed.generation !in 1L..ResumeFenceStorage.MAX_FENCES.toLong())
                 fail("RESUME_FENCE_RECONCILIATION_UNCONFIRMED")
             var previous: ResumeFenceAnchorRecord? = null
             for (gen in 1L..priorCount) {
@@ -499,7 +498,7 @@ internal object ResumeFenceAnchor {
     fun publish(ledger: Path, fence: ResumeFenceRecord,
                 previous: ResumeFenceAnchorRecord?): ResumeFenceAnchorRecord {
         val directory = parent(ledger)
-        if (fence.generation !in 1L..MAX.toLong() ||
+        if (fence.generation !in 1L..ResumeFenceStorage.MAX_FENCES.toLong() ||
             fence.generation != (previous?.generation ?: 0L) + 1L)
             fail("RESUME_FENCE_ANCHOR_MISMATCH")
         val header = body(fence.generation, fence.sha256, previous?.sha256)
@@ -552,3 +551,6 @@ internal object ResumeFenceAnchor {
         }
     }
 }
+
+private const val AUDIT_FORMAT_MARKER = "RCAUD1"
+private const val ANCHOR_FORMAT_MARKER = "RCANCH1"

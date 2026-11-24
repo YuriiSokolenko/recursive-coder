@@ -316,14 +316,14 @@ class DurableEffectRecordJournal private constructor(
                 put("kind", id.kind.name)
                 put("inputSha256", id.inputSha256)
                 when (record) {
-                    is EffectRecord.Intent -> put("state", "intent")
-                    is EffectRecord.Started -> put("state", "started")
+                    is EffectRecord.Intent -> put("state", EffectRecordStates.INTENT)
+                    is EffectRecord.Started -> put("state", EffectRecordStates.STARTED)
                     is EffectRecord.Committed -> {
-                        put("state", "committed")
+                        put("state", EffectRecordStates.COMMITTED)
                         put("observedStateSha256", record.observedStateSha256)
                     }
                     is EffectRecord.Unconfirmed -> {
-                        put("state", "unconfirmed")
+                        put("state", EffectRecordStates.UNCONFIRMED)
                         put("code", record.code)
                     }
                 }
@@ -351,10 +351,10 @@ class DurableEffectRecordJournal private constructor(
                 val id = EffectIdentity(string("sessionId"), string("operationId"),
                     generation, kind, string("inputSha256"))
                 val record = when (string("state")) {
-                    "intent" -> EffectRecord.Intent(id)
-                    "started" -> EffectRecord.Started(id)
-                    "committed" -> EffectRecord.Committed(id, string("observedStateSha256"))
-                    "unconfirmed" -> EffectRecord.Unconfirmed(id, string("code"))
+                    EffectRecordStates.INTENT -> EffectRecord.Intent(id)
+                    EffectRecordStates.STARTED -> EffectRecord.Started(id)
+                    EffectRecordStates.COMMITTED -> EffectRecord.Committed(id, string("observedStateSha256"))
+                    EffectRecordStates.UNCONFIRMED -> EffectRecord.Unconfirmed(id, string("code"))
                     else -> refuse("EFFECT_JOURNAL_RECORD_CORRUPT")
                 }
                 if (!bytes.contentEquals(payload(sequence, record)))
