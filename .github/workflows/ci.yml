@@ -343,9 +343,11 @@ jobs:
         env:
           CI: 'true'
         run: ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache test integrationTest e2eTest checkPreparationHostConformance --stacktrace
+      - name: Assert per-module JUnit execution evidence
+        run: python3 -I tools/check_junit_evidence.py --root .
       - name: Confirm sandbox integration test was not skipped
         run: |
-          python3 - <<'PY'
+          python3 -I - <<'PY'
           from pathlib import Path
           from xml.etree import ElementTree as ET
 
@@ -394,7 +396,7 @@ jobs:
           PY
       - name: Verify focused integration excludes sandbox and E2E includes it once
         run: |
-          python3 - <<'PY'
+          python3 -I - <<'PY'
           from pathlib import Path
           from xml.etree import ElementTree as ET
 
@@ -601,6 +603,10 @@ jobs:
           node-version: '22'
       - name: Reject altered action refs and Gradle checksum inputs
         run: python3 -I -m unittest discover -s tests -p 'test_ci_bootstrap.py' -v
+      - name: Test JUnit evidence and import-order guards
+        run: python3 -I -m unittest discover -s tests -p 'test_junit_evidence.py' -v
+      - name: Check import order in issue 36 test classes
+        run: python3 -I tools/check_junit_evidence.py --root . --imports-only
       - name: Enforce English-only repository documentation
         run: |
           if LC_ALL=C.UTF-8 grep -nP '[\p{Cyrillic}]' README.md CONTRIBUTING.md contracts/README.md docs/architecture/*.md; then

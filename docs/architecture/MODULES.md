@@ -28,7 +28,6 @@
 
 Production dependencies point from the composition root and adapters toward the core contracts; no core module depends on the CLI, Koog, or the HTTP model implementation. The concrete workspace opener, model provider and JSONL EventSink are injected by `:app:cli` using Koin factories and constructor injection; the opt-in durable ledger, [atomic checkpoint store](SESSION_CHECKPOINTS.md) and [fenced admission](FENCED_RESUME.md) are not wired into the default CLI; see also [durable event ledger](DURABLE_EVENT_LEDGER.md). Koin is not present in any core module. The scheduler accepts a `TaskRunner` instead of constructing a model adapter. Session Protocol JSON Schema and fixtures remain at the repository root under `contracts/v1/` and continue to be validated independently by Node/Python CI.
 
-
 ## Shared JVM package audit and JPMS migration boundary (issue #52)
 
 All nine product Gradle modules place Kotlin production classes in
@@ -147,7 +146,6 @@ Shared Kotlin/JVM 21 and JUnit settings live in the `build-logic` included build
 ## Deliberately deferred
 
 `:agent:runtime` is no longer speculative: issue #73 introduces a working, independently tested, fake-only Koog role adapter. A separate `:infra:tools` module is still deferred until a distinct trusted-tool layer exists. The trusted write/check implementation remains alongside restricted Git in `:infra:workspace`.
-
 
 ## Verified architecture and test tiers (issue #25)
 

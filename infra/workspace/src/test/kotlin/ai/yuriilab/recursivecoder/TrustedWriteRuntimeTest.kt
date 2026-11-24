@@ -1,16 +1,15 @@
 package ai.yuriilab.recursivecoder
 
-import org.junit.jupiter.api.Tag
-
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
 import kotlin.test.*
-import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.Assumptions
-import org.junit.jupiter.api.io.TempDir
+import org.junit.jupiter.api.Tag
+import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.condition.EnabledOnOs
 import org.junit.jupiter.api.condition.OS
+import org.junit.jupiter.api.io.TempDir
 
 @EnabledOnOs(OS.LINUX)
 @Tag("integration")
