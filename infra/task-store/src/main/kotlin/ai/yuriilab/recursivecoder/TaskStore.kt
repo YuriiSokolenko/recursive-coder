@@ -38,7 +38,8 @@ class TaskStore(directory: Path) : TaskRepository {
 
     /**
      * Test-only fail-only seam after the temporary snapshot is forced and closed,
-     * but before ATOMIC_MOVE. Nothing ensures it cannot silently skip the move.
+     * but before ATOMIC_MOVE. The Nothing return type permits only failure,
+     * never silently skipping the production move.
      */
     @Volatile internal var atomicReplaceFailureTestHook: ((Path, Path) -> Nothing)? = null
 
