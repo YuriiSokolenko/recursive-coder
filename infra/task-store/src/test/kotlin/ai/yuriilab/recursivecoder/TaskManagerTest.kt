@@ -697,6 +697,97 @@ class TaskManagerTest {
             persistedTask.getValue("prunedTransitions").jsonPrimitive.long)
     }
 
+
+    @Test fun exhaustedAttemptsPersistAcrossClaimsRecoveryAndRejectedRetries() {
+        val first = service()
+        first.enqueue(request("exhausted"), priority = 100)
+        first.enqueue(request("child"), dependencies = listOf("exhausted"))
+        first.enqueue(request("last"), priority = 80)
+        first.enqueue(request("other"))
+        // Seed a legacy snapshot directly through the durable repository port.
+        first.store.update { queue ->
+            TaskMutation(queue.copy(tasks = queue.tasks.map { task ->
+                when (task.id) {
+                    "exhausted" -> task.copy(attempt = Int.MAX_VALUE)
+                    "last" -> task.copy(attempt = Int.MAX_VALUE - 1)
+                    else -> task
+                }
+            }), Unit)
+        }
+        val reopened = service()
+        val last = assertNotNull(reopened.claim())
+        assertEquals("last", last.id)
+        assertEquals(Int.MAX_VALUE, last.attempt)
+        assertEquals("session-last-${Int.MAX_VALUE}", last.sessionId)
+        val mapped = reopened.requestFor(last)
+        assertEquals(Int.MAX_VALUE, mapped.invocation.getValue("attempt").jsonPrimitive.int)
+        assertEquals("scheduler", mapped.invocation.getValue("source").jsonPrimitive.content)
+        assertEquals("invoke-last-${Int.MAX_VALUE}",
+            mapped.invocation.getValue("invocationId").jsonPrimitive.content)
+        assertEquals(temp.resolve("store/runs/last/attempt-${Int.MAX_VALUE}")
+            .toAbsolutePath().normalize(), mapped.outputRoot)
+        for (invalid in listOf(0, Int.MIN_VALUE)) {
+            assertFailsWith<Refused> {
+                reopened.requestFor(last.copy(attempt = invalid, sessionId = "session-last-$invalid"))
+            }
+        }
+        val exhausted = reopened.show("exhausted")
+        assertEquals(TaskState.NEEDS_ATTENTION, exhausted.state)
+        assertEquals("attempt counter exhausted", exhausted.reason)
+        assertEquals(Int.MAX_VALUE, exhausted.attempt)
+        assertNull(exhausted.sessionId)
+        assertEquals("dependency:exhausted:needs-attention", reopened.show("child").reason)
+
+        // Simulate process restart with the final attempt still RUNNING.
+        val restarted = service()
+        val launched = mutableListOf<String>()
+        val report = TaskScheduler(restarted, TaskRunner { req, _ ->
+            launched += req.task.getValue("taskId").jsonPrimitive.content
+            "succeeded"
+        }).runUntilIdle()
+        assertEquals(listOf("other"), launched)
+        assertEquals(1, report.launched)
+        assertEquals(1, report.completed)
+        val persisted = service()
+        val recovered = persisted.show("last")
+        assertEquals(TaskState.NEEDS_ATTENTION, recovered.state)
+        assertEquals("interrupted: reconcile before retry", recovered.reason)
+        assertEquals(last.sessionId, recovered.sessionId)
+        assertEquals(Int.MAX_VALUE, recovered.attempt)
+        assertEquals(exhausted, persisted.show("exhausted"))
+        val before = persisted.store.read { it }
+        val snapshot = temp.resolve("store/tasks.json")
+        val bytes = Files.readAllBytes(snapshot)
+        for (id in listOf("last", "exhausted")) {
+            assertEquals("attempt counter exhausted", assertFailsWith<IllegalArgumentException> {
+                persisted.retry(id)
+            }.message)
+        }
+        assertNull(persisted.claim())
+        assertEquals(before, persisted.store.read { it })
+        assertContentEquals(bytes, Files.readAllBytes(snapshot))
+        assertEquals(2L, before.dispatches)
+    }
+
+    @Test fun exhaustedOnlyClaimCommitsAttentionEvenWithoutDispatch() {
+        val first = service()
+        first.enqueue(request("only"))
+        first.store.update { queue ->
+            TaskMutation(queue.copy(tasks = queue.tasks.map { it.copy(attempt = Int.MAX_VALUE) }), Unit)
+        }
+        assertNull(service().claim())
+        val persisted = service()
+        val task = persisted.show("only")
+        assertEquals(TaskState.NEEDS_ATTENTION, task.state)
+        assertEquals("attempt counter exhausted", task.reason)
+        assertEquals(Int.MAX_VALUE, task.attempt)
+        assertEquals(0L, persisted.store.read { it.dispatches })
+        assertEquals(0, TaskScheduler(persisted, TaskRunner { _, _ ->
+            error("An exhausted task must never execute")
+        }).runUntilIdle().launched)
+        assertEquals(task, service().show("only"))
+    }
+
     @Test fun taskServiceRequestForPreservesV1OutputLayoutAcrossAttempts() {
         val service = service()
         service.enqueue(request("layout"))

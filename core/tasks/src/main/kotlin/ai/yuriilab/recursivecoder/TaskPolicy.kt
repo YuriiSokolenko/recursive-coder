@@ -108,6 +108,7 @@ internal fun validateGraph(tasks: List<Task>): List<String> {
  * The caller is responsible for serializing the returned snapshot inside one transaction.
  */
 internal object TaskPolicy {
+    private const val ATTEMPT_EXHAUSTED = "attempt counter exhausted"
     private const val MAX_TRANSITIONS = 128
     private const val MAX_WAIT_TURNS = 1000L
     private const val OLDEST_TASK_INTERVAL = 8L
@@ -221,6 +222,7 @@ internal object TaskPolicy {
             current.reason?.startsWith("dependency:") != true) {
             "Retry the failed prerequisite first; this task is blocked by a dependency"
         }
+        require(current.attempt < Int.MAX_VALUE) { ATTEMPT_EXHAUSTED }
         // The old session is historical; the next claim creates a different owner ID.
         val update = transition(current.copy(sessionId = null), TaskState.BLOCKED,
             "manual retry", queue.nextOrder, at)
@@ -247,7 +249,9 @@ internal object TaskPolicy {
             else task
         }.toMutableList()
         val current = tasks[selected.index]
-        val attempt = current.attempt + 1
+        // Reconciliation removes exhausted queued tasks before selection. MAX_VALUE
+        // itself is a valid final attempt, not a sentinel or a new owner after wrap.
+        val attempt = Math.incrementExact(current.attempt)
         val owner = current.copy(attempt = attempt, sessionId = "session-" + current.id + "-" + attempt)
         val update = transition(owner, TaskState.RUNNING,
             "claimed by local scheduler", ready.nextOrder, at)
@@ -302,6 +306,13 @@ internal object TaskPolicy {
                     TaskState.FAILED, TaskState.CANCELLED)) continue
             if (task.state == TaskState.NEEDS_ATTENTION &&
                 task.reason?.startsWith("dependency:") != true) continue
+            // Exhaustion is permanent for this task identity. Resolve it before
+            // dependencies or pause can make an exhausted task ready again.
+            if (task.attempt == Int.MAX_VALUE) {
+                tasks[index] = transition(task, TaskState.NEEDS_ATTENTION,
+                    ATTEMPT_EXHAUSTED, nextOrder, at).task
+                continue
+            }
             val prerequisites = task.dependencies.map { tasks[indexById.getValue(it)] }
             val missing = prerequisites.firstOrNull {
                 it.state in setOf(TaskState.FAILED, TaskState.CANCELLED, TaskState.NEEDS_ATTENTION)
