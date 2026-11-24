@@ -28,7 +28,7 @@ and `core/session/src/test/kotlin/ai/yuriilab/recursivecoder/`, respectively.
 | Decision / invariant | Baseline unit test (#28) | Gap case (#37) |
 | --- | --- | --- |
 | Lifecycle legal/illegal edges, one terminal result, cancellation/timeout paths | `SessionPolicyUnitTest.onlyDeclaredLifecycleTransitionsAreLegal`, `aTerminalOutcomeCannotBeOverwrittenByCancellationTimeoutOrFailure`, `cancellationTimeoutAndDenialHaveDeterministicPathsFromEveryNonterminalPhase` | Existing exhaustive transition and nonterminal reason matrices; no duplicate test added |
-| Admission: protocol, invocation, resume, capability, provider, tools, budget | `admissionDeniesUnsupportedInvocationsCapabilitiesModelAndUnsafePolicies` | `SessionPolicyCoverageUnitTest.admissionDenialPrecedenceIsStableWhenMultipleInputsAreInvalid` tests overlapping errors; `admissionBoundariesCoverModelAndToolPolicyVariants` adds provider/tool/counter variants; `schedulerAttemptRangeIsNotValidatedByPureAdmission` characterizes the existing scheduler attempt handling |
+| Admission: protocol, invocation, resume, capability, provider, tools, budget | `admissionDeniesUnsupportedInvocationsCapabilitiesModelAndUnsafePolicies` | `SessionPolicyCoverageUnitTest.admissionDenialPrecedenceIsStableWhenMultipleInputsAreInvalid` tests overlapping errors; `admissionBoundariesCoverModelAndToolPolicyVariants` adds provider/tool/counter variants; `schedulerAttemptMustBePositiveAndPreserveInvocationDenialPrecedence` verifies valid scheduler retries, rejects nonpositive attempts, and keeps denial ordering stable |
 | Resume preflight does not convert unsupported resume into later denials | `resumeProbePreservesProtocolV1PrecedenceAcrossLaterDenials`, `resumeFilesystemDetailAcceptsOnlySafeHostVolumeIdentifiers` | `admissionDenialPrecedenceIsStableWhenMultipleInputsAreInvalid` includes a simultaneous resume/capability refusal |
 | Two-turn model request reservation and retry quota | `modelRequestReservationAndToolQuotaAreFailClosed` | `modelTurnReservationHandlesExactCapacityAndInvalidCounters` checks exact/quota, negative counters and invalid turn indices; `recordedModelUsageRespectsTokenAndRequestEdgesWithoutOverflow` checks retry enabled/disabled and Long boundaries |
 | Token observation accounting, unknown usage, overflow/negative fail closed | `tokenAccountingRejectsOverLimitNegativeAndOverflowWithoutSideEffects` | `recordedModelUsageRespectsTokenAndRequestEdgesWithoutOverflow` checks exact capacity, combined usage, negative prior counters, overflow-sized usage and cumulative accounting |
@@ -55,12 +55,17 @@ existing integration/E2E owners:
 - `contracts/v1/session-v1.test.mjs` and installed Python CLI suites:
   Session Protocol v1 envelopes, event ordering and adapter validation.
 
-The pure admission policy currently accepts scheduler attempts of zero and
-negative values when all other facts are valid. The characterization test
-pins that existing behavior, not a new authorization guarantee; protocol
-validation and trusted caller constraints are separate. Tightening admission
-is tracked in [issue #190](https://github.com/YuriiSokolenko/recursive-coder/issues/190),
-which must replace this temporary characterization when the policy changes.
+Issue [#190](https://github.com/YuriiSokolenko/recursive-coder/issues/190)
+closes the scheduler-attempt admission gap. Session Protocol v1 declares
+`invocation.attempt` as an integer with minimum 1; `SessionRequest.parse`
+enforces the same bound. The Task policy begins with attempt 0 for an
+unclaimed task, increments it on claim and `TaskRequestMapper.forAttempt`
+projects the claimed positive attempt into a scheduler v1 request.
+Pure Session admission now rejects nonpositive scheduler attempts through
+the existing typed `UNSUPPORTED_INVOCATION` denial, after protocol checks and
+before resume/capability/model/tool/budget denials. Positive scheduler retries
+have no additional arbitrary upper bound; CLI still accepts only attempt 1.
+No Session Protocol v1 schema, envelope or request-mapping change is needed.
 
 Remaining integration concerns include actual worker scheduling races and
 persistent recovery, model/gateway wire errors, filesystem boundary checks,

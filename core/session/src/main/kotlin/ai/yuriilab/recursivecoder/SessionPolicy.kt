@@ -145,6 +145,7 @@ internal object SessionAdmissionPolicy {
         fun deny(reason: AdmissionDenial) = AdmissionDecision.Denied(reason)
         if (!f.supportedProtocol) return deny(AdmissionDenial.PROTOCOL)
         if (f.invocationSource !in setOf("cli", "scheduler") ||
+            f.attempt < 1L ||
             (f.invocationSource == "cli" && f.attempt != 1L))
             return deny(AdmissionDenial.INVOCATION)
         if (f.resumeMode != "fresh" || f.fenceGeneration != 1L)
