@@ -2,6 +2,7 @@ package ai.yuriilab.recursivecoder
 
 import java.io.IOException
 import java.nio.channels.FileChannel
+import java.nio.charset.Charset
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
@@ -35,8 +36,14 @@ class TaskRepositoryContractTest {
             .replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
             .replace("\u000c", "\\f") + "\""
 
+    // Java 21 defaults to UTF-8, but the native launcher reads argument files
+    // using the platform's native encoding (which can differ on Windows).
+    private val launcherCharset: Charset
+        get() = Charset.forName(System.getProperty("native.encoding"))
+
     /** Run lock probes in an independent JVM, portable across POSIX and Windows. */
     private fun launchLockFixture(mode: String, path: Path): LockFixture {
+        // The fallback supports IDE runs that do not delegate to Gradle.
         val classpath = System.getProperty("taskstore.test.runtime.classpath")
             ?: System.getProperty("java.class.path")
         require(!classpath.isNullOrBlank()) { "Missing JVM fixture runtime classpath" }
@@ -47,7 +54,7 @@ class TaskRepositoryContractTest {
         Files.writeString(args, listOf("-cp", classpath,
             TaskStoreLockProcessFixture::class.java.name, mode, path.toString())
             .joinToString("\n", postfix = "\n", transform = ::argfileToken),
-            java.nio.charset.Charset.defaultCharset())
+            launcherCharset)
         val process = ProcessBuilder(executable.toString(), "@$args")
             .redirectError(stderr.toFile()).start()
         return LockFixture(process, stderr)
@@ -64,7 +71,7 @@ class TaskRepositoryContractTest {
             } catch (e: java.util.concurrent.TimeoutException) {
                 throw AssertionError("Timed out awaiting $expected. ${child.diagnostics()}", e)
             }
-            assertEquals(expected, line, child.diagnostics())
+            if (expected != line) assertEquals(expected, line, child.diagnostics())
         } finally {
             // Interrupting readLine does not unblock a pipe read; the caller's
             // finally stops the child, closing the pipe even on timeout.
@@ -73,8 +80,9 @@ class TaskRepositoryContractTest {
     }
 
     private fun awaitFixtureExit(child: LockFixture) {
-        assertTrue(child.process.waitFor(5, TimeUnit.SECONDS), child.diagnostics())
-        assertEquals(0, child.process.exitValue(), child.diagnostics())
+        if (!child.process.waitFor(5, TimeUnit.SECONDS)) fail(child.diagnostics())
+        val exit = child.process.exitValue()
+        if (exit != 0) assertEquals(0, exit, child.diagnostics())
     }
 
     private fun releaseFixture(child: LockFixture) {
@@ -118,12 +126,17 @@ class TaskRepositoryContractTest {
     }
 
     @Test fun forkedFixtureReportsStderrAndSupportsQuotedPaths() {
-        val root = Files.createDirectory(temp.resolve("lock path with spaces #"))
+        // Select a non-ASCII character representable by the native encoding.
+        // Do not assume every Windows code page can represent Cyrillic.
+        val unicode = listOf("ї", "é", "日", "한", "中", "א", "ع", "ก", "Ω")
+            .firstOrNull { launcherCharset.newEncoder().canEncode(it) }
+        val root = Files.createDirectory(temp.resolve("lock path with spaces # ${unicode.orEmpty()}"))
         val child = launchLockFixture("invalid-mode", root.resolve(".store.lock"))
         try {
             val failure = assertFailsWith<AssertionError> { awaitFixtureLine(child, "LOCKED") }
             assertTrue(failure.message.orEmpty().contains("Unknown JVM lock fixture mode: invalid-mode"),
                 failure.message)
+            assertTrue(Files.exists(root.resolve(".store.lock")), "Child must open the exact encoded path")
             assertTrue(child.process.waitFor(5, TimeUnit.SECONDS))
             assertNotEquals(0, child.process.exitValue())
         } finally {
