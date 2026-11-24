@@ -22,14 +22,16 @@ dependencies {
     implementation(libs.coroutines.core)
 }
 
+val cliApplicationName = "recursive-coder"
+
 application {
     mainClass.set("ai.yuriilab.recursivecoder.MainKt")
-    applicationName = "recursive-coder"
+    applicationName = cliApplicationName
 }
 
 // Preserve the historical root distribution path used by callers and Python CI.
 tasks.named<Sync>("installDist") {
-    into(rootProject.layout.buildDirectory.dir("install/recursive-coder"))
+    into(rootProject.layout.buildDirectory.dir("install/$cliApplicationName"))
 }
 
 tasks.named<Test>("test") { dependsOn(tasks.named("installDist")) }
