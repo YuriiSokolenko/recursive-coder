@@ -220,7 +220,6 @@ private fun JsonObject.optionalText(field: String): String? =
 
 private const val TASK_STORE_VERSION = 1
 
-/** Private persistence fields, not the public task CLI contract. */
 /** Durable tasks.json v1 keys; independent of the CLI projection. */
 private object TaskStoreFields {
     const val STATE = "state"

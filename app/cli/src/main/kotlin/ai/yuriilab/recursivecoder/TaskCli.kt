@@ -254,11 +254,13 @@ private class RetryTask(tasks: TasksCommand) : TaskByIdCommand("retry", tasks) {
     override fun run() = echo(tasks.retry()(taskId).toPublicJson())
 }
 
+private const val QUEUE_PAUSED_FIELD = "paused"
+
 private class PauseTasks(private val tasks: TasksCommand) : CliktCommand(name = "pause") {
     override fun help(context: Context) = "Pause new task dispatches."
     override fun run() {
         tasks.pause()()
-        echo(buildJsonObject { put("paused", true) })
+        echo(buildJsonObject { put(QUEUE_PAUSED_FIELD, true) })
     }
 }
 
@@ -266,7 +268,7 @@ private class ResumeTasks(private val tasks: TasksCommand) : CliktCommand(name =
     override fun help(context: Context) = "Resume dispatching queued tasks."
     override fun run() {
         tasks.resume()()
-        echo(buildJsonObject { put("paused", false) })
+        echo(buildJsonObject { put(QUEUE_PAUSED_FIELD, false) })
     }
 }
 
@@ -274,7 +276,7 @@ private class CancelAllTasks(private val tasks: TasksCommand) : CliktCommand(nam
     override fun help(context: Context) = "Cancel all tasks and pause future launches."
     override fun run() {
         tasks.cancelAll()()
-        echo(buildJsonObject { put("paused", true); put("cancelled", true) })
+        echo(buildJsonObject { put(QUEUE_PAUSED_FIELD, true); put("cancelled", true) })
     }
 }
 
@@ -285,7 +287,7 @@ private class RunTasks(private val tasks: TasksCommand) : CliktCommand(name = "r
         .int().multiple()
 
     override fun run() {
-        val concurrency = once(concurrencyOptions, "--concurrency", 1)
+        val concurrency = once(concurrencyOptions, "--concurrency", TaskSchedulerConcurrency.DEFAULT)
         val scheduler = tasks.scheduler()
         val hook = Thread({ scheduler.requestStop() }, "task-scheduler-shutdown")
         Runtime.getRuntime().addShutdownHook(hook)
@@ -301,7 +303,7 @@ private class RunTasks(private val tasks: TasksCommand) : CliktCommand(name = "r
         echo(buildJsonObject {
             put("launched", report.launched)
             put("completed", report.completed)
-            put("paused", report.paused)
+            put(QUEUE_PAUSED_FIELD, report.paused)
         })
     }
 }

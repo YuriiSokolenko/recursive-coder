@@ -26,7 +26,7 @@ class DefaultEnqueueTaskUseCase(
         val submission = TaskRequestMapper.submission(requestJson)
         val id = submission.taskId
         require(safeTaskId.matches(id)) { "Unsafe task ID" }
-        require(priority in TaskPriority.MIN..TaskPriority.MAX) { "Priority must be 0..100" }
+        requireTaskPriority(priority)
         return repository.update { queue ->
             val next = TaskPolicy.enqueue(
                 queue, id, submission.template, priority, dependencies, clock.instant().toString()

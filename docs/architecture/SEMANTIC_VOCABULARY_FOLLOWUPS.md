@@ -20,6 +20,41 @@ or any child complete solely because this branch exists.
 | #204 | `JournalFormatVocabulary` in journal; effect metadata and state keys reused by physical effect journal, effect envelope policy and evidence verifier. Fence/anchor/audit markers remain private to their codecs. Anchor bound reuses existing ResumeFenceStorage.MAX_FENCES. Lock names are internal to journal. | Do not merge unrelated ledger and effect record capacities, magic headers, cryptographic domains, HMAC inputs or wire versions merely because values coincide. Checkpoint task-state allowlist stays local: no journal dependency on tasks. More codec-local field candidates remain for review. |
 | #205 | Gradle JVM convention uses local source-set name and e2e tag; Python test-tier, JUnit evidence and CI bootstrap guards reuse their own local constants. | CI YAML and verification metadata, independent Python tests and standalone JavaScript schema checks remain literal or independently specified. Do not import product constants into external verifiers. |
 
+## #202 targeted completion audit
+
+Reviewed `TaskPolicy.kt` (including TaskState, Task, TaskQueue and transition policy),
+`TaskVocabulary.kt`, `TaskUseCases.kt`, `TaskOperationsUseCases.kt`,
+`TaskManager.kt`, `TaskRepository.kt`, `TaskRequestMapper.kt`,
+`TaskStore.kt`, `TaskJsonMapper.kt` and `TaskCli.kt`.
+
+- Task-owned unclaimed attempt, priority validation and scheduler concurrency
+  defaults/bounds have explicit owners in tasks. The zero sentinel is not
+  SessionProtocol's positive invocation minimum. Int.MAX_VALUE and the
+  checked increment remain the authoritative overflow boundary (#193).
+- Dependency-attention reason prefix and cancellation eligibility are private
+  TaskPolicy definitions. Other state sets serve distinct decisions and stay
+  explicit; no automatic derivation from enum membership.
+- Scheduler outcomes remain typed until the existing string-facing completion
+  boundary; TaskRunner and TaskService compatibility APIs and pre-transaction
+  validation in DefaultCompleteTaskAttemptUseCase are unchanged. The repeated
+  scheduler-stop reason has one local owner.
+- CLI queue-report paused key is local, independent of task state and store
+  paused flag. TaskJsonMapper already uses typed codecs and task projection
+  keys. Its single taskId field is distinct from protocol task input and
+  private snapshot id. TaskStore already owns all v1 keys, and no
+  persistence, lock, validation, field order or optional-field default changes
+  are needed. TaskRepository has no duplicated wire vocabulary.
+- TaskRequestMapper uses protocol-owned fields; its request byte-size limit is
+  a cross-cutting request constraint rather than task vocabulary. Leave it to
+  the protocol/request audit instead of creating a competing task constant.
+  File names, human help and diagnostics, poll intervals, graph traversal
+  markers and unrelated zero-valued counters remain independent.
+- Independent literal tests pin the existing task state and CLI mapping,
+  snapshot field order, all state/outcome codecs and unknown state rejection;
+  the existing #193 counter, priority, fairness and scheduler tests are retained.
+
+Verification requires the full CI matrix; this audit does not close #194.
+
 ## Trusted C3 boundary exclusion
 
 The architecture gate rejected changes to three SHA-256-pinned sources:

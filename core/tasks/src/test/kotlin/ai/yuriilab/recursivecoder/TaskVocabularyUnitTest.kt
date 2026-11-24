@@ -14,6 +14,13 @@ class TaskVocabularyUnitTest {
             listOf(TaskTransitionWireFields.FROM, TaskTransitionWireFields.TO, TaskTransitionWireFields.AT))
     }
 
+    @Test fun taskAttemptAndSchedulerLimitsRemainIndependent() {
+        assertEquals(0, UNCLAIMED_TASK_ATTEMPT)
+        assertEquals(0, Task("job", "{}", emptyList(), 50).attempt)
+        assertEquals(listOf(1, 32, 1), listOf(
+            TaskSchedulerConcurrency.MIN, TaskSchedulerConcurrency.MAX, TaskSchedulerConcurrency.DEFAULT))
+    }
+
     @Test fun taskStateCodecRetainsIndependentWireOracle() {
         val states = mapOf("created" to TaskState.CREATED, "ready" to TaskState.READY,
             "blocked" to TaskState.BLOCKED, "running" to TaskState.RUNNING,
