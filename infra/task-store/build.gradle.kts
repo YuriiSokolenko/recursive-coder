@@ -1,3 +1,7 @@
+import org.gradle.api.file.ConfigurableFileCollection
+import org.gradle.api.tasks.Classpath
+import org.gradle.process.CommandLineArgumentProvider
+
 plugins { id("recursivecoder.jvm") }
 
 dependencies {
@@ -6,9 +10,17 @@ dependencies {
     testImplementation(testFixtures(project(":core:tasks")))
 }
 
-/** Forked lock probes require the complete runtime classpath, not Gradle's worker jar. */
+/** Model the forked JVM classpath as a Gradle task input. */
+abstract class TaskStoreFixtureClasspath : CommandLineArgumentProvider {
+    @get:Classpath
+    abstract val runtimeClasspath: ConfigurableFileCollection
+
+    override fun asArguments(): Iterable<String> =
+        listOf("-Dtaskstore.test.runtime.classpath=${runtimeClasspath.asPath}")
+}
+
 tasks.withType<Test>().configureEach {
-    doFirst {
-        systemProperty("taskstore.test.runtime.classpath", classpath.asPath)
-    }
+    val fixtureClasspath = objects.newInstance<TaskStoreFixtureClasspath>()
+    fixtureClasspath.runtimeClasspath.from(classpath)
+    jvmArgumentProviders.add(fixtureClasspath)
 }

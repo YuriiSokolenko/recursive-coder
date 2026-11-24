@@ -9,6 +9,9 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.test.*
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
 import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
@@ -18,51 +21,84 @@ import org.junit.jupiter.api.io.TempDir
 class TaskRepositoryContractTest {
     @TempDir lateinit var temp: Path
 
-    /** Run lock probes in an independent JVM, portable across POSIX and Windows. */
-    private fun launchLockFixture(mode: String, path: Path): Process {
-        val classpath = System.getProperty("taskstore.test.runtime.classpath")
-        require(!classpath.isNullOrBlank()) {
-            "Missing taskstore.test.runtime.classpath from the :infra:task-store Test task"
+    private data class LockFixture(val process: Process, val stderr: Path) {
+        fun diagnostics(): String {
+            val status = if (process.isAlive) "running" else "exit=${process.exitValue()}"
+            val error = runCatching { Files.readString(stderr) }.getOrElse { "Cannot read stderr: $it" }
+            return "JVM fixture ($status), stderr:\n$error"
         }
+    }
+
+    /** Quote one Java launcher argfile token, including Windows backslashes. */
+    private fun argfileToken(value: String): String =
+        "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"")
+            .replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+            .replace("\u000c", "\\f") + "\""
+
+    /** Run lock probes in an independent JVM, portable across POSIX and Windows. */
+    private fun launchLockFixture(mode: String, path: Path): LockFixture {
+        val classpath = System.getProperty("taskstore.test.runtime.classpath")
+            ?: System.getProperty("java.class.path")
+        require(!classpath.isNullOrBlank()) { "Missing JVM fixture runtime classpath" }
         val executable = Path.of(System.getProperty("java.home"), "bin",
             if (System.getProperty("os.name").startsWith("Windows")) "java.exe" else "java")
-        return ProcessBuilder(executable.toString(), "-cp", classpath,
-            TaskStoreLockProcessFixture::class.java.name, mode, path.toString()).start()
+        val args = Files.createTempFile(temp, "fixture-", ".args")
+        val stderr = Files.createTempFile(temp, "fixture-", ".err")
+        Files.writeString(args, listOf("-cp", classpath,
+            TaskStoreLockProcessFixture::class.java.name, mode, path.toString())
+            .joinToString("\n", postfix = "\n", transform = ::argfileToken),
+            java.nio.charset.Charset.defaultCharset())
+        val process = ProcessBuilder(executable.toString(), "@$args")
+            .redirectError(stderr.toFile()).start()
+        return LockFixture(process, stderr)
     }
 
     /** A child prints its state only after the OS lock call has completed. */
-    private fun awaitFixtureLine(child: Process, expected: String) {
+    private fun awaitFixtureLine(child: LockFixture, expected: String) {
         val reader = Executors.newSingleThreadExecutor()
         try {
-            val line = reader.submit<String?> {
-                child.inputStream.bufferedReader().use { it.readLine() }
-            }.get(5, TimeUnit.SECONDS)
-            assertEquals(expected, line, "Unexpected JVM lock fixture state")
+            val line = try {
+                reader.submit<String?> {
+                    child.process.inputStream.bufferedReader().use { it.readLine() }
+                }.get(5, TimeUnit.SECONDS)
+            } catch (e: java.util.concurrent.TimeoutException) {
+                throw AssertionError("Timed out awaiting $expected. ${child.diagnostics()}", e)
+            }
+            assertEquals(expected, line, child.diagnostics())
         } finally {
+            // Interrupting readLine does not unblock a pipe read; the caller's
+            // finally stops the child, closing the pipe even on timeout.
             reader.shutdownNow()
         }
     }
 
-    private fun releaseFixture(child: Process) {
-        child.outputStream.bufferedWriter().use {
-            it.write("RELEASE\n")
-            it.flush()
-        }
-        assertTrue(child.waitFor(5, TimeUnit.SECONDS), "JVM lock fixture did not terminate")
-        assertEquals(0, child.exitValue(), "JVM lock fixture failed")
+    private fun awaitFixtureExit(child: LockFixture) {
+        assertTrue(child.process.waitFor(5, TimeUnit.SECONDS), child.diagnostics())
+        assertEquals(0, child.process.exitValue(), child.diagnostics())
     }
 
-    private fun stopFixture(child: Process) {
-        child.destroyForcibly()
-        child.waitFor(5, TimeUnit.SECONDS)
+    private fun releaseFixture(child: LockFixture) {
+        try {
+            child.process.outputStream.bufferedWriter().use {
+                it.write("RELEASE\n")
+                it.flush()
+            }
+        } catch (e: IOException) {
+            throw AssertionError(child.diagnostics(), e)
+        }
+        awaitFixtureExit(child)
+    }
+
+    private fun stopFixture(child: LockFixture) {
+        child.process.destroyForcibly()
+        child.process.waitFor(5, TimeUnit.SECONDS)
     }
 
     private fun assertOsLockUnavailableToAnotherProcess(path: Path) {
         val child = launchLockFixture("probe", path)
         try {
             awaitFixtureLine(child, "BUSY")
-            assertTrue(child.waitFor(5, TimeUnit.SECONDS), "OS lock probe timed out")
-            assertEquals(0, child.exitValue(), "OS lock probe failed")
+            awaitFixtureExit(child)
         } finally {
             stopFixture(child)
         }
@@ -78,6 +114,27 @@ class TaskRepositoryContractTest {
             if (!System.getProperty("os.name").startsWith("Windows")) throw e
             org.junit.jupiter.api.Assumptions.assumeTrue(false,
                 "Directory symlinks require Windows privilege or developer mode: $e")
+        }
+    }
+
+    @Test fun forkedFixtureReportsStderrAndSupportsQuotedPaths() {
+        val root = Files.createDirectory(temp.resolve("lock path with spaces #"))
+        val child = launchLockFixture("invalid-mode", root.resolve(".store.lock"))
+        try {
+            val failure = assertFailsWith<AssertionError> { awaitFixtureLine(child, "LOCKED") }
+            assertTrue(failure.message.orEmpty().contains("Unknown JVM lock fixture mode: invalid-mode"),
+                failure.message)
+            assertTrue(child.process.waitFor(5, TimeUnit.SECONDS))
+            assertNotEquals(0, child.process.exitValue())
+        } finally {
+            stopFixture(child)
+        }
+        val probe = launchLockFixture("probe", root.resolve(".store.lock"))
+        try {
+            awaitFixtureLine(probe, "ACQUIRED")
+            awaitFixtureExit(probe)
+        } finally {
+            stopFixture(probe)
         }
     }
 
@@ -146,13 +203,14 @@ class TaskRepositoryContractTest {
         var reachedReplacement = false
         // Failure injection happens only after writing, force(true) and closing
         // the new temp file; filesystem-specific directory rename behavior is irrelevant.
-        repo.atomicReplaceFailureTestHook = { source, destination ->
+        repo.testHooks.atomicReplaceFailure = { source, destination ->
             reachedReplacement = true
             assertEquals(orphan, source)
             assertEquals(snapshot, destination)
             assertContentEquals(before, Files.readAllBytes(destination))
             assertTrue(Files.isRegularFile(source), "Fsynced replacement file must exist")
-            assertTrue(Files.readString(source).contains("\"paused\":false"),
+            assertEquals(JsonPrimitive(false),
+                Json.parseToJsonElement(Files.readString(source)).jsonObject["paused"],
                 "Replacement must contain the updated snapshot")
             throw IOException("injected atomic replacement failure")
         }
@@ -162,7 +220,7 @@ class TaskRepositoryContractTest {
             }
             assertEquals("injected atomic replacement failure", failure.message)
         } finally {
-            repo.atomicReplaceFailureTestHook = null
+            repo.testHooks.atomicReplaceFailure = null
         }
         assertTrue(reachedReplacement, "Atomic replacement boundary must be reached")
         assertContentEquals(before, Files.readAllBytes(snapshot))
@@ -181,7 +239,7 @@ class TaskRepositoryContractTest {
             priority = 1, state = TaskState.READY)
         store.update { TaskMutation(it.copy(tasks = listOf(initial)), Unit) }
         val synced = mutableListOf<Path>()
-        store.directorySyncTestHook = {
+        store.testHooks.directorySync = {
             synced.add(it)
             throw IOException("induced directory fsync failure")
         }
@@ -198,7 +256,7 @@ class TaskRepositoryContractTest {
         assertEquals(listOf(store.directory), synced)
         // The rename already happened: the new snapshot is visible but was reported
         // as not durable instead of silently claiming a durable commit.
-        store.directorySyncTestHook = null
+        store.testHooks.directorySync = null
         assertEquals(changed, store.read { queue -> queue.tasks.single() })
         assertFalse(Files.exists(store.directory.resolve("tasks.json.tmp")))
     }
@@ -324,8 +382,8 @@ class TaskRepositoryContractTest {
         } finally {
             start.countDown()
             pool.shutdownNow()
-            assertTrue(pool.awaitTermination(5, TimeUnit.SECONDS))
         }
+        assertTrue(pool.awaitTermination(5, TimeUnit.SECONDS))
     }
 
     @Test fun failedJvmSchedulerAcquisitionCannotReleaseOriginalOsLease() {
@@ -406,7 +464,7 @@ class TaskRepositoryContractTest {
             awaitFixtureLine(child, "LOCKED")
             // The handshake is inside transaction(): after its JVM mutex and
             // channel opening, immediately before the blocking OS lock call.
-            repo.beforeStoreLockAcquisitionTestHook = { reachedAcquisition.countDown() }
+            repo.testHooks.beforeStoreLockAcquisition = { reachedAcquisition.countDown() }
             val future = pool.submit<Int> { repo.read { it.tasks.size } }
             assertTrue(reachedAcquisition.await(5, TimeUnit.SECONDS),
                 "Contender never reached FileChannel.lock()")
@@ -416,11 +474,11 @@ class TaskRepositoryContractTest {
             releaseFixture(child)
             assertEquals(0, future.get(5, TimeUnit.SECONDS))
         } finally {
-            repo.beforeStoreLockAcquisitionTestHook = null
+            repo.testHooks.beforeStoreLockAcquisition = null
             stopFixture(child)
             pool.shutdownNow()
-            assertTrue(pool.awaitTermination(5, TimeUnit.SECONDS))
         }
+        assertTrue(pool.awaitTermination(5, TimeUnit.SECONDS))
     }
 }
 

@@ -27,21 +27,7 @@ class TaskStore(directory: Path) : TaskRepository {
     // Set only while this thread owns the real .scheduler.lock OS file lock.
     private val schedulerLeaseHeld = ThreadLocal.withInitial { false }
 
-    /**
-     * Fault seam for #162, never installed by production: invoked immediately
-     * before the post-rename directory fsync so tests can inject its failure.
-     */
-    @Volatile internal var directorySyncTestHook: ((Path) -> Unit)? = null
-
-    /** Test-only observation point immediately before the real OS store lock. */
-    @Volatile internal var beforeStoreLockAcquisitionTestHook: (() -> Unit)? = null
-
-    /**
-     * Test-only fail-only seam after the temporary snapshot is forced and closed,
-     * but before ATOMIC_MOVE. The Nothing return type permits only failure,
-     * never silently skipping the production move.
-     */
-    @Volatile internal var atomicReplaceFailureTestHook: ((Path, Path) -> Nothing)? = null
+    internal val testHooks = TaskStoreTestHooks()
 
     init {
         require(!Files.isSymbolicLink(this.directory)) { "Task store cannot be a symlink" }
@@ -59,7 +45,7 @@ class TaskStore(directory: Path) : TaskRepository {
         return mutex.withLock {
             require(!Files.isSymbolicLink(guardFile) && !Files.isSymbolicLink(snapshot))
             FileChannel.open(guardFile, StandardOpenOption.CREATE, StandardOpenOption.WRITE).use { channel ->
-                beforeStoreLockAcquisitionTestHook?.invoke()
+                testHooks.beforeStoreLockAcquisition?.invoke()
                 channel.lock().use { operation(load()) }
             }
         }
@@ -195,14 +181,14 @@ class TaskStore(directory: Path) : TaskRepository {
             while (buffer.hasRemaining()) channel.write(buffer)
             channel.force(true)
         }
-        atomicReplaceFailureTestHook?.invoke(temp, snapshot)
+        testHooks.atomicReplaceFailure?.invoke(temp, snapshot)
         Files.move(temp, snapshot, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
         // Directory metadata fsync makes the rename durable. On Linux a failure
         // means a committed claim/finish could be lost after power loss, so it is
         // never ignored there (issue #162). Other platforms may not support opening
         // a directory channel; the rename itself remains atomic.
         try {
-            directorySyncTestHook?.invoke(directory)
+            testHooks.directorySync?.invoke(directory)
             FileChannel.open(directory, StandardOpenOption.READ).use { it.force(true) }
         } catch (failure: java.io.IOException) {
             if (System.getProperty("os.name").startsWith("Linux"))
@@ -215,6 +201,18 @@ class TaskStore(directory: Path) : TaskRepository {
         // Shared by all TaskStore instances; never used in place of .scheduler.lock.
         val activeSchedulerLeases = ConcurrentHashMap.newKeySet<Path>()
     }
+}
+
+/** Instance-local test seams; all callbacks are absent in production. */
+internal class TaskStoreTestHooks {
+    /** #162: immediately before post-rename directory fsync. */
+    @Volatile var directorySync: ((Path) -> Unit)? = null
+
+    /** Immediately before the real blocking OS lock. */
+    @Volatile var beforeStoreLockAcquisition: (() -> Unit)? = null
+
+    /** After temp force and close; Nothing prevents bypassing the real move. */
+    @Volatile var atomicReplaceFailure: ((Path, Path) -> Nothing)? = null
 }
 
 private fun JsonObject.optionalText(field: String): String? =

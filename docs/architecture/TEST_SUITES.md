@@ -259,15 +259,17 @@ its owning module rather than only through CLI integration. The new `LinuxFiveRo
 
 `:infra:task-store:integrationTest` executes `TaskRepositoryContractTest`
 using Java 21 and a standalone JVM fixture. It launches the current JDK's
-`bin/java` (or `bin/java.exe`) with the Gradle test runtime classpath.
+`bin/java` (or `bin/java.exe`) with a Java launcher argument file containing
+the Gradle test runtime classpath, avoiding Windows command-line length limits.
+Child stderr is captured separately from the stdout handshake and reported on failure.
 **No Python, `fcntl`, shell utility, POSIX-only API or external service**
 is required for these lock tests. Local filesystems must support Java NIO
 exclusive file locks; Linux CI exercises both `.store.lock` (blocking
 transaction) and `.scheduler.lock` (fail-fast lease/recovery denial).
 The child prints `LOCKED` only after acquiring the physical file lock;
-the parent observes an in-transaction acquisition hook and then requires
-a timed `Future.get` to remain blocked until the child releases its lease.
-This is a synchronization handshake rather than a scheduler-dependent sleep.
+the parent observes an in-transaction hook immediately before the lock call.
+Blocking is then observed over a bounded 300 ms `Future.get` window, and
+completion is required after the child releases its lease.
 A separate child probes that a failed same-JVM acquisition did not release
 the original lease.
 
