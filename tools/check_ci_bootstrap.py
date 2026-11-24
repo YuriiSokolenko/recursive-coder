@@ -16,7 +16,8 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 VERSION = "9.8.2"
-GRADLE_URL = f"https://services.gradle.org/distributions/gradle-{VERSION}-bin.zip"
+GRADLE_ARCHIVE_NAME = f"gradle-{VERSION}-bin.zip"
+GRADLE_URL = f"https://services.gradle.org/distributions/{GRADLE_ARCHIVE_NAME}"
 GRADLE_SHA256 = "21bd5da2de49b642904077f38c0efdc7778e92b3ed0889392dca61b97e389607"
 
 # Compared to the official GitHub git/ref/tags endpoints on 2026-11-22.
@@ -141,7 +142,7 @@ def install_gradle() -> None:
     if os.environ.get("CI") != "true" or not all((runner_temp, github_env, github_path)):
         raise RuntimeError("Authenticated Gradle installation is supported only in GitHub CI")
     install_root = Path(tempfile.mkdtemp(prefix=f"verified-gradle-{VERSION}-", dir=runner_temp))
-    archive = install_root / f"gradle-{VERSION}-bin.zip"
+    archive = install_root / GRADLE_ARCHIVE_NAME
     subprocess.run([
         "curl", "--fail", "--location", "--silent", "--show-error",
         "--proto", "=https", "--proto-redir", "=https",
