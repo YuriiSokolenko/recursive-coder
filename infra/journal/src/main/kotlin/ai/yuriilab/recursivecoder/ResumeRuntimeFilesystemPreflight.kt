@@ -23,7 +23,7 @@ class ResumeRuntimeFilesystemPreflight private constructor(
                 fileStoreType)
             SessionResumePreflightDenial.NotEnabled
         } catch (failure: SessionResumeUnconfirmed) {
-            if (failure.code != "RESUME_FILESYSTEM_UNSUPPORTED")
+            if (failure.code != ResumeDenialCodes.RESUME_FILESYSTEM_UNSUPPORTED)
                 SessionResumePreflightDenial.Unavailable
             else {
                 val detail = failure.detail

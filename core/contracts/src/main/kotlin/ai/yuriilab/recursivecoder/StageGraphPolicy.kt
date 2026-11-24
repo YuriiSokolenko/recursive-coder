@@ -43,12 +43,12 @@ object StageGraphPolicy {
             return deny("DUPLICATE_ACTIVE_STAGE")
         if (active.mapNotNull { it.agentId }.toSet().size !=
             active.count { it.agentId != null })
-            return deny("SHARED_ROLE_ACTOR")
+            return deny(StageGraphPolicyDiagnosticCodes.SHARED_ROLE_ACTOR)
         // Superseded history counts too: a former Developer must never become a
         // Reviewer (or any other role) of the same graph (issue #158).
         if (graph.stages.filter { it.agentId != null }.groupBy { it.agentId }
                 .values.any { nodes -> nodes.map { it.kind }.toSet().size > 1 })
-            return deny("SHARED_ROLE_ACTOR")
+            return deny(StageGraphPolicyDiagnosticCodes.SHARED_ROLE_ACTOR)
         for (stage in graph.stages) {
             val correlation = stage.correlation
             if (correlation.sessionId != identity.sessionId ||
@@ -60,13 +60,13 @@ object StageGraphPolicy {
                 return deny("INVALID_STAGE_DEPENDENCY")
             if (stage.supersededBy != null) {
                 val replacement = stages[stage.supersededBy]
-                    ?: return deny("INVALID_STAGE_SUPERSESSION")
+                    ?: return deny(StageGraphPolicyDiagnosticCodes.INVALID_STAGE_SUPERSESSION)
                 if (stage.state !in setOf(StageState.ACCEPTED, StageState.REJECTED,
                         StageState.FAILED, StageState.CANCELLED) ||
                     replacement.kind != stage.kind ||
                     positions.getValue(replacement.correlation.stageRunId) <=
                         positions.getValue(correlation.stageRunId))
-                    return deny("INVALID_STAGE_SUPERSESSION")
+                    return deny(StageGraphPolicyDiagnosticCodes.INVALID_STAGE_SUPERSESSION)
             }
             if (stage.agentId == null && stage.state in setOf(
                     StageState.RUNNING, StageState.ACCEPTED, StageState.REJECTED))
@@ -83,7 +83,7 @@ object StageGraphPolicy {
             if (stage.kind == StageKind.REVIEW && stage.outputArtifacts.isNotEmpty())
                 return deny(StageDenialCodes.INVALID_STAGE_OUTPUT)
             if (stage.kind != StageKind.REVIEW && stage.review != null)
-                return deny("INVALID_STAGE_REVIEW")
+                return deny(StageGraphPolicyDiagnosticCodes.INVALID_STAGE_REVIEW)
             if (stage.state == StageState.ACCEPTED) {
                 if (stage.kind != StageKind.REVIEW &&
                     (stage.outputArtifacts.size != 1 ||
@@ -91,16 +91,16 @@ object StageGraphPolicy {
                             manifests.getValue(id).approval != ArtifactApproval.ACCEPTED ||
                                 manifests.getValue(id).freeze != ArtifactFreeze.FROZEN
                         }))
-                    return deny("UNACCEPTED_STAGE_OUTPUT")
+                    return deny(StageGraphPolicyDiagnosticCodes.UNACCEPTED_STAGE_OUTPUT)
                 if (stage.kind == StageKind.REVIEW && stage.review?.verdict != ReviewVerdict.ACCEPT)
-                    return deny("INVALID_STAGE_REVIEW")
+                    return deny(StageGraphPolicyDiagnosticCodes.INVALID_STAGE_REVIEW)
             }
             if (stage.kind == StageKind.REVIEW && stage.review != null) {
                 if (stage.state !in setOf(StageState.RUNNING, StageState.ACCEPTED,
                         StageState.REJECTED) ||
                     (stage.state == StageState.REJECTED &&
                         stage.review.verdict == ReviewVerdict.ACCEPT))
-                    return deny("INVALID_STAGE_REVIEW")
+                    return deny(StageGraphPolicyDiagnosticCodes.INVALID_STAGE_REVIEW)
             }
         }
 
@@ -169,7 +169,7 @@ object StageGraphPolicy {
         val stage = graph.stages.firstOrNull { it.correlation.stageRunId == stageRunId }
             ?: return deny(StageDenialCodes.UNKNOWN_STAGE)
         if (graph.state != StageGraphState.RUNNING)
-            return deny("GRAPH_NOT_RUNNING")
+            return deny(StageGraphPolicyDiagnosticCodes.GRAPH_NOT_RUNNING)
         if (stage.state != StageState.READY || stage.supersededBy != null)
             return deny(StageDenialCodes.STAGE_NOT_READY)
         if (stage.agentId == null)
@@ -218,13 +218,13 @@ object StageGraphPolicy {
         if (!legalStageEdge(stage.state, target)) return deny("ILLEGAL_STAGE_TRANSITION")
         if (stage.supersededBy != null) return deny("SUPERSEDED_STAGE")
         if (graph.state != StageGraphState.RUNNING && target != StageState.CANCELLED)
-            return deny("GRAPH_NOT_RUNNING")
+            return deny(StageGraphPolicyDiagnosticCodes.GRAPH_NOT_RUNNING)
         if (target == StageState.RUNNING)
             return admitStage(graph, stageRunId, hostAcceptedArtifactIds)
         if (target == StageState.ACCEPTED) {
             if (stage.kind == StageKind.REVIEW) {
                 if (stage.review?.verdict != ReviewVerdict.ACCEPT)
-                    return deny("INVALID_STAGE_REVIEW")
+                    return deny(StageGraphPolicyDiagnosticCodes.INVALID_STAGE_REVIEW)
                 return authorizeReview(graph, stageRunId, hostVerifiedReviewStageIds)
             }
             if (stage.outputArtifacts.size != 1 ||
@@ -234,12 +234,12 @@ object StageGraphPolicy {
                         artifact?.freeze != ArtifactFreeze.FROZEN ||
                         id !in hostAcceptedArtifactIds
                 })
-                return deny("UNACCEPTED_STAGE_OUTPUT")
+                return deny(StageGraphPolicyDiagnosticCodes.UNACCEPTED_STAGE_OUTPUT)
         }
         if (target == StageState.REJECTED && stage.kind == StageKind.REVIEW) {
-            val record = stage.review ?: return deny("INVALID_STAGE_REVIEW")
+            val record = stage.review ?: return deny(StageGraphPolicyDiagnosticCodes.INVALID_STAGE_REVIEW)
             if (record.verdict == ReviewVerdict.ACCEPT)
-                return deny("INVALID_STAGE_REVIEW")
+                return deny(StageGraphPolicyDiagnosticCodes.INVALID_STAGE_REVIEW)
             return authorizeReview(graph, stageRunId, hostVerifiedReviewStageIds)
         }
         return StageGateDecision.Permit
@@ -255,15 +255,15 @@ object StageGraphPolicy {
         if (valid != StageGateDecision.Permit) return valid
         val reviewer = graph.stages.firstOrNull {
             it.correlation.stageRunId == reviewStageRunId && it.kind == StageKind.REVIEW
-        } ?: return deny("INVALID_STAGE_REVIEW")
-        val record = reviewer.review ?: return deny("INVALID_STAGE_REVIEW")
+        } ?: return deny(StageGraphPolicyDiagnosticCodes.INVALID_STAGE_REVIEW)
+        val record = reviewer.review ?: return deny(StageGraphPolicyDiagnosticCodes.INVALID_STAGE_REVIEW)
         val developer = graph.stages.firstOrNull {
             it.correlation.stageRunId == record.targetStageRunId &&
                 it.kind == StageKind.DEVELOP
-        } ?: return deny("INVALID_STAGE_REVIEW")
+        } ?: return deny(StageGraphPolicyDiagnosticCodes.INVALID_STAGE_REVIEW)
         val artifact = graph.artifacts.firstOrNull {
             it.id == record.implementationArtifactId
-        } ?: return deny("INVALID_STAGE_REVIEW")
+        } ?: return deny(StageGraphPolicyDiagnosticCodes.INVALID_STAGE_REVIEW)
         if (developer.correlation.stageRunId !in reviewer.dependencies ||
             artifact.id !in reviewer.inputArtifacts ||
             artifact.producerStageRunId != developer.correlation.stageRunId ||
@@ -272,7 +272,7 @@ object StageGraphPolicy {
             record.requestedBy != developer.agentId ||
             record.reviewedBy != reviewer.agentId ||
             record.requestedBy == record.reviewedBy)
-            return deny("INVALID_INDEPENDENT_REVIEW")
+            return deny(StageGraphPolicyDiagnosticCodes.INVALID_INDEPENDENT_REVIEW)
         if (reviewStageRunId !in hostVerifiedReviewStageIds)
             return deny("UNVERIFIED_REVIEW")
         return StageGateDecision.Permit
@@ -303,7 +303,7 @@ object StageGraphPolicy {
             if (active.size != StageKind.entries.size ||
                 active.any { it.state != StageState.ACCEPTED } ||
                 active.map { it.kind }.toSet() != StageKind.entries.toSet())
-                return deny("GRAPH_NOT_ACCEPTED")
+                return deny(StageGraphPolicyDiagnosticCodes.GRAPH_NOT_ACCEPTED)
             for (stage in active) {
                 val inputs = stage.inputArtifacts.map { manifests.getValue(it) }
                 if (inputs.size != stage.kind.requiredInputs.size ||
@@ -312,7 +312,7 @@ object StageGraphPolicy {
                         it.id !in hostAcceptedArtifactIds } ||
                     stage.dependencies.any { it !in activeIds } ||
                     stage.outputArtifacts.any { it !in hostAcceptedArtifactIds })
-                    return deny("GRAPH_NOT_ACCEPTED")
+                    return deny(StageGraphPolicyDiagnosticCodes.GRAPH_NOT_ACCEPTED)
                 if (stage.kind == StageKind.REVIEW) {
                     val decision = authorizeReview(graph, stage.correlation.stageRunId,
                         hostVerifiedReviewStageIds)
@@ -336,7 +336,7 @@ object StageGraphPolicy {
     ): StageGateDecision {
         val valid = validate(graph)
         if (valid != StageGateDecision.Permit) return valid
-        if (graph.state != StageGraphState.RUNNING) return deny("GRAPH_NOT_RUNNING")
+        if (graph.state != StageGraphState.RUNNING) return deny(StageGraphPolicyDiagnosticCodes.GRAPH_NOT_RUNNING)
         val manifest = graph.artifacts.firstOrNull { it.id == artifactId }
             ?: return deny(StageDenialCodes.UNKNOWN_ARTIFACT)
         if (actorRole != manifest.ownerRole) return deny("ARTIFACT_ROLE_MISMATCH")
@@ -356,7 +356,7 @@ object StageGraphPolicy {
                 manifest.declaredPath !in reviewer.paths ||
                 ToolAuthorizationPolicy.validateIndependentReview(reviewer) !=
                     ToolAuthorizationDecision.Permit)
-                return deny("INVALID_INDEPENDENT_REVIEW")
+                return deny(StageGraphPolicyDiagnosticCodes.INVALID_INDEPENDENT_REVIEW)
             reviewedPaths = setOf(manifest.declaredPath)
         }
         // Inputs are pinned by artifact ID, not by revision. A consumer that has
@@ -378,4 +378,15 @@ object StageGraphPolicy {
         return if (decision == ToolAuthorizationDecision.Permit) StageGateDecision.Permit
         else deny((decision as ToolAuthorizationDecision.Deny).deniedCode)
     }
+}
+
+/** Diagnostic codes emitted by StageGraphPolicy; not shared protocol vocabulary. */
+internal object StageGraphPolicyDiagnosticCodes {
+    const val SHARED_ROLE_ACTOR = "SHARED_ROLE_ACTOR"
+    const val INVALID_STAGE_SUPERSESSION = "INVALID_STAGE_SUPERSESSION"
+    const val INVALID_STAGE_REVIEW = "INVALID_STAGE_REVIEW"
+    const val UNACCEPTED_STAGE_OUTPUT = "UNACCEPTED_STAGE_OUTPUT"
+    const val GRAPH_NOT_RUNNING = "GRAPH_NOT_RUNNING"
+    const val INVALID_INDEPENDENT_REVIEW = "INVALID_INDEPENDENT_REVIEW"
+    const val GRAPH_NOT_ACCEPTED = "GRAPH_NOT_ACCEPTED"
 }

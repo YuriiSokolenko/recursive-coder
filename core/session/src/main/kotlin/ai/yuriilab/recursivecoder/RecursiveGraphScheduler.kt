@@ -230,7 +230,8 @@ class RecursiveGraphScheduler(
                     nested[child.graphId] = results
                 }
                 val manifests = host.manifestsFor(child)
-                    ?: return ChildIntegrationDecision.Denied("CHILD_EVIDENCE_UNAVAILABLE")
+                    ?: return ChildIntegrationDecision.Denied(
+                        RecursiveGraphSchedulerDiagnosticCodes.CHILD_EVIDENCE_UNAVAILABLE)
                 val receipts = mutableListOf<VerifiedChildArtifact>()
                 for (manifest in manifests) {
                     // Read from the trusted workspace, never from model text or a
@@ -246,7 +247,7 @@ class RecursiveGraphScheduler(
             RecursiveChildIntegrationPolicy.integrate(snapshot, parentId,
                 byChild, host.acceptedArtifactIds(), host.reservedParentArtifacts(parent), nested)
         } catch (_: Exception) {
-            ChildIntegrationDecision.Denied("CHILD_EVIDENCE_UNAVAILABLE")
+            ChildIntegrationDecision.Denied(RecursiveGraphSchedulerDiagnosticCodes.CHILD_EVIDENCE_UNAVAILABLE)
         }
     }
 
@@ -269,8 +270,8 @@ class RecursiveGraphScheduler(
                 RecursiveGraphPolicy.MAX_TOTAL_CHILDREN) * 4)
             val attempted = attemptedIntegrations[parent.graphId] ?: 0
             if (attempted >= attemptLimit) {
-                emitIntegrationDenial(parent, "INTEGRATION_ATTEMPT_LIMIT")
-                return ChildIntegrationDecision.Denied("INTEGRATION_ATTEMPT_LIMIT")
+                emitIntegrationDenial(parent, RecursiveGraphSchedulerDiagnosticCodes.INTEGRATION_ATTEMPT_LIMIT)
+                return ChildIntegrationDecision.Denied(RecursiveGraphSchedulerDiagnosticCodes.INTEGRATION_ATTEMPT_LIMIT)
             }
             attemptedIntegrations[parent.graphId] = attempted + 1
             IntegrationFrame(snapshot, integrated.toMap(), mutationVersion)
@@ -551,11 +552,11 @@ class RecursiveGraphScheduler(
             // Job is an authorized host cancellation. A stray CancellationException
             // thrown by an executor must not be reported as a host cancellation.
             if (stageJob.isCancelled) RecursiveExecutionOutcome.Cancelled
-            else RecursiveExecutionOutcome.Failed("STAGE_EXECUTOR_FAILED")
+            else RecursiveExecutionOutcome.Failed(RecursiveGraphSchedulerDiagnosticCodes.STAGE_EXECUTOR_FAILED)
         } catch (_: InterruptedException) {
             RecursiveExecutionOutcome.Cancelled
         } catch (_: Exception) {
-            RecursiveExecutionOutcome.Failed("STAGE_EXECUTOR_FAILED")
+            RecursiveExecutionOutcome.Failed(RecursiveGraphSchedulerDiagnosticCodes.STAGE_EXECUTOR_FAILED)
         } catch (fatal: Error) {
             // A JVM error is never a success, and must not strand a RUNNING node
             // or its job entry (issue #161). Record FAILED, then propagate.
@@ -640,4 +641,11 @@ class RecursiveGraphScheduler(
             final
         }
     }
+}
+
+/** Diagnostic codes emitted by RecursiveGraphScheduler; not shared protocol vocabulary. */
+internal object RecursiveGraphSchedulerDiagnosticCodes {
+    const val CHILD_EVIDENCE_UNAVAILABLE = "CHILD_EVIDENCE_UNAVAILABLE"
+    const val INTEGRATION_ATTEMPT_LIMIT = "INTEGRATION_ATTEMPT_LIMIT"
+    const val STAGE_EXECUTOR_FAILED = "STAGE_EXECUTOR_FAILED"
 }

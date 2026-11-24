@@ -137,7 +137,8 @@ class FailClosedProviderUsageGateway(
             // Discovery HTTP timeouts still respect the admitted deadline.
             val timeout = Duration.between(clock.instant(), bounded).toMillis()
             if (timeout <= 0L) deny(MODEL_DEADLINE_EXCEEDED)
-            if (config.requestTimeoutMs <= 0L) deny("MODEL_REQUEST_TIMEOUT_INVALID")
+            if (config.requestTimeoutMs <= 0L) deny(
+                FailClosedProviderUsageGatewayDiagnosticCodes.MODEL_REQUEST_TIMEOUT_INVALID)
             inFlightOperation = Operation.DISCOVERY
             Prepared(config.copy(requestTimeoutMs = minOf(config.requestTimeoutMs, timeout)),
                 bounded)
@@ -189,7 +190,7 @@ class FailClosedProviderUsageGateway(
             // error, distinct from expiry of the admitted deadline. No
             // completion reservation/receipt is recorded when nothing ran.
             if (boundedConfig.requestTimeoutMs <= 0L) {
-                terminalCode = "MODEL_REQUEST_TIMEOUT_INVALID"
+                terminalCode = FailClosedProviderUsageGatewayDiagnosticCodes.MODEL_REQUEST_TIMEOUT_INVALID
                 deny(terminalCode!!)
             }
             inFlightOperation = Operation.COMPLETION
@@ -289,4 +290,9 @@ class FailClosedProviderUsageGateway(
             turn
         }
     }
+}
+
+/** Diagnostic codes emitted by FailClosedProviderUsageGateway; not shared protocol vocabulary. */
+internal object FailClosedProviderUsageGatewayDiagnosticCodes {
+    const val MODEL_REQUEST_TIMEOUT_INVALID = "MODEL_REQUEST_TIMEOUT_INVALID"
 }

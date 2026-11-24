@@ -524,7 +524,7 @@ internal class InstalledRecursiveWorkflow(
             // never enough to assume its physical checkout is unchanged.
             if (!initialChildBaselineIntact(config))
                 uncertainChildExecution = true
-            return "AUTHENTICATED_CHILD_RECEIPT_MISSING"
+            return InstalledRecursiveWorkflowDiagnosticCodes.AUTHENTICATED_CHILD_RECEIPT_MISSING
         }
         attempts.getValue(kind).physicalCompleted = true
         origins[kind] = Origin(kind, grant, host, childStageId, config,
@@ -560,7 +560,7 @@ internal class InstalledRecursiveWorkflow(
                 RecursiveStageExecutor { owned ->
                     val receipt = origin.host.authenticatedAcceptedStage(origin.stageId)
                         ?: return@RecursiveStageExecutor RecursiveExecutionOutcome.Failed(
-                            "AUTHENTICATED_CHILD_RECEIPT_MISSING")
+                            InstalledRecursiveWorkflowDiagnosticCodes.AUTHENTICATED_CHILD_RECEIPT_MISSING)
                     if (receipt.checkedIds != requiredChildChecks)
                         return@RecursiveStageExecutor RecursiveExecutionOutcome.Failed(
                             "CHILD_CHECK_RECEIPT_MISMATCH")
@@ -722,4 +722,9 @@ internal class InstalledRecursiveWorkflow(
             !verifiedParent(StageKind.DEVELOP, expected)) return null
         return parent.finishSuccess(expected, reviewerId)
     }
+}
+
+/** Diagnostic codes emitted by InstalledRecursiveWorkflow; not shared protocol vocabulary. */
+internal object InstalledRecursiveWorkflowDiagnosticCodes {
+    const val AUTHENTICATED_CHILD_RECEIPT_MISSING = "AUTHENTICATED_CHILD_RECEIPT_MISSING"
 }

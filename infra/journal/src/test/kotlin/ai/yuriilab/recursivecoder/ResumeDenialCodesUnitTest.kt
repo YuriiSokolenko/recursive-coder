@@ -17,5 +17,7 @@ class ResumeDenialCodesUnitTest {
         assertEquals("RESUME_FENCE_ANCHOR_MISMATCH", ResumeDenialCodes.RESUME_FENCE_ANCHOR_MISMATCH)
         assertEquals("RESUME_FENCE_CORRUPT", ResumeDenialCodes.RESUME_FENCE_CORRUPT)
         assertEquals("RESUME_CHECKPOINT_CHANGED", ResumeDenialCodes.RESUME_CHECKPOINT_CHANGED)
+        assertEquals("RESUME_FILESYSTEM_UNSUPPORTED", ResumeDenialCodes.RESUME_FILESYSTEM_UNSUPPORTED)
+        assertEquals("RESUME_ADMISSION_UNCONFIRMED", ResumeDenialCodes.RESUME_ADMISSION_UNCONFIRMED)
     }
 }

@@ -182,7 +182,7 @@ object ReviewerStageFinishPolicy {
         if (!hostVerifiedEvidence) return deny(StageDenialCodes.UNVERIFIED_DEVELOPER_EVIDENCE)
         if (next.copy(stages = lease.graph.stages) != lease.graph ||
             acceptedIds != lease.acceptedIds || next.stages.size != lease.graph.stages.size)
-            return deny("REVIEW_MUTATED_OTHER_STATE")
+            return deny(ReviewerStageContractsDiagnosticCodes.REVIEW_MUTATED_OTHER_STATE)
         val before = lease.graph.stages.singleOrNull {
             it.correlation.stageRunId == lease.stageRunId
         } ?: return deny(StageDenialCodes.UNKNOWN_STAGE)
@@ -194,7 +194,7 @@ object ReviewerStageFinishPolicy {
             next.stages.zip(lease.graph.stages).any { (a, b) ->
                 a.correlation.stageRunId != b.correlation.stageRunId ||
                     (a.correlation.stageRunId != lease.stageRunId && a != b)
-            }) return deny("REVIEW_MUTATED_OTHER_STATE")
+            }) return deny(ReviewerStageContractsDiagnosticCodes.REVIEW_MUTATED_OTHER_STATE)
         val handoff = lease.handoff.developerResult
         val manifest = handoff.manifest
         val dev = lease.graph.stages.singleOrNull {
@@ -272,7 +272,7 @@ object ReviewerRepairPlanner {
             it.correlation.stageRunId == rejectedReviewId &&
                 it.kind == StageKind.REVIEW && it.supersededBy == null
         } ?: return deny("INVALID_REJECTED_REVIEW")
-        val record = review.review ?: return deny("UNAUTHORIZED_REPAIR")
+        val record = review.review ?: return deny(ReviewerStageContractsDiagnosticCodes.UNAUTHORIZED_REPAIR)
         if (review.state != StageState.REJECTED ||
             record.verdict != ReviewVerdict.REQUEST_CHANGES ||
             verifiedDecision.correlation != review.correlation ||
@@ -283,7 +283,7 @@ object ReviewerRepairPlanner {
             rejectedReviewId !in hostVerifiedReviewIds ||
             StageGraphPolicy.authorizeReview(graph, rejectedReviewId,
                 hostVerifiedReviewIds) != StageGateDecision.Permit)
-            return deny("UNAUTHORIZED_REPAIR")
+            return deny(ReviewerStageContractsDiagnosticCodes.UNAUTHORIZED_REPAIR)
         val developer = graph.stages.singleOrNull {
             it.correlation.stageRunId == record.targetStageRunId &&
                 it.kind == StageKind.DEVELOP && it.state == StageState.ACCEPTED &&
@@ -329,4 +329,10 @@ object ReviewerRepairPlanner {
             ReviewerRepairResult.Planned(next)
         else deny("INVALID_REPAIR_GRAPH")
     }
+}
+
+/** Diagnostic codes emitted by ReviewerStageContracts; not shared protocol vocabulary. */
+internal object ReviewerStageContractsDiagnosticCodes {
+    const val REVIEW_MUTATED_OTHER_STATE = "REVIEW_MUTATED_OTHER_STATE"
+    const val UNAUTHORIZED_REPAIR = "UNAUTHORIZED_REPAIR"
 }

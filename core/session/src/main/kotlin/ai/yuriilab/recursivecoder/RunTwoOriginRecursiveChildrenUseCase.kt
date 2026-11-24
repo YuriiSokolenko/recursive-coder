@@ -69,14 +69,16 @@ class RunTwoOriginRecursiveChildrenUseCase(
             }
         }
         if (stages.any { it == null }) {
-            return TwoOriginRecursiveOutcome.Stopped(null, "INVALID_ORIGIN_PAIR")
+            return TwoOriginRecursiveOutcome.Stopped(null,
+                RunTwoOriginRecursiveChildrenUseCaseDiagnosticCodes.INVALID_ORIGIN_PAIR)
         }
         val kinds = stages.map { requireNotNull(it).kind }
         if (kinds.toSet().size != 2 || StageKind.REVIEW in kinds ||
             sources.map { it.root.graph.correlation.graphId }.toSet().size != 2 ||
             sources.map { it.root.stageRunId }.toSet().size != 2 ||
             sources.map { it.root.graph.correlation.sessionId }.toSet().size != 1) {
-            return TwoOriginRecursiveOutcome.Stopped(null, "INVALID_ORIGIN_PAIR")
+            return TwoOriginRecursiveOutcome.Stopped(null,
+                RunTwoOriginRecursiveChildrenUseCaseDiagnosticCodes.INVALID_ORIGIN_PAIR)
         }
 
         val ordered = sources.zip(kinds).sortedBy { (_, kind) ->
@@ -158,4 +160,9 @@ class RunTwoOriginRecursiveChildrenUseCase(
         }
         return TwoOriginRecursiveOutcome.Completed(integrated.toMap(), snapshots.toMap())
     }
+}
+
+/** Diagnostic codes emitted by RunTwoOriginRecursiveChildrenUseCase; not shared protocol vocabulary. */
+internal object RunTwoOriginRecursiveChildrenUseCaseDiagnosticCodes {
+    const val INVALID_ORIGIN_PAIR = "INVALID_ORIGIN_PAIR"
 }
