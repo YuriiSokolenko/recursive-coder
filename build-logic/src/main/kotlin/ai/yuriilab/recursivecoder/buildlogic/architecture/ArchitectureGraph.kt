@@ -52,12 +52,19 @@ object ArchitectureGraph {
         )
         projects.forEach { edge ->
             val permitted = allowed[edge.module].orEmpty()
-            if (edge.target !in permitted) {
+            if (edge.target !in paths) {
+                // One diagnostic per missing edge, even when it also violates the allowlist.
+                val remedy = if (edge.target in permitted) {
+                    "include the module in settings.gradle.kts or remove the dependency"
+                } else {
+                    "include the module in settings.gradle.kts and update the architecture allowlist, " +
+                        "or remove the dependency"
+                }
+                problems += "Unknown project dependency target ${edge.module}:${edge.configuration} -> " +
+                    "${edge.target} ($remedy)"
+            } else if (edge.target !in permitted) {
                 problems += "Forbidden project dependency ${edge.module}:${edge.configuration} -> " +
                     "${edge.target} (allowed: ${permitted.sorted().joinToString().ifEmpty { "none" }})"
-            }
-            if (edge.target !in paths) {
-                problems += "Unknown project dependency target ${edge.module}:${edge.configuration} -> ${edge.target}"
             }
         }
 

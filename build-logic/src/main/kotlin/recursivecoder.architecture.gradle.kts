@@ -29,8 +29,24 @@ gradle.projectsEvaluated {
         // Build model inspection takes place during configuration only. Sources are
         // wired as actual compile-task FileCollections, including generated roots.
         // Compiler options are tracked as primitive MapProperty inputs/providers.
-        val modules = rootProject.allprojects.filter {
-            it != rootProject && (it.childProjects.isEmpty() || it.buildFile.isFile)
+        // Read both conventional script names through tracked Gradle providers.
+        // In particular, a previously scriptless aggregator (:core, :infra, etc.)
+        // must invalidate the configuration cache when its build script appears.
+        // The selected buildFile also covers custom paths set by settings scripts.
+        fun trackedBuildScript(project: org.gradle.api.Project): String? {
+            val selected = project.layout.file(project.providers.provider { project.buildFile })
+            val selectedText = project.providers.fileContents(selected).asText.orNull
+            val kotlinText = project.providers.fileContents(
+                project.layout.projectDirectory.file("build.gradle.kts"),
+            ).asText.orNull
+            val groovyText = project.providers.fileContents(
+                project.layout.projectDirectory.file("build.gradle"),
+            ).asText.orNull
+            return selectedText ?: kotlinText ?: groovyText
+        }
+        val scripts = rootProject.allprojects.associateWith(::trackedBuildScript)
+        val modules = rootProject.allprojects.filter { project ->
+            project != rootProject && (project.childProjects.isEmpty() || scripts[project] != null)
         }.sortedBy { it.path }
         modulePaths.set(modules.map { it.path })
         checkoutRoot.set(rootProject.rootDir.canonicalPath)
@@ -85,8 +101,7 @@ gradle.projectsEvaluated {
             val scriptPluginMutation = Regex(
                 """\b(?:project\s*\.\s*)?apply\s*(?:\(\s*from\s*=|\{\s*from\s*\()""",
             )
-            if (project.buildFile.isFile) {
-                val script = project.buildFile.readText()
+            scripts[project]?.let { script ->
                 if (buildscriptMutation.containsMatchIn(script)) {
                     invalidRepositories += "${project.path}:explicit buildscript repository or dependency mutation"
                 }

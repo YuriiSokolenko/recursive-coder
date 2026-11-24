@@ -1670,6 +1670,46 @@ class ArchitectureConfigurationCacheRegressionTest(_GradleOutputAssertions):
                 script.write_text(original, encoding="utf-8")
             self.assert_restored_cache_ready(fixture, scenario="module opt-in restored")
 
+    def test_parent_module_script_added_and_removed_invalidates_configuration_cache(self):
+        # :core is an implicit aggregator without a build script. Once it gains
+        # one, the architecture allowlist must classify it on the very next run.
+        with tempfile.TemporaryDirectory(prefix="architecture-parent-script-cache-") as temporary:
+            fixture = Path(temporary)
+            self.copy_fixture(fixture)
+            parent_script = fixture / "core/build.gradle.kts"
+            self.assertFalse(parent_script.exists())
+
+            cold = self.check_architecture(
+                fixture, scenario="scriptless parent baseline", phase="cold-warmup"
+            )
+            self.assert_valid(cold)
+            self.assert_gradle_contains("Configuration cache entry stored.", cold.stdout)
+            self.assert_cache_hit(fixture, scenario="scriptless parent baseline")
+
+            parent_script.write_text(
+                "// A configured parent project now has its own build script.\n",
+                encoding="utf-8",
+            )
+            try:
+                self.assert_cache_invalidated(
+                    fixture,
+                    "Unclassified module :core",
+                    r"core/build\.gradle\.kts|build\.gradle\.kts",
+                    scenario="parent script created",
+                )
+                again = self.check_architecture(
+                    fixture, scenario="parent script still present", phase="cache-reuse"
+                )
+                self.assertNotEqual(0, again.returncode)
+                self.assert_gradle_contains("Reusing configuration cache.", again.stdout)
+                self.assert_gradle_contains("Unclassified module :core", again.stdout)
+            finally:
+                parent_script.unlink()
+
+            self.assert_restored_cache_ready(
+                fixture, scenario="parent script removed"
+            )
+
     def test_changed_build_script_invalidates_cache_for_production_and_test_edges(self):
         with tempfile.TemporaryDirectory(prefix="architecture-cache-") as temporary:
             fixture = Path(temporary)
