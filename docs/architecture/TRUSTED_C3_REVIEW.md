@@ -142,10 +142,12 @@ values obtained from the implementation. The additional cases cover:
   `isString` check. A numeric `sessionId` with a matching root actor can
   pass that policy in isolation. Physical ledger validation requires a
   string identifier; the handoff also binds the checkpoint identity.
-  The ledger hardening integration test supplies matching string and
-  numeric session identifiers in independently hashed frames and requires
-  rejection of the numeric case, not a hash failure. Pure policy is not
-  a substitute for the ledger or evidence checks.
+  The ledger hardening integration test creates and closes a real ledger
+  to establish its lock file, then supplies independently hashed frames
+  differing only in the JSON type of the session identifier. It requires
+  successful inspection of the string case and rejection of the numeric
+  case with `LEDGER_EVENT_INVALID`, not a hash or lock failure.
+  Pure policy is not a substitute for the ledger or evidence checks.
 
 These are regression oracles for selected changes to the shared vocabulary,
 identifier policy and pre-execution policy; they are not mutation-testing

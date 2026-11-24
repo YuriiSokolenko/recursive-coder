@@ -179,6 +179,9 @@ class TrustedRunningBoundaryPolicyUnitTest {
             .filter { it.type == String::class.java &&
                 Modifier.isStatic(it.modifiers) && Modifier.isFinal(it.modifiers) }
             .map { it.get(null) as String }.toSet()
+        assertTrue(declaredKinds.size >= 13,
+            "Expected at least 13 distinct public static final event-kind strings; " +
+                "found ${declaredKinds.size}. Review the vocabulary representation and completeness check.")
         assertEquals(declaredKinds - setOf("checkpoint.saved", "session.transition"),
             forbiddenPrefixKinds, "Review and explicitly classify new event kinds")
         assertTrue(declaredKinds.containsAll(setOf("checkpoint.saved", "session.transition")))

@@ -287,6 +287,8 @@ class DurableSessionEventLedgerHardeningIntegrationTest {
 
     @Test fun replayRejectsNumericSessionIdEvenWhenRootActorAndChainMatch() {
         val path = ledger("numeric-session-id")
+        // Establish the real lock file; inspection must never create it.
+        DurableSessionEventLedger.create(path, workspace()).use { }
         val valid = SessionEventJournal.frame(
             sessionId = "1", traceId = "trace-one", requestId = "request-one",
             sequence = 1, timestamp = now, type = "session.transition",
