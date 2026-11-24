@@ -130,7 +130,7 @@ class TaskRepositoryContractTest {
         // Do not assume every Windows code page can represent Cyrillic.
         val unicode = listOf("ї", "é", "日", "한", "中", "א", "ع", "ก", "Ω")
             .firstOrNull { launcherCharset.newEncoder().canEncode(it) }
-        val root = Files.createDirectory(temp.resolve("lock path with spaces # ${unicode.orEmpty()}"))
+        val root = Files.createDirectory(temp.resolve("lock path with spaces #" + (unicode?.let { " $it" } ?: "")))
         val child = launchLockFixture("invalid-mode", root.resolve(".store.lock"))
         try {
             val failure = assertFailsWith<AssertionError> { awaitFixtureLine(child, "LOCKED") }
