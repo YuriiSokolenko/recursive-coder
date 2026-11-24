@@ -129,6 +129,15 @@ Git baseline suitable for the next `TrustedWriteRuntime.open`. It must fence
 concurrent workspace mutations throughout the read/commit interval. A policy
 `Permit` does not substitute for this evidence.
 
+Accepted-stage Git reconciliation captures an order-preserving private copy
+of `acceptedFiles` and `frozenArtifacts` at entry, before validation or lock
+creation. The caller must keep both collections stable during capture using
+exclusive ownership or external synchronization; copying is not a
+synchronization primitive. All subsequent checks and the CAS use the same
+captured facts. Failed-Developer recovery still aliases its collections and
+mutable `beforeBytes`; that separate gap is tracked in
+[#221](https://github.com/YuriiSokolenko/recursive-coder/issues/221).
+
 Developer failures retain the trusted stage's `workspaceMayBeDirty` signal:
 a `DeveloperStageOutcome.Failed` with this flag **never** becomes a resumable
 `Stopped`, even when the host graph snapshot looks valid. It becomes
