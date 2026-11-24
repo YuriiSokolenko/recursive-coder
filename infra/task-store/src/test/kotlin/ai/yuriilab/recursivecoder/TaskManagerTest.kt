@@ -604,7 +604,7 @@ class TaskManagerTest {
 
         // The worker's complete() transaction calls this hook immediately before
         // directory fsync. Capture observations without asserting inside TaskStore.
-        store.directorySyncTestHook = {
+        store.testHooks.directorySync = {
             val cancellation = runningCancellation.get()
             if (cancellation != null) {
                 val cancellingThread = thread(name = "late-cancellation") { cancellation.cancel() }
@@ -632,7 +632,7 @@ class TaskManagerTest {
             assertEquals(1, report.completed)
             assertEquals(TaskState.SUCCEEDED, service.show("completed").state)
         } finally {
-            store.directorySyncTestHook = null
+            store.testHooks.directorySync = null
         }
     }
 

@@ -29,6 +29,30 @@
 Production dependencies point from the composition root and adapters toward the core contracts; no core module depends on the CLI, Koog, or the HTTP model implementation. The concrete workspace opener, model provider and JSONL EventSink are injected by `:app:cli` using Koin factories and constructor injection; the opt-in durable ledger, [atomic checkpoint store](SESSION_CHECKPOINTS.md) and [fenced admission](FENCED_RESUME.md) are not wired into the default CLI; see also [durable event ledger](DURABLE_EVENT_LEDGER.md). Koin is not present in any core module. The scheduler accepts a `TaskRunner` instead of constructing a model adapter. Session Protocol JSON Schema and fixtures remain at the repository root under `contracts/v1/` and continue to be validated independently by Node/Python CI.
 
 
+## Shared JVM package audit and JPMS migration boundary (issue #52)
+
+All nine product Gradle modules place Kotlin production classes in
+`ai.yuriilab.recursivecoder`: `:core:contracts`, `:core:session`, `:core:tasks`,
+`:infra:model`, `:infra:workspace`, `:infra:task-store`, `:infra:journal`,
+`:agent:runtime` and `:app:cli`. This is a **split JVM package** across
+separately compiled JARs. The current Gradle **classpath** build does not
+require unique packages; the project is not a JPMS/module-path build and does
+not have `module-info.java`. Tests also share the package to exercise
+module-local Kotlin `internal` seams. The enforced Gradle dependency graph,
+not package names, is currently the module boundary.
+
+If JPMS becomes a target, proposed distinct implementation packages are
+`ai.yuriilab.recursivecoder.contracts`, `.session`, `.tasks`,
+`.infra.model`, `.infra.workspace`, `.infra.taskstore`,
+`.infra.journal`, `.agent.runtime` and `.app.cli`, each relative to
+`ai.yuriilab.recursivecoder`. **No packages move in this change.** Before
+any later migration, inventory public JVM symbols (including top-level Kotlin
+`*Kt` facades), external Java/Kotlin consumers, reflection, serialized
+names, and tests. Design compatibility shims for existing public binary names
+where possible, prove downstream compile/binary compatibility, and only then
+introduce JPMS descriptors. Kotlin type aliases alone are not Java/JVM binary
+compatibility shims. Implement this as a separate, reviewed migration.
+
 ## Use Case contracts and Koin composition (issues #58 and #59)
 
 The initial vertical slice introduced `EnqueueTaskUseCase` in `:core:tasks` and `RunSessionUseCase` in `:core:session`. Issue #59 adds `TaskQueriesUseCase`, cancel/retry/pause/resume/replace-dependencies/cancel-all contracts and scheduler claim/complete/interrupt/recover/prepare contracts, each with an independent policy-backed `Default*` implementation. The CLI resolves **interfaces** using explicit Koin module definitions in `:app:cli/CompositionRoot.kt`. It does not construct concrete Use Cases or use `get()` from business logic. No new Gradle layer is needed: interfaces, orchestration and owned ports stay inside the bounded contexts.

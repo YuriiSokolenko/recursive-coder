@@ -255,6 +255,39 @@ inspection), unsafe local config/index flags, ignored files and total deadline
 expiry. This validates the shared read-only and mutable preflight contract at
 its owning module rather than only through CLI integration. The new `LinuxFiveRoleWorkflowHostTest` (`:app:cli`, `@Tag("integration")`) exercises the real Linux TrustedWriteRuntime session, host HMAC/typed evidence, a complete five-role run through Git CAS and independent Reviewer `finishSuccess`, tampered Developer usage/write ID/changed-file digests, forged acceptance, quarantine, unsafe Git configuration, ignored files, FIFO reads, and an external approval callback without holding the host monitor. The installed writable CLI with two distinct nested stage origins is still outstanding under #79. See [five-role orchestration](FIVE_ROLE_ORCHESTRATION.md).
 
+## Portable task-store lock and atomic replacement regressions (issue #52)
+
+`:infra:task-store:integrationTest` executes `TaskRepositoryContractTest`
+using Java 21 and a standalone JVM fixture. It launches the current JDK's
+`bin/java` (or `bin/java.exe`) with a Java launcher argument file containing
+the Gradle test runtime classpath, avoiding Windows command-line length limits.
+Child stderr is captured separately from the stdout handshake and reported on failure.
+**No Python, `fcntl`, shell utility, POSIX-only API or external service**
+is required for these lock tests. Local filesystems must support Java NIO
+exclusive file locks; Linux CI exercises both `.store.lock` (blocking
+transaction) and `.scheduler.lock` (fail-fast lease/recovery denial).
+The child prints `LOCKED` only after acquiring the physical file lock;
+the parent observes an in-transaction hook immediately before the lock call.
+Blocking is then observed over a bounded 300 ms `Future.get` window, and
+completion is required after the child releases its lease.
+A separate child probes that a failed same-JVM acquisition did not release
+the original lease.
+
+Windows and macOS are supported by the JVM fixture design, but this
+repository's mandatory CI currently runs these regressions on Linux; do not
+treat unexecuted platforms as validated. Only alias-symlink cases explicitly
+assume/skip on Windows when symlinks require privileges or developer mode,
+with a diagnostic. Missing Java subprocess execution or broken local NIO
+locking is a failing environment rather than a silent success.
+
+The atomic replacement regression uses a test-only fail-only hook *after*
+`FileChannel.force(true)` and close of `tasks.json.tmp`, at the
+`ATOMIC_MOVE` boundary. This avoids assuming that replacing an existing
+directory with a regular file fails on all filesystems. It verifies byte-
+identical previous authority, ignored orphan temp, and successful later
+replacement. No production move options, snapshot encoding, corruption
+checks, locking, or fsync behavior are substituted.
+
 ## Test taxonomy
 
 | Tier | Target | Characteristics and coverage |
