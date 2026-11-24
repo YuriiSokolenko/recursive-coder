@@ -106,7 +106,7 @@ class SessionPolicyCoverageUnitTest {
 
     @Test fun schedulerAttemptRangeIsNotValidatedByPureAdmission() {
         // Characterization only: protocol/schema and trusted caller validation are separate.
-        // Do not change production admission semantics in this coverage-only issue.
+        // Temporary until #190 defines and enforces the scheduler attempt range.
         for (attempt in listOf(-1L, 0L, 1L, 2L, Long.MAX_VALUE)) {
             assertEquals(AdmissionDecision.Accepted,
                 SessionAdmissionPolicy.decide(admitted().copy(invocationSource = "scheduler", attempt = attempt)),

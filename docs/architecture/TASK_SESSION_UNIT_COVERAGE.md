@@ -59,7 +59,8 @@ The pure admission policy currently accepts scheduler attempts of zero and
 negative values when all other facts are valid. The characterization test
 pins that existing behavior, not a new authorization guarantee; protocol
 validation and trusted caller constraints are separate. Tightening admission
-would require a separate behavior-changing issue.
+is tracked in [issue #190](https://github.com/YuriiSokolenko/recursive-coder/issues/190),
+which must replace this temporary characterization when the policy changes.
 
 Remaining integration concerns include actual worker scheduling races and
 persistent recovery, model/gateway wire errors, filesystem boundary checks,

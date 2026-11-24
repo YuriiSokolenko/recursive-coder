@@ -202,15 +202,10 @@ class TaskPolicyCoverageUnitTest {
             "negative-wait" to good.copy(waitTurns = -1),
             "negative-pruned-history" to good.copy(prunedTransitions = -1)
         )
-        for ((name, snapshot) in listOf(
-            "minimum-priority" to good.copy(priority = 0),
-            "maximum-priority" to good.copy(priority = 100),
-            "64-character-id" to good.copy(id = "a".repeat(64)),
-            "one-character-id" to good.copy(id = "a")
-        )) {
-            val failure = runCatching { validateStoredTasks(listOf(snapshot)) }.exceptionOrNull()
-            assertNull(failure, "Valid stored task boundary: $name")
-        }
+        validateStoredTasks(listOf(good.copy(priority = 0)))
+        validateStoredTasks(listOf(good.copy(priority = 100)))
+        validateStoredTasks(listOf(good.copy(id = "a".repeat(64))))
+        validateStoredTasks(listOf(good.copy(id = "a")))
         for ((name, snapshot) in invalid) {
             assertFailsWith<IllegalArgumentException>("Invalid stored task invariant: $name") {
                 validateStoredTasks(listOf(snapshot))
