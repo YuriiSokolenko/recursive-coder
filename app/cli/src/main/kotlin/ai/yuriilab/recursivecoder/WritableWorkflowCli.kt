@@ -290,7 +290,8 @@ internal object WritableWorkflowCli {
             ToolAuthorizationPolicy.validHostIdentifier(sessionId))
         val recursiveConfig = plan["recursiveChildren"]?.let { raw ->
             val children = raw as? JsonObject ?: error("Invalid recursive children")
-            require(children.keys == setOf("SDD", "DEVELOP"))
+            // StageKind names are part of this installed plan's JSON key contract.
+            require(children.keys == setOf(StageKind.SDD.name, StageKind.DEVELOP.name))
             val allRoots = mutableSetOf<Path>()
             val allLocks = mutableSetOf<Path>()
             listOf(StageKind.SDD, StageKind.DEVELOP).associateWith { kind ->
@@ -379,8 +380,8 @@ internal object WritableWorkflowCli {
         val model = ModelConfig(ModelProviderIds.FAKE, ModelProviderIds.FAKE_MODEL_ID, "http://localhost/unused",
             "env:FAKE_UNUSED", 8192, 512, setOf(ModelFeatureIds.TOOL_CALLS), null, 1000, 1000)
         val host = LinuxFiveRoleWorkflowHost(checkout, graph, expectedHead, branch,
-            mapOf("offline-check" to StageIsolatedCheck(executable, arguments)),
-            setOf(StageCheckIds.GIT_DIFF_CHECK, "offline-check"),
+            mapOf(INSTALLED_OFFLINE_CHECK_ID to StageIsolatedCheck(executable, arguments)),
+            setOf(StageCheckIds.GIT_DIFF_CHECK, INSTALLED_OFFLINE_CHECK_ID),
             { candidate, _, _ ->
                 val kind = writers.singleOrNull { it.role == candidate.ownerRole }
                 if (kind != null && targets.getValue(kind).path == candidate.declaredPath &&
@@ -514,3 +515,6 @@ internal object WritableWorkflowCli {
         }
     }
 }
+
+/** Operator-selected check ID shared by installed root and child workflow adapters. */
+internal const val INSTALLED_OFFLINE_CHECK_ID = "offline-check"

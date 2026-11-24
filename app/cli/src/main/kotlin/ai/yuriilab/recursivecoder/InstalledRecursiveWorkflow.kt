@@ -294,8 +294,8 @@ internal class InstalledRecursiveWorkflow(
                     put("code", code)
                     put("observedTokens", observed.tokens)
                     put("observedToolCalls", observed.toolCalls)
-                    put("grantTokens", reserved.tokens)
-                    put("grantToolCalls", reserved.toolCalls)
+                    put(StageEventMetadataFields.GRANT_TOKENS, reserved.tokens)
+                    put(StageEventMetadataFields.GRANT_TOOL_CALLS, reserved.toolCalls)
                     put("accountedTokens", accounted.tokens)
                     put("accountedToolCalls", accounted.toolCalls)
                     put("usageUncertain", attempt.meter.hasUncertainUsage())
@@ -321,7 +321,7 @@ internal class InstalledRecursiveWorkflow(
     private var integrated: TwoOriginRecursiveOutcome.Completed? = null
     @Volatile private var uncertainChildExecution = false
     val reconciliationRequired: Boolean get() = uncertainChildExecution
-    private val requiredChildChecks = setOf(StageCheckIds.GIT_DIFF_CHECK, "offline-check")
+    private val requiredChildChecks = setOf(StageCheckIds.GIT_DIFF_CHECK, INSTALLED_OFFLINE_CHECK_ID)
     // SDD does one write/check cycle. Developer runs 3 preparation
     // stages plus its own write/check cycle, with one shared grant.
     private fun childToolCalls(kind: StageKind): Long =
@@ -423,7 +423,7 @@ internal class InstalledRecursiveWorkflow(
         val childTargets = childTargets(kind, childId)
         val host = LinuxFiveRoleWorkflowHost(
             config.root, childGraph, config.head, config.branch,
-            mapOf("offline-check" to check),
+            mapOf(INSTALLED_OFFLINE_CHECK_ID to check),
             requiredChildChecks,
             { candidate, _, _ ->
                 val stage = listOf(StageKind.SDD, StageKind.ATDD, StageKind.TDD,

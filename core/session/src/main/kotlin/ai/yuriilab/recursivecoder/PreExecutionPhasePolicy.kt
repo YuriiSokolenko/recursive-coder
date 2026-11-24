@@ -35,7 +35,7 @@ object PreExecutionPhasePolicy {
         // metadata restriction applies to both allowed event types.
         val metadata = event["metadata"]
         if (metadata != null && (metadata !is JsonObject ||
-            metadata.keys.any { it != "graphId" })) return null
+            metadata.keys.any { it != StageEventMetadataFields.GRAPH_ID })) return null
         return when ((event["type"] as? JsonPrimitive)?.content) {
             SessionEventKinds.CHECKPOINT_SAVED ->
                 if ("transition" !in event) currentPhase else null

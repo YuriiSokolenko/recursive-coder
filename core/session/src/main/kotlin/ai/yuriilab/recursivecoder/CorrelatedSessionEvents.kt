@@ -58,21 +58,21 @@ class CorrelatedRecursiveSessionEvents(
                 // Unknown child session identity must remain null.
             ),
             extra = buildJsonObject {
-                put("recursiveEvent", event.kind.name)
-                put("graphId", event.graphId.value)
-                put("stageRunId", event.stageRunId.value)
+                put(StageEventMetadataFields.RECURSIVE_EVENT, event.kind.name)
+                put(StageEventMetadataFields.GRAPH_ID, event.graphId.value)
+                put(StageEventMetadataFields.STAGE_RUN_ID, event.stageRunId.value)
                 put("origin", event.origin.name)
-                put("role", event.origin.role.name)
+                put(StageEventMetadataFields.ROLE, event.origin.role.name)
                 // Graph scope is not a host-issued budget correlation identifier.
-                put("budgetScopeGraphId", event.graphId.value)
-                put("grantTokens", event.granted.tokens)
-                put("grantToolCalls", event.granted.toolCalls)
-                put("spentTokens", event.usage.tokens)
-                put("spentToolCalls", event.usage.toolCalls)
-                put("delegatedTokens", event.delegated.tokens)
-                put("delegatedToolCalls", event.delegated.toolCalls)
-                put("parentGraphId", event.parentGraphId?.value?.let(::JsonPrimitive) ?: JsonNull)
-                put("childGraphId", event.childGraphId?.value?.let(::JsonPrimitive) ?: JsonNull)
+                put(StageEventMetadataFields.BUDGET_SCOPE_GRAPH_ID, event.graphId.value)
+                put(StageEventMetadataFields.GRANT_TOKENS, event.granted.tokens)
+                put(StageEventMetadataFields.GRANT_TOOL_CALLS, event.granted.toolCalls)
+                put(StageEventMetadataFields.SPENT_TOKENS, event.usage.tokens)
+                put(StageEventMetadataFields.SPENT_TOOL_CALLS, event.usage.toolCalls)
+                put(StageEventMetadataFields.DELEGATED_TOKENS, event.delegated.tokens)
+                put(StageEventMetadataFields.DELEGATED_TOOL_CALLS, event.delegated.toolCalls)
+                put(StageEventMetadataFields.PARENT_GRAPH_ID, event.parentGraphId?.value?.let(::JsonPrimitive) ?: JsonNull)
+                put(StageEventMetadataFields.CHILD_GRAPH_ID, event.childGraphId?.value?.let(::JsonPrimitive) ?: JsonNull)
                 put("requestId", event.requestId?.let(::JsonPrimitive) ?: JsonNull)
                 event.code?.let { put("code", it) }
             })
@@ -100,10 +100,10 @@ class CorrelatedRoleSessionEvents(
             }, status, correlationId = event.correlation.requestId,
             actor = event.agentId?.let { SessionEventActor(it.value) },
             extra = buildJsonObject {
-                put("roleEvent", event.kind.name)
-                put("graphId", event.correlation.graphId.value)
-                put("stageRunId", event.correlation.stageRunId.value)
-                put("role", event.role.name)
+                put(StageEventMetadataFields.ROLE_EVENT, event.kind.name)
+                put(StageEventMetadataFields.GRAPH_ID, event.correlation.graphId.value)
+                put(StageEventMetadataFields.STAGE_RUN_ID, event.correlation.stageRunId.value)
+                put(StageEventMetadataFields.ROLE, event.role.name)
                 put("requestId", event.correlation.requestId)
                 put("modelRequests", event.usage.modelRequests)
                 event.usage.inputTokens?.let { put("inputTokens", it) }
@@ -136,9 +136,9 @@ class CorrelatedPreparationSessionEvents(
         journal.append(type, status,
             correlationId = event.correlation.requestId,
             extra = buildJsonObject {
-                put("stageRunId", event.correlation.stageRunId.value)
+                put(StageEventMetadataFields.STAGE_RUN_ID, event.correlation.stageRunId.value)
                 put("kind", event.kind.name)
-                put("stageState", event.state.name)
+                put(StageEventMetadataFields.STAGE_STATE, event.state.name)
                 event.artifactId?.let { put("artifactId", it.value) }
                 event.sha256?.let { put("artifactSha256", it) }
                 event.approval?.let { put("approval", it.name) }
@@ -155,8 +155,8 @@ class CorrelatedReviewerSessionEvents(
             if (decision.verdict == ReviewerDisposition.ACCEPT) SessionEventStatuses.COMPLETED else SessionEventStatuses.DENIED,
             correlationId = decision.correlation.requestId,
             extra = buildJsonObject {
-                put("stageRunId", decision.correlation.stageRunId.value)
-                put("role", EngineeringRole.REVIEWER.name)
+                put(StageEventMetadataFields.STAGE_RUN_ID, decision.correlation.stageRunId.value)
+                put(StageEventMetadataFields.ROLE, EngineeringRole.REVIEWER.name)
                 put("verdict", decision.verdict.name)
                 put("reasonCode", decision.reasonCode)
                 put("scope", decision.scope.name)
