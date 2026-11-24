@@ -313,7 +313,13 @@ here authorizes actual effects, general runtime resume or #105 recovery.
 `LinuxStageGitBaselineReconcilerTest` cases separately exercise the new typed
 baseline API: malformed heads/branches, Git ref drift (including during final
 inspection), unsafe local config/index flags, ignored files and total deadline
-expiry. This validates the shared read-only and mutable preflight contract at
+expiry. Accepted-stage snapshot regressions (#220) cover exceptions during
+capture of either collection before lock creation, exact denial precedence
+in both accepted-file and frozen-artifact orders, caller collection drift
+before and after CAS, final readback rejecting an unsafe accepted-file mode
+despite cleared caller facts, and malformed-path preflight denials. The
+valid-path unsafe traversal and competing-CAS/fault cases remain separate.
+This validates the shared read-only and mutable preflight contract at
 its owning module rather than only through CLI integration. The new `LinuxFiveRoleWorkflowHostTest` (`:app:cli`, `@Tag("integration")`) exercises the real Linux TrustedWriteRuntime session, host HMAC/typed evidence, a complete five-role run through Git CAS and independent Reviewer `finishSuccess`, tampered Developer usage/write ID/changed-file digests, forged acceptance, quarantine, unsafe Git configuration, ignored files, FIFO reads, and an external approval callback without holding the host monitor. The installed writable CLI with two distinct nested stage origins is still outstanding under #79. See [five-role orchestration](FIVE_ROLE_ORCHESTRATION.md).
 
 ## Portable task-store lock and atomic replacement regressions (issue #52)

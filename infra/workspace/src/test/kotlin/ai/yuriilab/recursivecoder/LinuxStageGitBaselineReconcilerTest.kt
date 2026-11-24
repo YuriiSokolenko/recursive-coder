@@ -386,6 +386,105 @@ class LinuxStageGitBaselineReconcilerTest {
         LinuxStageGitBaselineReconciler(repo.root, repo.locks,
             Path.of("/usr/bin/git"), observer)
 
+    @Test fun acceptedFileCaptureFailureDeniesBeforeWorkspaceSideEffects() {
+        val repo = createRepo()
+        write(repo.root, "specs/Feature.md", "accepted requirements\n")
+        val unreadable = object : AbstractList<StageGitAcceptedFile>() {
+            override val size: Int = 2
+            override fun get(index: Int): StageGitAcceptedFile =
+                throw ConcurrentModificationException("injected accepted-file capture failure")
+        }
+        assertCaptureFailureLeavesWorkspaceUntouched(repo,
+            StageGitReconciliationRequest(repo.head, "dev", EngineeringRole.SDD, unreadable))
+    }
+
+    @Test fun frozenArtifactCaptureFailureDeniesBeforeWorkspaceSideEffects() {
+        val repo = createRepo()
+        val path = "specs/Feature.md"
+        val hash = write(repo.root, path, "accepted requirements\n")
+        val unreadable = object : AbstractMap<String, String>() {
+            override val entries: Set<Map.Entry<String, String>> =
+                object : AbstractSet<Map.Entry<String, String>>() {
+                    override val size: Int = 2
+                    override fun iterator(): Iterator<Map.Entry<String, String>> =
+                        throw ConcurrentModificationException("injected frozen-artifact capture failure")
+                }
+        }
+        assertCaptureFailureLeavesWorkspaceUntouched(repo,
+            StageGitReconciliationRequest(repo.head, "dev", EngineeringRole.SDD,
+                listOf(StageGitAcceptedFile(path, hash)), unreadable))
+    }
+
+    private fun assertCaptureFailureLeavesWorkspaceUntouched(
+        repo: Repo, request: StageGitReconciliationRequest
+    ) {
+        val beforeStatus = git(repo.root, "status", "--porcelain", "--untracked-files=all")
+        val beforeIndex = git(repo.root, "ls-files", "--stage")
+        val beforeBytes = Files.readAllBytes(repo.root.resolve("specs/Feature.md"))
+        assertTrue(Files.notExists(repo.locks))
+        val outcome = assertIs<StageGitReconciliationResult.Denied>(
+            LinuxStageGitBaselineReconciler(repo.root, repo.locks).reconcile(request))
+        assertEquals("GIT_HANDOFF_UNAVAILABLE", outcome.code)
+        assertTrue(Files.notExists(repo.locks), "capture must precede lock directory creation")
+        assertEquals(repo.head, git(repo.root, "rev-parse", "HEAD"))
+        assertEquals(repo.head, git(repo.root, "rev-parse", "refs/heads/dev"))
+        assertEquals(beforeIndex, git(repo.root, "ls-files", "--stage"))
+        assertEquals(beforeStatus, git(repo.root, "status", "--porcelain", "--untracked-files=all"))
+        assertTrue(beforeBytes.contentEquals(Files.readAllBytes(repo.root.resolve("specs/Feature.md"))))
+    }
+
+    @Test fun acceptedFileCapturePreservesDenialPrecedenceInBothOrders() {
+        val repo = createRepo()
+        val badDigest = "specs/Z.md"
+        val badMode = "specs/A.md"
+        write(repo.root, badDigest, "digest mismatch\n")
+        Files.setPosixFilePermissions(repo.root.resolve(badDigest),
+            PosixFilePermissions.fromString("rw-r--r--"))
+        val modeHash = write(repo.root, badMode, "unsafe mode\n")
+        Files.setPosixFilePermissions(repo.root.resolve(badMode),
+            PosixFilePermissions.fromString("r--r--r--"))
+        val digestFirst = listOf(
+            StageGitAcceptedFile(badDigest, "0".repeat(64)),
+            StageGitAcceptedFile(badMode, modeHash))
+        val beforeStatus = git(repo.root, "status", "--porcelain", "--untracked-files=all")
+        val beforeIndex = git(repo.root, "ls-files", "--stage")
+        val reconciler = LinuxStageGitBaselineReconciler(repo.root, repo.locks)
+        for ((files, expectedCode) in listOf(
+            digestFirst to "STAGE_ARTIFACT_CHANGED",
+            digestFirst.reversed() to "UNSAFE_STAGE_FILE_MODE"
+        )) {
+            val outcome = assertIs<StageGitReconciliationResult.Denied>(
+                reconciler.reconcile(StageGitReconciliationRequest(repo.head, "dev",
+                    EngineeringRole.SDD, files)))
+            assertEquals(expectedCode, outcome.code)
+            assertEquals(repo.head, git(repo.root, "rev-parse", "HEAD"))
+            assertEquals(beforeIndex, git(repo.root, "ls-files", "--stage"))
+            assertEquals(beforeStatus, git(repo.root, "status", "--porcelain", "--untracked-files=all"))
+        }
+    }
+
+    @Test fun frozenArtifactCapturePreservesDenialPrecedenceInBothOrders() {
+        val repo = createRepo()
+        val path = "specs/Feature.md"
+        val hash = write(repo.root, path, "accepted requirements\n")
+        val missing = "specs/Missing/Feature.md"
+        val missingFirst = linkedMapOf(missing to hash, "README.md" to "0".repeat(64))
+        val digestFirst = linkedMapOf("README.md" to "0".repeat(64), missing to hash)
+        val beforeStatus = git(repo.root, "status", "--porcelain", "--untracked-files=all")
+        val beforeIndex = git(repo.root, "ls-files", "--stage")
+        for ((frozen, expectedCode) in listOf(
+            missingFirst to "UNSAFE_STAGE_PATH",
+            digestFirst to "FROZEN_ARTIFACT_CHANGED"
+        )) {
+            val outcome = assertIs<StageGitReconciliationResult.Denied>(
+                reconcile(repo, repo.head, EngineeringRole.SDD, mapOf(path to hash), frozen))
+            assertEquals(expectedCode, outcome.code)
+            assertEquals(repo.head, git(repo.root, "rev-parse", "HEAD"))
+            assertEquals(beforeIndex, git(repo.root, "ls-files", "--stage"))
+            assertEquals(beforeStatus, git(repo.root, "status", "--porcelain", "--untracked-files=all"))
+        }
+    }
+
     @Test fun requestCollectionDriftBeforeCasCannotChangeValidatedFacts() {
         assertRequestCollectionDriftIgnored(StageGitTestCheckpoint.BEFORE_REF_UPDATE)
     }

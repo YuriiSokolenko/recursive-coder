@@ -97,7 +97,7 @@ unit and integration tests live in the corresponding module's
 | `infra/workspace/TrustedWriteRuntime.kt` | `CHECK_OUTPUT_LIMIT` | Migrated to local owner | `TrustedWriteRuntimeDiagnosticCodes.CHECK_OUTPUT_LIMIT` | Not shared | `TrustedWriteRuntimeDiagnosticCodesUnitTest.exactDiagnosticCodes` (unit) |
 | `infra/workspace/TrustedWriteRuntime.kt` | `CHECK_OUTPUT_UNAVAILABLE` | Migrated to local owner | `TrustedWriteRuntimeDiagnosticCodes.CHECK_OUTPUT_UNAVAILABLE` | Not shared | `TrustedWriteRuntimeDiagnosticCodesUnitTest.exactDiagnosticCodes` (unit) |
 | `infra/workspace/LinuxStageGitBaselineReconciler.kt` | `GIT_BASELINE_TIMEOUT` | Migrated to local owner | `LinuxStageGitBaselineReconcilerDiagnosticCodes.GIT_BASELINE_TIMEOUT` | Not shared | `LinuxStageGitBaselineReconcilerDiagnosticCodesUnitTest.exactDiagnosticCodes` (unit) |
-| `infra/workspace/LinuxStageGitBaselineReconciler.kt` | `INVALID_STAGE_PATH` | Migrated to local owner | `LinuxStageGitBaselineReconcilerDiagnosticCodes.INVALID_STAGE_PATH` | Not shared | `LinuxStageGitBaselineReconcilerDiagnosticCodesUnitTest.exactDiagnosticCodes` (unit); historical post-CAS syntax oracle replaced in #220 (see below) |
+| `infra/workspace/LinuxStageGitBaselineReconciler.kt` | `INVALID_STAGE_PATH` | Migrated to local owner | `LinuxStageGitBaselineReconcilerDiagnosticCodes.INVALID_STAGE_PATH` | Not shared | `LinuxStageGitBaselineReconcilerDiagnosticCodesUnitTest.exactDiagnosticCodes` (unit); historical post-CAS syntax oracle replaced in [#220](https://github.com/YuriiSokolenko/recursive-coder/issues/220) ([details](#follow-up-220-request-snapshots-and-path-guard-reachability)) |
 | `infra/workspace/LinuxStageGitBaselineReconciler.kt` | `UNSAFE_STAGE_FILE_MODE` | Migrated to local owner | `LinuxStageGitBaselineReconcilerDiagnosticCodes.UNSAFE_STAGE_FILE_MODE` | Not shared | `LinuxStageGitBaselineReconcilerDiagnosticCodesUnitTest.exactDiagnosticCodes` (unit) |
 | `infra/workspace/LinuxStageGitBaselineReconciler.kt` | `GIT_COMMAND_INTERRUPTED` | Migrated to local owner | `LinuxStageGitBaselineReconcilerDiagnosticCodes.GIT_COMMAND_INTERRUPTED` | Not shared | `LinuxStageGitBaselineReconcilerDiagnosticCodesUnitTest.exactDiagnosticCodes` (unit) |
 | `infra/workspace/LinuxStageGitBaselineReconciler.kt` | `GIT_BASELINE_INTERRUPTED` | Migrated to local owner | `LinuxStageGitBaselineReconcilerDiagnosticCodes.GIT_BASELINE_INTERRUPTED` | Not shared | `LinuxStageGitBaselineReconcilerDiagnosticCodesUnitTest.exactDiagnosticCodes` (unit) |
@@ -135,6 +135,10 @@ captured request for preflight, object construction, re-verification, ref
 CAS and final readback. List elements, map keys and values are immutable.
 No caller mutation is permitted during capture; copying does not make
 concurrent writes safe or provide a linearizable multi-collection snapshot.
+Integration tests inject collection traversal exceptions in each capture and
+assert `GIT_HANDOFF_UNAVAILABLE` with unchanged ref, index, working-tree
+status and bytes, and no lock directory creation. Paired ordering tests pin
+the first denial for both accepted and frozen collections in both orders.
 
 For stable inputs, preflight still checks baseline syntax, change-set
 cardinality/uniqueness and overlap, role authorization and frozen syntax/hash
