@@ -27,6 +27,8 @@ import java.util.concurrent.TimeUnit
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
+private const val APPROVED_ARTIFACT_CHANGED = "APPROVED_ARTIFACT_CHANGED"
+
 /**
  * Host-owned write capability. Never deserialize this type from an agent's tool arguments.
  * In particular, reviewedChange must come from an independent authenticated control plane.
@@ -129,7 +131,7 @@ class TrustedWriteRuntime private constructor(
         private fun sha(bytes: ByteArray): String =
             MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 
-        private fun fail(code: String): Nothing = throw Refused(code, "policy", "Trusted write denied: " + code)
+        private fun fail(code: String): Nothing = throw Refused(code, SessionDiagnosticCategories.POLICY, "Trusted write denied: " + code)
 
         /** The host chooses executable paths, reviews, artifacts, and the external lease location. */
         fun open(
@@ -227,7 +229,7 @@ class TrustedWriteRuntime private constructor(
                     sha(config.toByteArray()), indexFingerprint(git), tracked, channel, lock, policyHash, audit)
                 for ((path, expected) in policy.approvedArtifacts) {
                     if (sha(runtime.readFile(path) ?: fail("APPROVED_ARTIFACT_MISSING")) != expected)
-                        fail("APPROVED_ARTIFACT_CHANGED")
+                        fail(APPROVED_ARTIFACT_CHANGED)
                 }
                 runtime.verifyState()
                 return runtime
@@ -253,7 +255,7 @@ class TrustedWriteRuntime private constructor(
         private fun indexFingerprint(git: RestrictedGit): String {
             val flags = git.text(4 * 1024 * 1024, "ls-files", "-v", "-z")
             if (flags.split('\u0000').filter(String::isNotEmpty).any { !it.startsWith("H ") })
-                fail("UNSAFE_GIT_INDEX")
+                fail(WorkspaceWriteDenialCodes.UNSAFE_GIT_INDEX)
             val staged = git.text(4 * 1024 * 1024, "ls-files", "--stage", "-z")
             return sha((flags + "\u0000" + staged).toByteArray())
         }
@@ -266,15 +268,15 @@ class TrustedWriteRuntime private constructor(
             while (index < records.size) {
                 val record = records[index++]
                 if (record.isEmpty()) continue
-                if (record.length < 4 || record[2] != ' ') fail("GIT_STATUS_INVALID")
+                if (record.length < 4 || record[2] != ' ') fail(WorkspaceGitDenialCodes.GIT_STATUS_INVALID)
                 val xy = record.substring(0, 2)
                 val path = record.substring(3)
-                if (!validPath(path)) fail("GIT_STATUS_INVALID")
+                if (!validPath(path)) fail(WorkspaceGitDenialCodes.GIT_STATUS_INVALID)
                 found[path] = xy
                 if (xy.contains('R') || xy.contains('C')) {
-                    if (index >= records.size) fail("GIT_STATUS_INVALID")
+                    if (index >= records.size) fail(WorkspaceGitDenialCodes.GIT_STATUS_INVALID)
                     val oldPath = records[index++]
-                    if (!validPath(oldPath)) fail("GIT_STATUS_INVALID")
+                    if (!validPath(oldPath)) fail(WorkspaceGitDenialCodes.GIT_STATUS_INVALID)
                     found[oldPath] = xy
                 }
             }
@@ -291,7 +293,7 @@ class TrustedWriteRuntime private constructor(
     private fun report(id: String, tool: String, denied: String?) = audit(id, tool, denied)
 
     private fun ensureLive() {
-        if (closed || poisoned || !lease.isValid) fail("WRITE_SESSION_INVALID")
+        if (closed || poisoned || !lease.isValid) fail(WorkspaceWriteDenialCodes.WRITE_SESSION_INVALID)
         if (Files.readAttributes(root, BasicFileAttributes::class.java).fileKey() != rootKey ||
             Files.readAttributes(root.resolve(".git"), BasicFileAttributes::class.java).fileKey() != gitKey)
             fail(WorkspaceDenialCodes.WORKSPACE_REPLACED)
@@ -415,9 +417,9 @@ class TrustedWriteRuntime private constructor(
             val current = readFile(path)?.let(::sha)
             if (path in (policy.reviewedChange?.paths ?: emptySet())) {
                 if (path in accepted) {
-                    if (accepted[path] != current) fail("APPROVED_ARTIFACT_CHANGED")
-                } else if (current != expected) fail("APPROVED_ARTIFACT_CHANGED")
-            } else if (current != expected) fail("APPROVED_ARTIFACT_CHANGED")
+                    if (accepted[path] != current) fail(APPROVED_ARTIFACT_CHANGED)
+                } else if (current != expected) fail(APPROVED_ARTIFACT_CHANGED)
+            } else if (current != expected) fail(APPROVED_ARTIFACT_CHANGED)
         }
         return sha(accepted.toSortedMap().entries.joinToString("\u0000") {
             it.key + "=" + (it.value ?: "<deleted>")
@@ -653,8 +655,8 @@ class TrustedWriteRuntime private constructor(
             report(id, RUN_CHECK_TOOL_NAME, e.code)
             CheckOutcome(id, e.code)
         } catch (_: Exception) {
-            report(id, RUN_CHECK_TOOL_NAME, "CHECK_UNAVAILABLE")
-            CheckOutcome(id, "CHECK_UNAVAILABLE")
+            report(id, RUN_CHECK_TOOL_NAME, WorkspaceWriteDenialCodes.CHECK_UNAVAILABLE)
+            CheckOutcome(id, WorkspaceWriteDenialCodes.CHECK_UNAVAILABLE)
         }
     }
 

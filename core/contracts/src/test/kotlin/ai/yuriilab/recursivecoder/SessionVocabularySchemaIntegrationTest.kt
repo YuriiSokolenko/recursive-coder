@@ -59,4 +59,17 @@ class SessionVocabularySchemaIntegrationTest {
         val modes = event.getValue("redaction").jsonObject.getValue("properties").jsonObject.getValue("mode")
         assertTrue(SessionEventRedactionMode.METADATA_ONLY in enumValues(modes))
     }
+    @Test fun diagnosticCategoriesMatchSchema() {
+        assertEquals(enumValues(properties("SessionError").getValue("category")), setOf(
+            SessionDiagnosticCategories.POLICY,
+            SessionDiagnosticCategories.VALIDATION,
+            SessionDiagnosticCategories.PROVIDER,
+            SessionDiagnosticCategories.TOOL,
+            SessionDiagnosticCategories.INFRASTRUCTURE,
+            SessionDiagnosticCategories.TIMEOUT,
+            SessionDiagnosticCategories.CANCELLATION,
+            SessionDiagnosticCategories.CHECKPOINT,
+            SessionDiagnosticCategories.PROTOCOL
+        ))
+    }
 }

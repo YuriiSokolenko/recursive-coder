@@ -66,7 +66,7 @@ object DurableCreatedAcceptedHandoff {
             proposal.phase != SessionPhaseVocabulary.createdWire ||
             !PreExecutionSnapshotPolicy.safe(proposal) ||
             !validProposal(proposal, acceptedTransition))
-            throw SessionResumeUnconfirmed("RESUME_UNSAFE_BOUNDARY")
+            throw SessionResumeUnconfirmed(ResumeDenialCodes.RESUME_UNSAFE_BOUNDARY)
 
         return SessionResumeAdmission.admit(
             checkpointDirectory, context, ledgerPath, attestation
@@ -77,7 +77,7 @@ object DurableCreatedAcceptedHandoff {
             val admitted = SessionCheckpointStore.admittedCheckpointForReopen(
                 lease, checkpointDirectory, context)
             if (admitted != created)
-                throw SessionResumeUnconfirmed("RESUME_CHECKPOINT_CHANGED")
+                throw SessionResumeUnconfirmed(ResumeDenialCodes.RESUME_CHECKPOINT_CHANGED)
             val source = admitted.snapshot
 
             DurableSessionEventLedger.reopenForAppend(

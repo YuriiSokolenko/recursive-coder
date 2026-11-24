@@ -207,7 +207,7 @@ class RecursiveGraphScheduler(
     ): ChildIntegrationDecision {
         val snapshot = evidence.snapshot
         val parent = snapshot.node(parentId)
-            ?: return ChildIntegrationDecision.Denied("UNKNOWN_PARENT")
+            ?: return ChildIntegrationDecision.Denied(RecursiveDenialCodes.UNKNOWN_PARENT)
         val host = integrationHost
             ?: return ChildIntegrationDecision.Denied("CHILD_INTEGRATION_UNAVAILABLE")
         return try {
@@ -217,15 +217,15 @@ class RecursiveGraphScheduler(
                 evidence.nested[child.graphId]?.let { results ->
                     for (receipt in results.artifacts) {
                         val producer = snapshot.node(receipt.childGraphId)
-                            ?: return ChildIntegrationDecision.Denied("UNKNOWN_CHILD_ARTIFACT")
+                            ?: return ChildIntegrationDecision.Denied(RecursiveDenialCodes.UNKNOWN_CHILD_ARTIFACT)
                         if (host.manifestsFor(producer)?.contains(receipt.manifest) != true)
                             return ChildIntegrationDecision.Denied("CHILD_EVIDENCE_REVOKED")
                         val currentBytes = host.readBytes(receipt.manifest.declaredPath)
-                            ?: return ChildIntegrationDecision.Denied("CHILD_ARTIFACT_MISSING")
+                            ?: return ChildIntegrationDecision.Denied(RecursiveDenialCodes.CHILD_ARTIFACT_MISSING)
                         val actual = MessageDigest.getInstance("SHA-256")
                             .digest(currentBytes).joinToString("") { "%02x".format(it) }
                         if (actual != receipt.observedSha256)
-                            return ChildIntegrationDecision.Denied("CHILD_ARTIFACT_DIGEST_MISMATCH")
+                            return ChildIntegrationDecision.Denied(RecursiveDenialCodes.CHILD_ARTIFACT_DIGEST_MISMATCH)
                     }
                     nested[child.graphId] = results
                 }
@@ -236,7 +236,7 @@ class RecursiveGraphScheduler(
                     // Read from the trusted workspace, never from model text or a
                     // digest supplied by the child executor.
                     val bytes = host.readBytes(manifest.declaredPath)
-                        ?: return ChildIntegrationDecision.Denied("CHILD_ARTIFACT_MISSING")
+                        ?: return ChildIntegrationDecision.Denied(RecursiveDenialCodes.CHILD_ARTIFACT_MISSING)
                     val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
                         .joinToString("") { "%02x".format(it) }
                     receipts += VerifiedChildArtifact(child.graphId, manifest, digest)
@@ -260,11 +260,11 @@ class RecursiveGraphScheduler(
     internal fun integrateFrom(context: RecursiveStageContext): ChildIntegrationDecision {
         val frame = synchronized(lock) {
             val parent = snapshot.node(context.graphId)
-                ?: return ChildIntegrationDecision.Denied("UNKNOWN_PARENT")
+                ?: return ChildIntegrationDecision.Denied(RecursiveDenialCodes.UNKNOWN_PARENT)
             if (parent.stageRunId != context.stageRunId || parent.origin != context.origin)
-                return ChildIntegrationDecision.Denied("STAGE_OWNERSHIP_MISMATCH")
+                return ChildIntegrationDecision.Denied(RecursiveDenialCodes.STAGE_OWNERSHIP_MISMATCH)
             if (parent.state != RecursiveNodeState.RUNNING)
-                return ChildIntegrationDecision.Denied("PARENT_NOT_RUNNING")
+                return ChildIntegrationDecision.Denied(RecursiveDenialCodes.PARENT_NOT_RUNNING)
             val attemptLimit = maxOf(16, graphBudget.maxChildren.coerceAtMost(
                 RecursiveGraphPolicy.MAX_TOTAL_CHILDREN) * 4)
             val attempted = attemptedIntegrations[parent.graphId] ?: 0
@@ -278,10 +278,10 @@ class RecursiveGraphScheduler(
         val checked = verifyIntegration(context.graphId, frame)
         return synchronized(lock) {
             val parent = snapshot.node(context.graphId)
-                ?: return@synchronized ChildIntegrationDecision.Denied("UNKNOWN_PARENT")
+                ?: return@synchronized ChildIntegrationDecision.Denied(RecursiveDenialCodes.UNKNOWN_PARENT)
             val decision = if (parent.state != RecursiveNodeState.RUNNING ||
                 !evidenceUnchanged(parent.graphId, frame)) {
-                ChildIntegrationDecision.Denied("CHILD_INTEGRATION_STALE")
+                ChildIntegrationDecision.Denied(RecursiveDenialCodes.CHILD_INTEGRATION_STALE)
             } else checked
             when (decision) {
                 is ChildIntegrationDecision.Accepted -> {
@@ -296,7 +296,7 @@ class RecursiveGraphScheduler(
                     }
                 }
                 is ChildIntegrationDecision.Denied -> {
-                    if (decision.code == "CHILD_INTEGRATION_STALE") {
+                    if (decision.code == RecursiveDenialCodes.CHILD_INTEGRATION_STALE) {
                         // A concurrent subtree mutation is not an executor retry.
                         attemptedIntegrations[parent.graphId] = maxOf(0,
                             (attemptedIntegrations[parent.graphId] ?: 0) - 1)
@@ -340,9 +340,9 @@ class RecursiveGraphScheduler(
         context: RecursiveStageContext, proposal: RecursiveChildProposal
     ): RecursiveDecision = synchronized(lock) {
         val parent = snapshot.node(context.graphId)
-            ?: return@synchronized RecursiveDecision.Denied("UNKNOWN_PARENT")
+            ?: return@synchronized RecursiveDecision.Denied(RecursiveDenialCodes.UNKNOWN_PARENT)
         if (context.stageRunId != parent.stageRunId || context.origin != parent.origin)
-            return@synchronized RecursiveDecision.Denied("STAGE_OWNERSHIP_MISMATCH")
+            return@synchronized RecursiveDecision.Denied(RecursiveDenialCodes.STAGE_OWNERSHIP_MISMATCH)
         val validRequestId = ToolAuthorizationPolicy.validHostIdentifier(proposal.requestId)
         val identity = Triple(parent.graphId, parent.stageRunId, proposal.requestId)
         // Per-parent cap, including malformed and denied proposals.
@@ -353,7 +353,7 @@ class RecursiveGraphScheduler(
             count >= attemptLimit ->
                 RecursiveDecision.Denied("REQUEST_ATTEMPT_LIMIT")
             validRequestId && identity in seenRequests ->
-                RecursiveDecision.Denied("REPEATED_REQUEST")
+                RecursiveDecision.Denied(RecursiveDenialCodes.REPEATED_REQUEST)
             else -> RecursiveGraphPolicy.admit(snapshot, parent.graphId, proposal,
                 limits, graphBudget, clock.instant())
         }
@@ -401,14 +401,14 @@ class RecursiveGraphScheduler(
         context: RecursiveStageContext, usage: RecursiveUsage
     ): RecursiveDecision = synchronized(lock) {
         val node = snapshot.node(context.graphId)
-            ?: return@synchronized RecursiveDecision.Denied("UNKNOWN_STAGE")
+            ?: return@synchronized RecursiveDecision.Denied(StageDenialCodes.UNKNOWN_STAGE)
         val decision = when {
             node.stageRunId != context.stageRunId || node.origin != context.origin ->
-                RecursiveDecision.Denied("STAGE_OWNERSHIP_MISMATCH")
+                RecursiveDecision.Denied(RecursiveDenialCodes.STAGE_OWNERSHIP_MISMATCH)
             !clock.instant().isBefore(limits.deadline) ->
-                RecursiveDecision.Denied("GLOBAL_DEADLINE")
+                RecursiveDecision.Denied(RecursiveDenialCodes.GLOBAL_DEADLINE)
             !clock.instant().isBefore(node.deadline) ->
-                RecursiveDecision.Denied("STAGE_DEADLINE")
+                RecursiveDecision.Denied(RecursiveDenialCodes.STAGE_DEADLINE)
             tokens.getValue(node.graphId).signals().requested ->
                 RecursiveDecision.Denied("STAGE_CANCELLED")
             else -> RecursiveGraphPolicy.authorizeCharge(node, usage)
@@ -493,17 +493,17 @@ class RecursiveGraphScheduler(
         val contextOrDenial: Pair<RecursiveStageContext?, RecursiveExecutionOutcome?> =
             synchronized(lock) {
                 val node = snapshot.node(id)
-                    ?: return@synchronized null to RecursiveExecutionOutcome.Denied("UNKNOWN_STAGE")
+                    ?: return@synchronized null to RecursiveExecutionOutcome.Denied(StageDenialCodes.UNKNOWN_STAGE)
                 val denial = when {
                     node.state != RecursiveNodeState.READY -> StageDenialCodes.STAGE_NOT_READY
-                    !clock.instant().isBefore(limits.deadline) -> "GLOBAL_DEADLINE"
-                    !clock.instant().isBefore(node.deadline) -> "STAGE_DEADLINE"
+                    !clock.instant().isBefore(limits.deadline) -> RecursiveDenialCodes.GLOBAL_DEADLINE
+                    !clock.instant().isBefore(node.deadline) -> RecursiveDenialCodes.STAGE_DEADLINE
                     node.dependencies.any {
                         snapshot.node(it)?.state != RecursiveNodeState.SUCCEEDED
                     } -> "DEPENDENCY_NOT_SUCCEEDED"
                     node.parentGraphId?.let { parentId ->
                         snapshot.node(parentId)?.state != RecursiveNodeState.RUNNING
-                    } == true -> "PARENT_NOT_RUNNING"
+                    } == true -> RecursiveDenialCodes.PARENT_NOT_RUNNING
                     else -> null
                 }
                 if (denial != null) {
@@ -602,14 +602,14 @@ class RecursiveGraphScheduler(
                 outcome == RecursiveExecutionOutcome.Completed && integrationHost != null &&
                     snapshot.nodes.any { it.parentGraphId == id } &&
                     integrated[id] == null ->
-                    RecursiveExecutionOutcome.Failed("CHILD_RESULTS_NOT_INTEGRATED")
+                    RecursiveExecutionOutcome.Failed(RecursiveDenialCodes.CHILD_RESULTS_NOT_INTEGRATED)
                 outcome == RecursiveExecutionOutcome.Completed && integrationHost != null &&
                     snapshot.nodes.any { it.parentGraphId == id } &&
                     (completionFrame == null ||
                         !evidenceUnchanged(id, completionFrame) ||
                         (terminalEvidence as? ChildIntegrationDecision.Accepted)?.results !=
                             integrated[id]) ->
-                    RecursiveExecutionOutcome.Failed("CHILD_INTEGRATION_STALE")
+                    RecursiveExecutionOutcome.Failed(RecursiveDenialCodes.CHILD_INTEGRATION_STALE)
                 else -> outcome
             }
             val terminal = when (final) {

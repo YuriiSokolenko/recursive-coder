@@ -97,15 +97,15 @@ class RunReviewerStageUseCase(
         fun string(key: String): String? = (root[key] as? JsonPrimitive)
             ?.takeIf { it.isString }?.content
         val verdict = when (string("verdict")) {
-            "ACCEPT" -> ReviewerDisposition.ACCEPT
-            "REJECT" -> ReviewerDisposition.REJECT
-            "NEEDS_HUMAN" -> ReviewerDisposition.NEEDS_HUMAN
+            ReviewerDisposition.ACCEPT.name -> ReviewerDisposition.ACCEPT
+            ReviewerDisposition.REJECT.name -> ReviewerDisposition.REJECT
+            ReviewerDisposition.NEEDS_HUMAN.name -> ReviewerDisposition.NEEDS_HUMAN
             else -> return null
         }
         val scope = when (string("scope")) {
-            "NONE" -> ReviewerCorrectionScope.NONE
-            "IMPLEMENTATION_ONLY" -> ReviewerCorrectionScope.IMPLEMENTATION_ONLY
-            "FROZEN_INPUTS" -> ReviewerCorrectionScope.FROZEN_INPUTS
+            ReviewerCorrectionScope.NONE.name -> ReviewerCorrectionScope.NONE
+            ReviewerCorrectionScope.IMPLEMENTATION_ONLY.name -> ReviewerCorrectionScope.IMPLEMENTATION_ONLY
+            ReviewerCorrectionScope.FROZEN_INPUTS.name -> ReviewerCorrectionScope.FROZEN_INPUTS
             else -> return null
         }
         val code = string("code") ?: return null
@@ -212,7 +212,7 @@ class RunReviewerStageUseCase(
                 it.correlation.stageRunId == manifest.producerStageRunId &&
                     it.kind == StageKind.DEVELOP && it.state == StageState.ACCEPTED &&
                     it.supersededBy == null
-            } ?: return abort("INVALID_DEVELOPER_HANDOFF")
+            } ?: return abort(StageDenialCodes.INVALID_DEVELOPER_HANDOFF)
             if (running.artifacts.singleOrNull { it.id == manifest.id } != manifest ||
                 manifest.kind != StageArtifactKind.IMPLEMENTATION ||
                 manifest.approval != ArtifactApproval.ACCEPTED ||
@@ -226,7 +226,7 @@ class RunReviewerStageUseCase(
                 evidence.changedFiles.isEmpty() ||
                 evidence.changedFiles.size > 7 ||
                 evidence.changedFiles.map { it.path }.toSet().size != evidence.changedFiles.size)
-                return abort("INVALID_DEVELOPER_HANDOFF")
+                return abort(StageDenialCodes.INVALID_DEVELOPER_HANDOFF)
             val checks = evidence.validation.requiredChecks
             if (checks.map { it.checkId }.toSet().size != checks.size ||
                 checks.none { it.checkId == StageCheckIds.GIT_DIFF_CHECK } ||
@@ -234,7 +234,7 @@ class RunReviewerStageUseCase(
                 checks.any { !it.passed || it.toolId.isNullOrBlank() ||
                     it.baselineHead.isNullOrBlank() } ||
                 !host.verifyDeveloperEvidence(lease))
-                return abort("UNVERIFIED_DEVELOPER_EVIDENCE")
+                return abort(StageDenialCodes.UNVERIFIED_DEVELOPER_EVIDENCE)
 
             val requiredInputs = running.artifacts.filter {
                 it.id in stage.inputArtifacts && it.id != manifest.id
@@ -247,7 +247,7 @@ class RunReviewerStageUseCase(
                     host.readBytes(path)?.let { sha(it) == digest } == true
                 }
             }
-            if (!intact()) return abort("FROZEN_INPUT_OR_SOURCE_CHANGED")
+            if (!intact()) return abort(StageDenialCodes.FROZEN_INPUT_OR_SOURCE_CHANGED)
             val prompt = buildString {
                 append(command.instruction)
                 append("\n\nYou are an independent, read-only Reviewer.")
@@ -347,11 +347,11 @@ class RunReviewerStageUseCase(
                 return abort("INVALID_REVIEW_RESPONSE")
             val decision = decode(text, stage.correlation, manifest.sha256)
                 ?: return abort("INVALID_REVIEW_RESPONSE")
-            if (!intact()) return abort("FROZEN_INPUT_OR_SOURCE_CHANGED")
+            if (!intact()) return abort(StageDenialCodes.FROZEN_INPUT_OR_SOURCE_CHANGED)
             checkpoint()?.let { return checkpointFailure(it) }
             val review = StageReviewDecision(developer.correlation.stageRunId, manifest.id,
-                manifest.sha256, developer.agentId ?: return abort("MISSING_DEVELOPER_ACTOR"),
-                stage.agentId ?: return abort("MISSING_REVIEWER_ACTOR"),
+                manifest.sha256, developer.agentId ?: return abort(StageDenialCodes.MISSING_DEVELOPER_ACTOR),
+                stage.agentId ?: return abort(StageDenialCodes.MISSING_REVIEWER_ACTOR),
                 when (decision.verdict) {
                     ReviewerDisposition.ACCEPT -> ReviewVerdict.ACCEPT
                     ReviewerDisposition.REJECT -> ReviewVerdict.REQUEST_CHANGES
@@ -366,7 +366,7 @@ class RunReviewerStageUseCase(
             val gateResult = ReviewerStageFinishPolicy.permits(lease, updated, accepted,
                 decision, host.verifyDeveloperEvidence(lease))
             if (gateResult is StageGateDecision.Deny) return abort(gateResult.code)
-            if (!intact()) return abort("FROZEN_INPUT_OR_SOURCE_CHANGED")
+            if (!intact()) return abort(StageDenialCodes.FROZEN_INPUT_OR_SOURCE_CHANGED)
             checkpoint()?.let { return checkpointFailure(it) }
             val committed = try {
                 withContext(NonCancellable + blockingDispatcher) {

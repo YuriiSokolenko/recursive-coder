@@ -79,15 +79,15 @@ class KoogStageRoleExecutor(
         // A malformed graph, missing actor, role escalation or unaccepted input fails
         // BEFORE any model call. Admission is repeated by the host at commit time.
         if (!requestIdValid)
-            return terminal(StageRoleOutcome.Denied("INVALID_REQUEST_ID"),
-                StageRoleEventKind.DENIED, "INVALID_REQUEST_ID")
+            return terminal(StageRoleOutcome.Denied(StageDenialCodes.INVALID_REQUEST_ID),
+                StageRoleEventKind.DENIED, StageDenialCodes.INVALID_REQUEST_ID)
         val gate = StageGraphPolicy.admitStage(
             request.graph, request.stageRunId, request.hostAcceptedArtifactIds)
         if (gate is StageGateDecision.Deny)
             return terminal(StageRoleOutcome.Denied(gate.code), StageRoleEventKind.DENIED, gate.code)
         if (stage?.correlation?.requestId != request.requestId)
-            return terminal(StageRoleOutcome.Denied("REQUEST_CORRELATION_MISMATCH"),
-                StageRoleEventKind.DENIED, "REQUEST_CORRELATION_MISMATCH")
+            return terminal(StageRoleOutcome.Denied(StageDenialCodes.REQUEST_CORRELATION_MISMATCH),
+                StageRoleEventKind.DENIED, StageDenialCodes.REQUEST_CORRELATION_MISMATCH)
         if (stage == null || agentId == null || stage.kind.role != request.expectedRole)
             return terminal(StageRoleOutcome.Denied("ROLE_IDENTITY_MISMATCH"),
                 StageRoleEventKind.DENIED, "ROLE_IDENTITY_MISMATCH")
@@ -125,7 +125,7 @@ class KoogStageRoleExecutor(
             if (!capabilities.features.containsAll(request.model.features) ||
                 capabilities.contextTokens < request.model.contextTokens ||
                 capabilities.maxOutputTokens < request.model.maxOutputTokens)
-                throw RoleExecutionError("MODEL_CAPABILITY_UNSUPPORTED")
+                throw RoleExecutionError(ModelDenialCodes.MODEL_CAPABILITY_UNSUPPORTED)
             val binding = bridge.open(request.model, request.expectedRole)
             try {
                 // One-stage quota, NOT shared-graph reservations; #78 will own
@@ -178,7 +178,7 @@ class KoogStageRoleExecutor(
                     request.cancellation.check(request.deadline)
                     if (proposed.isBlank() ||
                         proposed.toByteArray(Charsets.UTF_8).size > StageRoleLimits.MAX_PROPOSAL_BYTES)
-                        throw RoleExecutionError("MODEL_INVALID_RESPONSE")
+                        throw RoleExecutionError(ModelDenialCodes.MODEL_INVALID_RESPONSE)
                     StageRoleOutcome.Proposed(proposed)
                 } finally {
                     agent.close()
@@ -268,7 +268,7 @@ internal class MeteredKoogExecutor(
     ): Message.Assistant {
         cancellation.check(deadline)
         if (tools.isNotEmpty()) throw RoleExecutionError("ROLE_TOOL_SURFACE_UNAVAILABLE")
-        if (requests != 0) throw RoleExecutionError("MODEL_REQUEST_BUDGET_EXCEEDED")
+        if (requests != 0) throw RoleExecutionError(ModelDenialCodes.MODEL_REQUEST_BUDGET_EXCEEDED)
         requests++
         val answer = underlying.execute(prompt, model, emptyList())
         cancellation.check(deadline)
@@ -281,7 +281,7 @@ internal class MeteredKoogExecutor(
             input > maxTokens || output > maxOutputTokens ||
             output > maxTokens - input)
             throw RoleExecutionError(if (input == null || output == null) "MODEL_USAGE_MISSING"
-                else "TOKEN_BUDGET_EXCEEDED")
+                else ModelDenialCodes.TOKEN_BUDGET_EXCEEDED)
         inputTokens = input
         outputTokens = output
         return answer

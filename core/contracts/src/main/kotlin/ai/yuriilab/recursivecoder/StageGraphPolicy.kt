@@ -70,7 +70,7 @@ object StageGraphPolicy {
             }
             if (stage.agentId == null && stage.state in setOf(
                     StageState.RUNNING, StageState.ACCEPTED, StageState.REJECTED))
-                return deny("MISSING_STAGE_ACTOR")
+                return deny(StageDenialCodes.MISSING_STAGE_ACTOR)
             if (stage.inputArtifacts.any { it !in manifests } ||
                 stage.outputArtifacts.any { it !in manifests })
                 return deny("UNKNOWN_STAGE_ARTIFACT")
@@ -79,9 +79,9 @@ object StageGraphPolicy {
                     artifact.producerStageRunId != correlation.stageRunId ||
                         artifact.kind != stage.kind.output
                 })
-                return deny("INVALID_STAGE_OUTPUT")
+                return deny(StageDenialCodes.INVALID_STAGE_OUTPUT)
             if (stage.kind == StageKind.REVIEW && stage.outputArtifacts.isNotEmpty())
-                return deny("INVALID_STAGE_OUTPUT")
+                return deny(StageDenialCodes.INVALID_STAGE_OUTPUT)
             if (stage.kind != StageKind.REVIEW && stage.review != null)
                 return deny("INVALID_STAGE_REVIEW")
             if (stage.state == StageState.ACCEPTED) {
@@ -167,13 +167,13 @@ object StageGraphPolicy {
         val valid = validate(graph)
         if (valid != StageGateDecision.Permit) return valid
         val stage = graph.stages.firstOrNull { it.correlation.stageRunId == stageRunId }
-            ?: return deny("UNKNOWN_STAGE")
+            ?: return deny(StageDenialCodes.UNKNOWN_STAGE)
         if (graph.state != StageGraphState.RUNNING)
             return deny("GRAPH_NOT_RUNNING")
         if (stage.state != StageState.READY || stage.supersededBy != null)
             return deny(StageDenialCodes.STAGE_NOT_READY)
         if (stage.agentId == null)
-            return deny("MISSING_STAGE_ACTOR")
+            return deny(StageDenialCodes.MISSING_STAGE_ACTOR)
         val stages = graph.stages.associateBy { it.correlation.stageRunId }
         if (stage.dependencies.any { stages.getValue(it).state != StageState.ACCEPTED })
             return deny("PREREQUISITE_STAGE_NOT_ACCEPTED")
@@ -214,7 +214,7 @@ object StageGraphPolicy {
         val valid = validate(graph)
         if (valid != StageGateDecision.Permit) return valid
         val stage = graph.stages.firstOrNull { it.correlation.stageRunId == stageRunId }
-            ?: return deny("UNKNOWN_STAGE")
+            ?: return deny(StageDenialCodes.UNKNOWN_STAGE)
         if (!legalStageEdge(stage.state, target)) return deny("ILLEGAL_STAGE_TRANSITION")
         if (stage.supersededBy != null) return deny("SUPERSEDED_STAGE")
         if (graph.state != StageGraphState.RUNNING && target != StageState.CANCELLED)
@@ -338,7 +338,7 @@ object StageGraphPolicy {
         if (valid != StageGateDecision.Permit) return valid
         if (graph.state != StageGraphState.RUNNING) return deny("GRAPH_NOT_RUNNING")
         val manifest = graph.artifacts.firstOrNull { it.id == artifactId }
-            ?: return deny("UNKNOWN_ARTIFACT")
+            ?: return deny(StageDenialCodes.UNKNOWN_ARTIFACT)
         if (actorRole != manifest.ownerRole) return deny("ARTIFACT_ROLE_MISMATCH")
         var reviewedPaths: Set<String> = emptySet()
         if (manifest.freeze == ArtifactFreeze.FROZEN) {

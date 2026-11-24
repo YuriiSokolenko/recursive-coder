@@ -22,12 +22,12 @@ object ModelGateways {
             override fun negotiate(
                 config: ModelConfig, cancellation: Cancellation, deadline: Instant
             ): GatewayCapabilities =
-                throw Refused(ModelDenialCodes.UNSUPPORTED_MODEL, "provider", "Unknown model provider")
+                throw Refused(ModelDenialCodes.UNSUPPORTED_MODEL, SessionDiagnosticCategories.PROVIDER, "Unknown model provider")
             override fun next(
                 config: ModelConfig, task: Path, observed: Pair<Int, String>?,
                 cancellation: Cancellation, deadline: Instant, allowRetry: Boolean
             ): ModelTurn =
-                throw Refused(ModelDenialCodes.UNSUPPORTED_MODEL, "provider", "Unknown model provider")
+                throw Refused(ModelDenialCodes.UNSUPPORTED_MODEL, SessionDiagnosticCategories.PROVIDER, "Unknown model provider")
         }
     }
 }
@@ -37,7 +37,7 @@ class FakeModel(private val delayMs: Long = 0) : ModelGateway {
     override fun negotiate(config: ModelConfig, cancellation: Cancellation, deadline: Instant): GatewayCapabilities {
         if (config.provider != ModelProviderIds.FAKE || config.modelId != ModelProviderIds.FAKE_MODEL_ID ||
             config.features != setOf(ModelFeatureIds.TOOL_CALLS))
-            throw Refused(ModelDenialCodes.UNSUPPORTED_MODEL, "provider", "Unsupported fake model configuration")
+            throw Refused(ModelDenialCodes.UNSUPPORTED_MODEL, SessionDiagnosticCategories.PROVIDER, "Unsupported fake model configuration")
         cancellation.check(deadline)
         return GatewayCapabilities(setOf(ModelFeatureIds.TOOL_CALLS), config.contextTokens, config.maxOutputTokens)
     }
@@ -72,10 +72,10 @@ class OpenAICompatibleGateway(
 
     override fun negotiate(config: ModelConfig, cancellation: Cancellation, deadline: Instant): GatewayCapabilities {
         if (config.modelId in setOf(".", ".."))
-            throw Refused(ModelDenialCodes.UNSUPPORTED_MODEL, "provider", "Invalid model identifier")
+            throw Refused(ModelDenialCodes.UNSUPPORTED_MODEL, SessionDiagnosticCategories.PROVIDER, "Invalid model identifier")
         if (config.provider != ModelProviderIds.OPENAI_COMPATIBLE || ModelFeatureIds.TOOL_CALLS !in config.features ||
             !supported.containsAll(config.features) || config.maxOutputTokens >= config.contextTokens)
-            throw Refused(ModelDenialCodes.UNSUPPORTED_MODEL, "provider", "Unsupported model feature selection")
+            throw Refused(ModelDenialCodes.UNSUPPORTED_MODEL, SessionDiagnosticCategories.PROVIDER, "Unsupported model feature selection")
         val response = send(client(config), request(config, "models/" + encode(config.modelId), "GET", null),
             config, cancellation, deadline, retryable = true)
         val record = parseObject(response.body)
@@ -110,10 +110,10 @@ class OpenAICompatibleGateway(
     }
 
     private fun unsupported() =
-        Refused("MODEL_CAPABILITY_UNSUPPORTED", "provider", "Required model capability is unavailable")
+        Refused(ModelDenialCodes.MODEL_CAPABILITY_UNSUPPORTED, SessionDiagnosticCategories.PROVIDER, "Required model capability is unavailable")
 
     private fun invalidResponse() =
-        Refused("MODEL_INVALID_RESPONSE", "provider", "Invalid model response")
+        Refused(ModelDenialCodes.MODEL_INVALID_RESPONSE, SessionDiagnosticCategories.PROVIDER, "Invalid model response")
 
     private fun client(config: ModelConfig) = clients.computeIfAbsent(config.connectTimeoutMs) { timeout ->
         HttpClient.newBuilder()
@@ -132,7 +132,7 @@ class OpenAICompatibleGateway(
             root.host == null || root.scheme !in setOf("http", "https"))
             throw unsupported()
         if (root.scheme == "http" && root.host !in setOf("localhost", "127.0.0.1", "::1", "[::1]"))
-            throw Refused("MODEL_INSECURE_ENDPOINT", "policy", "Non-loopback model endpoints require HTTPS")
+            throw Refused("MODEL_INSECURE_ENDPOINT", SessionDiagnosticCategories.POLICY, "Non-loopback model endpoints require HTTPS")
         return root.resolve(suffix)
     }
 
@@ -144,7 +144,7 @@ class OpenAICompatibleGateway(
         val envKey = config.credentialRef.removePrefix("env:")
         val secret = lookupCredential(envKey)?.takeIf { it.isNotBlank() }
         if (secret == null && destination.scheme == "https")
-            throw Refused("MODEL_CREDENTIAL_UNAVAILABLE", "provider", "Model credential is unavailable")
+            throw Refused("MODEL_CREDENTIAL_UNAVAILABLE", SessionDiagnosticCategories.PROVIDER, "Model credential is unavailable")
         if (secret != null) builder.header("Authorization", "Bearer $secret")
         return if (method == "GET") builder.GET().build()
         else builder.header("Content-Type", "application/json")
@@ -168,23 +168,23 @@ class OpenAICompatibleGateway(
                 response.body().use { input ->
                     val code = response.statusCode()
                     if (code == 401 || code == 403)
-                        throw Refused("MODEL_AUTH_FAILED", "provider", "Model authentication failed")
+                        throw Refused("MODEL_AUTH_FAILED", SessionDiagnosticCategories.PROVIDER, "Model authentication failed")
                     if (code in 300..399)
-                        throw Refused("MODEL_REDIRECT_DENIED", "provider", "Model redirect denied")
+                        throw Refused("MODEL_REDIRECT_DENIED", SessionDiagnosticCategories.PROVIDER, "Model redirect denied")
                     if (code == 429 || code in 500..599) {
                         if (attempt == maxAttempts)
-                            throw Refused("MODEL_RETRY_EXHAUSTED", "provider", "Model temporarily unavailable")
+                            throw Refused("MODEL_RETRY_EXHAUSTED", SessionDiagnosticCategories.PROVIDER, "Model temporarily unavailable")
                         val seconds = response.headers().firstValue("Retry-After").orElse("0")
                             .toLongOrNull()?.coerceIn(0, 1) ?: 0L
                         retryDelay = if (seconds == 0L) 100L else seconds * 1000L
                     } else {
                         if (code !in 200..299)
-                            throw Refused("MODEL_HTTP_ERROR", "provider", "Model request rejected")
+                            throw Refused("MODEL_HTTP_ERROR", SessionDiagnosticCategories.PROVIDER, "Model request rejected")
                         readingBody = true
                         val bytes = input.readNBytes(limitBytes + 1)
                         cancellation.check(deadline)
                         if (bytes.size > limitBytes)
-                            throw Refused("MODEL_RESPONSE_TOO_LARGE", "provider", "Model response exceeds size limit")
+                            throw Refused("MODEL_RESPONSE_TOO_LARGE", SessionDiagnosticCategories.PROVIDER, "Model response exceeds size limit")
                         return Reply(String(bytes, StandardCharsets.UTF_8), attempt, code)
                     }
                 }
@@ -197,14 +197,14 @@ class OpenAICompatibleGateway(
                 if (attempt == maxAttempts)
                     throw Refused(
                         if (readingBody) "MODEL_STREAM_INCOMPLETE" else "MODEL_TRANSPORT_FAILED",
-                        "provider", "Model transport failed"
+                        SessionDiagnosticCategories.PROVIDER, "Model transport failed"
                     )
                 retryDelay = 100L
             } catch (e: Refused) {
                 throw e
             } catch (_: Exception) {
                 cancellation.check(deadline)
-                throw Refused("MODEL_TRANSPORT_FAILED", "provider", "Model transport failed")
+                throw Refused("MODEL_TRANSPORT_FAILED", SessionDiagnosticCategories.PROVIDER, "Model transport failed")
             }
             val delay = retryDelay ?: break
             try {
@@ -214,7 +214,7 @@ class OpenAICompatibleGateway(
                 throw Stopped(false)
             }
         }
-        throw Refused("MODEL_RETRY_EXHAUSTED", "provider", "Model temporarily unavailable")
+        throw Refused("MODEL_RETRY_EXHAUSTED", SessionDiagnosticCategories.PROVIDER, "Model temporarily unavailable")
     }
 
     private fun completionRequest(
@@ -286,7 +286,7 @@ class OpenAICompatibleGateway(
     private fun parseObject(raw: String): JsonObject = try {
         Json.parseToJsonElement(raw) as? JsonObject ?: throw IllegalArgumentException()
     } catch (_: Exception) {
-        throw Refused("MODEL_MALFORMED_RESPONSE", "provider", "Malformed model response")
+        throw Refused("MODEL_MALFORMED_RESPONSE", SessionDiagnosticCategories.PROVIDER, "Malformed model response")
     }
 
     private fun usage(obj: JsonObject): ModelUsage? {
@@ -350,7 +350,7 @@ class OpenAICompatibleGateway(
             }
         }
         if (!done || finish == null)
-            throw Refused("MODEL_STREAM_INCOMPLETE", "provider", "Model stream ended before completion")
+            throw Refused("MODEL_STREAM_INCOMPLETE", SessionDiagnosticCategories.PROVIDER, "Model stream ended before completion")
         return Completion(finish!!, content.toString(), name,
             if (name != null) arguments.toString() else null, refused, reportedUsage)
     }

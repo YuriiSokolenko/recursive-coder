@@ -416,7 +416,7 @@ class LinuxFiveRoleWorkflowHost(
             active
         }
         val opened = try { linuxTools.open(authority) }
-            catch (_: Exception) { StageToolOpenResult.Denied("STAGE_TOOL_UNAVAILABLE") }
+            catch (_: Exception) { StageToolOpenResult.Denied(StageDenialCodes.STAGE_TOOL_UNAVAILABLE) }
         if (opened is StageToolOpenResult.Denied) {
             synchronized(this) { if (writer === owner) owner.opened = false }
             return opened
@@ -455,7 +455,7 @@ class LinuxFiveRoleWorkflowHost(
                                 is StageWrite.Delete -> error("DELETE_NOT_SUPPORTED")
                             }
                             check(bytes.size <= 4 * 1024 * 1024) {
-                                "STAGE_FILE_TOO_LARGE"
+                                StageDenialCodes.STAGE_FILE_TOO_LARGE
                             }
                             StageGitUnacceptedFile(operation.path, old?.copyOf(),
                                 digest(bytes))
@@ -468,7 +468,7 @@ class LinuxFiveRoleWorkflowHost(
                     } catch (failure: IllegalStateException) {
                         val code = failure.message?.takeIf {
                             it in setOf("CREATE_PREIMAGE_EXISTS",
-                                "EDIT_PREIMAGE_CHANGED", "STAGE_FILE_TOO_LARGE")
+                                "EDIT_PREIMAGE_CHANGED", StageDenialCodes.STAGE_FILE_TOO_LARGE)
                         } ?: "RECOVERY_PREIMAGE_UNAVAILABLE"
                         return StageWriteEvidence(null, code)
                     } catch (_: Exception) {
@@ -688,9 +688,9 @@ class LinuxFiveRoleWorkflowHost(
                 reconciler.recoverFailedDeveloper(attempt)
             } catch (_: InterruptedException) {
                 Thread.currentThread().interrupt()
-                StageGitFailedWriteResult.ReconciliationRequired("RECOVERY_INTERRUPTED")
+                StageGitFailedWriteResult.ReconciliationRequired(StageDenialCodes.RECOVERY_INTERRUPTED)
             } catch (_: Exception) {
-                StageGitFailedWriteResult.ReconciliationRequired("RECOVERY_UNCONFIRMED")
+                StageGitFailedWriteResult.ReconciliationRequired(StageDenialCodes.RECOVERY_UNCONFIRMED)
             }
             return synchronized(this) {
                 if (reconcilingFailedDeveloper !== attempt ||
@@ -989,10 +989,10 @@ class LinuxFiveRoleWorkflowHost(
                     return@synchronized ReviewerFinishResult.Denied(ReviewerFinishDenialCodes.STALE_LEASE)
                 if (!frozenIntact())
                     return@synchronized ReviewerFinishResult.Denied(
-                        "FROZEN_INPUT_OR_SOURCE_CHANGED")
+                        StageDenialCodes.FROZEN_INPUT_OR_SOURCE_CHANGED)
                 if (!verifyDeveloperEvidence(lease))
                     return@synchronized ReviewerFinishResult.Denied(
-                        "UNVERIFIED_DEVELOPER_EVIDENCE")
+                        StageDenialCodes.UNVERIFIED_DEVELOPER_EVIDENCE)
                 val gate = ReviewerStageFinishPolicy.permits(lease, updatedGraph,
                     acceptedIds, decision, true)
                 if (gate is StageGateDecision.Deny)
