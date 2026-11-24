@@ -48,7 +48,7 @@ internal object ResumeImmutablePublication {
                 entries.filter { matchesProbe(it.fileName.toString(), scope) }.forEach { file ->
                     if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS))
                         throw SessionResumeUnconfirmed(
-                            "RESUME_FENCE_HARD_LINK_PROBE_CLEANUP_UNCONFIRMED")
+                            ResumeFenceAnchorDiagnosticCodes.RESUME_FENCE_HARD_LINK_PROBE_CLEANUP_UNCONFIRMED)
                     if (Files.deleteIfExists(file)) removed = true
                 }
             }
@@ -58,7 +58,7 @@ internal object ResumeImmutablePublication {
             throw e
         } catch (e: Exception) {
             throw SessionResumeUnconfirmed(
-                "RESUME_FENCE_HARD_LINK_PROBE_CLEANUP_UNCONFIRMED", e)
+                ResumeFenceAnchorDiagnosticCodes.RESUME_FENCE_HARD_LINK_PROBE_CLEANUP_UNCONFIRMED, e)
         }
     }
 
@@ -107,7 +107,7 @@ internal object ResumeImmutablePublication {
                 FileChannel.open(directory, StandardOpenOption.READ).use { it.force(true) }
             } catch (e: Exception) {
                 val cleanup = SessionResumeUnconfirmed(
-                    "RESUME_FENCE_HARD_LINK_PROBE_CLEANUP_UNCONFIRMED", e)
+                    ResumeFenceAnchorDiagnosticCodes.RESUME_FENCE_HARD_LINK_PROBE_CLEANUP_UNCONFIRMED, e)
                 if (error == null) error = cleanup else error.addSuppressed(cleanup)
             }
         }
@@ -164,7 +164,7 @@ internal object ResumeFenceAnchor {
                 Files.getPosixFilePermissions(directory, LinkOption.NOFOLLOW_LINKS) != setOf(
                     PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE,
                     PosixFilePermission.OWNER_EXECUTE))
-                fail("RESUME_FENCE_ANCHOR_UNSAFE_DIRECTORY")
+                fail(ResumeFenceAnchorDiagnosticCodes.RESUME_FENCE_ANCHOR_UNSAFE_DIRECTORY)
             LinuxCheckpointOwner.requireMatchingUid(
                 Files.getAttribute(directory, "unix:uid", LinkOption.NOFOLLOW_LINKS),
                 LinuxCheckpointOwner.effectiveUid())
@@ -172,7 +172,7 @@ internal object ResumeFenceAnchor {
         } catch (e: SessionResumeUnconfirmed) {
             throw e
         } catch (e: Exception) {
-            throw SessionResumeUnconfirmed("RESUME_FENCE_ANCHOR_UNSAFE_DIRECTORY", e)
+            throw SessionResumeUnconfirmed(ResumeFenceAnchorDiagnosticCodes.RESUME_FENCE_ANCHOR_UNSAFE_DIRECTORY, e)
         }
     }
 
@@ -284,7 +284,7 @@ internal object ResumeFenceAnchor {
                 record.checkpointSha256 != fence.checkpointSha256 ||
                 record.policySha256 != fence.policySha256 ||
                 record.operatorId != operator.operatorId || !record.operatorApproved)
-                fail("RESUME_FENCE_AUDIT_CONFLICT")
+                fail(ResumeFenceAnchorDiagnosticCodes.RESUME_FENCE_AUDIT_CONFLICT)
             return record
         }
         if (Files.exists(target, LinkOption.NOFOLLOW_LINKS))
@@ -307,7 +307,8 @@ internal object ResumeFenceAnchor {
                 channel.force(true)
             }
             ResumeImmutablePublication.linkAndSync(directory, temporary, target,
-                "RESUME_FENCE_AUDIT_CONFLICT", ResumeDenialCodes.RESUME_FENCE_AUDIT_UNCONFIRMED)
+                ResumeFenceAnchorDiagnosticCodes.RESUME_FENCE_AUDIT_CONFLICT,
+                    ResumeDenialCodes.RESUME_FENCE_AUDIT_UNCONFIRMED)
             return requireSame(readAudit(target))
         } catch (e: SessionResumeUnconfirmed) {
             throw e
@@ -554,3 +555,10 @@ internal object ResumeFenceAnchor {
 
 private const val AUDIT_FORMAT_MARKER = "RCAUD1"
 private const val ANCHOR_FORMAT_MARKER = "RCANCH1"
+
+/** Diagnostic codes emitted by ResumeFenceAnchor; not shared protocol vocabulary. */
+internal object ResumeFenceAnchorDiagnosticCodes {
+    const val RESUME_FENCE_HARD_LINK_PROBE_CLEANUP_UNCONFIRMED = "RESUME_FENCE_HARD_LINK_PROBE_CLEANUP_UNCONFIRMED"
+    const val RESUME_FENCE_ANCHOR_UNSAFE_DIRECTORY = "RESUME_FENCE_ANCHOR_UNSAFE_DIRECTORY"
+    const val RESUME_FENCE_AUDIT_CONFLICT = "RESUME_FENCE_AUDIT_CONFLICT"
+}

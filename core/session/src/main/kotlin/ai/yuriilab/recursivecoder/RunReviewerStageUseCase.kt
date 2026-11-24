@@ -344,9 +344,9 @@ class RunReviewerStageUseCase(
                 outputTokens > running.budget.maxTokens - inputTokens)
                 return abort("INVALID_REVIEW_USAGE")
             if (text.toByteArray(Charsets.UTF_8).size > StageRoleLimits.MAX_PROPOSAL_BYTES)
-                return abort("INVALID_REVIEW_RESPONSE")
+                return abort(RunReviewerStageUseCaseDiagnosticCodes.INVALID_REVIEW_RESPONSE)
             val decision = decode(text, stage.correlation, manifest.sha256)
-                ?: return abort("INVALID_REVIEW_RESPONSE")
+                ?: return abort(RunReviewerStageUseCaseDiagnosticCodes.INVALID_REVIEW_RESPONSE)
             if (!intact()) return abort(StageDenialCodes.FROZEN_INPUT_OR_SOURCE_CHANGED)
             checkpoint()?.let { return checkpointFailure(it) }
             val review = StageReviewDecision(developer.correlation.stageRunId, manifest.id,
@@ -374,7 +374,8 @@ class RunReviewerStageUseCase(
                 }
             } catch (_: Exception) {
                 return ReviewerStageResult(null, null,
-                    ReviewerStageOutcome.ReconciliationRequired("REVIEW_FINISH_UNCONFIRMED"),
+                    ReviewerStageOutcome.ReconciliationRequired(
+                        RunReviewerStageUseCaseDiagnosticCodes.REVIEW_FINISH_UNCONFIRMED),
                     spentUsage)
             }
             when (committed) {
@@ -393,7 +394,8 @@ class RunReviewerStageUseCase(
                     return abort(committed.code, StageState.FAILED, committed.code)
                 }
                 ReviewerFinishResult.Unknown -> return ReviewerStageResult(null, null,
-                    ReviewerStageOutcome.ReconciliationRequired("REVIEW_FINISH_UNCONFIRMED"),
+                    ReviewerStageOutcome.ReconciliationRequired(
+                        RunReviewerStageUseCaseDiagnosticCodes.REVIEW_FINISH_UNCONFIRMED),
                     spentUsage)
             }
             try { decisionEvents.emit(decision) }
@@ -416,4 +418,10 @@ class RunReviewerStageUseCase(
             return abort("REVIEW_STAGE_FAILED")
         }
     }
+}
+
+/** Diagnostic codes emitted by RunReviewerStageUseCase; not shared protocol vocabulary. */
+internal object RunReviewerStageUseCaseDiagnosticCodes {
+    const val INVALID_REVIEW_RESPONSE = "INVALID_REVIEW_RESPONSE"
+    const val REVIEW_FINISH_UNCONFIRMED = "REVIEW_FINISH_UNCONFIRMED"
 }

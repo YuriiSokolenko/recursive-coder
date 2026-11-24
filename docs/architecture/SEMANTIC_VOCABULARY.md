@@ -158,39 +158,17 @@ remain in the named protected files pending the #207 C3 review process.
 | `DurableSessionEventLedger` | `LEDGER_CHECKPOINT_SIZE_EXCEEDED`, `LEDGER_REOPEN_CHECKPOINT_CAPACITY` | Trusted ledger pin; preserve checkpoint capacity checks. |
 | `SessionRuntime` | `RESUME_ADMISSION_UNCONFIRMED`, `RESUME_FILESYSTEM_UNSUPPORTED` | Trusted runtime pin; preserve resume failure mapping. |
 
-### Remaining repeated-in-touched-file candidates (#218)
+### Diagnostic literal follow-up (#218)
 
-The #213 scanner review on `2bc43a6` reported 110 repeated rows.
-The named shared owners and Reviewer wire migration resolve 11 of those
-rows. The following 99 remaining file/value rows are explicitly deferred to
-#218 to avoid broadening this slice into a separate review of adapter
-and graph failure semantics. Each group identifies the remaining raw
-values in its file and the semantic reason for reviewing them together.
-This is an inventory, not approval to change their spelling or precedence.
-
-| Production file | Deferred literal values | Reason for separate audit |
-| --- | --- | --- |
-| `KoogStageRoleExecutor` | `EVENT_SINK_FAILED`, `ROLE_IDENTITY_MISMATCH`, `ROLE_TOOL_SURFACE_UNAVAILABLE`, `INVALID_ROLE_BUDGET_OR_INPUT`, `MODEL_BRIDGE_UNSUPPORTED` | Role bridge event, tool-surface and request validation; preserve the adapter's outcome/event pairing. |
-| `InstalledChildRuntimeGrants` | `CHILD_USAGE_INVALID` | Meter's invalid physical usage observation; review with provider usage semantics rather than conflate unknown usage. |
-| `InstalledRecursiveWorkflow` | `AUTHENTICATED_CHILD_RECEIPT_MISSING` | Authenticated receipt absence at the installed host boundary; review with other receipt producers. |
-| `LinuxFiveRoleWorkflowHost` | `CREATE_PREIMAGE_EXISTS`, `EDIT_PREIMAGE_CHANGED`, `RECOVERY_PREIMAGE_UNAVAILABLE`, `AUTHORITATIVE_ACCEPTANCE_UNCONFIRMED` | Host preimage, recovery and acceptance evidence; review against the separate Git reconciler and stage authority transitions. |
-| `RecursiveGraphPolicy` | `INVALID_ROOT`, `GLOBAL_CHILD_LIMIT`, `CHILD_AUTHORITY_ESCALATION`, `INVALID_CHILD_DEPENDENCY`, `CYCLIC_RECURSIVE_GRAPH`, `INVALID_CHILD_RESERVATION`, `NO_PROGRESS_LOOP` | Graph admission, authority, reservation and progress checks; preserve each denial predicate and ordering. |
-| `RecursiveChildIntegrationPolicy` | `CHILD_ARTIFACT_UNACCEPTED` | Child artifact acceptance evidence; reconcile with host receipt validation. |
-| `StageGraphPolicy` | `SHARED_ROLE_ACTOR`, `INVALID_STAGE_SUPERSESSION`, `INVALID_STAGE_REVIEW`, `UNACCEPTED_STAGE_OUTPUT`, `GRAPH_NOT_RUNNING`, `INVALID_INDEPENDENT_REVIEW`, `GRAPH_NOT_ACCEPTED` | Graph-local state, supersession, actor separation and review validity; review the policy/host boundary before assigning further shared owners. |
-| `RecursiveGraphScheduler` | `CHILD_EVIDENCE_UNAVAILABLE`, `INTEGRATION_ATTEMPT_LIMIT`, `STAGE_EXECUTOR_FAILED` | Scheduler execution, integration limits and evidence availability; keep scheduler outcomes distinct from graph admission. |
-| `RunDeveloperStageUseCase` | `UNSUPPORTED_DEVELOPER_STAGE`, `TARGET_READ_UNAVAILABLE`, `STALE_TARGET_BASELINE`, `CREATE_TARGET_EXISTS`, `TARGET_ENCODING_INVALID`, `INVALID_DEVELOPER_PROPOSAL` | Developer proposal validation and target baseline/read checks; audit with stage file and artifact producers. |
-| `RunFiveRoleWorkflowUseCase` | `HOST_SNAPSHOT_UNAVAILABLE`, `GRAPH_TOKEN_BUDGET_EXHAUSTED`, `WORKFLOW_OUTPUT_MISMATCH`, `MISSING_COMMITTED_GRAPH`, `MISSING_HOST_ACCEPTANCE`, `STAGE_RECONCILIATION_UNCONFIRMED`, `GRAPH_FINISH_UNCONFIRMED` | Orchestrator graph/host confirmation and reconciliation; distinguish uncertain commits from confirmed denial. |
-| `RunPreparationStageUseCase` | `UNSUPPORTED_PREPARATION_STAGE`, `STALE_ARTIFACT_APPROVAL`, `HUMAN_APPROVAL_STOPPED`, `HUMAN_APPROVAL_TIMED_OUT`, `NO_PENDING_HUMAN_APPROVAL`, `INVALID_HUMAN_APPROVAL_LEASE`, `HUMAN_APPROVAL_AUTHORITY_UNAVAILABLE`, `STALE_HUMAN_APPROVAL`, `HUMAN_APPROVAL_READ_UNAVAILABLE` | Preparation-specific artifact and human-approval lease/authority outcomes; review together with approval host implementations. |
-| `RunTwoOriginRecursiveChildrenUseCase` | `INVALID_ORIGIN_PAIR` | Two-origin pair validation, not individual recursive node admission. |
-| `SessionResumeAdmission` | `RESUME_FENCE_LIMIT`, `RESUME_FENCE_CLEANUP_UNCONFIRMED`, `RESUME_FENCE_CONTEXT_CHANGED`, `RESUME_LEDGER_PATH_CHANGED`, `RESUME_LEDGER_IDENTITY_UNCONFIRMED`, `RESUME_EFFECT_RECONCILIATION_INVALID`, `RESUME_LEASE_HELD` | Fence, ledger identity, lease and effect reconciliation checks; preserve storage and replay failure classifications. |
-| `ResumeFenceAnchor` | `RESUME_FENCE_HARD_LINK_PROBE_CLEANUP_UNCONFIRMED`, `RESUME_FENCE_ANCHOR_UNSAFE_DIRECTORY`, `RESUME_FENCE_AUDIT_CONFLICT` | Physical fence-directory, audit and hard-link probe safety; review publication failure mapping before further extraction. |
-| `ModelGateway` | `MODEL_RETRY_EXHAUSTED`, `MODEL_STREAM_INCOMPLETE`, `MODEL_TRANSPORT_FAILED` | Transport/stream and retry failure mapping; keep distinct from general model response and usage budget denials. |
-| `ReviewerStageContracts` | `REVIEW_MUTATED_OTHER_STATE`, `UNAUTHORIZED_REPAIR` | Reviewer repair authority and mutation verification, not the reason/scope wire allowlist. |
-| `RunReviewerStageUseCase` | `INVALID_REVIEW_RESPONSE`, `REVIEW_FINISH_UNCONFIRMED` | Reviewer decoder and uncertain finish outcomes; distinguish invalid model proposal from authoritative CAS result. |
-| `TrustedWriteRuntime` | `PATH_CASE_COLLISION`, `INDEX_MUTATION_DENIED`, `FILE_SIZE_LIMIT`, `WRITE_IO_DENIED`, `MUTATION_DIGEST_MISMATCH`, `WRITE_EXECUTION_DENIED`, `CHECK_OUTPUT_LIMIT`, `CHECK_OUTPUT_UNAVAILABLE` | Trusted write/index and output validation; review physical mutations and check execution together without changing denial order. |
-| `LinuxStageGitBaselineReconciler` | `GIT_BASELINE_TIMEOUT`, `INVALID_STAGE_PATH`, `UNSAFE_STAGE_FILE_MODE`, `GIT_COMMAND_INTERRUPTED`, `GIT_BASELINE_INTERRUPTED`, `GIT_COMMAND_UNAVAILABLE`, `UNEXPECTED_GIT_CHANGE`, `STAGE_BRANCH_CHANGED`, `STAGE_WORKSPACE_CHANGED`, `FROZEN_ARTIFACT_CHANGED`, `INVALID_GIT_BASELINE`, `INVALID_STAGE_CHANGESET`, `UNSAFE_GIT_ENTRY`, `UNCERTAIN_GIT_HANDOFF`, `FOREIGN_GIT_OR_INDEX_EDIT`, `POST_RESTORE_IMAGE_UNCONFIRMED` | Git baseline, path and recovery failure classification; review with workspace adapters while retaining recovery-specific uncertainty and timeout semantics. |
-| `FailClosedProviderUsageGateway` | `MODEL_REQUEST_TIMEOUT_INVALID` | Provider request timeout validation, not a stage deadline or Git timeout. |
-| `WorkspaceManager` | `READ_LIMIT_EXCEEDED`, `INVALID_TASK_PATH`, `RESULT_LIMIT_EXCEEDED`, `GIT_OUTPUT_INVALID`, `GIT_INSPECTION_DENIED` | Read-only workspace path/result limits and Git inspection parsing/denials; review independently of write-capability grants. |
+The original 99 deferred file/value pairs from PR #212 are reconciled in the
+[per-value disposition and oracle ledger](DIAGNOSTIC_LITERAL_AUDIT_218.md).
+The original candidate table remains available at the immutable baseline
+`944cea58d2a6606499c884e7ae3359d5a168e05d`. Each migrated value has an
+implementation-local owner and independent exact literal unit assertion;
+the additional pre-existing private `UNSAFE_STAGE_PATH` owner and the
+distinct `INVALID_STAGE_PATH` guard have separate integration cases.
+No baseline candidate is intentionally deferred. Completion remains subject
+to final-head scanner, pin verification, CI and strict review.
 
 The scanner also matches non-diagnostic literals. In `WorkspaceManager`
 and `LinuxStageGitBaselineReconciler`, the Git/locale environment keys
@@ -203,6 +181,11 @@ reconciler is also an environment key. `UNCHECKED_CAST` in
 not a runtime diagnostic. Keep these spellings literal at their call sites
 in this diagnostic slice; any environment-ownership refactor is separate.
 
+The journal-local `ResumeDenialCodes` also owns `RESUME_FILESYSTEM_UNSUPPORTED`
+and `RESUME_ADMISSION_UNCONFIRMED` for the unpinned admission and preflight
+paths; their pinned runtime projections remain literal. No core-to-infra
+module edge is introduced.
+
 The repeated-row inventory was reconstructed from production source at
 `2bc43a6` using the scanner's literal pattern. Strict review of `a391898`
 confirmed all 99 deferred rows with the repository scanner and verified
@@ -213,4 +196,4 @@ The cross-file literal `DUPLICATE_GRAPH_ID` is intentionally separate:
 one stage graph, whereas `RecursiveGraphPolicy` checks graph IDs and
 stage-run IDs across recursive nodes. The equal diagnostic spelling is
 preserved without coupling these distinct graph identity invariants.
-Both sites remain documented for the semantic-owner follow-up #218.
+Both sites are final distinct-semantic exclusions in #218.

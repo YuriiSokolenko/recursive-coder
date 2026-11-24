@@ -307,7 +307,7 @@ class WorkspaceManager private constructor(
                             buffer.flip()
                             output.write(buffer.array(), 0, n)
                             buffer.clear()
-                            if (output.size() > maxReadBytes) deny("READ_LIMIT_EXCEEDED")
+                            if (output.size() > maxReadBytes) deny(WorkspaceManagerDiagnosticCodes.READ_LIMIT_EXCEEDED)
                         }
                         output.toByteArray()
                     }
@@ -333,12 +333,12 @@ class WorkspaceManager private constructor(
      * or the canonical root. Never resolve an in-workspace symlink before descriptor traversal.
      */
     override fun taskRelativePath(path: Path): String {
-        if (!path.isAbsolute) deny("INVALID_TASK_PATH")
+        if (!path.isAbsolute) deny(WorkspaceManagerDiagnosticCodes.INVALID_TASK_PATH)
         val normalized = path.normalize()
         val ancestor = when {
             normalized.startsWith(declaredRoot) -> declaredRoot
             normalized.startsWith(root) -> root
-            else -> deny("INVALID_TASK_PATH")
+            else -> deny(WorkspaceManagerDiagnosticCodes.INVALID_TASK_PATH)
         }
         val suffix = ancestor.relativize(normalized).toString().replace('\\', '/')
         return relative(suffix)
@@ -382,7 +382,7 @@ class WorkspaceManager private constructor(
                     val paths = tree.keys.asSequence().filter {
                         it.startsWith(prefix) && permittedPath(it)
                     }.take(101).toList()
-                    if (paths.size > 100) deny("RESULT_LIMIT_EXCEEDED")
+                    if (paths.size > 100) deny(WorkspaceManagerDiagnosticCodes.RESULT_LIMIT_EXCEEDED)
                     ToolData.Paths(paths.sorted())
                 }
                 is WorkspaceTool.Find -> {
@@ -392,7 +392,7 @@ class WorkspaceManager private constructor(
                     val paths = tree.keys.asSequence().filter {
                         permittedPath(it) && it.substringAfterLast('/').contains(fragment, ignoreCase = true)
                     }.take(101).toList()
-                    if (paths.size > 100) deny("RESULT_LIMIT_EXCEEDED")
+                    if (paths.size > 100) deny(WorkspaceManagerDiagnosticCodes.RESULT_LIMIT_EXCEEDED)
                     ToolData.Paths(paths.sorted())
                 }
                 is WorkspaceTool.Search -> {
@@ -406,7 +406,7 @@ class WorkspaceManager private constructor(
                     var examined = 0
                     var truncated = false
                     val skippable = setOf(WorkspaceDenialCodes.UNSAFE_FILE, WorkspaceDenialCodes.UNSAFE_PATH_COMPONENT,
-                        "READ_LIMIT_EXCEEDED", WorkspaceDenialCodes.BINARY_FILE_DENIED)
+                        WorkspaceManagerDiagnosticCodes.READ_LIMIT_EXCEEDED, WorkspaceDenialCodes.BINARY_FILE_DENIED)
                     scan@ for (path in candidates) {
                         if (examined >= 256 || scanned >= 1024 * 1024) {
                             truncated = true
@@ -448,13 +448,13 @@ class WorkspaceManager private constructor(
                     while (i < tokens.size) {
                         val record = tokens[i++]
                         if (record.isEmpty()) continue
-                        if (record.length < 4) deny("GIT_OUTPUT_INVALID")
+                        if (record.length < 4) deny(WorkspaceManagerDiagnosticCodes.GIT_OUTPUT_INVALID)
                         val path = record.substring(3)
                         val renamed = record.take(2).any { it == 'R' || it == 'C' }
                         if (renamed && i < tokens.size) i++ // Ignore the second path of a rename.
                         if (!permittedPath(path)) continue
                         entries += ToolData.StatusEntry(path, record[0], record[1])
-                        if (entries.size > 100) deny("RESULT_LIMIT_EXCEEDED")
+                        if (entries.size > 100) deny(WorkspaceManagerDiagnosticCodes.RESULT_LIMIT_EXCEEDED)
                     }
                     ToolData.Status(entries)
                 }
@@ -507,7 +507,8 @@ internal class RestrictedGit(private val root: Path, private val executable: Pat
     fun text(maxBytes: Int, vararg arguments: String): String {
         val (exitCode, output) = inspect(maxBytes, *arguments)
         if (exitCode != 0)
-            throw Refused("GIT_INSPECTION_DENIED", SessionDiagnosticCategories.POLICY, "Git inspection failed")
+            throw Refused(WorkspaceManagerDiagnosticCodes.GIT_INSPECTION_DENIED, SessionDiagnosticCategories.POLICY,
+                "Git inspection failed")
         return output
     }
 
@@ -554,18 +555,29 @@ internal class RestrictedGit(private val root: Path, private val executable: Pat
                     .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(data))
                     .toString().trimEnd('\n')
             } catch (_: Exception) {
-                throw Refused("GIT_OUTPUT_INVALID", SessionDiagnosticCategories.POLICY, "Git output is not valid UTF-8")
+                throw Refused(WorkspaceManagerDiagnosticCodes.GIT_OUTPUT_INVALID,
+                    SessionDiagnosticCategories.POLICY, "Git output is not valid UTF-8")
             }
         } catch (_: java.util.concurrent.TimeoutException) {
             throw Refused(WorkspaceGitDenialCodes.GIT_TIMEOUT, SessionDiagnosticCategories.POLICY, "Git inspection exceeded its deadline")
         } catch (e: java.util.concurrent.ExecutionException) {
             val cause = e.cause
             if (cause is Refused) throw cause
-            throw Refused("GIT_INSPECTION_DENIED", SessionDiagnosticCategories.POLICY, "Git inspection failed")
+            throw Refused(WorkspaceManagerDiagnosticCodes.GIT_INSPECTION_DENIED, SessionDiagnosticCategories.POLICY,
+                "Git inspection failed")
         } finally {
             if (process.isAlive) process.destroyForcibly()
             future.cancel(true)
             reader.shutdownNow()
         }
     }
+}
+
+/** Diagnostic codes emitted by WorkspaceManager; not shared protocol vocabulary. */
+internal object WorkspaceManagerDiagnosticCodes {
+    const val READ_LIMIT_EXCEEDED = "READ_LIMIT_EXCEEDED"
+    const val INVALID_TASK_PATH = "INVALID_TASK_PATH"
+    const val RESULT_LIMIT_EXCEEDED = "RESULT_LIMIT_EXCEEDED"
+    const val GIT_OUTPUT_INVALID = "GIT_OUTPUT_INVALID"
+    const val GIT_INSPECTION_DENIED = "GIT_INSPECTION_DENIED"
 }

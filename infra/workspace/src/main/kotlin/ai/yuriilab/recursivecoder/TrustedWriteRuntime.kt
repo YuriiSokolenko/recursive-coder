@@ -200,7 +200,7 @@ class TrustedWriteRuntime private constructor(
             // Linux can track both variants, but a later checkout on a case-insensitive
             // filesystem cannot represent them unambiguously. Reject at admission.
             if (tracked.keys.groupBy(::folded).any { (_, paths) -> paths.size > 1 })
-                fail("PATH_CASE_COLLISION")
+                fail(TrustedWriteRuntimeDiagnosticCodes.PATH_CASE_COLLISION)
             val rootKey = Files.readAttributes(root, BasicFileAttributes::class.java).fileKey()
                 ?: fail(WorkspaceDenialCodes.SANDBOX_UNAVAILABLE)
             val gitKey = Files.readAttributes(root.resolve(".git"), BasicFileAttributes::class.java).fileKey()
@@ -303,8 +303,8 @@ class TrustedWriteRuntime private constructor(
         if (sha(git.text(256 * 1024, "config", "--local", "--list").toByteArray()) != configHash)
             fail(WorkspaceDenialCodes.GIT_CONFIGURATION_CHANGED)
         val currentIndex = try { indexFingerprint(git) }
-            catch (_: Refused) { fail("INDEX_MUTATION_DENIED") }
-        if (currentIndex != indexHash) fail("INDEX_MUTATION_DENIED")
+            catch (_: Refused) { fail(TrustedWriteRuntimeDiagnosticCodes.INDEX_MUTATION_DENIED) }
+        if (currentIndex != indexHash) fail(TrustedWriteRuntimeDiagnosticCodes.INDEX_MUTATION_DENIED)
     }
 
     private fun authorized(path: String, operation: WriteOperationKind) {
@@ -352,7 +352,7 @@ class TrustedWriteRuntime private constructor(
                 if (cursor.any { candidate ->
                         val actual = candidate.fileName.toString()
                         actual != leaf && folded(actual) == folded(leaf)
-                    }) fail("PATH_CASE_COLLISION")
+                    }) fail(TrustedWriteRuntimeDiagnosticCodes.PATH_CASE_COLLISION)
                 return operation(cursor, Path.of(leaf))
             } finally {
                 opened.asReversed().forEach { it.close() }
@@ -380,7 +380,7 @@ class TrustedWriteRuntime private constructor(
                         buffer.flip()
                         output.write(buffer.array(), 0, n)
                         buffer.clear()
-                        if (output.size() > MAX_FILE_BYTES) fail("FILE_SIZE_LIMIT")
+                        if (output.size() > MAX_FILE_BYTES) fail(TrustedWriteRuntimeDiagnosticCodes.FILE_SIZE_LIMIT)
                     }
                     output.toByteArray()
                 }
@@ -399,19 +399,20 @@ class TrustedWriteRuntime private constructor(
                     val buffer = ByteBuffer.wrap(bytes)
                     while (buffer.hasRemaining()) channel.write(buffer)
                 }
-            } catch (_: Exception) { fail("WRITE_IO_DENIED") }
+            } catch (_: Exception) { fail(TrustedWriteRuntimeDiagnosticCodes.WRITE_IO_DENIED) }
         }
     }
 
     private fun verifyState(): String {
         ensureLive()
         val status = gitStatus(git)
-        if (status.values.any { it[0] != ' ' && it != "??" }) fail("INDEX_MUTATION_DENIED")
+        if (status.values.any { it[0] != ' ' && it != "??" }) fail(
+            TrustedWriteRuntimeDiagnosticCodes.INDEX_MUTATION_DENIED)
         if (status.keys != accepted.keys) fail("UNAUTHORIZED_GIT_CHANGE")
         for ((path, hash) in accepted) {
             authorizedForVerification(path)
             val bytes = readFile(path)
-            if ((bytes?.let(::sha)) != hash) fail("MUTATION_DIGEST_MISMATCH")
+            if ((bytes?.let(::sha)) != hash) fail(TrustedWriteRuntimeDiagnosticCodes.MUTATION_DIGEST_MISMATCH)
         }
         for ((path, expected) in policy.approvedArtifacts) {
             val current = readFile(path)?.let(::sha)
@@ -459,7 +460,7 @@ class TrustedWriteRuntime private constructor(
                 // Repositories may originate on case-sensitive media and be opened on
                 // case-insensitive media. Disallow any ambiguous tracked spelling.
                 if (tracked.keys.any { it != op.path && folded(it) == folded(op.path) })
-                    fail("PATH_CASE_COLLISION")
+                    fail(TrustedWriteRuntimeDiagnosticCodes.PATH_CASE_COLLISION)
                 val before = readFile(op.path)
                 prior[op.path] = before?.let(::sha)
                 when (op) {
@@ -472,7 +473,7 @@ class TrustedWriteRuntime private constructor(
                         if (exit != 1) fail("GIT_IGNORE_INSPECTION_DENIED")
                         if ('\u0000' in op.content) fail(WorkspaceDenialCodes.BINARY_FILE_DENIED)
                         if (op.content.toByteArray(StandardCharsets.UTF_8).size > MAX_FILE_BYTES)
-                            fail("FILE_SIZE_LIMIT")
+                            fail(TrustedWriteRuntimeDiagnosticCodes.FILE_SIZE_LIMIT)
                     }
                     is WriteOperation.Edit -> {
                         if (before == null || op.path !in tracked ||
@@ -480,7 +481,7 @@ class TrustedWriteRuntime private constructor(
                             sha(before) != op.expectedSha256) fail("EDIT_PRECONDITION_FAILED")
                         if ('\u0000' in op.content) fail(WorkspaceDenialCodes.BINARY_FILE_DENIED)
                         if (op.content.toByteArray(StandardCharsets.UTF_8).size > MAX_FILE_BYTES)
-                            fail("FILE_SIZE_LIMIT")
+                            fail(TrustedWriteRuntimeDiagnosticCodes.FILE_SIZE_LIMIT)
                     }
                     is WriteOperation.Delete -> {
                         if (before == null || op.path !in tracked ||
@@ -500,7 +501,8 @@ class TrustedWriteRuntime private constructor(
                         is WriteOperation.Create -> writeFile(op.path, op.content.toByteArray(StandardCharsets.UTF_8), true)
                         is WriteOperation.Edit -> writeFile(op.path, op.content.toByteArray(StandardCharsets.UTF_8), false)
                         is WriteOperation.Delete -> withParent(op.path) { dir, name ->
-                            try { dir.deleteFile(name) } catch (_: Exception) { fail("WRITE_IO_DENIED") }
+                            try { dir.deleteFile(name) } catch (_: Exception) { fail(
+                                TrustedWriteRuntimeDiagnosticCodes.WRITE_IO_DENIED) }
                         }
                     }
                     val current = when (op) {
@@ -527,8 +529,8 @@ class TrustedWriteRuntime private constructor(
             WriteToolOutcome(id, e.code)
         } catch (_: Exception) {
             poisoned = true
-            report(id, WRITE_TOOL_NAME, "WRITE_EXECUTION_DENIED")
-            WriteToolOutcome(id, "WRITE_EXECUTION_DENIED")
+            report(id, WRITE_TOOL_NAME, TrustedWriteRuntimeDiagnosticCodes.WRITE_EXECUTION_DENIED)
+            WriteToolOutcome(id, TrustedWriteRuntimeDiagnosticCodes.WRITE_EXECUTION_DENIED)
         }
     }
 
@@ -574,7 +576,7 @@ class TrustedWriteRuntime private constructor(
                         if (total > check.maxOutputBytes) {
                             exceeded.set(true)
                             process.destroyForcibly()
-                            fail("CHECK_OUTPUT_LIMIT")
+                            fail(TrustedWriteRuntimeDiagnosticCodes.CHECK_OUTPUT_LIMIT)
                         }
                     }
                     total
@@ -583,18 +585,18 @@ class TrustedWriteRuntime private constructor(
             try {
                 val completed = process.waitFor(check.timeoutMs, TimeUnit.MILLISECONDS)
                 if (!completed) {
-                    if (exceeded.get()) fail("CHECK_OUTPUT_LIMIT")
+                    if (exceeded.get()) fail(TrustedWriteRuntimeDiagnosticCodes.CHECK_OUTPUT_LIMIT)
                     fail("CHECK_TIMEOUT")
                 }
                 try {
                     future.get(1, TimeUnit.SECONDS)
                 } catch (e: ExecutionException) {
                     if (e.cause is Refused) throw e.cause as Refused
-                    fail("CHECK_OUTPUT_UNAVAILABLE")
+                    fail(TrustedWriteRuntimeDiagnosticCodes.CHECK_OUTPUT_UNAVAILABLE)
                 } catch (_: java.util.concurrent.TimeoutException) {
-                    fail("CHECK_OUTPUT_UNAVAILABLE")
+                    fail(TrustedWriteRuntimeDiagnosticCodes.CHECK_OUTPUT_UNAVAILABLE)
                 }
-                if (exceeded.get()) fail("CHECK_OUTPUT_LIMIT")
+                if (exceeded.get()) fail(TrustedWriteRuntimeDiagnosticCodes.CHECK_OUTPUT_LIMIT)
                 if (process.exitValue() != 0) fail("CHECK_FAILED_OR_SANDBOX_UNAVAILABLE")
             } finally {
                 if (process.isAlive) process.destroyForcibly()
@@ -633,7 +635,7 @@ class TrustedWriteRuntime private constructor(
                 git.text(1024 * 1024, "diff", "--check", "--no-ext-diff", "--no-textconv", "HEAD")
                 for ((path, hash) in accepted) {
                     if (path !in tracked && hash != null) {
-                        val data = readFile(path) ?: fail("MUTATION_DIGEST_MISMATCH")
+                        val data = readFile(path) ?: fail(TrustedWriteRuntimeDiagnosticCodes.MUTATION_DIGEST_MISMATCH)
                         if (data.toString(StandardCharsets.UTF_8).lineSequence()
                                 .any { it.endsWith(' ') || it.endsWith('\t') })
                             fail("CHECK_FAILED")
@@ -695,3 +697,15 @@ class TrustedWriteRuntime private constructor(
 
 private const val WRITE_TOOL_NAME = "write"
 private const val RUN_CHECK_TOOL_NAME = "run_check"
+
+/** Diagnostic codes emitted by TrustedWriteRuntime; not shared protocol vocabulary. */
+internal object TrustedWriteRuntimeDiagnosticCodes {
+    const val PATH_CASE_COLLISION = "PATH_CASE_COLLISION"
+    const val INDEX_MUTATION_DENIED = "INDEX_MUTATION_DENIED"
+    const val FILE_SIZE_LIMIT = "FILE_SIZE_LIMIT"
+    const val WRITE_IO_DENIED = "WRITE_IO_DENIED"
+    const val MUTATION_DIGEST_MISMATCH = "MUTATION_DIGEST_MISMATCH"
+    const val WRITE_EXECUTION_DENIED = "WRITE_EXECUTION_DENIED"
+    const val CHECK_OUTPUT_LIMIT = "CHECK_OUTPUT_LIMIT"
+    const val CHECK_OUTPUT_UNAVAILABLE = "CHECK_OUTPUT_UNAVAILABLE"
+}

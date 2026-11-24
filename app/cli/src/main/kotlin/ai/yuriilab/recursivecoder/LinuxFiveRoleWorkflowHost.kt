@@ -443,12 +443,13 @@ class LinuxFiveRoleWorkflowHost(
                             val old = readBytes(operation.path)
                             val bytes = when (operation) {
                                 is StageWrite.Create -> {
-                                    check(old == null) { "CREATE_PREIMAGE_EXISTS" }
+                                    check(old == null) {
+                                        LinuxFiveRoleWorkflowHostDiagnosticCodes.CREATE_PREIMAGE_EXISTS }
                                     operation.content.toByteArray(Charsets.UTF_8)
                                 }
                                 is StageWrite.Edit -> {
                                     check(old != null && digest(old) == operation.expectedSha256) {
-                                        "EDIT_PREIMAGE_CHANGED"
+                                        LinuxFiveRoleWorkflowHostDiagnosticCodes.EDIT_PREIMAGE_CHANGED
                                     }
                                     operation.content.toByteArray(Charsets.UTF_8)
                                 }
@@ -467,12 +468,14 @@ class LinuxFiveRoleWorkflowHost(
                             }.associate { it.declaredPath to it.sha256 })
                     } catch (failure: IllegalStateException) {
                         val code = failure.message?.takeIf {
-                            it in setOf("CREATE_PREIMAGE_EXISTS",
-                                "EDIT_PREIMAGE_CHANGED", StageDenialCodes.STAGE_FILE_TOO_LARGE)
-                        } ?: "RECOVERY_PREIMAGE_UNAVAILABLE"
+                            it in setOf(LinuxFiveRoleWorkflowHostDiagnosticCodes.CREATE_PREIMAGE_EXISTS,
+                                LinuxFiveRoleWorkflowHostDiagnosticCodes.EDIT_PREIMAGE_CHANGED,
+                                    StageDenialCodes.STAGE_FILE_TOO_LARGE)
+                        } ?: LinuxFiveRoleWorkflowHostDiagnosticCodes.RECOVERY_PREIMAGE_UNAVAILABLE
                         return StageWriteEvidence(null, code)
                     } catch (_: Exception) {
-                        return StageWriteEvidence(null, "RECOVERY_PREIMAGE_UNAVAILABLE")
+                        return StageWriteEvidence(null,
+                            LinuxFiveRoleWorkflowHostDiagnosticCodes.RECOVERY_PREIMAGE_UNAVAILABLE)
                     }
                 } else null
                 synchronized(this@LinuxFiveRoleWorkflowHost) {
@@ -654,7 +657,7 @@ class LinuxFiveRoleWorkflowHost(
         val attempt = synchronized(this) {
             if (writer != null || reviewing != null)
                 return StageGitFailedWriteResult.NeedsHuman(
-                    "AUTHORITATIVE_ACCEPTANCE_UNCONFIRMED")
+                    LinuxFiveRoleWorkflowHostDiagnosticCodes.AUTHORITATIVE_ACCEPTANCE_UNCONFIRMED)
             if (reconcilingFailedDeveloper != null || retryingDeveloperId != null)
                 return StageGitFailedWriteResult.NeedsHuman("RECOVERY_IN_PROGRESS")
             val pending = failedDeveloperWrite
@@ -674,7 +677,7 @@ class LinuxFiveRoleWorkflowHost(
                 graph.artifacts.any { it.producerStageRunId == stageRunId } ||
                 StageGraphPolicy.validate(graph) != StageGateDecision.Permit)
                 return StageGitFailedWriteResult.NeedsHuman(
-                    "AUTHORITATIVE_ACCEPTANCE_UNCONFIRMED")
+                    LinuxFiveRoleWorkflowHostDiagnosticCodes.AUTHORITATIVE_ACCEPTANCE_UNCONFIRMED)
             if (terminalFailedDeveloperLeaseGeneration != pending.leaseGeneration)
                 return StageGitFailedWriteResult.NeedsHuman(
                     "STALE_DEVELOPER_LEASE_GENERATION")
@@ -1134,4 +1137,12 @@ class LinuxAuthenticatedRecursiveChildIntegrationHost(
         }
 
     override fun readBytes(path: String): ByteArray? = host.readBytesForVerification(path)
+}
+
+/** Diagnostic codes emitted by LinuxFiveRoleWorkflowHost; not shared protocol vocabulary. */
+internal object LinuxFiveRoleWorkflowHostDiagnosticCodes {
+    const val CREATE_PREIMAGE_EXISTS = "CREATE_PREIMAGE_EXISTS"
+    const val EDIT_PREIMAGE_CHANGED = "EDIT_PREIMAGE_CHANGED"
+    const val RECOVERY_PREIMAGE_UNAVAILABLE = "RECOVERY_PREIMAGE_UNAVAILABLE"
+    const val AUTHORITATIVE_ACCEPTANCE_UNCONFIRMED = "AUTHORITATIVE_ACCEPTANCE_UNCONFIRMED"
 }

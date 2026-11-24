@@ -81,7 +81,8 @@ object RecursiveChildIntegrationPolicy {
                 manifest.freeze != ArtifactFreeze.FROZEN ||
                 manifest.id !in hostAcceptedIds ||
                 manifest.revision < 1)
-                return ChildIntegrationDecision.Denied("CHILD_ARTIFACT_UNACCEPTED")
+                return ChildIntegrationDecision.Denied(
+                    RecursiveChildIntegrationPolicyDiagnosticCodes.CHILD_ARTIFACT_UNACCEPTED)
             if (!sha256.matches(manifest.sha256) ||
                 receipt.observedSha256 != manifest.sha256)
                 return ChildIntegrationDecision.Denied(RecursiveDenialCodes.CHILD_ARTIFACT_DIGEST_MISMATCH)
@@ -135,11 +136,16 @@ object RecursiveChildIntegrationPolicy {
             for (receipt in receipts.sortedWith(compareBy({ it.manifest.declaredPath },
                     { it.manifest.id.value }))) {
                 if (receipt.childGraphId != id)
-                    return deny("CHILD_ARTIFACT_UNACCEPTED")
+                    return deny(RecursiveChildIntegrationPolicyDiagnosticCodes.CHILD_ARTIFACT_UNACCEPTED)
                 addReceipt(receipt)?.let { return it }
             }
         }
         return ChildIntegrationDecision.Accepted(IntegratedChildResults(
             parentId, order.toList(), accepted.toList()))
     }
+}
+
+/** Diagnostic codes emitted by RecursiveChildIntegrationPolicy; not shared protocol vocabulary. */
+internal object RecursiveChildIntegrationPolicyDiagnosticCodes {
+    const val CHILD_ARTIFACT_UNACCEPTED = "CHILD_ARTIFACT_UNACCEPTED"
 }

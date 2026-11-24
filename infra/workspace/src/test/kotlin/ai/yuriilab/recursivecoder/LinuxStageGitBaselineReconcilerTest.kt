@@ -386,6 +386,45 @@ class LinuxStageGitBaselineReconcilerTest {
         LinuxStageGitBaselineReconciler(repo.root, repo.locks,
             Path.of("/usr/bin/git"), observer)
 
+    @Test fun invalidDeclaredPathAtPostCasReadbackRetainsExactDenial() {
+        val repo = createRepo()
+        val path = "specs/Feature.md"
+        val hash = write(repo.root, path, "accepted requirements\n")
+        val invalidPath = "../outside.md"
+        assertFalse(ToolAuthorizationPolicy.validDeclaredPath(invalidPath))
+        val frozen = linkedMapOf<String, String>()
+        var injected = false
+        val reconciler = withFaultObserver(repo, StageGitTestObserver { checkpoint ->
+            if (checkpoint == StageGitTestCheckpoint.AFTER_REF_UPDATE) {
+                // Deliberate host-side request drift after the earlier preflight.
+                // Revisit this aliasing-dependent oracle after defensive snapshots (#220).
+                // Exercise the existing defense-in-depth readback guard.
+                frozen[invalidPath] = hash
+                injected = true
+            }
+        })
+        val outcome = assertIs<StageGitReconciliationResult.ReconciliationRequired>(
+            reconciler.reconcile(StageGitReconciliationRequest(repo.head, "dev",
+                EngineeringRole.SDD, listOf(StageGitAcceptedFile(path, hash)), frozen)))
+        assertTrue(injected)
+        assertEquals("INVALID_STAGE_PATH", outcome.code)
+        assertTrue(git(repo.root, "rev-parse", "HEAD") != repo.head)
+    }
+
+    @Test fun validDeclaredPathWithMissingIntermediateDirectoryIsUnsafe() {
+        val repo = createRepo()
+        val path = "specs/Feature.md"
+        val hash = write(repo.root, path, "accepted requirements\n")
+        val missing = "specs/Missing/Feature.md"
+        assertTrue(ToolAuthorizationPolicy.validDeclaredPath(missing))
+        assertFalse(Files.exists(repo.root.resolve("specs/Missing")))
+        val outcome = assertIs<StageGitReconciliationResult.Denied>(
+            reconcile(repo, repo.head, EngineeringRole.SDD, mapOf(path to hash),
+                mapOf(missing to hash)))
+        assertEquals("UNSAFE_STAGE_PATH", outcome.code)
+        assertEquals(repo.head, git(repo.root, "rev-parse", "HEAD"))
+    }
+
     @Test fun postCasFailureIsUncertainEvenWhenRefAlreadyMoved() {
         val repo = createRepo()
         val path = "specs/Feature.md"

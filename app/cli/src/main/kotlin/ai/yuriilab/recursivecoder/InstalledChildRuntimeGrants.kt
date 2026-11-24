@@ -86,7 +86,7 @@ internal class InstalledChildRuntimeMeter(
             usage.modelRequests == 0 && (input != null && input != 0L ||
                 output != null && output != 0L)) {
             usageUncertain = true
-            return "CHILD_USAGE_INVALID"
+            return InstalledChildRuntimeGrantsDiagnosticCodes.CHILD_USAGE_INVALID
         }
         // This method is called only AFTER delegate.execute ran; even a
         // non-proposed result without complete counters is not proof of zero.
@@ -97,7 +97,7 @@ internal class InstalledChildRuntimeMeter(
             return "CHILD_USAGE_UNAVAILABLE"
         }
         if (tokens > admitted.granted.tokens) return RecursiveDenialCodes.TOKEN_BUDGET_EXHAUSTED
-        if (usageUncertain) return "CHILD_USAGE_INVALID"
+        if (usageUncertain) return InstalledChildRuntimeGrantsDiagnosticCodes.CHILD_USAGE_INVALID
         return deadlineDenial()
     }
 
@@ -199,4 +199,9 @@ internal class MeteredChildTools(
             override fun close() = session.close()
         })
     }
+}
+
+/** Diagnostic codes emitted by InstalledChildRuntimeGrants; not shared protocol vocabulary. */
+internal object InstalledChildRuntimeGrantsDiagnosticCodes {
+    const val CHILD_USAGE_INVALID = "CHILD_USAGE_INVALID"
 }

@@ -173,7 +173,8 @@ class OpenAICompatibleGateway(
                         throw Refused("MODEL_REDIRECT_DENIED", SessionDiagnosticCategories.PROVIDER, "Model redirect denied")
                     if (code == 429 || code in 500..599) {
                         if (attempt == maxAttempts)
-                            throw Refused("MODEL_RETRY_EXHAUSTED", SessionDiagnosticCategories.PROVIDER, "Model temporarily unavailable")
+                            throw Refused(ModelGatewayDiagnosticCodes.MODEL_RETRY_EXHAUSTED,
+                                SessionDiagnosticCategories.PROVIDER, "Model temporarily unavailable")
                         val seconds = response.headers().firstValue("Retry-After").orElse("0")
                             .toLongOrNull()?.coerceIn(0, 1) ?: 0L
                         retryDelay = if (seconds == 0L) 100L else seconds * 1000L
@@ -196,7 +197,8 @@ class OpenAICompatibleGateway(
                 cancellation.check(deadline)
                 if (attempt == maxAttempts)
                     throw Refused(
-                        if (readingBody) "MODEL_STREAM_INCOMPLETE" else "MODEL_TRANSPORT_FAILED",
+                        if (readingBody) ModelGatewayDiagnosticCodes.MODEL_STREAM_INCOMPLETE else
+                            ModelGatewayDiagnosticCodes.MODEL_TRANSPORT_FAILED,
                         SessionDiagnosticCategories.PROVIDER, "Model transport failed"
                     )
                 retryDelay = 100L
@@ -204,7 +206,8 @@ class OpenAICompatibleGateway(
                 throw e
             } catch (_: Exception) {
                 cancellation.check(deadline)
-                throw Refused("MODEL_TRANSPORT_FAILED", SessionDiagnosticCategories.PROVIDER, "Model transport failed")
+                throw Refused(ModelGatewayDiagnosticCodes.MODEL_TRANSPORT_FAILED,
+                    SessionDiagnosticCategories.PROVIDER, "Model transport failed")
             }
             val delay = retryDelay ?: break
             try {
@@ -214,7 +217,8 @@ class OpenAICompatibleGateway(
                 throw Stopped(false)
             }
         }
-        throw Refused("MODEL_RETRY_EXHAUSTED", SessionDiagnosticCategories.PROVIDER, "Model temporarily unavailable")
+        throw Refused(ModelGatewayDiagnosticCodes.MODEL_RETRY_EXHAUSTED, SessionDiagnosticCategories.PROVIDER,
+            "Model temporarily unavailable")
     }
 
     private fun completionRequest(
@@ -350,7 +354,8 @@ class OpenAICompatibleGateway(
             }
         }
         if (!done || finish == null)
-            throw Refused("MODEL_STREAM_INCOMPLETE", SessionDiagnosticCategories.PROVIDER, "Model stream ended before completion")
+            throw Refused(ModelGatewayDiagnosticCodes.MODEL_STREAM_INCOMPLETE, SessionDiagnosticCategories.PROVIDER,
+                "Model stream ended before completion")
         return Completion(finish!!, content.toString(), name,
             if (name != null) arguments.toString() else null, refused, reportedUsage)
     }
@@ -378,3 +383,10 @@ class OpenAICompatibleGateway(
 }
 
 private const val READ_TASK_MODEL_TOOL = "read_task"
+
+/** Diagnostic codes emitted by ModelGateway; not shared protocol vocabulary. */
+internal object ModelGatewayDiagnosticCodes {
+    const val MODEL_RETRY_EXHAUSTED = "MODEL_RETRY_EXHAUSTED"
+    const val MODEL_STREAM_INCOMPLETE = "MODEL_STREAM_INCOMPLETE"
+    const val MODEL_TRANSPORT_FAILED = "MODEL_TRANSPORT_FAILED"
+}

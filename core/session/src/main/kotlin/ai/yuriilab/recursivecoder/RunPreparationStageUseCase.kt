@@ -187,9 +187,9 @@ class RunPreparationStageUseCase(
         fun denied(code: String) = PreparationStageResult(original, accepted,
             PreparationStageOutcome.Denied(code))
         val stage = original.stages.firstOrNull { it.correlation.stageRunId == id }
-            ?: return denied("UNSUPPORTED_PREPARATION_STAGE")
+            ?: return denied(RunPreparationStageUseCaseDiagnosticCodes.UNSUPPORTED_PREPARATION_STAGE)
         if (stage.kind !in kinds || stage.supersededBy != null)
-            return denied("UNSUPPORTED_PREPARATION_STAGE")
+            return denied(RunPreparationStageUseCaseDiagnosticCodes.UNSUPPORTED_PREPARATION_STAGE)
         val kind = stage.kind
         if (stage.outputArtifacts.isNotEmpty() ||
             original.artifacts.any { it.id == command.artifactId ||
@@ -399,11 +399,12 @@ class RunPreparationStageUseCase(
             }
             // Authority wins over read diagnostics; never accept against a
             // revoked lease. Confirm output integrity before checking inputs.
-            if (!live(lease, snapshot)) return terminal("STALE_ARTIFACT_APPROVAL")
+            if (!live(lease, snapshot)) return terminal(
+                RunPreparationStageUseCaseDiagnosticCodes.STALE_ARTIFACT_APPROVAL)
             val inputStatus = verifyInputs(running, stage)
             if (inputStatus == HostReadVerification.CHANGED ||
                 (afterRead.isSuccess && afterRead.getOrThrow()?.contentEquals(bytes) != true))
-                return terminal("STALE_ARTIFACT_APPROVAL")
+                return terminal(RunPreparationStageUseCaseDiagnosticCodes.STALE_ARTIFACT_APPROVAL)
             if (afterRead.isFailure) return terminal(StageDenialCodes.OUTPUT_READ_UNAVAILABLE)
             if (inputStatus == HostReadVerification.UNAVAILABLE) return terminal(StageDenialCodes.INPUT_READ_UNAVAILABLE)
             if (decision == PreparationApproval.REJECT)
@@ -463,8 +464,9 @@ class RunPreparationStageUseCase(
         fun stoppedHuman(): String? {
             val signals = cancellation.signals()
             return when {
-                signals.requested || signals.expired -> "HUMAN_APPROVAL_STOPPED"
-                !Instant.now(clock).isBefore(deadline) -> "HUMAN_APPROVAL_TIMED_OUT"
+                signals.requested || signals.expired -> RunPreparationStageUseCaseDiagnosticCodes.HUMAN_APPROVAL_STOPPED
+                !Instant.now(clock).isBefore(deadline) ->
+                    RunPreparationStageUseCaseDiagnosticCodes.HUMAN_APPROVAL_TIMED_OUT
                 else -> null
             }
         }
@@ -474,11 +476,12 @@ class RunPreparationStageUseCase(
             it.correlation.stageRunId == stageRunId
         } ?: return denied(StageDenialCodes.UNKNOWN_STAGE)
         if (stage.kind !in kinds || stage.state != StageState.RUNNING ||
-            stage.outputArtifacts.size != 1) return denied("NO_PENDING_HUMAN_APPROVAL")
+            stage.outputArtifacts.size != 1) return denied(
+                RunPreparationStageUseCaseDiagnosticCodes.NO_PENDING_HUMAN_APPROVAL)
         val candidate = expectedGraph.artifacts.singleOrNull {
             it.id in stage.outputArtifacts && it.approval == ArtifactApproval.DRAFT &&
                 it.freeze == ArtifactFreeze.EDITABLE
-        } ?: return denied("NO_PENDING_HUMAN_APPROVAL")
+        } ?: return denied(RunPreparationStageUseCaseDiagnosticCodes.NO_PENDING_HUMAN_APPROVAL)
         stoppedHuman()?.let { return denied(it) }
         val lease = try {
             withContext(NonCancellable + blockingDispatcher) {
@@ -503,7 +506,8 @@ class RunPreparationStageUseCase(
         } catch (_: Exception) { false }
         if (!validHumanLease)
             return withContext(NonCancellable) {
-                abort(lease, StageState.FAILED, "INVALID_HUMAN_APPROVAL_LEASE", events)
+                abort(lease, StageState.FAILED,
+                    RunPreparationStageUseCaseDiagnosticCodes.INVALID_HUMAN_APPROVAL_LEASE, events)
             }
         val approvedEvidence = requireNotNull(validation)
         val originalUsage = requireNotNull(pending).usage
@@ -516,8 +520,9 @@ class RunPreparationStageUseCase(
         try {
             val initialCurrent = captureHostCall {
                 withContext(blockingDispatcher) { host.current(lease) }
-            }.getOrElse { return failed("HUMAN_APPROVAL_AUTHORITY_UNAVAILABLE") }
-            if (!initialCurrent) return stale("INVALID_HUMAN_APPROVAL_LEASE")
+            }.getOrElse { return failed(
+                RunPreparationStageUseCaseDiagnosticCodes.HUMAN_APPROVAL_AUTHORITY_UNAVAILABLE) }
+            if (!initialCurrent) return stale(RunPreparationStageUseCaseDiagnosticCodes.INVALID_HUMAN_APPROVAL_LEASE)
             // A confirmed change wins over transient read failures, regardless of path order.
             val before = captureHostCall {
                 withContext(blockingDispatcher) { host.readBytes(candidate.declaredPath) }
@@ -525,9 +530,9 @@ class RunPreparationStageUseCase(
             val beforeInputs = verifyInputs(expectedGraph, stage)
             if (beforeInputs == HostReadVerification.CHANGED ||
                 (before.isSuccess && before.getOrThrow()?.let { digest(it) == candidate.sha256 } != true))
-                return stale("STALE_HUMAN_APPROVAL")
+                return stale(RunPreparationStageUseCaseDiagnosticCodes.STALE_HUMAN_APPROVAL)
             if (beforeInputs == HostReadVerification.UNAVAILABLE || before.isFailure)
-                return failed("HUMAN_APPROVAL_READ_UNAVAILABLE")
+                return failed(RunPreparationStageUseCaseDiagnosticCodes.HUMAN_APPROVAL_READ_UNAVAILABLE)
             val bytes = requireNotNull(before.getOrThrow())
             stoppedHuman()?.let { return failed(it) }
             val decision = try {
@@ -542,7 +547,7 @@ class RunPreparationStageUseCase(
                 ensureHostCallerActive(failure)
                 return failed(stoppedHuman() ?: StageDenialCodes.HOST_APPROVAL_UNAVAILABLE)
             }
-            if (decision == null) return failed("HUMAN_APPROVAL_TIMED_OUT")
+            if (decision == null) return failed(RunPreparationStageUseCaseDiagnosticCodes.HUMAN_APPROVAL_TIMED_OUT)
             stoppedHuman()?.let { return failed(it) }
             val after = captureHostCall {
                 withContext(blockingDispatcher) { host.readBytes(candidate.declaredPath) }
@@ -553,10 +558,11 @@ class RunPreparationStageUseCase(
             }
             if (current.getOrNull() == false || afterInputs == HostReadVerification.CHANGED ||
                 (after.isSuccess && after.getOrThrow()?.contentEquals(bytes) != true))
-                return stale("STALE_HUMAN_APPROVAL")
-            if (current.isFailure) return failed("HUMAN_APPROVAL_AUTHORITY_UNAVAILABLE")
+                return stale(RunPreparationStageUseCaseDiagnosticCodes.STALE_HUMAN_APPROVAL)
+            if (current.isFailure) return failed(
+                RunPreparationStageUseCaseDiagnosticCodes.HUMAN_APPROVAL_AUTHORITY_UNAVAILABLE)
             if (after.isFailure || afterInputs == HostReadVerification.UNAVAILABLE)
-                return failed("HUMAN_APPROVAL_READ_UNAVAILABLE")
+                return failed(RunPreparationStageUseCaseDiagnosticCodes.HUMAN_APPROVAL_READ_UNAVAILABLE)
             if (decision == PreparationApproval.HUMAN_REVIEW_REQUIRED)
                 return finish(lease, expectedGraph, acceptedIds,
                     PreparationStageOutcome.AwaitingHuman(candidate), events, candidate,
@@ -583,7 +589,7 @@ class RunPreparationStageUseCase(
             if (cancelled == null)
                 return failed(stoppedHuman() ?: "HUMAN_APPROVAL_FAILED")
             withContext(NonCancellable) {
-                try { failed("HUMAN_APPROVAL_STOPPED") }
+                try { failed(RunPreparationStageUseCaseDiagnosticCodes.HUMAN_APPROVAL_STOPPED) }
                 catch (cleanup: Exception) {
                     if (cleanup !== cancelled) cancelled.addSuppressed(cleanup)
                 }
@@ -591,4 +597,17 @@ class RunPreparationStageUseCase(
             throw cancelled
         }
     }
+}
+
+/** Diagnostic codes emitted by RunPreparationStageUseCase; not shared protocol vocabulary. */
+internal object RunPreparationStageUseCaseDiagnosticCodes {
+    const val UNSUPPORTED_PREPARATION_STAGE = "UNSUPPORTED_PREPARATION_STAGE"
+    const val STALE_ARTIFACT_APPROVAL = "STALE_ARTIFACT_APPROVAL"
+    const val HUMAN_APPROVAL_STOPPED = "HUMAN_APPROVAL_STOPPED"
+    const val HUMAN_APPROVAL_TIMED_OUT = "HUMAN_APPROVAL_TIMED_OUT"
+    const val NO_PENDING_HUMAN_APPROVAL = "NO_PENDING_HUMAN_APPROVAL"
+    const val INVALID_HUMAN_APPROVAL_LEASE = "INVALID_HUMAN_APPROVAL_LEASE"
+    const val HUMAN_APPROVAL_AUTHORITY_UNAVAILABLE = "HUMAN_APPROVAL_AUTHORITY_UNAVAILABLE"
+    const val STALE_HUMAN_APPROVAL = "STALE_HUMAN_APPROVAL"
+    const val HUMAN_APPROVAL_READ_UNAVAILABLE = "HUMAN_APPROVAL_READ_UNAVAILABLE"
 }
