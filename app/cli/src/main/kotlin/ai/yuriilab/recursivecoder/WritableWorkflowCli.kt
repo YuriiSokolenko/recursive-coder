@@ -376,8 +376,8 @@ internal object WritableWorkflowCli {
         require(StageGraphPolicy.validate(graph) == StageGateDecision.Permit)
         // Hard live-model feature gate: the installed writable surface only
         // constructs FakeModel and never accepts a provider from input JSON.
-        val model = ModelConfig("fake", "fake-v1", "http://localhost/unused",
-            "env:FAKE_UNUSED", 8192, 512, setOf("tool_calls"), null, 1000, 1000)
+        val model = ModelConfig(ModelProviderIds.FAKE, ModelProviderIds.FAKE_MODEL_ID, "http://localhost/unused",
+            "env:FAKE_UNUSED", 8192, 512, setOf(ModelFeatureIds.TOOL_CALLS), null, 1000, 1000)
         val host = LinuxFiveRoleWorkflowHost(checkout, graph, expectedHead, branch,
             mapOf("offline-check" to StageIsolatedCheck(executable, arguments)),
             setOf("git_diff_check", "offline-check"),

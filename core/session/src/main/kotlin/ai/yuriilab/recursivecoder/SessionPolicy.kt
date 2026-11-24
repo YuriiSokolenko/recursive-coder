@@ -138,7 +138,7 @@ internal data class SessionAdmissionFacts(
 
 internal object SessionAdmissionPolicy {
     private val capabilities = setOf(
-        "session-events-v1", "fake-model-v1", "model-gateway-v1", "read-only-tools-v1"
+        SessionCapabilityIds.EVENTS_V1, SessionCapabilityIds.FAKE_MODEL_V1, SessionCapabilityIds.MODEL_GATEWAY_V1, SessionCapabilityIds.READ_ONLY_TOOLS_V1
     )
 
     fun decide(f: SessionAdmissionFacts): AdmissionDecision {
@@ -155,20 +155,20 @@ internal object SessionAdmissionPolicy {
         if (f.resumeMode != "fresh" || f.fenceGeneration != 1L)
             return deny(AdmissionDenial.RESUME)
         if (!capabilities.containsAll(f.requiredCapabilities) ||
-            "session-events-v1" !in f.requiredCapabilities)
+            SessionCapabilityIds.EVENTS_V1 !in f.requiredCapabilities)
             return deny(AdmissionDenial.CAPABILITY)
-        if (f.provider !in setOf("fake", "openai-compatible") ||
-            (f.provider == "fake" && (
-                "fake-model-v1" !in f.requiredCapabilities ||
-                    "model-gateway-v1" in f.requiredCapabilities ||
-                    f.modelId != "fake-v1" || f.modelFeatures != setOf("tool_calls")
+        if (f.provider !in setOf(ModelProviderIds.FAKE, ModelProviderIds.OPENAI_COMPATIBLE) ||
+            (f.provider == ModelProviderIds.FAKE && (
+                SessionCapabilityIds.FAKE_MODEL_V1 !in f.requiredCapabilities ||
+                    SessionCapabilityIds.MODEL_GATEWAY_V1 in f.requiredCapabilities ||
+                    f.modelId != ModelProviderIds.FAKE_MODEL_ID || f.modelFeatures != setOf(ModelFeatureIds.TOOL_CALLS)
                 )) ||
-            (f.provider == "openai-compatible" && (
-                "model-gateway-v1" !in f.requiredCapabilities ||
-                    "fake-model-v1" in f.requiredCapabilities ||
+            (f.provider == ModelProviderIds.OPENAI_COMPATIBLE && (
+                SessionCapabilityIds.MODEL_GATEWAY_V1 !in f.requiredCapabilities ||
+                    SessionCapabilityIds.FAKE_MODEL_V1 in f.requiredCapabilities ||
                     // Issue #155: without usage_metadata the gateway may return no
                     // usage, and maxTokens could not be enforced. Fail closed.
-                    "usage_metadata" !in f.modelFeatures
+                    ModelFeatureIds.USAGE_METADATA !in f.modelFeatures
                 )))
             return deny(AdmissionDenial.MODEL)
         if (f.toolPolicyMode != "read-only" ||

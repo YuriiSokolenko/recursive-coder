@@ -195,7 +195,7 @@ internal object InstalledRecursiveAdmissionPolicy {
 
 /** Strict model gate independent of the CLI parser's exact-field checks. */
 internal fun requireInstalledRecursiveFakeModel(model: ModelConfig) {
-    require(model.provider == "fake" && model.modelId == "fake-v1") {
+    require(model.provider == ModelProviderIds.FAKE && model.modelId == ModelProviderIds.FAKE_MODEL_ID) {
         "Installed recursive workflow is offline-only"
     }
 }

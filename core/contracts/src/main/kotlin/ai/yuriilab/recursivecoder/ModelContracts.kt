@@ -63,3 +63,20 @@ data class ModelConfig(
     }
 }
 
+
+/** Configured provider and fake-model identifiers, not HTTP API fields. */
+object ModelProviderIds {
+    const val FAKE = "fake"
+    const val OPENAI_COMPATIBLE = "openai-compatible"
+    const val FAKE_MODEL_ID = "fake-v1"
+}
+
+/** Model configuration and advertised capability identifiers. */
+object ModelFeatureIds {
+    const val TOOL_CALLS = "tool_calls"
+    const val TOOL_CHOICE = "tool_choice"
+    const val STREAMING = "streaming"
+    const val STRUCTURED_OUTPUTS = "structured_outputs"
+    const val USAGE_METADATA = "usage_metadata"
+    const val ERROR_METADATA = "error_metadata"
+}

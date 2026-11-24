@@ -113,9 +113,9 @@ class FailClosedProviderUsageGateway(
         if (unconfirmed) deny("MODEL_USAGE_UNCONFIRMED")
         // Existing SSE parser accepts usage in arbitrary events; no verified
         // terminal usage provenance exists for streaming.
-        if (config.provider != "openai-compatible" ||
-            "usage_metadata" !in config.features ||
-            "streaming" in config.features || config.maxOutputTokens <= 0)
+        if (config.provider != ModelProviderIds.OPENAI_COMPATIBLE ||
+            ModelFeatureIds.USAGE_METADATA !in config.features ||
+            ModelFeatureIds.STREAMING in config.features || config.maxOutputTokens <= 0)
             deny("MODEL_USAGE_PROVENANCE_UNAVAILABLE")
         val bounded = minOf(deadline, admittedDeadline)
         if (!clock.instant().isBefore(bounded)) deny("MODEL_DEADLINE_EXCEEDED")

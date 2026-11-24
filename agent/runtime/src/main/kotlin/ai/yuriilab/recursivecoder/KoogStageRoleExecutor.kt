@@ -104,8 +104,8 @@ class KoogStageRoleExecutor(
         // marker, NOT a grant to expose any tools through Koog.
         // Fake is the ONLY tested compatibility bridge. Do not silently use the
         // legacy read-only HTTP gateway with a new free-form role prompt.
-        if (request.model.provider != "fake" || request.model.modelId != "fake-v1" ||
-            request.model.features != setOf("tool_calls"))
+        if (request.model.provider != ModelProviderIds.FAKE || request.model.modelId != ModelProviderIds.FAKE_MODEL_ID ||
+            request.model.features != setOf(ModelFeatureIds.TOOL_CALLS))
             return terminal(StageRoleOutcome.Denied("MODEL_BRIDGE_UNSUPPORTED"),
                 StageRoleEventKind.DENIED, "MODEL_BRIDGE_UNSUPPORTED")
 

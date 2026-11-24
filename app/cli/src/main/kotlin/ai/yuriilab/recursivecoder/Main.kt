@@ -21,7 +21,7 @@ internal fun executeSession(requestPath: Path, delayMs: Long): Int {
         return 2
     }
     val provider = ModelConfig.from(request.model).provider
-    if (provider != "fake" && delayMs != 0L) {
+    if (provider != ModelProviderIds.FAKE && delayMs != 0L) {
         System.err.println("--fake-delay-ms is supported only for the fake provider")
         return 2
     }

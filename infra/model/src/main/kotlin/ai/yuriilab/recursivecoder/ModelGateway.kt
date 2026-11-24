@@ -16,8 +16,8 @@ import kotlinx.serialization.json.*
 /** Injection seam for the CLI, Koog agents, and deterministic offline tests. */
 object ModelGateways {
     fun create(provider: String, fakeDelayMs: Long = 0): ModelGateway = when (provider) {
-        "fake" -> FakeModel(fakeDelayMs)
-        "openai-compatible" -> OpenAICompatibleGateway()
+        ModelProviderIds.FAKE -> FakeModel(fakeDelayMs)
+        ModelProviderIds.OPENAI_COMPATIBLE -> OpenAICompatibleGateway()
         else -> object : ModelGateway {
             override fun negotiate(
                 config: ModelConfig, cancellation: Cancellation, deadline: Instant
@@ -35,11 +35,11 @@ object ModelGateways {
 /** The bootstrap fake remains network-free and produces the same trusted observations. */
 class FakeModel(private val delayMs: Long = 0) : ModelGateway {
     override fun negotiate(config: ModelConfig, cancellation: Cancellation, deadline: Instant): GatewayCapabilities {
-        if (config.provider != "fake" || config.modelId != "fake-v1" ||
-            config.features != setOf("tool_calls"))
+        if (config.provider != ModelProviderIds.FAKE || config.modelId != ModelProviderIds.FAKE_MODEL_ID ||
+            config.features != setOf(ModelFeatureIds.TOOL_CALLS))
             throw Refused("UNSUPPORTED_MODEL", "provider", "Unsupported fake model configuration")
         cancellation.check(deadline)
-        return GatewayCapabilities(setOf("tool_calls"), config.contextTokens, config.maxOutputTokens)
+        return GatewayCapabilities(setOf(ModelFeatureIds.TOOL_CALLS), config.contextTokens, config.maxOutputTokens)
     }
 
     override fun next(
@@ -66,14 +66,14 @@ class OpenAICompatibleGateway(
     private val lookupCredential: (String) -> String? = System::getenv
 ) : ModelGateway {
     private val clients = ConcurrentHashMap<Long, HttpClient>()
-    private val supported = setOf("tool_calls", "tool_choice", "streaming",
-        "structured_outputs", "usage_metadata", "error_metadata")
+    private val supported = setOf(ModelFeatureIds.TOOL_CALLS, ModelFeatureIds.TOOL_CHOICE, ModelFeatureIds.STREAMING,
+        ModelFeatureIds.STRUCTURED_OUTPUTS, ModelFeatureIds.USAGE_METADATA, ModelFeatureIds.ERROR_METADATA)
     private val limitBytes = 1_048_576
 
     override fun negotiate(config: ModelConfig, cancellation: Cancellation, deadline: Instant): GatewayCapabilities {
         if (config.modelId in setOf(".", ".."))
             throw Refused("UNSUPPORTED_MODEL", "provider", "Invalid model identifier")
-        if (config.provider != "openai-compatible" || "tool_calls" !in config.features ||
+        if (config.provider != ModelProviderIds.OPENAI_COMPATIBLE || ModelFeatureIds.TOOL_CALLS !in config.features ||
             !supported.containsAll(config.features) || config.maxOutputTokens >= config.contextTokens)
             throw Refused("UNSUPPORTED_MODEL", "provider", "Unsupported model feature selection")
         val response = send(client(config), request(config, "models/" + encode(config.modelId), "GET", null),
@@ -98,13 +98,13 @@ class OpenAICompatibleGateway(
         config: ModelConfig, task: Path, observed: Pair<Int, String>?,
         cancellation: Cancellation, deadline: Instant, allowRetry: Boolean
     ): ModelTurn {
-        val stream = "streaming" in config.features
+        val stream = ModelFeatureIds.STREAMING in config.features
         val body = completionRequest(config, task, observed, stream)
         val response = send(client(config), request(config, "chat/completions", "POST", body),
             config, cancellation, deadline, retryable = allowRetry && observed == null)
         val parsed = if (stream) parseStream(response.body) else parseCompletion(response.body)
         val decision = parseDecision(parsed, task, observed)
-        if ("usage_metadata" in config.features && parsed.usage == null) throw invalidResponse()
+        if (ModelFeatureIds.USAGE_METADATA in config.features && parsed.usage == null) throw invalidResponse()
         cancellation.check(deadline)
         return ModelTurn(decision, parsed.usage, response.attempts, response.status)
     }
@@ -224,7 +224,7 @@ class OpenAICompatibleGateway(
         put("max_tokens", config.maxOutputTokens)
         config.temperature?.let { put("temperature", it) }
         put("stream", streaming)
-        if (streaming && "usage_metadata" in config.features)
+        if (streaming && ModelFeatureIds.USAGE_METADATA in config.features)
             put("stream_options", buildJsonObject { put("include_usage", true) })
         put("messages", buildJsonArray {
             add(buildJsonObject {
@@ -257,8 +257,8 @@ class OpenAICompatibleGateway(
                     })
                 })
             })
-            if ("tool_choice" in config.features) put("tool_choice", "required")
-        } else if ("structured_outputs" in config.features) {
+            if (ModelFeatureIds.TOOL_CHOICE in config.features) put("tool_choice", "required")
+        } else if (ModelFeatureIds.STRUCTURED_OUTPUTS in config.features) {
             put("response_format", buildJsonObject {
                 put("type", "json_schema")
                 put("json_schema", buildJsonObject {
