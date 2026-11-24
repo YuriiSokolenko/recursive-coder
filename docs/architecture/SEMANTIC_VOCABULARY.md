@@ -31,10 +31,17 @@ attempt. Task mapping still projects a claimed Int attempt to the scheduler
 wire source, reparsing the complete envelope. The task counter's overflow
 protection and zero-valued unclaimed state are separate domain concerns.
 
-Existing literal admission tests cover unsupported sources, invalid attempts,
-Long.MAX_VALUE and denial precedence. Focused compatibility tests pin the
-new constant values and reparse the actual mapper output for first, repeated
-and maximum Int attempts, including rejection of a zero attempt.
+The independent literal tests in `SessionPolicyUnitTest` cover unsupported
+sources and `SessionPolicyCoverageUnitTest` covers invalid attempts,
+`Long.MAX_VALUE` and denial precedence (see
+`schedulerAttemptMustBePositive`, `cliAttemptMustBeExactlyOne` and
+`schedulerAttemptDenialsPreserveResumePreflightPrecedence`).
+`SessionProtocolTest` pins the new constant values. `TaskRequestMapperUnitTest`
+reparses actual mapper output for first, repeated and maximum Int attempts,
+and verifies that nonpositive attempts fail with the exact validation diagnostic.
+The shared first-attempt constant is the protocol minimum; CLI currently admits
+only that attempt. If source-specific admission bounds diverge, keep them in
+admission policy rather than changing the protocol minimum.
 
 ## Remaining work
 

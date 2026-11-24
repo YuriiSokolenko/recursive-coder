@@ -14,7 +14,13 @@ object SessionProtocol {
     // The schema also reserves "api"; declaring a value here does not admit it.
     const val INVOCATION_SOURCE_CLI: String = "cli"
     const val INVOCATION_SOURCE_SCHEDULER: String = "scheduler"
-    /** First valid protocol attempt; an unclaimed Task has a separate zero-based counter. */
+    /**
+     * First valid protocol attempt: the envelope minimum and the only attempt
+     * currently admitted for CLI. Scheduler admits this attempt and later ones.
+     * If source-specific admission rules diverge, define those bounds in the
+     * admission policy rather than changing the protocol minimum.
+     * An unclaimed Task has a separate zero-based counter.
+     */
     const val FIRST_INVOCATION_ATTEMPT: Long = 1L
 
     fun supports(version: String): Boolean = version == VERSION
