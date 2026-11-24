@@ -36,7 +36,7 @@ class TaskService(
     fun list(): List<Task> = queries.list()
     fun show(id: String): Task = queries.show(id)
     fun isPaused(): Boolean = queries.isPaused()
-    fun enqueue(requestJson: String, priority: Int = 50, dependencies: List<String> = emptyList()): Task =
+    fun enqueue(requestJson: String, priority: Int = TaskPriority.DEFAULT, dependencies: List<String> = emptyList()): Task =
         enqueueUseCase(requestJson, priority, dependencies)
     fun replaceDependencies(id: String, dependencies: List<String>): Task =
         replaceDependenciesUseCase(id, dependencies)

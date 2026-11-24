@@ -9,7 +9,7 @@ import java.time.Clock
 interface EnqueueTaskUseCase {
     operator fun invoke(
         requestJson: String,
-        priority: Int = 50,
+        priority: Int = TaskPriority.DEFAULT,
         dependencies: List<String> = emptyList()
     ): Task
 }
@@ -26,7 +26,7 @@ class DefaultEnqueueTaskUseCase(
         val submission = TaskRequestMapper.submission(requestJson)
         val id = submission.taskId
         require(safeTaskId.matches(id)) { "Unsafe task ID" }
-        require(priority in 0..100) { "Priority must be 0..100" }
+        require(priority in TaskPriority.MIN..TaskPriority.MAX) { "Priority must be 0..100" }
         return repository.update { queue ->
             val next = TaskPolicy.enqueue(
                 queue, id, submission.template, priority, dependencies, clock.instant().toString()

@@ -218,7 +218,7 @@ private class EnqueueTask(private val tasks: TasksCommand) : CliktCommand(name =
         }.multiple()
 
     override fun run() {
-        val priority = once(priorityOptions, "--priority", 50)
+        val priority = once(priorityOptions, "--priority", TaskPriority.DEFAULT)
         val dependencies = once(dependencyOptions, "--depends-on", emptyList())
         if (!requestPath.isAbsolute || !Files.isRegularFile(requestPath) ||
             Files.size(requestPath) > 262144

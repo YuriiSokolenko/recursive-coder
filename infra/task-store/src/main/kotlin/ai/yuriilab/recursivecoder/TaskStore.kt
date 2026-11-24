@@ -99,42 +99,42 @@ class TaskStore(directory: Path) : TaskRepository {
         require(Files.size(snapshot) <= 64L * 1024 * 1024) { "Task store is too large" }
         return try {
             val obj = Json.parseToJsonElement(Files.readString(snapshot)).jsonObject
-            require(obj.getValue("version").jsonPrimitive.int == 1)
-            val tasks = obj.getValue("tasks").jsonArray.map { element ->
+            require(obj.getValue(TaskStoreFields.VERSION).jsonPrimitive.int == TASK_STORE_VERSION)
+            val tasks = obj.getValue(TaskStoreFields.TASKS).jsonArray.map { element ->
                 val item = element.jsonObject
-                val transitions = item.getValue("transitions").jsonArray.map { event ->
+                val transitions = item.getValue(TaskStoreFields.TRANSITIONS).jsonArray.map { event ->
                     val step = event.jsonObject
                     TaskTransition(
-                        step.optionalText("from")?.let(TaskState::fromWire),
-                        TaskState.fromWire(step.getValue("to").jsonPrimitive.content),
-                        step.getValue("at").jsonPrimitive.content,
-                        step.getValue("attempt").jsonPrimitive.int,
-                        step.optionalText("sessionId"),
-                        step.optionalText("reason")
+                        step.optionalText(TaskStoreFields.FROM)?.let(TaskState::fromWire),
+                        TaskState.fromWire(step.getValue(TaskStoreFields.TO).jsonPrimitive.content),
+                        step.getValue(TaskStoreFields.AT).jsonPrimitive.content,
+                        step.getValue(TaskStoreFields.ATTEMPT).jsonPrimitive.int,
+                        step.optionalText(TaskStoreFields.SESSION_ID),
+                        step.optionalText(TaskStoreFields.REASON)
                     )
                 }
                 Task(
-                    id = item.getValue("id").jsonPrimitive.content,
-                    requestTemplate = item.getValue("requestTemplate").jsonPrimitive.content,
-                    dependencies = item.getValue("dependencies").jsonArray.map { it.jsonPrimitive.content },
-                    priority = item.getValue("priority").jsonPrimitive.int,
-                    state = TaskState.fromWire(item.getValue("state").jsonPrimitive.content),
-                    attempt = item.getValue("attempt").jsonPrimitive.int,
-                    sessionId = item.optionalText("sessionId"),
-                    lastResultStatus = item.optionalText("lastResultStatus")?.let(SessionOutcome::fromWire),
-                    reason = item.optionalText("reason"),
-                    queueOrder = item.getValue("queueOrder").jsonPrimitive.long,
-                    waitTurns = item.getValue("waitTurns").jsonPrimitive.long,
-                    preserveOrderOnResume = item["preserveOrderOnResume"]?.jsonPrimitive?.boolean ?: false,
-                    prunedTransitions = item["prunedTransitions"]?.jsonPrimitive?.long ?: 0,
+                    id = item.getValue(TaskStoreFields.ID).jsonPrimitive.content,
+                    requestTemplate = item.getValue(TaskStoreFields.REQUEST_TEMPLATE).jsonPrimitive.content,
+                    dependencies = item.getValue(TaskStoreFields.DEPENDENCIES).jsonArray.map { it.jsonPrimitive.content },
+                    priority = item.getValue(TaskStoreFields.PRIORITY).jsonPrimitive.int,
+                    state = TaskState.fromWire(item.getValue(TaskStoreFields.STATE).jsonPrimitive.content),
+                    attempt = item.getValue(TaskStoreFields.ATTEMPT).jsonPrimitive.int,
+                    sessionId = item.optionalText(TaskStoreFields.SESSION_ID),
+                    lastResultStatus = item.optionalText(TaskStoreFields.LAST_RESULT_STATUS)?.let(SessionOutcome::fromWire),
+                    reason = item.optionalText(TaskStoreFields.REASON),
+                    queueOrder = item.getValue(TaskStoreFields.QUEUE_ORDER).jsonPrimitive.long,
+                    waitTurns = item.getValue(TaskStoreFields.WAIT_TURNS).jsonPrimitive.long,
+                    preserveOrderOnResume = item[TaskStoreFields.PRESERVE_ORDER_ON_RESUME]?.jsonPrimitive?.boolean ?: false,
+                    prunedTransitions = item[TaskStoreFields.PRUNED_TRANSITIONS]?.jsonPrimitive?.long ?: 0,
                     transitions = transitions
                 )
             }
             validateStoredTasks(tasks)
             TaskQueue(
-                paused = obj.getValue("paused").jsonPrimitive.boolean,
-                nextOrder = obj.getValue("nextOrder").jsonPrimitive.long,
-                dispatches = obj["dispatches"]?.jsonPrimitive?.long ?: 0,
+                paused = obj.getValue(TaskStoreFields.PAUSED).jsonPrimitive.boolean,
+                nextOrder = obj.getValue(TaskStoreFields.NEXT_ORDER).jsonPrimitive.long,
+                dispatches = obj[TaskStoreFields.DISPATCHES]?.jsonPrimitive?.long ?: 0,
                 tasks = tasks
             )
         } catch (e: Exception) {
@@ -145,29 +145,29 @@ class TaskStore(directory: Path) : TaskRepository {
     private fun save(database: TaskQueue) {
         require(!Files.isSymbolicLink(temp)) { "Unsafe temporary task store path" }
         val payload = buildJsonObject {
-            put("version", 1); put("paused", database.paused); put("nextOrder", database.nextOrder)
-            put("dispatches", database.dispatches)
-            put("tasks", buildJsonArray {
+            put(TaskStoreFields.VERSION, TASK_STORE_VERSION); put(TaskStoreFields.PAUSED, database.paused); put(TaskStoreFields.NEXT_ORDER, database.nextOrder)
+            put(TaskStoreFields.DISPATCHES, database.dispatches)
+            put(TaskStoreFields.TASKS, buildJsonArray {
                 database.tasks.forEach { task ->
                     add(buildJsonObject {
-                        put("id", task.id); put("requestTemplate", task.requestTemplate)
-                        put("dependencies", buildJsonArray { task.dependencies.forEach { add(it) } })
-                        put("priority", task.priority); put("state", task.state.wire)
-                        put("attempt", task.attempt)
-                        put("sessionId", task.sessionId?.let(::JsonPrimitive) ?: JsonNull)
-                        put("lastResultStatus", task.lastResultStatus?.wire?.let(::JsonPrimitive) ?: JsonNull)
-                        put("reason", task.reason?.let(::JsonPrimitive) ?: JsonNull)
-                        put("queueOrder", task.queueOrder); put("waitTurns", task.waitTurns)
-                        put("preserveOrderOnResume", task.preserveOrderOnResume)
-                        put("prunedTransitions", task.prunedTransitions)
-                        put("transitions", buildJsonArray {
+                        put(TaskStoreFields.ID, task.id); put(TaskStoreFields.REQUEST_TEMPLATE, task.requestTemplate)
+                        put(TaskStoreFields.DEPENDENCIES, buildJsonArray { task.dependencies.forEach { add(it) } })
+                        put(TaskStoreFields.PRIORITY, task.priority); put(TaskStoreFields.STATE, task.state.wire)
+                        put(TaskStoreFields.ATTEMPT, task.attempt)
+                        put(TaskStoreFields.SESSION_ID, task.sessionId?.let(::JsonPrimitive) ?: JsonNull)
+                        put(TaskStoreFields.LAST_RESULT_STATUS, task.lastResultStatus?.wire?.let(::JsonPrimitive) ?: JsonNull)
+                        put(TaskStoreFields.REASON, task.reason?.let(::JsonPrimitive) ?: JsonNull)
+                        put(TaskStoreFields.QUEUE_ORDER, task.queueOrder); put(TaskStoreFields.WAIT_TURNS, task.waitTurns)
+                        put(TaskStoreFields.PRESERVE_ORDER_ON_RESUME, task.preserveOrderOnResume)
+                        put(TaskStoreFields.PRUNED_TRANSITIONS, task.prunedTransitions)
+                        put(TaskStoreFields.TRANSITIONS, buildJsonArray {
                             task.transitions.forEach { step ->
                                 add(buildJsonObject {
-                                    put("from", step.from?.wire?.let(::JsonPrimitive) ?: JsonNull)
-                                    put("to", step.to.wire); put("at", step.occurredAt)
-                                    put("attempt", step.attempt)
-                                    put("sessionId", step.sessionId?.let(::JsonPrimitive) ?: JsonNull)
-                                    put("reason", step.reason?.let(::JsonPrimitive) ?: JsonNull)
+                                    put(TaskStoreFields.FROM, step.from?.wire?.let(::JsonPrimitive) ?: JsonNull)
+                                    put(TaskStoreFields.TO, step.to.wire); put(TaskStoreFields.AT, step.occurredAt)
+                                    put(TaskStoreFields.ATTEMPT, step.attempt)
+                                    put(TaskStoreFields.SESSION_ID, step.sessionId?.let(::JsonPrimitive) ?: JsonNull)
+                                    put(TaskStoreFields.REASON, step.reason?.let(::JsonPrimitive) ?: JsonNull)
                                 })
                             }
                         })
@@ -217,3 +217,32 @@ internal class TaskStoreTestHooks {
 
 private fun JsonObject.optionalText(field: String): String? =
     this[field]?.takeUnless { it == JsonNull }?.jsonPrimitive?.content
+
+private const val TASK_STORE_VERSION = 1
+
+/** Private persistence fields, not the public task CLI contract. */
+/** Durable tasks.json v1 keys; independent of the CLI projection. */
+private object TaskStoreFields {
+    const val STATE = "state"
+    const val PRIORITY = "priority"
+    const val DEPENDENCIES = "dependencies"
+    const val ATTEMPT = "attempt"
+    const val PRUNED_TRANSITIONS = "prunedTransitions"
+    const val SESSION_ID = "sessionId"
+    const val LAST_RESULT_STATUS = "lastResultStatus"
+    const val REASON = "reason"
+    const val TRANSITIONS = "transitions"
+    const val FROM = "from"
+    const val TO = "to"
+    const val AT = "at"
+    const val VERSION = "version"
+    const val PAUSED = "paused"
+    const val NEXT_ORDER = "nextOrder"
+    const val DISPATCHES = "dispatches"
+    const val TASKS = "tasks"
+    const val ID = "id"
+    const val REQUEST_TEMPLATE = "requestTemplate"
+    const val QUEUE_ORDER = "queueOrder"
+    const val WAIT_TURNS = "waitTurns"
+    const val PRESERVE_ORDER_ON_RESUME = "preserveOrderOnResume"
+}
