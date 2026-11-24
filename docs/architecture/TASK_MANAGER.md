@@ -156,6 +156,27 @@ cover denial, contention, recovery, and stale-session fencing.
   128 structured transitions per task, plus the number pruned, while `list`
   and `show` omit request bodies. Previous attempt outputs remain in their
   separate attempt directories.
+- The persisted attempt counter is a nonnegative `Int`; `Int.MAX_VALUE`
+  is a valid final claim (issue #193), including its usual v1 request, owner
+  and output directory. Reconciliation moves exhausted queued tasks into
+  `needs-attention` with reason `attempt counter exhausted` before selection,
+  including while paused, and propagates dependency attention in the same
+  transaction. No dispatch is counted for exhaustion; other eligible tasks
+  remain schedulable. A final running attempt may finish normally; recovery
+  retains the interrupted owner and reason without replay. Retry at the limit
+  fails before mutation, regardless of whether the final attempt failed,
+  was cancelled or requires attention. For retry-eligible states, exhaustion
+  takes precedence over dependency attention, even in legacy snapshots.
+  Use a new task identity for further work; the counter is never reset or
+  wrapped. To unblock dependents that have never been claimed (`attempt == 0`),
+  enqueue a replacement prerequisite and update their dependencies using
+  the programmatic `ReplaceTaskDependenciesUseCase` or
+  `TaskService.replaceDependencies` (not a CLI command). They become ready
+  when their new prerequisites succeed. Otherwise cancel the affected
+  dependent tasks and enqueue replacements with new identities and the
+  corrected dependency graph, after reconciling any prior attempt effects.
+  Retrying the exhausted prerequisite cannot unblock its dependents.
+  No store or protocol migration is required.
 
 ## Ordering, durability, and recovery
 
