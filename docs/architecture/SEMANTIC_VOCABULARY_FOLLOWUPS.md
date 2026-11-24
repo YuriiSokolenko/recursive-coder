@@ -24,12 +24,12 @@ or any child complete solely because this branch exists.
 
 The architecture gate rejected changes to three SHA-256-pinned sources:
 `SessionRuntime.kt`, `TrustedRunningBoundaryPolicy.kt` and
-`DurableSessionEventLedger.kt`. Their exact bytes are restored to the dev
-baseline. The existing reviewed source hashes, allowlist, and verifier are
-unchanged. Retained literals in these sources and the separately pinned
-`DurableRuntimeAcceptedRunningHost.kt` (event type and graph metadata) are
-intentional until #207 establishes independently reviewed replacement controls.
-This also preserves the ledger's explicit authorization allowlists.
+`DurableSessionEventLedger.kt`. PR #206 restored their exact bytes and retained the original pins. The separate
+#207 candidate reintroduces the literal-only substitutions in these files,
+`DurableRuntimeAcceptedRunningHost.kt` and `DurableAcceptedRunningHandoff.kt`.
+The ledger's explicit authorization allowlists remain explicit and unchanged in
+membership. The candidate must not be merged until independent review approves
+the replacement controls and CI passes; see [Trusted C3 review and replacement](TRUSTED_C3_REVIEW.md).
 
 ## Changed-file inventory
 
@@ -54,7 +54,11 @@ architecture graph/build-script checks, dependency-verification guard, JavaScrip
 protocol validator, StageGraphContracts, StageGraphPolicy, StageRoleLimits,
 RecursiveGraphPolicy, and task/journal contracts and adapters. Their existing
 typed values, external identifiers and independent oracle literals were retained
-where no shared semantic replacement was justified.
+where no shared semantic replacement was justified. A later targeted audit
+of all 84 production Kotlin sources found two remaining CLI event emissions
+and the C3 literals addressed by #207. The checkpoint binding's graphId key
+remains codec-local, distinct from event metadata. This is not a claim that
+all unrelated diagnostics, numbers, or cross-language tooling have been audited.
 
 ## Review follow-up
 
@@ -62,8 +66,7 @@ The explicit event metadata keys in `SessionCheckpointStore`, C1 event emission
 in `DurableRuntimeCreatedAcceptedHost`, stage readiness in `StageGraphPolicy`
 and `RecursiveGraphScheduler`, and sandbox denials in
 `LinuxStageGitBaselineReconciler` use their vocabulary owners. Checkpoint
-binding fields are distinct from event metadata and remain local. The C3 host
-emitter is excluded under #207. Tool invocation denials `FORGED_TOOL_ID` and
+binding fields are distinct from event metadata and remain local. The C3 host emitter is migrated only in the separate #207 candidate. Tool invocation denials `FORGED_TOOL_ID` and
 `TOOL_QUOTA_EXCEEDED` belong to `ToolDenialCodes`.
 
 ## Compatibility and verification

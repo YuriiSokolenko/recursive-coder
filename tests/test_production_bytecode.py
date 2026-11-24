@@ -35,6 +35,27 @@ class ProductionBytecodeGateTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return self.classes / "Example.class"
 
+    def test_c3_compiler_emitted_calls_and_handles_are_rejected(self):
+        source = self.module / "C3Fixture.java"
+        source.write_text("""
+            package ai.yuriilab.recursivecoder;
+            interface TrustedSessionRunningHost { void publishAcceptedRunning(); }
+            class C3Fixture {
+                void direct(TrustedSessionRunningHost host) { host.publishAcceptedRunning(); }
+                Runnable indirect(TrustedSessionRunningHost host) {
+                    return host::publishAcceptedRunning;
+                }
+            }
+        """, encoding="utf-8")
+        result = subprocess.run(["javac", "-d", str(self.classes), str(source)],
+                                text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        cls = self.classes / "ai/yuriilab/recursivecoder/C3Fixture.class"
+        issues = violations_for_class(cls, "core/tasks")
+        self.assertTrue(any("Unapproved C3 JVM call" in x and
+                            "TrustedSessionRunningHost.publishAcceptedRunning" in x
+                            for x in issues), issues)
+
     def test_c3_jvm_direct_and_method_handle_calls_are_denied(self):
         package = "ai/yuriilab/recursivecoder/"
         target = (package + "TrustedSessionRunningHost", "publishAcceptedRunning", "()V")
