@@ -356,6 +356,69 @@ class ArchitectureGraphTest {
     }
 
     @Test
+    fun unknownForbiddenEdgeIsReportedOnceWithoutHidingOtherViolations() {
+        val allowed = mapOf<String, Set<String>>(
+            ":core:owner" to emptySet(),
+            ":infra:known" to emptySet(),
+        )
+        val edges = listOf(
+            ProjectEdge(":core:owner", "implementation", ":missing"),
+            ProjectEdge(":core:owner", "testImplementation", ":infra:known"),
+        )
+        val external = listOf(
+            ExternalEdge(":core:owner", "implementation", "io.ktor", "ktor"),
+        )
+        val violations = ArchitectureGraph.violations(allowed.keys, edges, external, allowed)
+        assertEquals(3, violations.size, violations.joinToString())
+        assertEquals(1, violations.count {
+            it.startsWith("Unknown project dependency target :core:owner:implementation -> :missing")
+        })
+        assertTrue(violations.any {
+            it.contains("include the module in settings.gradle.kts and update the architecture allowlist")
+        })
+        assertTrue(violations.any {
+            it.startsWith("Forbidden project dependency :core:owner:testImplementation -> :infra:known")
+        })
+        assertTrue(violations.any {
+            it.startsWith("Forbidden core framework dependency :core:owner:implementation -> io.ktor:ktor")
+        })
+        assertFalse(violations.any {
+            it.startsWith("Forbidden project dependency :core:owner:implementation -> :missing")
+        })
+        assertEquals(violations, ArchitectureGraph.violations(
+            allowed.keys.reversed(), edges.reversed(), external.reversed(), allowed,
+        ))
+    }
+
+    @Test
+    fun allowedButMissingTargetStillReportsAnUnknownTargetOnly() {
+        val allowed = mapOf(":known" to setOf(":missing"))
+        val violations = ArchitectureGraph.violations(
+            modules = listOf(":known"),
+            projectEdges = listOf(ProjectEdge(":known", "runtimeOnly", ":missing")),
+            externalEdges = emptyList(),
+            allowed = allowed,
+        )
+        assertEquals(listOf(
+            "Unknown project dependency target :known:runtimeOnly -> :missing " +
+                "(include the module in settings.gradle.kts or remove the dependency)",
+        ), violations)
+    }
+
+    @Test
+    fun knownForbiddenTargetKeepsItsAllowlistDiagnostic() {
+        val violations = ArchitectureGraph.violations(
+            modules = ArchitectureGraph.allowedProjectDependencies.keys,
+            projectEdges = listOf(ProjectEdge(":core:tasks", "implementation", ":infra:model")),
+            externalEdges = emptyList(),
+        )
+        assertEquals(listOf(
+            "Forbidden project dependency :core:tasks:implementation -> :infra:model " +
+                "(allowed: :core:contracts)",
+        ), violations)
+    }
+
+    @Test
     fun rejectsCoreFrameworkFamiliesWithoutResolvingThem() {
         val violations = ArchitectureGraph.violations(
             modules = listOf(":core:contracts", ":app:cli"),
