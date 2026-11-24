@@ -55,7 +55,7 @@ gradle.projectsEvaluated {
         modulePaths.set(modules.map { it.path })
         checkoutRoot.set(rootProject.rootDir.canonicalPath)
         gradleUserHomeRoot.set(gradle.gradleUserHomeDir.canonicalPath)
-        reviewedC3Sources.from(TrustedRunningOptInPolicy.approvedSourceSha256.keys.map {
+        reviewedC3Sources.from(TrustedRunningOptInPolicy.approvedSourcePaths.map {
             rootProject.file(it)
         })
         allowedModuleDependencies.set(

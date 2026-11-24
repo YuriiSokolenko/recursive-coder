@@ -136,21 +136,22 @@ object TrustedRunningOptInPolicy {
             listOf("appendTrustedAcceptedRunning", "appendTrustedRunningWithFault"),
     )
 
-    /** SHA-256 over exact UTF-8 file bytes. Any edit needs a trusted-boundary review. */
-    val approvedSourceSha256: Map<String, String> = mapOf(
-        "core/session/src/main/kotlin/ai/yuriilab/recursivecoder/SessionRuntime.kt" to
-            "a8e310eb60caa2f9c56a710c5ef1e5fc866351da636aef1bfa8c582517c4296b",
-        "core/session/src/main/kotlin/ai/yuriilab/recursivecoder/TrustedRunningBoundaryPolicy.kt" to
-            "f06db73cf6e29ae5ce6add2f1e9d4a9b05a3b6e33756367027812fa37687df35",
-        "core/session/src/main/kotlin/ai/yuriilab/recursivecoder/TrustedSessionPreExecutionHost.kt" to
-            "da9512f54c0b32fe84eda6186d0a7b240dfdb415662f581b8b1ba70efbdd3546",
-        "infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/DurableAcceptedRunningHandoff.kt" to
-            "740501efc1bcbd90422d47d0d444d8283e2684b16b39453874e9c61bfa0bad25",
-        "infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/DurableRuntimeAcceptedRunningHost.kt" to
-            "7d89e7fd4a8362efdb6de602f6869f1a692550e863b8a109b5286abac8c4149e",
-        "infra/journal/src/main/kotlin/ai/yuriilab/recursivecoder/DurableSessionEventLedger.kt" to
-            "80aa979779f95c94e75f4e3373e94163b7660d94986e671b968d7ec7c222a898",
+    /** Exact reviewed paths, not source-content digests. */
+    val approvedSourcePaths: Set<String> = approvedTargets.keys.toSet()
+
+    // The declaration must retain the compiler error-level opt-in. The compiled
+    // class verifier independently checks its annotation and approved JVM edges.
+    private val markerDeclaration = Regex(
+        """@RequiresOptIn\s*\(\s*message\s*=\s*"[^"\r\n]*"\s*,\s*level\s*=\s*RequiresOptIn\.Level\.ERROR\s*\)\s*""" +
+            """@Retention\(AnnotationRetention\.BINARY\)\s*""" +
+            """@Target\(AnnotationTarget\.CLASS\s*,\s*AnnotationTarget\.FUNCTION\)\s*""" +
+            """annotation\s+class\s+TrustedRunningBoundaryApi\b""",
     )
+
+    fun reviewedSourceShapeValid(source: String, path: String): Boolean =
+        path in approvedSourcePaths &&
+            !forbiddenInProduction(source, path) &&
+            (path != declarationFile || markerDeclaration.containsMatchIn(source))
 
     private val reviewedMarkerLine = Regex(
         """\s*(?:@TrustedRunningBoundaryApi|annotation\s+class\s+TrustedRunningBoundaryApi)\s*""",

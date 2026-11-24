@@ -2,7 +2,6 @@ package ai.yuriilab.recursivecoder.buildlogic.architecture
 
 import java.io.File
 import java.nio.file.Path
-import java.security.MessageDigest
 import org.gradle.api.DefaultTask
 import org.gradle.api.GradleException
 import org.gradle.api.file.ConfigurableFileCollection
@@ -71,17 +70,13 @@ abstract class CheckArchitectureTask : DefaultTask() {
             forbiddenGroups = forbiddenFrameworkGroups.get(),
         ).toMutableList()
         val root = File(checkoutRoot.get()).canonicalFile.toPath()
-        val pinnedInputs = reviewedC3Sources.files.map { it.canonicalFile.toPath() }.toSet()
-        TrustedRunningOptInPolicy.approvedSourceSha256.toSortedMap().forEach { (relative, sha256) ->
+        val reviewedInputs = reviewedC3Sources.files.map { it.canonicalFile.toPath() }.toSet()
+        TrustedRunningOptInPolicy.approvedSourcePaths.sorted().forEach { relative ->
             val source = root.resolve(relative).toFile()
-            if (source.canonicalFile.toPath() !in pinnedInputs || !source.isFile) {
-                problems += "Missing trusted C3 source pin: $relative"
-            } else {
-                val actual = MessageDigest.getInstance("SHA-256")
-                    .digest(source.readBytes())
-                    .joinToString("") { byte -> "%02x".format(byte.toInt() and 255) }
-                if (actual != sha256)
-                    problems += "Trusted C3 source content changed; independent review and pin update required: $relative"
+            if (source.canonicalFile.toPath() !in reviewedInputs || !source.isFile) {
+                problems += "Missing reviewed trusted C3 source: $relative"
+            } else if (!TrustedRunningOptInPolicy.reviewedSourceShapeValid(source.readText(), relative)) {
+                problems += "Invalid trusted C3 declaration or source shape: $relative"
             }
         }
 

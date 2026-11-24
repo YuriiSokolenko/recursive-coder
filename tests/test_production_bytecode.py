@@ -12,7 +12,8 @@ from zipfile import ZipFile
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 from check_production_bytecode import (
-    compiled_classes, validate_launch_scripts, validate_module_jar, violations_for_class
+    c3_boundary_violations, compiled_classes, validate_launch_scripts, validate_module_jar,
+    violations_for_class
 )
 
 
@@ -33,6 +34,48 @@ class ProductionBytecodeGateTest(unittest.TestCase):
                                 text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         return self.classes / "Example.class"
+
+    def test_c3_jvm_direct_and_method_handle_calls_are_denied(self):
+        package = "ai/yuriilab/recursivecoder/"
+        target = (package + "TrustedSessionRunningHost", "publishAcceptedRunning", "()V")
+        info = SimpleNamespace(name=package + "OrdinaryCaller", module="core/session",
+                               annotations=[], methods=[], interfaces=[],
+                               superclass="java/lang/Object", flags=0,
+                               method_references={target}, method_handle_references=set())
+        self.assertTrue(any("Unapproved C3 JVM call" in x for x in c3_boundary_violations(info)))
+        info.method_references = set()
+        info.method_handle_references = {target}
+        self.assertTrue(any("Unapproved C3 JVM call" in x for x in c3_boundary_violations(info)))
+        # A familiar owner in the wrong module is not approved.
+        info.name = package + "DefaultRunSessionUseCase"
+        info.module = "core/tasks"
+        self.assertTrue(any("unapproved module" in x for x in c3_boundary_violations(info)))
+
+    def test_c3_port_supertype_and_implementation_escape_are_denied(self):
+        package = "ai/yuriilab/recursivecoder/"
+        port = package + "TrustedSessionRunningHost"
+        marker = SimpleNamespace(name=package + "TrustedRunningBoundaryApi", values={})
+        info = SimpleNamespace(name=port, module="core/session", annotations=[marker],
+                               methods=[], interfaces=[], superclass="java/lang/Object",
+                               flags=0, method_references=set(), method_handle_references=set())
+        self.assertEqual([], c3_boundary_violations(info))
+        info.interfaces = ["example/Unmarked"]
+        self.assertTrue(any("unexpected supertype" in x for x in c3_boundary_violations(info)))
+        info.name = package + "UnmarkedWrapper"
+        info.annotations = []
+        info.interfaces = [port]
+        self.assertTrue(any("Unapproved C3 port implementation" in x
+                            for x in c3_boundary_violations(info)))
+
+    def test_c3_compiled_marker_cannot_be_removed_or_downgraded(self):
+        package = "ai/yuriilab/recursivecoder/"
+        info = SimpleNamespace(name=package + "TrustedRunningBoundaryApi", module="core/session",
+                               annotations=[], methods=[], interfaces=[],
+                               superclass="java/lang/Object", flags=0,
+                               method_references=set(), method_handle_references=set())
+        self.assertTrue(any("ERROR opt-in" in x for x in c3_boundary_violations(info)))
+        info.name = package + "DefaultRunSessionUseCase"
+        self.assertTrue(any("method markers" in x for x in c3_boundary_violations(info)))
 
     def test_kotlin_class_literal_equivalent_is_caught_at_jvm_level(self):
         cls = self.compile("""
@@ -167,6 +210,8 @@ class ProductionBytecodeGateTest(unittest.TestCase):
 
     def test_kotlin_callable_reflection_is_denied_but_metadata_is_allowed(self):
         info = SimpleNamespace(
+            name="Example", module="core/tasks", annotations=[], methods=[],
+            interfaces=[], superclass="java/lang/Object", flags=0,
             references={"kotlin/reflect/KClass"},
             method_references={("kotlin/reflect/KCallable", "call",
                                 "([Ljava/lang/Object;)Ljava/lang/Object;")},

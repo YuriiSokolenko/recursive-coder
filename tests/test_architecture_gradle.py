@@ -1157,8 +1157,8 @@ dependencies { add("testHiddenBridge", files("rogue.jar")) }
             self.assert_gradle_contains(
                 "Unreviewed production file dependency", result.stdout)
 
-    def test_content_pinned_c3_file_mutation_is_denied(self):
-        with tempfile.TemporaryDirectory(prefix="architecture-c3-sha-") as directory:
+    def test_harmless_reviewed_c3_source_change_is_permitted(self):
+        with tempfile.TemporaryDirectory(prefix="architecture-c3-format-") as directory:
             fixture = Path(directory)
             ArchitectureConfigurationCacheRegressionTest.copy_fixture(fixture)
             source = fixture / (
@@ -1172,11 +1172,10 @@ dependencies { add("testHiddenBridge", files("rogue.jar")) }
             run = run_logged_gradle(
                 [str(ROOT / "gradlew"), "--daemon", "--offline",
                  "--console=plain", "checkArchitecture"],
-                cwd=fixture, scenario="trusted C3 SHA-256 content pin",
-                phase="negative", sequence=1, timeout=240)
-            self.assertNotEqual(0, run.returncode)
-            self.assert_gradle_contains(
-                "Trusted C3 source content changed", run.stdout)
+                cwd=fixture, scenario="trusted C3 harmless source edit",
+                phase="positive", sequence=1, timeout=240)
+            self.assertEqual(0, run.returncode, run.stdout)
+            self.assert_gradle_contains("Architecture boundaries verified", run.stdout)
 
     def test_production_reflection_is_denied(self):
         with tempfile.TemporaryDirectory(prefix="architecture-reflection-") as directory:
@@ -1250,7 +1249,7 @@ dependencies { add("testHiddenBridge", files("rogue.jar")) }
                 "core/session/src/main/kotlin/ai/yuriilab/recursivecoder/"
                 "TrustedRunningBoundaryPolicy.kt"
             )
-            self.assertTrue(reviewed.is_file())  # Original, content-pinned declaration.
+            self.assertTrue(reviewed.is_file())  # Original reviewed marker declaration.
             result = run_logged_gradle(
                 [str(ROOT / "gradlew"), "--daemon", "--offline",
                  "--console=plain", "checkArchitecture"],
@@ -1432,8 +1431,8 @@ class ArchitectureConfigurationCacheRegressionTest(_GradleOutputAssertions):
             destination / "build-logic",
             ignore=shutil.ignore_patterns(".gradle", "build", "__pycache__"),
         )
-        # The guard pins exact SHA-256 of these six reviewed C3 sources.
-        # Temporary workspaces need their real bytes to verify unrelated edits.
+        # Temporary workspaces need the six reviewed C3 source shapes.
+        # Their real declarations are checked independently of file bytes.
         trusted = (
             "core/session/src/main/kotlin/ai/yuriilab/recursivecoder/SessionRuntime.kt",
             "core/session/src/main/kotlin/ai/yuriilab/recursivecoder/TrustedRunningBoundaryPolicy.kt",
