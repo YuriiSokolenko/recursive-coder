@@ -33,6 +33,15 @@ class TaskStore(directory: Path) : TaskRepository {
      */
     @Volatile internal var directorySyncTestHook: ((Path) -> Unit)? = null
 
+    /** Test-only observation point immediately before the real OS store lock. */
+    @Volatile internal var beforeStoreLockAcquisitionTestHook: (() -> Unit)? = null
+
+    /**
+     * Test-only fail-only seam after the temporary snapshot is forced and closed,
+     * but before ATOMIC_MOVE. Nothing ensures it cannot silently skip the move.
+     */
+    @Volatile internal var atomicReplaceFailureTestHook: ((Path, Path) -> Nothing)? = null
+
     init {
         require(!Files.isSymbolicLink(this.directory)) { "Task store cannot be a symlink" }
         Files.createDirectories(this.directory)
@@ -49,6 +58,7 @@ class TaskStore(directory: Path) : TaskRepository {
         return mutex.withLock {
             require(!Files.isSymbolicLink(guardFile) && !Files.isSymbolicLink(snapshot))
             FileChannel.open(guardFile, StandardOpenOption.CREATE, StandardOpenOption.WRITE).use { channel ->
+                beforeStoreLockAcquisitionTestHook?.invoke()
                 channel.lock().use { operation(load()) }
             }
         }
@@ -184,6 +194,7 @@ class TaskStore(directory: Path) : TaskRepository {
             while (buffer.hasRemaining()) channel.write(buffer)
             channel.force(true)
         }
+        atomicReplaceFailureTestHook?.invoke(temp, snapshot)
         Files.move(temp, snapshot, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
         // Directory metadata fsync makes the rename durable. On Linux a failure
         // means a committed claim/finish could be lost after power loss, so it is
