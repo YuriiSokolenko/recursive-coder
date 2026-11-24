@@ -549,11 +549,21 @@ class LinuxStageGitBaselineReconciler internal constructor(
     /**
      * On success returns a clean new HEAD. The caller MUST persist the new
      * baseline in its fenced host snapshot before admitting another stage.
+     * The caller must keep both request collections stable while they are copied
+     * at entry (including their iteration order). Copying is not synchronization;
+     * the caller must arrange exclusive ownership or external synchronization
+     * during capture. Later caller mutations cannot affect this invocation.
      */
     fun reconcile(request: StageGitReconciliationRequest): StageGitReconciliationResult {
         var updatedRef = false
         var index: Path? = null
         try {
+            // Accepted entries and map keys/values contain only immutable values.
+            // Preserve the supplied iteration order; never consult caller collections again.
+            val snapshot = request.copy(
+                acceptedFiles = request.acceptedFiles.toList(),
+                frozenArtifacts = request.frozenArtifacts.toMap()
+            )
             val real = canonicalRoot()
             check(lockDirectory.isAbsolute && !Files.isSymbolicLink(lockDirectory),
                 WorkspaceDenialCodes.WORKSPACE_LOCK_UNAVAILABLE)
@@ -568,11 +578,11 @@ class LinuxStageGitBaselineReconciler internal constructor(
                 val lease = try { channel.tryLock() } catch (_: Exception) { null }
                 check(lease != null, WorkspaceDenialCodes.WORKSPACE_LOCKED)
                 requireNotNull(lease).use {
-                    val (before, contents) = preflight(real, request)
+                    val (before, contents) = preflight(real, snapshot)
                     index = Files.createTempFile(locks, "stage-git-index-", ".tmp")
                     Files.delete(requireNotNull(index))
-                    git(real, listOf("read-tree", request.expectedHead), index = index)
-                    for (item in request.acceptedFiles.sortedBy { it.path }) {
+                    git(real, listOf("read-tree", snapshot.expectedHead), index = index)
+                    for (item in snapshot.acceptedFiles.sortedBy { it.path }) {
                         val oid = git(real, listOf("hash-object", "-w", "--stdin"),
                             contents.getValue(item.path).bytes)
                         check(gitObjectId.matches(oid), "INVALID_GIT_OBJECT")
@@ -589,18 +599,18 @@ class LinuxStageGitBaselineReconciler internal constructor(
                     val tree = git(real, listOf("write-tree"), index = index)
                     check(gitObjectId.matches(tree), "INVALID_GIT_TREE")
                     val commit = git(real, listOf("commit-tree", tree,
-                        "-p", request.expectedHead, "-m",
-                        "Recursive Coder accepted " + request.actorRole.name.lowercase() + " stage"))
+                        "-p", snapshot.expectedHead, "-m",
+                        "Recursive Coder accepted " + snapshot.actorRole.name.lowercase() + " stage"))
                     check(gitObjectId.matches(commit), "INVALID_GIT_COMMIT")
-                    verifyFacts(real, request, before)
+                    verifyFacts(real, snapshot, before)
                     // The test-only observer can simulate an external actor
                     // moving the ref before our compare-and-swap. That observer
                     // does not grant any capability to the model or CLI.
                     testObserver?.at(StageGitTestCheckpoint.BEFORE_REF_UPDATE)
                     // From here the ref may have moved, even if Git reports failure.
                     updatedRef = true
-                    git(real, listOf("update-ref", "refs/heads/" + request.branch,
-                        commit, request.expectedHead))
+                    git(real, listOf("update-ref", "refs/heads/" + snapshot.branch,
+                        commit, snapshot.expectedHead))
                     // Simulate the critical crash window: HEAD moved but the
                     // real index has not yet been aligned with the new commit.
                     testObserver?.at(StageGitTestCheckpoint.AFTER_REF_UPDATE)
@@ -609,15 +619,15 @@ class LinuxStageGitBaselineReconciler internal constructor(
                     git(real, listOf("read-tree", "--reset", commit))
                     check(git(real, listOf("rev-parse", "HEAD")) == commit &&
                         status(real).isEmpty(), LinuxStageGitBaselineReconcilerDiagnosticCodes.UNCERTAIN_GIT_HANDOFF)
-                    for ((path, hash) in request.frozenArtifacts)
+                    for ((path, hash) in snapshot.frozenArtifacts)
                         check(digest(read(real, path).bytes) == hash,
                             LinuxStageGitBaselineReconcilerDiagnosticCodes.UNCERTAIN_GIT_HANDOFF)
-                    for (item in request.acceptedFiles)
+                    for (item in snapshot.acceptedFiles)
                         check(digest(read(real, item.path,
                             requireCanonicalMode = true).bytes) == item.sha256,
                             LinuxStageGitBaselineReconcilerDiagnosticCodes.UNCERTAIN_GIT_HANDOFF)
                     return StageGitReconciliationResult.Committed(
-                        request.expectedHead, commit)
+                        snapshot.expectedHead, commit)
                 }
             }
         } catch (error: Reject) {

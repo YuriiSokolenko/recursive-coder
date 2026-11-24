@@ -97,7 +97,7 @@ unit and integration tests live in the corresponding module's
 | `infra/workspace/TrustedWriteRuntime.kt` | `CHECK_OUTPUT_LIMIT` | Migrated to local owner | `TrustedWriteRuntimeDiagnosticCodes.CHECK_OUTPUT_LIMIT` | Not shared | `TrustedWriteRuntimeDiagnosticCodesUnitTest.exactDiagnosticCodes` (unit) |
 | `infra/workspace/TrustedWriteRuntime.kt` | `CHECK_OUTPUT_UNAVAILABLE` | Migrated to local owner | `TrustedWriteRuntimeDiagnosticCodes.CHECK_OUTPUT_UNAVAILABLE` | Not shared | `TrustedWriteRuntimeDiagnosticCodesUnitTest.exactDiagnosticCodes` (unit) |
 | `infra/workspace/LinuxStageGitBaselineReconciler.kt` | `GIT_BASELINE_TIMEOUT` | Migrated to local owner | `LinuxStageGitBaselineReconcilerDiagnosticCodes.GIT_BASELINE_TIMEOUT` | Not shared | `LinuxStageGitBaselineReconcilerDiagnosticCodesUnitTest.exactDiagnosticCodes` (unit) |
-| `infra/workspace/LinuxStageGitBaselineReconciler.kt` | `INVALID_STAGE_PATH` | Migrated to local owner | `LinuxStageGitBaselineReconcilerDiagnosticCodes.INVALID_STAGE_PATH` | Not shared | `LinuxStageGitBaselineReconcilerDiagnosticCodesUnitTest.exactDiagnosticCodes` (unit) and `LinuxStageGitBaselineReconcilerTest.invalidDeclaredPathAtPostCasReadbackRetainsExactDenial` (integration) |
+| `infra/workspace/LinuxStageGitBaselineReconciler.kt` | `INVALID_STAGE_PATH` | Migrated to local owner | `LinuxStageGitBaselineReconcilerDiagnosticCodes.INVALID_STAGE_PATH` | Not shared | `LinuxStageGitBaselineReconcilerDiagnosticCodesUnitTest.exactDiagnosticCodes` (unit); historical post-CAS syntax oracle replaced in #220 (see below) |
 | `infra/workspace/LinuxStageGitBaselineReconciler.kt` | `UNSAFE_STAGE_FILE_MODE` | Migrated to local owner | `LinuxStageGitBaselineReconcilerDiagnosticCodes.UNSAFE_STAGE_FILE_MODE` | Not shared | `LinuxStageGitBaselineReconcilerDiagnosticCodesUnitTest.exactDiagnosticCodes` (unit) |
 | `infra/workspace/LinuxStageGitBaselineReconciler.kt` | `GIT_COMMAND_INTERRUPTED` | Migrated to local owner | `LinuxStageGitBaselineReconcilerDiagnosticCodes.GIT_COMMAND_INTERRUPTED` | Not shared | `LinuxStageGitBaselineReconcilerDiagnosticCodesUnitTest.exactDiagnosticCodes` (unit) |
 | `infra/workspace/LinuxStageGitBaselineReconciler.kt` | `GIT_BASELINE_INTERRUPTED` | Migrated to local owner | `LinuxStageGitBaselineReconcilerDiagnosticCodes.GIT_BASELINE_INTERRUPTED` | Not shared | `LinuxStageGitBaselineReconcilerDiagnosticCodesUnitTest.exactDiagnosticCodes` (unit) |
@@ -125,18 +125,59 @@ unit and integration tests live in the corresponding module's
 | --- | --- | --- | --- | --- | --- |
 | `infra/workspace/LinuxStageGitBaselineReconciler.kt` | `UNSAFE_STAGE_PATH` | Intentionally retained | Existing private constant; secure traversal/path safety, not syntax | Not shared | `LinuxStageGitBaselineReconcilerTest.validDeclaredPathWithMissingIntermediateDirectoryIsUnsafe` (integration) |
 
-The two path behavior tests exercise different predicates. A valid path with
-a missing intermediate directory reaches the secure traversal check before
-mutation. For the syntax guard, a regular malformed request is rejected by
-earlier preflight; the test uses the existing post-CAS observer to simulate
-host-side drift in the supplied mutable frozen-path map after preflight.
-This relies on existing caller-owned request collection aliasing; the
-reconciler does not snapshot the collections at entry. Follow-up
-[#220](https://github.com/YuriiSokolenko/recursive-coder/issues/220)
-tracks defensive snapshots and revisiting this oracle and guard reachability.
-The final readback must reject the invalid path and report reconciliation
-required, not a clean commit. No production test seam or authorization
-change is introduced.
+### Follow-up #220: request snapshots and path-guard reachability
+
+At the #218 merge baseline, the syntax integration oracle depended on a
+caller mutating the frozen-path map after CAS. #220 intentionally removes
+that aliasing: accepted-stage reconciliation copies the list and ordered
+map before canonical-root, lease or preflight validation and uses only the
+captured request for preflight, object construction, re-verification, ref
+CAS and final readback. List elements, map keys and values are immutable.
+No caller mutation is permitted during capture; copying does not make
+concurrent writes safe or provide a linearizable multi-collection snapshot.
+
+For stable inputs, preflight still checks baseline syntax, change-set
+cardinality/uniqueness and overlap, role authorization and frozen syntax/hash
+before Git identity, status, digest and mode checks in the original order.
+No authorization grant, receipt authentication, filesystem guard, ref CAS,
+exception classification or post-CAS quarantine rule is changed.
+
+The private `read` syntax guard cannot be reached with a malformed path via
+`reconcile` now: all accepted paths must pass authorization (whose first
+predicate is `validDeclaredPath`) and frozen paths pass the same syntax check
+in preflight; strings and the private collections cannot drift afterwards.
+Keep the guard as defense in depth, not a public test seam. The former
+`invalidDeclaredPathAtPostCasReadbackRetainsExactDenial` test is intentionally
+superseded by before/after-CAS collection drift regressions, an exact
+`INVALID_STAGE_CHANGESET` preflight behavior test for malformed accepted and
+frozen paths, and the existing independent literal unit oracle for
+`INVALID_STAGE_PATH`. The unit oracle pins spelling, not guard execution.
+The separate valid-path missing-directory behavior test still reaches secure
+traversal and asserts `UNSAFE_STAGE_PATH`.
+
+The same `read` guard and the private `withFailedWriteParent` guard also
+serve `recoverFailedDeveloper`. Stable recovery inputs pass initial
+authorization or frozen-path validation before reaching either guard.
+However, recovery currently aliases `request.files` and
+`request.frozenArtifacts`; those collections can still drift after evidence
+validation. In addition, `StageGitUnacceptedFile.beforeBytes` is a mutable
+array retained through baseline blob verification, physical restoration,
+post-restore checks and audit hashing. A shallow list copy would not isolate
+those bytes. This analogous gap is tracked in
+[#221](https://github.com/YuriiSokolenko/recursive-coder/issues/221);
+recovery behavior is intentionally unchanged in #220. The read-only
+`inspectCleanBaseline` and its Boolean wrapper take immutable strings, not
+caller collections.
+
+The existing Linux integration observer is after the second verification
+at BEFORE_REF_UPDATE, or after the CAS at AFTER_REF_UPDATE; it is not a seam
+between preflight and object construction. The regression tests exercise
+both existing checkpoints, literal outcomes, exact committed paths/content,
+parent/ref integrity and final readback mode failure even when Git status is
+clean. Coverage of earlier stages follows from the single private snapshot
+and source review, not a new public or internal observer. Existing CAS
+competition and post-CAS fault tests remain in the integration tier.
+No C3 source, pin, verifier, contract, module edge or test-tier tag changes.
 
 ## Cross-file and non-diagnostic scanner reconciliation
 

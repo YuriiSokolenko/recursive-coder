@@ -386,29 +386,109 @@ class LinuxStageGitBaselineReconcilerTest {
         LinuxStageGitBaselineReconciler(repo.root, repo.locks,
             Path.of("/usr/bin/git"), observer)
 
-    @Test fun invalidDeclaredPathAtPostCasReadbackRetainsExactDenial() {
+    @Test fun requestCollectionDriftBeforeCasCannotChangeValidatedFacts() {
+        assertRequestCollectionDriftIgnored(StageGitTestCheckpoint.BEFORE_REF_UPDATE)
+    }
+
+    @Test fun requestCollectionDriftAfterCasCannotChangeValidatedFacts() {
+        assertRequestCollectionDriftIgnored(StageGitTestCheckpoint.AFTER_REF_UPDATE)
+    }
+
+    private fun assertRequestCollectionDriftIgnored(at: StageGitTestCheckpoint) {
+        val repo = createRepo()
+        val secondFrozen = "docs/approved.md"
+        val secondHash = write(repo.root, secondFrozen, "approved\n")
+        git(repo.root, "add", secondFrozen)
+        git(repo.root, "commit", "-m", "second frozen artifact")
+        val baseline = git(repo.root, "rev-parse", "HEAD")
+        val original = listOf(
+            StageGitAcceptedFile("specs/A.md", write(repo.root, "specs/A.md", "A\n")),
+            StageGitAcceptedFile("specs/B.md", write(repo.root, "specs/B.md", "B\n")),
+            StageGitAcceptedFile("specs/C.md", write(repo.root, "specs/C.md", "C\n"))
+        )
+        val accepted = original.toMutableList()
+        val frozen = linkedMapOf(
+            "README.md" to sha("baseline\n".toByteArray()),
+            secondFrozen to secondHash
+        )
+        var observed = false
+        val reconciler = withFaultObserver(repo, StageGitTestObserver { checkpoint ->
+            if (checkpoint == at) {
+                observed = true
+                accepted.reverse()
+                accepted.removeAt(0)
+                accepted[0] = accepted[0].copy(sha256 = "0".repeat(64))
+                accepted += StageGitAcceptedFile("../outside.md", "0".repeat(64))
+                val reversed = frozen.toList().reversed()
+                frozen.clear()
+                frozen.putAll(reversed)
+                frozen.remove(secondFrozen)
+                frozen["README.md"] = "0".repeat(64)
+                frozen["../outside.md"] = "0".repeat(64)
+            }
+        })
+        val outcome = assertIs<StageGitReconciliationResult.Committed>(
+            reconciler.reconcile(StageGitReconciliationRequest(baseline, "dev",
+                EngineeringRole.SDD, accepted, frozen)))
+        assertTrue(observed)
+        assertEquals(baseline, outcome.oldHead)
+        assertEquals(baseline, git(repo.root, "rev-parse", "HEAD^"))
+        assertEquals(outcome.newHead, git(repo.root, "rev-parse", "refs/heads/dev"))
+        assertEquals(original.map { it.path }, git(repo.root, "diff-tree", "--no-commit-id",
+            "--name-only", "-r", outcome.newHead).lines())
+        for (item in original) {
+            assertEquals(item.sha256, sha(Files.readAllBytes(repo.root.resolve(item.path))))
+            assertEquals(item.path.substringAfterLast('/').substringBefore('.'),
+                git(repo.root, "show", "HEAD:" + item.path))
+        }
+        assertEquals("baseline", git(repo.root, "show", "HEAD:README.md"))
+        assertEquals("approved", git(repo.root, "show", "HEAD:" + secondFrozen))
+        assertEquals("", git(repo.root, "status", "--porcelain"))
+    }
+
+    @Test fun removingAcceptedFactsCannotHideUnsafeModeAtFinalReadback() {
         val repo = createRepo()
         val path = "specs/Feature.md"
         val hash = write(repo.root, path, "accepted requirements\n")
-        val invalidPath = "../outside.md"
-        assertFalse(ToolAuthorizationPolicy.validDeclaredPath(invalidPath))
-        val frozen = linkedMapOf<String, String>()
-        var injected = false
+        val accepted = mutableListOf(StageGitAcceptedFile(path, hash))
+        val frozen = linkedMapOf("README.md" to sha("baseline\n".toByteArray()))
+        var observedHead: String? = null
         val reconciler = withFaultObserver(repo, StageGitTestObserver { checkpoint ->
             if (checkpoint == StageGitTestCheckpoint.AFTER_REF_UPDATE) {
-                // Deliberate host-side request drift after the earlier preflight.
-                // Revisit this aliasing-dependent oracle after defensive snapshots (#220).
-                // Exercise the existing defense-in-depth readback guard.
-                frozen[invalidPath] = hash
-                injected = true
+                observedHead = git(repo.root, "rev-parse", "HEAD")
+                accepted.clear()
+                frozen.clear()
+                // Git ignores this read/write permission change, but the accepted
+                // file's canonical mode must still be checked at final readback.
+                Files.setPosixFilePermissions(repo.root.resolve(path),
+                    PosixFilePermissions.fromString("r--r--r--"))
             }
         })
         val outcome = assertIs<StageGitReconciliationResult.ReconciliationRequired>(
             reconciler.reconcile(StageGitReconciliationRequest(repo.head, "dev",
-                EngineeringRole.SDD, listOf(StageGitAcceptedFile(path, hash)), frozen)))
-        assertTrue(injected)
-        assertEquals("INVALID_STAGE_PATH", outcome.code)
-        assertTrue(git(repo.root, "rev-parse", "HEAD") != repo.head)
+                EngineeringRole.SDD, accepted, frozen)))
+        assertEquals("UNSAFE_STAGE_FILE_MODE", outcome.code)
+        assertTrue(observedHead != null && observedHead != repo.head)
+        assertEquals(observedHead, git(repo.root, "rev-parse", "HEAD"))
+        assertEquals(repo.head, git(repo.root, "rev-parse", "HEAD^"))
+        assertEquals("", git(repo.root, "status", "--porcelain"))
+        assertEquals(hash, sha(Files.readAllBytes(repo.root.resolve(path))))
+    }
+
+    @Test fun malformedRequestPathsAreRejectedDuringPreflight() {
+        val repo = createRepo()
+        val path = "specs/Feature.md"
+        val hash = write(repo.root, path, "accepted requirements\n")
+        val invalidPath = "../outside.md"
+        val invalidAccepted = assertIs<StageGitReconciliationResult.Denied>(
+            reconcile(repo, repo.head, EngineeringRole.SDD, mapOf(invalidPath to hash)))
+        assertEquals("INVALID_STAGE_CHANGESET", invalidAccepted.code)
+        val invalidFrozen = assertIs<StageGitReconciliationResult.Denied>(
+            reconcile(repo, repo.head, EngineeringRole.SDD, mapOf(path to hash),
+                mapOf(invalidPath to hash)))
+        assertEquals("INVALID_STAGE_CHANGESET", invalidFrozen.code)
+        assertEquals(repo.head, git(repo.root, "rev-parse", "HEAD"))
+        assertEquals("?? " + path.substringBefore('/') + "/", git(repo.root, "status", "--porcelain"))
     }
 
     @Test fun validDeclaredPathWithMissingIntermediateDirectoryIsUnsafe() {
