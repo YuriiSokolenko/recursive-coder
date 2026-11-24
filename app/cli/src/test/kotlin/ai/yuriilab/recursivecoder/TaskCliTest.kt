@@ -39,6 +39,16 @@ class TaskCliTest {
         assertFalse("reviewerDenialCode" in ordinary)
     }
 
+    @Test fun taskJsonProjectionKeepsIndependentFieldOrderAndValues() {
+        val task = Task("job", "private template", listOf("parent"), 50,
+            state = TaskState.FAILED, attempt = 1, sessionId = "session-job-1",
+            lastResultStatus = SessionOutcome.TIMED_OUT, reason = "timeout", prunedTransitions = 2,
+            transitions = listOf(TaskTransition(null, TaskState.CREATED, "at", 0, null, "enqueued")))
+        assertEquals(
+            """{"taskId":"job","state":"failed","priority":50,"dependencies":["parent"],"attempt":1,"prunedTransitions":2,"sessionId":"session-job-1","lastResultStatus":"timed_out","reason":"timeout","transitions":[{"from":null,"to":"created","at":"at","attempt":0,"sessionId":null,"reason":"enqueued"}]}""",
+            task.toPublicJson().toString())
+    }
+
     private fun serviceAt(directory: Path) = TaskService(
         TaskStore(directory), DirectoryTaskRunPaths.forStore(directory)
     )

@@ -93,6 +93,7 @@ class TaskScheduler(
         val cancellation: Cancellation,
         val future: Future<*>
     )
+
     private val stopping = AtomicBoolean(false)
     private val active = ConcurrentHashMap<String, RunningAttempt>()
 
@@ -107,12 +108,14 @@ class TaskScheduler(
         inFlight.forEach { it.value.cancellation.cancel() }
         inFlight.forEach { (sessionId, attempt) ->
             interrupt(attempt.taskId, sessionId,
-                "scheduler stopped: reconcile unfinished attempt before retry")
+                STOPPED_ATTEMPT_REASON)
         }
     }
 
-    fun runUntilIdle(concurrency: Int = 1): SchedulerReport {
-        require(concurrency in 1..32) { "Concurrency must be 1..32" }
+    fun runUntilIdle(concurrency: Int = TaskSchedulerConcurrency.DEFAULT): SchedulerReport {
+        require(concurrency in TaskSchedulerConcurrency.MIN..TaskSchedulerConcurrency.MAX) {
+            "Concurrency must be ${TaskSchedulerConcurrency.MIN}..${TaskSchedulerConcurrency.MAX}"
+        }
         require(pollMillis in 1..1000)
         return repository.withSchedulerLock {
             if (stopping.get()) return@withSchedulerLock SchedulerReport(0, 0, queries.isPaused())
@@ -134,15 +137,15 @@ class TaskScheduler(
                         val cancellation = Cancellation()
                         val future = pool.submit {
                             cancellation.bind()
-                            val status = try {
+                            val outcome = try {
                                 val current = queries.show(task.id)
                                 if (current.sessionId != sessionId ||
-                                    current.state == TaskState.CANCELLED || stopping.get()) "cancelled"
-                                else SessionOutcome.fromWire(runner.execute(prepare(task), cancellation)).wire
+                                    current.state == TaskState.CANCELLED || stopping.get()) SessionOutcome.CANCELLED
+                                else SessionOutcome.fromWire(runner.execute(prepare(task), cancellation))
                             } catch (_: InterruptedException) {
-                                "cancelled"
+                                SessionOutcome.CANCELLED
                             } catch (_: Exception) {
-                                "failed"
+                                SessionOutcome.FAILED
                             } finally {
                                 // Scheduler polls may still call cancel() while the old
                                 // session is tracked. End interrupt delivery before store I/O.
@@ -152,9 +155,9 @@ class TaskScheduler(
                             Thread.interrupted()
                             if (stopping.get()) {
                                 interrupt(task.id, sessionId,
-                                    "scheduler stopped: reconcile unfinished attempt before retry")
+                                    STOPPED_ATTEMPT_REASON)
                             } else {
-                                complete(task.id, sessionId, status)
+                                complete(task.id, sessionId, outcome.wire)
                             }
                         }
                         active[sessionId] = RunningAttempt(task.id, cancellation, future)
@@ -205,6 +208,10 @@ class TaskScheduler(
             }
             SchedulerReport(launched, completed, queries.isPaused())
         }
+    }
+
+    private companion object {
+        const val STOPPED_ATTEMPT_REASON = "scheduler stopped: reconcile unfinished attempt before retry"
     }
 }
 

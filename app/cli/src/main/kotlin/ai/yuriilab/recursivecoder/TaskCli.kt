@@ -208,7 +208,7 @@ private class EnqueueTask(private val tasks: TasksCommand) : CliktCommand(name =
     override fun help(context: Context) = "Add a SessionRequest v1 to the durable task queue."
 
     private val requestPath by argument("REQUEST").convert { Path.of(it) }
-    private val priorityOptions by option("--priority", help = "Task priority (default 50; validated by the enqueue Use Case).")
+    private val priorityOptions by option("--priority", help = "Task priority (default ${TaskPriority.DEFAULT}; validated by the enqueue Use Case).")
         .int().multiple()
     private val dependencyOptions by option("--depends-on", help = "Comma-separated existing task IDs.")
         .convert { value ->
@@ -254,11 +254,13 @@ private class RetryTask(tasks: TasksCommand) : TaskByIdCommand("retry", tasks) {
     override fun run() = echo(tasks.retry()(taskId).toPublicJson())
 }
 
+private const val QUEUE_PAUSED_FIELD = "paused"
+
 private class PauseTasks(private val tasks: TasksCommand) : CliktCommand(name = "pause") {
     override fun help(context: Context) = "Pause new task dispatches."
     override fun run() {
         tasks.pause()()
-        echo(buildJsonObject { put("paused", true) })
+        echo(buildJsonObject { put(QUEUE_PAUSED_FIELD, true) })
     }
 }
 
@@ -266,7 +268,7 @@ private class ResumeTasks(private val tasks: TasksCommand) : CliktCommand(name =
     override fun help(context: Context) = "Resume dispatching queued tasks."
     override fun run() {
         tasks.resume()()
-        echo(buildJsonObject { put("paused", false) })
+        echo(buildJsonObject { put(QUEUE_PAUSED_FIELD, false) })
     }
 }
 
@@ -274,18 +276,18 @@ private class CancelAllTasks(private val tasks: TasksCommand) : CliktCommand(nam
     override fun help(context: Context) = "Cancel all tasks and pause future launches."
     override fun run() {
         tasks.cancelAll()()
-        echo(buildJsonObject { put("paused", true); put("cancelled", true) })
+        echo(buildJsonObject { put(QUEUE_PAUSED_FIELD, true); put("cancelled", true) })
     }
 }
 
 private class RunTasks(private val tasks: TasksCommand) : CliktCommand(name = "run") {
     override fun help(context: Context) = "Run the foreground scheduler until it is idle or paused."
 
-    private val concurrencyOptions by option("--concurrency", help = "Maximum parallel sessions (1..32).")
+    private val concurrencyOptions by option("--concurrency", help = "Maximum parallel sessions (${TaskSchedulerConcurrency.MIN}..${TaskSchedulerConcurrency.MAX}).")
         .int().multiple()
 
     override fun run() {
-        val concurrency = once(concurrencyOptions, "--concurrency", 1)
+        val concurrency = once(concurrencyOptions, "--concurrency", TaskSchedulerConcurrency.DEFAULT)
         val scheduler = tasks.scheduler()
         val hook = Thread({ scheduler.requestStop() }, "task-scheduler-shutdown")
         Runtime.getRuntime().addShutdownHook(hook)
@@ -301,7 +303,7 @@ private class RunTasks(private val tasks: TasksCommand) : CliktCommand(name = "r
         echo(buildJsonObject {
             put("launched", report.launched)
             put("completed", report.completed)
-            put("paused", report.paused)
+            put(QUEUE_PAUSED_FIELD, report.paused)
         })
     }
 }
