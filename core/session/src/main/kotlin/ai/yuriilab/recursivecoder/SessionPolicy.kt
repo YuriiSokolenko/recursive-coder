@@ -144,10 +144,14 @@ internal object SessionAdmissionPolicy {
     fun decide(f: SessionAdmissionFacts): AdmissionDecision {
         fun deny(reason: AdmissionDenial) = AdmissionDecision.Denied(reason)
         if (!f.supportedProtocol) return deny(AdmissionDenial.PROTOCOL)
-        if (f.invocationSource !in setOf("cli", "scheduler") ||
-            f.attempt < 1L ||
-            (f.invocationSource == "cli" && f.attempt != 1L))
-            return deny(AdmissionDenial.INVOCATION)
+        // Defense in depth: SessionRequest already validates positivity, but pure
+        // admission must fail closed even when facts are constructed directly.
+        val supportedInvocation = when (f.invocationSource) {
+            "cli" -> f.attempt == 1L
+            "scheduler" -> f.attempt >= 1L
+            else -> false
+        }
+        if (!supportedInvocation) return deny(AdmissionDenial.INVOCATION)
         if (f.resumeMode != "fresh" || f.fenceGeneration != 1L)
             return deny(AdmissionDenial.RESUME)
         if (!capabilities.containsAll(f.requiredCapabilities) ||

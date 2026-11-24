@@ -104,7 +104,7 @@ class SessionPolicyCoverageUnitTest {
         }
     }
 
-    @Test fun schedulerAttemptMustBePositiveAndPreserveInvocationDenialPrecedence() {
+    @Test fun schedulerAttemptMustBePositive() {
         val scheduler = admitted().copy(invocationSource = "scheduler")
         // Protocol v1 requires a positive integer; no upper retry limit is declared.
         for (attempt in listOf(1L, 2L, 3L, Long.MAX_VALUE)) {
@@ -117,7 +117,10 @@ class SessionPolicyCoverageUnitTest {
                 SessionAdmissionPolicy.decide(scheduler.copy(attempt = attempt)),
                 "Invalid scheduler attempt=$attempt")
         }
+    }
 
+    @Test fun schedulerAttemptDenialsPreserveResumePreflightPrecedence() {
+        val scheduler = admitted().copy(invocationSource = "scheduler")
         val invalid = scheduler.copy(attempt = 0L, resumeMode = "resume",
             requiredCapabilities = emptySet(), maxModelRequests = 0)
         assertEquals(AdmissionDecision.Denied(AdmissionDenial.INVOCATION),
@@ -126,16 +129,25 @@ class SessionPolicyCoverageUnitTest {
         assertEquals(AdmissionDenial.INVOCATION,
             SessionResumePreflightPolicy.earlierDenial(invalid),
             "Resume preflight must not bypass an invalid scheduler attempt")
+        val unsupported = invalid.copy(supportedProtocol = false)
         assertEquals(AdmissionDecision.Denied(AdmissionDenial.PROTOCOL),
-            SessionAdmissionPolicy.decide(invalid.copy(supportedProtocol = false)),
+            SessionAdmissionPolicy.decide(unsupported),
             "Protocol denial must still precede invocation denial")
+        assertEquals(AdmissionDenial.PROTOCOL,
+            SessionResumePreflightPolicy.earlierDenial(unsupported),
+            "Resume preflight must preserve protocol denial precedence")
+        val validRetry = invalid.copy(attempt = 2L)
         assertEquals(AdmissionDecision.Denied(AdmissionDenial.RESUME),
-            SessionAdmissionPolicy.decide(scheduler.copy(attempt = 2L, resumeMode = "resume")),
+            SessionAdmissionPolicy.decide(validRetry),
             "Valid retries must still observe resume policy")
+        assertNull(SessionResumePreflightPolicy.earlierDenial(validRetry),
+            "Valid retries requesting resume must reach the resume-specific probe")
+    }
 
+    @Test fun cliAttemptMustBeExactlyOne() {
         assertEquals(AdmissionDecision.Accepted, SessionAdmissionPolicy.decide(admitted()),
             "CLI attempt one remains accepted")
-        for (attempt in listOf(0L, -1L, 2L, Long.MAX_VALUE)) {
+        for (attempt in listOf(Long.MIN_VALUE, -1L, 0L, 2L, Long.MAX_VALUE)) {
             assertEquals(AdmissionDecision.Denied(AdmissionDenial.INVOCATION),
                 SessionAdmissionPolicy.decide(admitted().copy(attempt = attempt)),
                 "CLI only permits attempt one: attempt=$attempt")
