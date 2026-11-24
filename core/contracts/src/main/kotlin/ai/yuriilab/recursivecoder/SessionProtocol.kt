@@ -10,6 +10,13 @@ package ai.yuriilab.recursivecoder
 object SessionProtocol {
     const val VERSION: String = "1.0"
 
+    // Wire vocabulary for invocation sources admitted by the standalone runtime.
+    // The schema also reserves "api"; declaring a value here does not admit it.
+    const val INVOCATION_SOURCE_CLI: String = "cli"
+    const val INVOCATION_SOURCE_SCHEDULER: String = "scheduler"
+    /** First valid protocol attempt; an unclaimed Task has a separate zero-based counter. */
+    const val FIRST_INVOCATION_ATTEMPT: Long = 1L
+
     fun supports(version: String): Boolean = version == VERSION
 }
 

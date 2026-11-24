@@ -147,8 +147,8 @@ internal object SessionAdmissionPolicy {
         // Defense in depth: SessionRequest already validates positivity, but pure
         // admission must fail closed even when facts are constructed directly.
         val supportedInvocation = when (f.invocationSource) {
-            "cli" -> f.attempt == 1L
-            "scheduler" -> f.attempt >= 1L
+            SessionProtocol.INVOCATION_SOURCE_CLI -> f.attempt == SessionProtocol.FIRST_INVOCATION_ATTEMPT
+            SessionProtocol.INVOCATION_SOURCE_SCHEDULER -> f.attempt >= SessionProtocol.FIRST_INVOCATION_ATTEMPT
             else -> false
         }
         if (!supportedInvocation) return deny(AdmissionDenial.INVOCATION)

@@ -77,7 +77,7 @@ class SessionRequest private constructor(val raw: JsonObject) {
     private fun validateShape() {
         invocation.fields(setOf("source", "invocationId", "attempt"))
         identifier(invocation.textAt("invocationId"))
-        if (invocation.longAt("attempt") < 1) refuse("Invalid attempt")
+        if (invocation.longAt("attempt") < SessionProtocol.FIRST_INVOCATION_ATTEMPT) refuse("Invalid attempt")
 
         workspace.fields(setOf("workspaceId", "rootPath", "baselineSha", "headSha"), setOf("branch"))
         identifier(workspace.textAt("workspaceId"))

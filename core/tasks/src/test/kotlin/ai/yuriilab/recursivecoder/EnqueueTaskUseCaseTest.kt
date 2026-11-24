@@ -1,5 +1,6 @@
 package ai.yuriilab.recursivecoder
 
+import java.nio.file.Path
 import java.time.Clock
 import java.time.Instant
 import java.time.ZoneOffset
@@ -67,6 +68,31 @@ class EnqueueTaskUseCaseTest {
             add("session-events-v1"); add("fake-model-v1"); add("read-only-tools-v1")
         })
     }.toString()
+
+    @Test fun claimedAttemptReplacesInvocationWithStableSchedulerWireValues() {
+        val template = request("mapped")
+        val original = SessionRequest.parse(template)
+        assertEquals("cli", original.invocation.textAt("source"))
+        assertEquals(1L, original.invocation.longAt("attempt"))
+
+        for (attempt in listOf(1, 2, Int.MAX_VALUE)) {
+            val task = Task("mapped", template, emptyList(), 50,
+                state = TaskState.RUNNING, attempt = attempt, sessionId = "session-mapped-$attempt")
+            val mapped = TaskRequestMapper.forAttempt(task, Path.of("/virtual/run-$attempt"))
+            val roundTrip = SessionRequest.parse(mapped.raw.toString())
+            assertEquals("scheduler", roundTrip.invocation.textAt("source"))
+            assertEquals(attempt.toLong(), roundTrip.invocation.longAt("attempt"))
+            assertEquals("invoke-mapped-$attempt", roundTrip.invocation.textAt("invocationId"))
+            assertEquals(original.task, roundTrip.task)
+            assertEquals("cli", original.invocation.textAt("source"))
+        }
+
+        val invalid = Task("mapped", template, emptyList(), 50,
+            state = TaskState.RUNNING, attempt = 0, sessionId = "session-mapped-0")
+        assertFailsWith<Refused> {
+            TaskRequestMapper.forAttempt(invalid, Path.of("/virtual/run-0"))
+        }
+    }
 
     @Test fun interfacePerformsAtomicPolicyDrivenSubmission() {
         val repository = InMemoryTaskRepository()

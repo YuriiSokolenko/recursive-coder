@@ -21,7 +21,7 @@ internal object TaskRequestMapper {
         require(source.task.textAt("taskId") == task.id) { "Task template ID mismatch" }
         val invocation = source.invocation
         val adjustedInvocation = JsonObject(invocation + mapOf(
-            "source" to JsonPrimitive("scheduler"),
+            "source" to JsonPrimitive(SessionProtocol.INVOCATION_SOURCE_SCHEDULER),
             "attempt" to JsonPrimitive(task.attempt),
             "invocationId" to JsonPrimitive("invoke-" + task.id + "-" + task.attempt)
         ))
