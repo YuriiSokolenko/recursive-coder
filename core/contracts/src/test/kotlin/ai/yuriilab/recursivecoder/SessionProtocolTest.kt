@@ -1,12 +1,11 @@
 package ai.yuriilab.recursivecoder
 
-import org.junit.jupiter.api.Tag
-
 import kotlin.test.Test
-import kotlin.test.assertFalse
-import kotlin.test.assertTrue
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
+import org.junit.jupiter.api.Tag
 
 @Tag("unit")
 class SessionProtocolTest {

@@ -1,7 +1,5 @@
 package ai.yuriilab.recursivecoder
 
-import org.junit.jupiter.api.Tag
-
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
@@ -13,6 +11,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 import kotlin.test.*
 import kotlinx.serialization.json.*
+import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.io.TempDir
 
 @Tag("integration")

@@ -1,7 +1,5 @@
 package ai.yuriilab.recursivecoder
 
-import org.junit.jupiter.api.Tag
-
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
 import java.net.InetSocketAddress
@@ -17,6 +15,7 @@ import kotlin.test.*
 import kotlinx.serialization.json.*
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
 
 /** No inference server, internet, credentials, or external model is used by these tests. */

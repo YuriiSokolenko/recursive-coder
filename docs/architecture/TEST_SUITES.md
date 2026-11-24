@@ -121,6 +121,50 @@ Windows junction removal unlinks the junction itself rather than traversing
 and deleting its target (the behavior was fixed in Python 3.8). Do not replace
 this with recursive removal that follows junctions or symlinks.
 
+### Architecture CI timing and execution evidence (issue #36)
+
+The architecture regression suite runs real injected Gradle dependency-edge,
+cycle, and configuration-cache negative cases. The reused, suite-private Gradle
+daemon introduced in [PR #168](https://github.com/YuriiSokolenko/recursive-coder/pull/168)
+replaced repeated **cold** Gradle starts without removing any of the 93 actual
+Gradle invocations. Scenario-specific subprocess deadlines are bounded (normally
+180 seconds, or 240 seconds for more expensive compile/configuration cases),
+and the runner streams combined stdout/stderr with scenario, phase and timeout
+markers; a timeout stops only its private daemon registry. These are ceilings,
+not performance assertions.
+
+Comparable GitHub-hosted architecture runs recorded for PR #168 (minutes):
+
+| Sample | Architecture job | Negative regression step |
+| --- | ---: | ---: |
+| Before: [45085104240](https://github.com/YuriiSokolenko/recursive-coder/actions/runs/45085104240) | 22.3 | 17.2 |
+| Before: [45097927895](https://github.com/YuriiSokolenko/recursive-coder/actions/runs/45097927895) | 15.7 | 11.7 |
+| Before: [45134262419](https://github.com/YuriiSokolenko/recursive-coder/actions/runs/45134262419) | 22.0 | 16.9 |
+| **Before median** | **22.0** | **16.9** |
+| After: [45138287471, attempt 1](https://github.com/YuriiSokolenko/recursive-coder/actions/runs/45138287471/attempts/1) | 6.6 | 2.52 |
+| After: [45138287471, attempt 2](https://github.com/YuriiSokolenko/recursive-coder/actions/runs/45138287471/attempts/2) | 6.6 | 2.57 |
+| After: [45138287471, attempt 3](https://github.com/YuriiSokolenko/recursive-coder/actions/runs/45138287471/attempts/3) | 6.6 | 2.62 |
+| **After median** | **6.6** | **2.57** |
+
+All three *after* architecture attempts ran the same 43-test/93-Gradle-invocation
+suite on the same PR #168 head; attempts 2 and 3 reran the architecture job only,
+not the full workflow. For whole-workflow context, the three before runs took
+26.1, 20.2 and 26.1 minutes; after-change successful full runs
+[45138287471](https://github.com/YuriiSokolenko/recursive-coder/actions/runs/45138287471)
+and [45145310763](https://github.com/YuriiSokolenko/recursive-coder/actions/runs/45145310763)
+took 10.4 and 10.5 minutes respectively. These are observational samples on
+PR #168 commits, **not** a measured speedup for later changes or a CI threshold.
+
+CI verifies all three JVM task outputs (`test`, `integrationTest`, `e2eTest`)
+contain executed passing JUnit cases, separately checks the required sandbox
+cases and pure-unit JUnit output, and retains independently installed CLI and
+protocol suites. The unfiltered `test` task remains intact. The production
+`installDist` build runs in the isolated bytecode-build job and is verified
+before CLI E2E; the full JVM tasks run on their own clean runner after that
+verifier succeeds. Compilation artifacts are intentionally **not shared** across
+these independent trust boundaries merely to improve cache hit rates. The
+standalone developer command `./gradlew test installDist` remains supported.
+
 ### Configuration-cache invalidation regression (issue #41)
 
 A cache hit is not a permanent architecture approval. The Python regression in
