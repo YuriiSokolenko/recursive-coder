@@ -29,11 +29,8 @@ APPROVED_ACTIONS = {
     "actions/upload-artifact": ("cf430e030ddbb5b0abf93d22962f4752f3646cd9", "v7", 3),
     "actions/download-artifact": ("9000827ccba6bdab643e8b6fd33ac0654aef8333", "v8", 2),
 }
-REQUIRED_JOBS = (
-    "architecture", "bytecode-build", "bytecode-verifier",
-    "kotlin", "cli-e2e", "contracts",
-)
 GRADLE_JOBS = ("architecture", "bytecode-build", "bytecode-verifier", "kotlin")
+REQUIRED_JOBS = (*GRADLE_JOBS, "cli-e2e", "contracts")
 USE_LINE = re.compile(r"^\s*(?:-\s*)?uses\s*:\s*(.*?)\s*$")
 PINNED = re.compile(r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)@([0-9a-f]{40})\s+#\s+(v[0-9]+(?:\.[0-9]+){0,2})")
 JOB_LINE = re.compile(r"^  ([a-z][a-z0-9-]*):\s*$", re.MULTILINE)

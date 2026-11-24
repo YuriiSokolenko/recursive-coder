@@ -19,7 +19,10 @@ TEST_MARKERS = {
     "org/junit/jupiter/api/RepeatedTest",
     "org/junit/jupiter/params/ParameterizedTest",
 }
-TIERS = {"unit", "integration", "e2e"}
+UNIT_TIER = "unit"
+INTEGRATION_TIER = "integration"
+E2E_TIER = "e2e"
+TIERS = {UNIT_TIER, INTEGRATION_TIER, E2E_TIER}
 
 
 class ClassFormatError(ValueError):
@@ -435,10 +438,10 @@ def validate(modules, root):
                 if not tags:
                     problems.append(f"{target}: missing JUnit tier; add @Tag(\"unit\"), "
                                     "@Tag(\"integration\") or @Tag(\"e2e\")")
-                elif len(tags) > 1 and tags != {"integration", "e2e"}:
+                elif len(tags) > 1 and tags != {INTEGRATION_TIER, E2E_TIER}:
                     problems.append(f"{target}: incompatible JUnit tiers {sorted(tags)}; "
                                     "only integration + e2e is supported together")
-                if tags == {"unit"}:
+                if tags == {UNIT_TIER}:
                     if info.name not in purity_cache:
                         related = pure_unit_related_classes(info, classes, descendants)
                         bad = {reference for related_class in related
