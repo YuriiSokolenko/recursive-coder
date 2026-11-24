@@ -28,8 +28,8 @@ and `core/session/src/test/kotlin/ai/yuriilab/recursivecoder/`, respectively.
 | Decision / invariant | Baseline unit test (#28) | Gap case (#37) |
 | --- | --- | --- |
 | Lifecycle legal/illegal edges, one terminal result, cancellation/timeout paths | `SessionPolicyUnitTest.onlyDeclaredLifecycleTransitionsAreLegal`, `aTerminalOutcomeCannotBeOverwrittenByCancellationTimeoutOrFailure`, `cancellationTimeoutAndDenialHaveDeterministicPathsFromEveryNonterminalPhase` | Existing exhaustive transition and nonterminal reason matrices; no duplicate test added |
-| Admission: protocol, invocation, resume, capability, provider, tools, budget | `admissionDeniesUnsupportedInvocationsCapabilitiesModelAndUnsafePolicies` | `SessionPolicyCoverageUnitTest.admissionDenialPrecedenceIsStableWhenMultipleInputsAreInvalid` tests overlapping errors; `admissionBoundariesCoverModelAndToolPolicyVariants` adds provider/tool/counter variants; `schedulerAttemptRangeIsNotValidatedByPureAdmission` characterizes the existing scheduler attempt handling |
-| Resume preflight does not convert unsupported resume into later denials | `resumeProbePreservesProtocolV1PrecedenceAcrossLaterDenials`, `resumeFilesystemDetailAcceptsOnlySafeHostVolumeIdentifiers` | `admissionDenialPrecedenceIsStableWhenMultipleInputsAreInvalid` includes a simultaneous resume/capability refusal |
+| Admission: protocol, invocation, resume, capability, provider, tools, budget | `admissionDeniesUnsupportedInvocationsCapabilitiesModelAndUnsafePolicies` | `SessionPolicyCoverageUnitTest.admissionDenialPrecedenceIsStableWhenMultipleInputsAreInvalid` tests overlapping errors; `admissionBoundariesCoverModelAndToolPolicyVariants` adds provider/tool/counter variants; `schedulerAttemptMustBePositive` covers positive Long and nonpositive boundaries; `cliAttemptMustBeExactlyOne` pins CLI compatibility; `schedulerAttemptDenialsPreserveResumePreflightPrecedence` preserves denial ordering (#190) |
+| Resume preflight does not convert unsupported resume into later denials | `resumeProbePreservesProtocolV1PrecedenceAcrossLaterDenials`, `resumeFilesystemDetailAcceptsOnlySafeHostVolumeIdentifiers` | `admissionDenialPrecedenceIsStableWhenMultipleInputsAreInvalid` includes a simultaneous resume/capability refusal; `schedulerAttemptDenialsPreserveResumePreflightPrecedence` verifies protocol and invocation denials and valid retry preflight (#190) |
 | Two-turn model request reservation and retry quota | `modelRequestReservationAndToolQuotaAreFailClosed` | `modelTurnReservationHandlesExactCapacityAndInvalidCounters` checks exact/quota, negative counters and invalid turn indices; `recordedModelUsageRespectsTokenAndRequestEdgesWithoutOverflow` checks retry enabled/disabled and Long boundaries |
 | Token observation accounting, unknown usage, overflow/negative fail closed | `tokenAccountingRejectsOverLimitNegativeAndOverflowWithoutSideEffects` | `recordedModelUsageRespectsTokenAndRequestEdgesWithoutOverflow` checks exact capacity, combined usage, negative prior counters, overflow-sized usage and cumulative accounting |
 | Tool-call consumption before dispatch, fail-closed at quota | `modelRequestReservationAndToolQuotaAreFailClosed` | `toolQuotaGuardsZeroNegativeExactAndLongMaxBoundaries` covers negative, zero, exact and Long.MAX_VALUE counters |
@@ -55,12 +55,22 @@ existing integration/E2E owners:
 - `contracts/v1/session-v1.test.mjs` and installed Python CLI suites:
   Session Protocol v1 envelopes, event ordering and adapter validation.
 
-The pure admission policy currently accepts scheduler attempts of zero and
-negative values when all other facts are valid. The characterization test
-pins that existing behavior, not a new authorization guarantee; protocol
-validation and trusted caller constraints are separate. Tightening admission
-is tracked in [issue #190](https://github.com/YuriiSokolenko/recursive-coder/issues/190),
-which must replace this temporary characterization when the policy changes.
+Issue [#190](https://github.com/YuriiSokolenko/recursive-coder/issues/190)
+closes the scheduler-attempt admission gap. Session Protocol v1 declares
+`invocation.attempt` as an integer with minimum 1; `SessionRequest.parse`
+enforces the same bound. Task policy begins with attempt 0 for an
+unclaimed task and increments its Int counter on claim.
+`TaskRequestMapper.forAttempt` projects the claimed attempt into a scheduler
+v1 request and reparses it, rejecting nonpositive attempts. At Int.MAX_VALUE
+the existing Task counter can overflow; exhaustion handling is tracked
+separately in [#193](https://github.com/YuriiSokolenko/recursive-coder/issues/193).
+Pure Session admission independently enforces the bound as defense in depth,
+rejecting nonpositive scheduler attempts through the existing typed
+`UNSUPPORTED_INVOCATION` denial after protocol checks and before
+resume/capability/model/tool/budget denials. Session admission accepts any
+positive Long scheduler attempt; the Task counter has a narrower Int domain.
+CLI still accepts only attempt 1.
+No Session Protocol v1 schema, envelope or request-mapping change is needed.
 
 Remaining integration concerns include actual worker scheduling races and
 persistent recovery, model/gateway wire errors, filesystem boundary checks,
