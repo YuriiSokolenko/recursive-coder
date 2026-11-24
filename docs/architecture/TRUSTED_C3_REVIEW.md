@@ -63,10 +63,19 @@ replacement is independently reviewed and accepted.
 - Independently review the literal-only substitutions against the previous
   source, especially explicit ledger allowlists and the runtime resume mode.
 - Check branch protection/rulesets and required independent owner approvals.
-  The existing repository documentation describes CODEOWNERS as advisory in
-  this solo repository. The GitHub integration returned HTTP 403 when reading
-  dev branch protection; enforcement is therefore **unverified**. Do not
-  claim CODEOWNERS alone replaces the approval guarantee. Do not silently
+  Repository ruleset `27857731` (`Protect dev - Required CI and PR (fixed)`)
+  is active and targets `~DEFAULT_BRANCH`; repository metadata identifies `dev`
+  as the default branch. The ruleset requires PRs, all six CI checks and a
+  current base, with deletion and non-fast-forward updates prohibited. However,
+  `required_approving_review_count` is 0, `require_code_owner_review` is false,
+  `require_last_push_approval` is false, and stale reviews are not dismissed.
+  Thus independent approval is **not required by this ruleset**, despite CI
+  enforcement. The classic branch-protection endpoint returned HTTP 403;
+  the ruleset listing and detail endpoint were readable. See
+  https://github.com/YuriiSokolenko/recursive-coder/rules/27857731.
+  Do not claim CODEOWNERS alone replaces the approval guarantee. Before pin
+  retirement, establish an eligible independent reviewer and protected review
+  of security-sensitive changes, including subsequent pushes. Do not silently
   alter repository settings or remove required protections.
 - If reviewer or repository enforcement is unavailable, retain the source
   pins on dev and treat this branch as a candidate, not completed #207.

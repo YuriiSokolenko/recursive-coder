@@ -572,8 +572,10 @@ Compiler option `-P` is rejected intentionally and broadly.
 
 CODEOWNERS covers C3 files, build logic, Gradle settings and wrappers,
 workflow definitions, compiler fixtures, architecture verification scripts
-and its own policy. **CODEOWNERS is advisory in this solo repository**:
-`dev` has no branch protection or rulesets, and PR authors cannot
-approve their own changes. Independent security review remains mandatory before accepting the proposed
-retirement of the source pins. Repository protection must be verified separately;
-this candidate does not establish or change repository enforcement.
+and its own policy. **CODEOWNERS approval remains advisory**: active ruleset
+`27857731` targets the default branch (`dev`), requires PRs and all six CI
+checks, but requires zero approving reviews and does not require code-owner
+approval or approval of the last push. PR authors cannot approve their own
+changes. Independent security review remains mandatory before accepting the
+proposed retirement of the source pins. See [Trusted C3 review and replacement](TRUSTED_C3_REVIEW.md).
+This candidate does not change repository enforcement.
