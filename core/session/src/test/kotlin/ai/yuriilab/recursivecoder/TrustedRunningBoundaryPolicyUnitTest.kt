@@ -1,5 +1,6 @@
 package ai.yuriilab.recursivecoder
 
+import java.lang.reflect.Modifier
 import java.time.Instant
 import kotlinx.serialization.json.*
 import org.junit.jupiter.api.Tag
@@ -104,6 +105,7 @@ class TrustedRunningBoundaryPolicyUnitTest {
         assertNull(TrustedRunningBoundaryPolicy.phaseFromVerifiedHistory(
             "running", listOf(c1, running)))
     }
+
     // Literal fixtures deliberately do not use the emitter, phase vocabulary,
     // field-name constants or the host identifier validator as an oracle.
     private fun literalRunningEdge(): JsonObject = Json.parseToJsonElement("""
@@ -164,6 +166,24 @@ class TrustedRunningBoundaryPolicyUnitTest {
         }
     }
 
+    private val forbiddenPrefixKinds = setOf(
+        "session.resumed", "agent.started", "agent.completed",
+        "llm.capabilities", "llm.request", "llm.response", "tool.started",
+        "tool.completed", "policy.denied", "session.error", "redaction.applied"
+    )
+
+    @Test fun literalForbiddenKindsCoverCurrentVocabulary() {
+        // Completeness only: never derive the negative test oracle from production.
+        // Kotlin const val properties compile to public static final fields.
+        val declaredKinds = SessionEventKinds::class.java.fields
+            .filter { it.type == String::class.java &&
+                Modifier.isStatic(it.modifiers) && Modifier.isFinal(it.modifiers) }
+            .map { it.get(null) as String }.toSet()
+        assertEquals(declaredKinds - setOf("checkpoint.saved", "session.transition"),
+            forbiddenPrefixKinds, "Review and explicitly classify new event kinds")
+        assertTrue(declaredKinds.containsAll(setOf("checkpoint.saved", "session.transition")))
+    }
+
     @Test fun literalHistoryRequiresExactlyOneFinalRunningEdgeAfterValidPrefix() {
         val c3 = literalRunningEdge()
         val c2 = JsonObject(c3 + ("transition" to JsonObject(mapOf(
@@ -182,15 +202,29 @@ class TrustedRunningBoundaryPolicyUnitTest {
             assertNull(TrustedRunningBoundaryPolicy.phaseFromVerifiedHistory("running", history),
                 history.toString())
         }
-        for (kind in listOf("session.resumed", "agent.started", "agent.completed",
-            "llm.capabilities", "llm.request", "llm.response", "tool.started",
-            "tool.completed", "policy.denied", "session.error", "redaction.applied", "unknown")) {
+        for (kind in forbiddenPrefixKinds + "unknown") {
             val poisoned = JsonObject(saved + ("type" to JsonPrimitive(kind)))
             assertNull(TrustedRunningBoundaryPolicy.phaseFromVerifiedHistory(
                 "running", listOf(saved, poisoned, c2, c3)), "before accepted: $kind")
             assertNull(TrustedRunningBoundaryPolicy.phaseFromVerifiedHistory(
                 "running", listOf(saved, c2, poisoned, c3)), "after accepted: $kind")
         }
+        val malformedPrefixRecords = mapOf(
+            "checkpoint with transition" to JsonObject(saved +
+                ("transition" to c2.getValue("transition"))),
+            "checkpoint with started status" to JsonObject(saved +
+                ("status" to JsonPrimitive("started"))),
+            "accepted edge with started status" to JsonObject(c2 +
+                ("status" to JsonPrimitive("started")))
+        )
+        for ((name, record) in malformedPrefixRecords) {
+            assertNull(TrustedRunningBoundaryPolicy.phaseFromVerifiedHistory(
+                "running", listOf(saved, record, c2, c3)), "before accepted: $name")
+            assertNull(TrustedRunningBoundaryPolicy.phaseFromVerifiedHistory(
+                "running", listOf(saved, c2, record, c3)), "after accepted: $name")
+        }
+        assertNull(TrustedRunningBoundaryPolicy.phaseFromVerifiedHistory(
+            "running", listOf(saved, malformedPrefixRecords.getValue(
+                "accepted edge with started status"), c3)), "non-completed accepted edge")
     }
-
 }
