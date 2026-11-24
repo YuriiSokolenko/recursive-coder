@@ -343,32 +343,8 @@ jobs:
         env:
           CI: 'true'
         run: ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache test integrationTest e2eTest checkPreparationHostConformance --stacktrace
-      - name: Assert JUnit XML proves all JVM test targets executed
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          from xml.etree import ElementTree as ET
-
-          for target in ("test", "integrationTest", "e2eTest"):
-              reports = sorted(Path(".").glob(f"**/build/test-results/{target}/TEST-*.xml"))
-              if not reports:
-                  raise SystemExit(f"{target}: no JUnit XML reports; target may have been omitted")
-              passed = skipped = total = 0
-              for report in reports:
-                  for case in ET.parse(report).iter("testcase"):
-                      total += 1
-                      case_name = f"{case.get('classname', '?')}.{case.get('name', '?')}"
-                      if case.find("failure") is not None or case.find("error") is not None:
-                          raise SystemExit(f"{target}: failed/error JUnit case {case_name} in {report}")
-                      if case.find("skipped") is not None:
-                          skipped += 1
-                      else:
-                          passed += 1
-              if not passed:
-                  raise SystemExit(f"{target}: {total} JUnit cases but no executed passing test")
-              print(f"{target}: {passed} passed, {skipped} skipped, "
-                    f"{len(reports)} XML reports; no failed/error cases")
-          PY
+      - name: Assert per-module JUnit execution evidence
+        run: python3 -I tools/check_junit_evidence.py --root .
       - name: Confirm sandbox integration test was not skipped
         run: |
           python3 - <<'PY'
@@ -627,6 +603,10 @@ jobs:
           node-version: '22'
       - name: Reject altered action refs and Gradle checksum inputs
         run: python3 -I -m unittest discover -s tests -p 'test_ci_bootstrap.py' -v
+      - name: Test JUnit evidence and import-order guards
+        run: python3 -I -m unittest discover -s tests -p 'test_junit_evidence.py' -v
+      - name: Check import order in issue 36 test classes
+        run: python3 -I tools/check_junit_evidence.py --root . --imports-only
       - name: Enforce English-only repository documentation
         run: |
           if LC_ALL=C.UTF-8 grep -nP '[\p{Cyrillic}]' README.md CONTRIBUTING.md contracts/README.md docs/architecture/*.md; then

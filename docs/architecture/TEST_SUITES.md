@@ -127,7 +127,7 @@ The architecture regression suite runs real injected Gradle dependency-edge,
 cycle, and configuration-cache negative cases. The reused, suite-private Gradle
 daemon introduced in [PR #168](https://github.com/YuriiSokolenko/recursive-coder/pull/168)
 replaced repeated **cold** Gradle starts without removing any of the 93 actual
-Gradle invocations. Scenario-specific subprocess deadlines are bounded (normally
+Gradle invocations measured at PR #168 head `b15e47b`. Scenario-specific subprocess deadlines are bounded (normally
 180 seconds, or 240 seconds for more expensive compile/configuration cases),
 and the runner streams combined stdout/stderr with scenario, phase and timeout
 markers; a timeout stops only its private daemon registry. These are ceilings,
@@ -147,7 +147,7 @@ Comparable GitHub-hosted architecture runs recorded for PR #168 (minutes):
 | **After median** | **6.6** | **2.57** |
 
 All three *after* architecture attempts ran the same 43-test/93-Gradle-invocation
-suite on the same PR #168 head; attempts 2 and 3 reran the architecture job only,
+suite on PR #168 head `b15e47b`; attempts 2 and 3 reran the architecture job only,
 not the full workflow. For whole-workflow context, the three before runs took
 26.1, 20.2 and 26.1 minutes; after-change successful full runs
 [45138287471](https://github.com/YuriiSokolenko/recursive-coder/actions/runs/45138287471)
@@ -155,10 +155,18 @@ and [45145310763](https://github.com/YuriiSokolenko/recursive-coder/actions/runs
 took 10.4 and 10.5 minutes respectively. These are observational samples on
 PR #168 commits, **not** a measured speedup for later changes or a CI threshold.
 
-CI verifies all three JVM task outputs (`test`, `integrationTest`, `e2eTest`)
-contain executed passing JUnit cases, separately checks the required sandbox
-cases and pure-unit JUnit output, and retains independently installed CLI and
-protocol suites. The unfiltered `test` task remains intact. The production
+CI uses `tools/check_junit_evidence.py` to require passing unfiltered
+`test` evidence in every product module and passing focused evidence for
+modules with compiled integration or E2E methods. The existing bytecode tier
+classifier supplies expected module/tier membership; a module with no methods
+in a focused tier need not produce XML for that tier. Focused case identities
+must also occur in that module's unfiltered reports. The gate checks execution
+presence, not complete method-level coverage; failure/error XML rejection is
+defence in depth after Gradle succeeds. Existing mandatory sandbox markers and
+pure-unit evidence remain separate. The contracts job tests the evidence checker
+and checks lexicographic contiguous imports in the eight issue #36 classes;
+this deliberately does not impose a new repository-wide formatting policy.
+The independently installed CLI and protocol suites remain unchanged. The unfiltered `test` task remains intact. The production
 `installDist` build runs in the isolated bytecode-build job and is verified
 before CLI E2E; the full JVM tasks run on their own clean runner after that
 verifier succeeds. Compilation artifacts are intentionally **not shared** across
