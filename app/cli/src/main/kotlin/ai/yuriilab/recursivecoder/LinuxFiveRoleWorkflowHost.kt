@@ -176,9 +176,9 @@ class LinuxFiveRoleWorkflowHost(
                     identity.first == RecursiveGraphPolicy.childStageId(expectedChild)
             }
         })
-        require("git_diff_check" in requiredChecks &&
-            (requiredChecks - "git_diff_check").isNotEmpty() &&
-            (requiredChecks - "git_diff_check").all { it in checks })
+        require(StageCheckIds.GIT_DIFF_CHECK in requiredChecks &&
+            (requiredChecks - StageCheckIds.GIT_DIFF_CHECK).isNotEmpty() &&
+            (requiredChecks - StageCheckIds.GIT_DIFF_CHECK).all { it in checks })
         require(clean()) {
             "Git baseline rejected: " + (lastGitBaselineDenialCode ?: "UNKNOWN")
         }

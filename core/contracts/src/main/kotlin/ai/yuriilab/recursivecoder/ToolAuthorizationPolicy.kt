@@ -66,7 +66,7 @@ data class ReviewedChangeFacts(
 )
 
 object ToolAuthorizationPolicy {
-    val knownReadTools: Set<String> = setOf("read", "list", "find", "search", "git_status", "git_diff")
+    val knownReadTools: Set<String> = setOf(WorkspaceToolNames.READ, WorkspaceToolNames.LIST, WorkspaceToolNames.FIND, WorkspaceToolNames.SEARCH, WorkspaceToolNames.GIT_STATUS, WorkspaceToolNames.GIT_DIFF)
     private val protectedSegments = setOf(".git", ".github", ".gradle", ".env", "secrets", "credentials")
     private val protectedFiles = setOf("gradle.properties", "local.properties", "build.gradle.kts",
         "settings.gradle.kts", "build.gradle", "settings.gradle", "pom.xml", "package.json",
@@ -108,7 +108,7 @@ object ToolAuthorizationPolicy {
             }
 
     fun admitReadOnlyPolicy(facts: ReadPolicyFacts): ToolAuthorizationDecision =
-        if (facts.mode != "read-only" || facts.allowedTools.any { it !in knownReadTools } ||
+        if (facts.mode != ToolPolicyModes.READ_ONLY || facts.allowedTools.any { it !in knownReadTools } ||
             facts.writablePathsPresent || facts.immutableInputsPresent)
             ToolAuthorizationDecision.Deny("UNSUPPORTED_TOOL_POLICY")
         else ToolAuthorizationDecision.Permit
@@ -173,13 +173,13 @@ object ToolAuthorizationPolicy {
     /** Developers must have an independent test and the fixed Git diff check. */
     fun admitRequiredChecks(role: EngineeringRole?, requiredChecks: Set<String>): ToolAuthorizationDecision =
         if (role == null || (role == EngineeringRole.DEVELOPER &&
-            ("git_diff_check" !in requiredChecks ||
-                requiredChecks.none { it != "git_diff_check" })))
+            (StageCheckIds.GIT_DIFF_CHECK !in requiredChecks ||
+                requiredChecks.none { it != StageCheckIds.GIT_DIFF_CHECK })))
             ToolAuthorizationDecision.Deny("TEST_CHECK_REQUIRED")
         else ToolAuthorizationDecision.Permit
 
     fun authorizeCheck(requestedCheck: String, allowlistedChecks: Set<String>): ToolAuthorizationDecision =
-        if (requestedCheck == "git_diff_check" || requestedCheck in allowlistedChecks)
+        if (requestedCheck == StageCheckIds.GIT_DIFF_CHECK || requestedCheck in allowlistedChecks)
             ToolAuthorizationDecision.Permit
         else ToolAuthorizationDecision.Deny("CHECK_NOT_ALLOWLISTED")
 }

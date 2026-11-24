@@ -229,8 +229,8 @@ class RunReviewerStageUseCase(
                 return abort("INVALID_DEVELOPER_HANDOFF")
             val checks = evidence.validation.requiredChecks
             if (checks.map { it.checkId }.toSet().size != checks.size ||
-                checks.none { it.checkId == "git_diff_check" } ||
-                checks.none { it.checkId != "git_diff_check" } ||
+                checks.none { it.checkId == StageCheckIds.GIT_DIFF_CHECK } ||
+                checks.none { it.checkId != StageCheckIds.GIT_DIFF_CHECK } ||
                 checks.any { !it.passed || it.toolId.isNullOrBlank() ||
                     it.baselineHead.isNullOrBlank() } ||
                 !host.verifyDeveloperEvidence(lease))

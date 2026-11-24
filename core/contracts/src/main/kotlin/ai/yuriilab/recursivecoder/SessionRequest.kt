@@ -114,7 +114,7 @@ class SessionRequest private constructor(val raw: JsonObject) {
 
         policy.fields(setOf(ToolPolicyFields.MODE, ToolPolicyFields.ALLOWED_TOOLS, ToolPolicyFields.DENIED_TOOLS, ToolPolicyFields.PROTECTED_PATHS,
             ToolPolicyFields.WRITABLE_PATHS, ToolPolicyFields.POLICY_SHA256), setOf(ToolPolicyFields.IMMUTABLE_INPUTS))
-        if (policy.textAt(ToolPolicyFields.MODE) !in setOf("read-only", "scoped-write")) refuse("Invalid tool mode")
+        if (policy.textAt(ToolPolicyFields.MODE) !in setOf(ToolPolicyModes.READ_ONLY, ToolPolicyModes.SCOPED_WRITE)) refuse("Invalid tool mode")
         listOf(ToolPolicyFields.ALLOWED_TOOLS, ToolPolicyFields.DENIED_TOOLS, ToolPolicyFields.PROTECTED_PATHS, ToolPolicyFields.WRITABLE_PATHS).forEach { policy.stringsAt(it) }
         hash(policy.textAt(ToolPolicyFields.POLICY_SHA256))
         policy[ToolPolicyFields.IMMUTABLE_INPUTS]?.let {

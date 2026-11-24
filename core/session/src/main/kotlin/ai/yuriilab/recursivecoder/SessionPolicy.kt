@@ -171,8 +171,8 @@ internal object SessionAdmissionPolicy {
                     ModelFeatureIds.USAGE_METADATA !in f.modelFeatures
                 )))
             return deny(AdmissionDenial.MODEL)
-        if (f.toolPolicyMode != "read-only" ||
-            "read" !in f.allowedTools || "read" in f.deniedTools ||
+        if (f.toolPolicyMode != ToolPolicyModes.READ_ONLY ||
+            WorkspaceToolNames.READ !in f.allowedTools || WorkspaceToolNames.READ in f.deniedTools ||
             f.writablePathCount != 0 || f.immutableInputCount != 0)
             return deny(AdmissionDenial.TOOL_POLICY)
         if (f.maxToolCalls < 1L || f.maxModelRequests < SESSION_MODEL_TURNS.toLong())

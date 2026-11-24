@@ -320,8 +320,8 @@ class RunPreparationStageUseCase(
                 !live(lease, snapshot))
                 return terminal("STAGE_AUTHORITY_MISMATCH")
             val checks = snapshot.requiredChecks
-            if ("git_diff_check" !in checks || checks.none { it != "git_diff_check" } ||
-                checks.any { it != "git_diff_check" && it !in snapshot.checks })
+            if (StageCheckIds.GIT_DIFF_CHECK !in checks || checks.none { it != StageCheckIds.GIT_DIFF_CHECK } ||
+                checks.any { it != StageCheckIds.GIT_DIFF_CHECK && it !in snapshot.checks })
                 return terminal("STAGE_CHECKS_REQUIRED")
             checkpoint()?.let { return halted(it) }
             val open = withContext(blockingDispatcher) { tools.open(authority) }
@@ -498,7 +498,7 @@ class RunPreparationStageUseCase(
                 validation.correlation == stage.correlation && validation.actor == stage.agentId &&
                 pending != null &&
                 validation.requiredChecks.map { it.checkId }.toSet().let { checks ->
-                    "git_diff_check" in checks && checks.any { it != "git_diff_check" }
+                    StageCheckIds.GIT_DIFF_CHECK in checks && checks.any { it != StageCheckIds.GIT_DIFF_CHECK }
                 } && validation.requiredChecks.all { it.passed }
         } catch (_: Exception) { false }
         if (!validHumanLease)

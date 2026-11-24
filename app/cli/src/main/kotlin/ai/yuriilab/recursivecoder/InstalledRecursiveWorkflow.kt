@@ -321,7 +321,7 @@ internal class InstalledRecursiveWorkflow(
     private var integrated: TwoOriginRecursiveOutcome.Completed? = null
     @Volatile private var uncertainChildExecution = false
     val reconciliationRequired: Boolean get() = uncertainChildExecution
-    private val requiredChildChecks = setOf("git_diff_check", "offline-check")
+    private val requiredChildChecks = setOf(StageCheckIds.GIT_DIFF_CHECK, "offline-check")
     // SDD does one write/check cycle. Developer runs 3 preparation
     // stages plus its own write/check cycle, with one shared grant.
     private fun childToolCalls(kind: StageKind): Long =

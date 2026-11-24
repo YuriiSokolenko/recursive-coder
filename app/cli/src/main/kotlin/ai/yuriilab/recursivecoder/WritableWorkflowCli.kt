@@ -380,7 +380,7 @@ internal object WritableWorkflowCli {
             "env:FAKE_UNUSED", 8192, 512, setOf(ModelFeatureIds.TOOL_CALLS), null, 1000, 1000)
         val host = LinuxFiveRoleWorkflowHost(checkout, graph, expectedHead, branch,
             mapOf("offline-check" to StageIsolatedCheck(executable, arguments)),
-            setOf("git_diff_check", "offline-check"),
+            setOf(StageCheckIds.GIT_DIFF_CHECK, "offline-check"),
             { candidate, _, _ ->
                 val kind = writers.singleOrNull { it.role == candidate.ownerRole }
                 if (kind != null && targets.getValue(kind).path == candidate.declaredPath &&

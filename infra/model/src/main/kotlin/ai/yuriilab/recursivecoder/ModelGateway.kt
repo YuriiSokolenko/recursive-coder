@@ -244,7 +244,7 @@ class OpenAICompatibleGateway(
                 add(buildJsonObject {
                     put("type", "function")
                     put("function", buildJsonObject {
-                        put("name", "read_task")
+                        put("name", READ_TASK_MODEL_TOOL)
                         put("description", "Request a trusted read of the task file")
                         put("parameters", buildJsonObject {
                             put("type", "object")
@@ -358,7 +358,7 @@ class OpenAICompatibleGateway(
     private fun parseDecision(parsed: Completion, task: Path, observed: Pair<Int, String>?): ModelDecision {
         if (parsed.refusal) return ModelDecision.Refusal
         if (observed == null) {
-            if (parsed.finish != "tool_calls" || parsed.toolName != "read_task" ||
+            if (parsed.finish != "tool_calls" || parsed.toolName != READ_TASK_MODEL_TOOL ||
                 parsed.toolArguments == null) throw invalidResponse()
             val args = parseObject(parsed.toolArguments)
             if (args.keys != setOf("path")) throw invalidResponse()
@@ -376,3 +376,5 @@ class OpenAICompatibleGateway(
         return ModelDecision.Done(bytes, sha)
     }
 }
+
+private const val READ_TASK_MODEL_TOOL = "read_task"

@@ -348,7 +348,7 @@ class WorkspaceManager private constructor(
         checkCurrent()
         val rel = taskRelativePath(path)
         ToolAuthorizationPolicy.authorizeRead(ReadAuthorizationFacts(
-            "read", allowed, denied, taskAdmission = true
+            WorkspaceToolNames.READ, allowed, denied, taskAdmission = true
         )).deniedCode?.let(::deny)
         if (sha256(secureRead(rel)) != expectedSha) deny("TASK_DIGEST_MISMATCH")
     }

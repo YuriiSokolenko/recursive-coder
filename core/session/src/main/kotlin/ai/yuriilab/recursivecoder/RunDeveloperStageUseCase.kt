@@ -438,7 +438,7 @@ class RunDeveloperStageUseCase(
             val checks = snapshot.requiredChecks
             if (ToolAuthorizationPolicy.admitRequiredChecks(EngineeringRole.DEVELOPER, checks)
                     != ToolAuthorizationDecision.Permit ||
-                checks.any { it != "git_diff_check" && it !in snapshot.checks })
+                checks.any { it != StageCheckIds.GIT_DIFF_CHECK && it !in snapshot.checks })
                 return terminal("STAGE_CHECKS_REQUIRED")
             checkpoint()?.let { return halted(it) }
             val opened = withContext(blockingDispatcher) { tools.open(authority) }

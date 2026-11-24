@@ -55,7 +55,7 @@ data class TrustedWritePolicy(
     val approvedArtifacts: Map<String, String> = emptyMap(),
     val reviewedChange: ReviewedChange? = null,
     val checks: Map<String, TrustedCheck> = emptyMap(),
-    val requiredChecks: Set<String> = setOf("git_diff_check"),
+    val requiredChecks: Set<String> = setOf(StageCheckIds.GIT_DIFF_CHECK),
     val maxToolCalls: Int = 64
 )
 
@@ -145,8 +145,8 @@ class TrustedWriteRuntime private constructor(
             if (!ToolAuthorizationPolicy.validHostIdentifier(policy.sessionId) || !gitPattern.matches(policy.baselineHead) ||
                 policy.branch.isBlank() || policy.maxToolCalls !in 1..10_000 ||
                 policy.requiredChecks.isEmpty() ||
-                policy.requiredChecks.any { it != "git_diff_check" && it !in policy.checks } ||
-                policy.checks.keys.any { !ToolAuthorizationPolicy.validHostIdentifier(it) || it == "git_diff_check" })
+                policy.requiredChecks.any { it != StageCheckIds.GIT_DIFF_CHECK && it !in policy.checks } ||
+                policy.checks.keys.any { !ToolAuthorizationPolicy.validHostIdentifier(it) || it == StageCheckIds.GIT_DIFF_CHECK })
                 fail("INVALID_WRITE_POLICY")
             // Reject unwinnable Developer sessions before taking a workspace lease
             // or changing files. The trusted host, not the model, chooses test checks.
@@ -438,7 +438,7 @@ class TrustedWriteRuntime private constructor(
     /** Batch preflight is all-or-nothing. An I/O failure mid-batch permanently blocks success. */
     @Synchronized
     fun apply(operations: List<WriteOperation>, claimedToolId: String? = null): WriteToolOutcome {
-        val id = nextId("write")
+        val id = nextId(WRITE_TOOL_NAME)
         return try {
             if (claimedToolId != null) fail("FORGED_TOOL_ID")
             if (sequence > policy.maxToolCalls) fail("TOOL_QUOTA_EXCEEDED")
@@ -518,14 +518,14 @@ class TrustedWriteRuntime private constructor(
                 throw e
             }
             issued.clear()
-            report(id, "write", null)
+            report(id, WRITE_TOOL_NAME, null)
             WriteToolOutcome(id)
         } catch (e: Refused) {
-            report(id, "write", e.code)
+            report(id, WRITE_TOOL_NAME, e.code)
             WriteToolOutcome(id, e.code)
         } catch (_: Exception) {
             poisoned = true
-            report(id, "write", "WRITE_EXECUTION_DENIED")
+            report(id, WRITE_TOOL_NAME, "WRITE_EXECUTION_DENIED")
             WriteToolOutcome(id, "WRITE_EXECUTION_DENIED")
         }
     }
@@ -619,14 +619,14 @@ class TrustedWriteRuntime private constructor(
 
     @Synchronized
     fun runCheck(checkId: String, claimedToolId: String? = null): CheckOutcome {
-        val id = nextId("run_check")
+        val id = nextId(RUN_CHECK_TOOL_NAME)
         return try {
             if (claimedToolId != null) fail("FORGED_TOOL_ID")
             if (sequence > policy.maxToolCalls) fail("TOOL_QUOTA_EXCEEDED")
             val manifest = verifyState()
             ToolAuthorizationPolicy.authorizeCheck(checkId, policy.checks.keys)
                 .deniedCode?.let(::fail)
-            if (checkId == "git_diff_check") {
+            if (checkId == StageCheckIds.GIT_DIFF_CHECK) {
                 // Fixed Git verb; no external diff tools, no shell, and an enforced deadline.
                 git.text(1024 * 1024, "diff", "--check", "--no-ext-diff", "--no-textconv", "HEAD")
                 for ((path, hash) in accepted) {
@@ -647,13 +647,13 @@ class TrustedWriteRuntime private constructor(
                 policy.baselineHead, policyHash, manifest, "")
             val receipt = unsigned.copy(mac = signature(receiptPayload(unsigned)))
             issued[id] = receipt
-            report(id, "run_check", null)
+            report(id, RUN_CHECK_TOOL_NAME, null)
             CheckOutcome(id, receipt = receipt)
         } catch (e: Refused) {
-            report(id, "run_check", e.code)
+            report(id, RUN_CHECK_TOOL_NAME, e.code)
             CheckOutcome(id, e.code)
         } catch (_: Exception) {
-            report(id, "run_check", "CHECK_UNAVAILABLE")
+            report(id, RUN_CHECK_TOOL_NAME, "CHECK_UNAVAILABLE")
             CheckOutcome(id, "CHECK_UNAVAILABLE")
         }
     }
@@ -690,3 +690,6 @@ class TrustedWriteRuntime private constructor(
         }
     }
 }
+
+private const val WRITE_TOOL_NAME = "write"
+private const val RUN_CHECK_TOOL_NAME = "run_check"
