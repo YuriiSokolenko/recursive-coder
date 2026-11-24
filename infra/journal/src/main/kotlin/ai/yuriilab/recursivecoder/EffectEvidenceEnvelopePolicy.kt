@@ -40,7 +40,7 @@ internal object EffectEvidenceEnvelopePolicy {
         val admissible = when (state) {
             EffectRecordStates.INTENT, EffectRecordStates.STARTED -> type == SessionEventKinds.TOOL_STARTED && status == SessionEventStatuses.STARTED
             EffectRecordStates.COMMITTED -> type == SessionEventKinds.TOOL_COMPLETED && status == SessionEventStatuses.COMPLETED
-            else -> type == "session.error" && status == "failed"
+            else -> type == SessionEventKinds.SESSION_ERROR && status == SessionEventStatuses.FAILED
         }
         if (!admissible ||
             number(metadata, EffectEvidenceFields.EFFECT_FENCE_GENERATION)?.let { it > 0L } != true ||

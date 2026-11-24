@@ -69,12 +69,12 @@ internal object SessionResultMapper {
             })
             put("outputs", buildJsonObject {
                 put("eventLog", buildJsonObject {
-                    put("path", result.eventLog.path.toString())
-                    put("sha256", result.eventLog.sha256)
+                    put(SessionArtifactReferenceFields.PATH, result.eventLog.path.toString())
+                    put(SessionArtifactReferenceFields.SHA256, result.eventLog.sha256)
                 })
                 put("diagnostics", buildJsonObject {
-                    put("path", result.diagnostics.path.toString())
-                    put("sha256", result.diagnostics.sha256)
+                    put(SessionArtifactReferenceFields.PATH, result.diagnostics.path.toString())
+                    put(SessionArtifactReferenceFields.SHA256, result.diagnostics.sha256)
                 })
                 put("terminalReceipt", JsonNull); put("changeManifest", JsonNull)
                 put("checkpoint", JsonNull)

@@ -854,14 +854,14 @@ object SessionCheckpointStore {
             }) refuse("CHECKPOINT_SESSION_MISMATCH")
         val graph = setOf(s.binding.graphId) + s.children.map { it.id }
         for (event in ledger.events) {
-            val metadata = event["metadata"] as? JsonObject ?: continue
-            for (key in listOf("graphId", "parentGraphId", "childGraphId")) {
+            val metadata = event[SessionEventFields.METADATA] as? JsonObject ?: continue
+            for (key in listOf(StageEventMetadataFields.GRAPH_ID, StageEventMetadataFields.PARENT_GRAPH_ID, StageEventMetadataFields.CHILD_GRAPH_ID)) {
                 val value = metadata[key]?.jsonPrimitive?.content ?: continue
                 if (value !in graph) refuse("CHECKPOINT_GRAPH_MISMATCH")
             }
         }
         val eventCorrelations = ledger.events.mapNotNull {
-            it["correlationId"]?.jsonPrimitive?.content
+            it[SessionEventFields.CORRELATION_ID]?.jsonPrimitive?.content
         }.toSet()
         if (s.pendingEffects.any { it.correlationId !in eventCorrelations })
             refuse("CHECKPOINT_CORRELATION_MISMATCH")
@@ -879,20 +879,20 @@ object SessionCheckpointStore {
         // physical tool execution ID (or correlation when the ID is absent);
         // a single later completion must never clear two uncertain operations.
         fun toolKey(event: JsonObject): String {
-            val actor = event["actor"] as? JsonObject
+            val actor = event[SessionEventFields.ACTOR] as? JsonObject
             val execution = actor?.get("toolExecutionId")
             return if (execution == null || execution == JsonNull)
-                "correlation:" + event["correlationId"]!!.jsonPrimitive.content
+                "correlation:" + event[SessionEventFields.CORRELATION_ID]!!.jsonPrimitive.content
             else "execution:" + execution.jsonPrimitive.content
         }
         val unmatched = mutableMapOf<String, ArrayDeque<String>>()
         for (event in ledger.events) {
-            val type = event["type"]!!.jsonPrimitive.content
+            val type = event[SessionEventFields.TYPE]!!.jsonPrimitive.content
             if (type != SessionEventKinds.TOOL_STARTED && type != SessionEventKinds.TOOL_COMPLETED) continue
             val key = toolKey(event)
             if (type == SessionEventKinds.TOOL_STARTED)
                 unmatched.getOrPut(key) { ArrayDeque() }
-                    .addLast(event["correlationId"]!!.jsonPrimitive.content)
+                    .addLast(event[SessionEventFields.CORRELATION_ID]!!.jsonPrimitive.content)
             else unmatched[key]?.removeFirstOrNull()
         }
         val unresolved = unmatched.values.flatMap { it.toList() }
@@ -905,11 +905,11 @@ object SessionCheckpointStore {
 
         if (s.acceptedArtifacts.any { artifact ->
                 ledger.events.none { event ->
-                    val m = event["metadata"] as? JsonObject
-                    event["status"]?.jsonPrimitive?.content == "completed" &&
+                    val m = event[SessionEventFields.METADATA] as? JsonObject
+                    event[SessionEventFields.STATUS]?.jsonPrimitive?.content == SessionEventStatuses.COMPLETED &&
                         m?.get("artifactId")?.jsonPrimitive?.content == artifact.id &&
                         m?.get("artifactSha256")?.jsonPrimitive?.content == artifact.sha256 &&
-                        (m?.get("childGraphId") ?: m?.get("graphId"))
+                        (m?.get(StageEventMetadataFields.CHILD_GRAPH_ID) ?: m?.get(StageEventMetadataFields.GRAPH_ID))
                             ?.jsonPrimitive?.content == artifact.ownerId
                 }
             }) refuse("CHECKPOINT_ARTIFACT_UNCONFIRMED")

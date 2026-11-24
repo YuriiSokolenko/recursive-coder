@@ -64,13 +64,13 @@ class WorkspaceManager private constructor(
             lockDirectory: Path = configuredLockDirectory(),
             gitExecutable: Path = discoverGit()
         ): WorkspaceManager {
-            val mode = request.policy["mode"]!!.jsonPrimitive.content
-            val allowed = request.policy["allowedTools"]!!.jsonArray.map { it.jsonPrimitive.content }
-            val denied = request.policy["deniedTools"]!!.jsonArray.map { it.jsonPrimitive.content }
+            val mode = request.policy[ToolPolicyFields.MODE]!!.jsonPrimitive.content
+            val allowed = request.policy[ToolPolicyFields.ALLOWED_TOOLS]!!.jsonArray.map { it.jsonPrimitive.content }
+            val denied = request.policy[ToolPolicyFields.DENIED_TOOLS]!!.jsonArray.map { it.jsonPrimitive.content }
             if (ToolAuthorizationPolicy.admitReadOnlyPolicy(ReadPolicyFacts(
                     mode, allowed.toSet(),
-                    request.policy["writablePaths"]!!.jsonArray.isNotEmpty(),
-                    (request.policy["immutableInputs"] as? JsonArray)?.isNotEmpty() == true
+                    request.policy[ToolPolicyFields.WRITABLE_PATHS]!!.jsonArray.isNotEmpty(),
+                    (request.policy[ToolPolicyFields.IMMUTABLE_INPUTS] as? JsonArray)?.isNotEmpty() == true
                 )).deniedCode != null)
                 throw Refused(ToolDenialCodes.UNSUPPORTED_TOOL_POLICY, "policy", "Unsupported workspace tool policy")
             val root = try {
@@ -106,11 +106,11 @@ class WorkspaceManager private constructor(
                     "Repository Git configuration may execute external commands")
             val head = git.text(4096, "rev-parse", "HEAD")
             val currentBranch = git.text(4096, "branch", "--show-current")
-            if (head != request.workspace["baselineSha"]!!.jsonPrimitive.content ||
-                head != request.workspace["headSha"]!!.jsonPrimitive.content)
+            if (head != request.workspace[WorkspaceFields.BASELINE_SHA]!!.jsonPrimitive.content ||
+                head != request.workspace[WorkspaceFields.HEAD_SHA]!!.jsonPrimitive.content)
                 throw Refused(WorkspaceDenialCodes.WORKSPACE_BASELINE_MISMATCH, "policy", "Workspace HEAD changed")
             if (currentBranch.isBlank() ||
-                currentBranch != request.workspace["branch"]?.jsonPrimitive?.content)
+                currentBranch != request.workspace[WorkspaceFields.BRANCH]?.jsonPrimitive?.content)
                 throw Refused("WORKSPACE_BRANCH_MISMATCH", "policy", "Workspace branch is unavailable or changed")
             val rootKey = Files.readAttributes(root, BasicFileAttributes::class.java).fileKey()
             val gitKey = Files.readAttributes(root.resolve(".git"), BasicFileAttributes::class.java).fileKey()
@@ -122,7 +122,7 @@ class WorkspaceManager private constructor(
                     throw Refused(WorkspaceDenialCodes.SANDBOX_UNAVAILABLE, "policy", "Race-safe directory access is unavailable")
             }
             val patterns = try {
-                request.policy["protectedPaths"]!!.jsonArray.map {
+                request.policy[ToolPolicyFields.PROTECTED_PATHS]!!.jsonArray.map {
                     val pattern = it.jsonPrimitive.content
                     if (pattern.isBlank() || pattern.length > 256 || '\u0000' in pattern)
                         throw IllegalArgumentException()
@@ -142,7 +142,7 @@ class WorkspaceManager private constructor(
                     path to metadata[0]
                 }
             if (tree.size > 50000) throw Refused("WORKSPACE_TOO_LARGE", "policy", "Git tree exceeds the supported limit")
-            val policyWithoutClaim = JsonObject(request.policy.filterKeys { it != "policySha256" })
+            val policyWithoutClaim = JsonObject(request.policy.filterKeys { it != ToolPolicyFields.POLICY_SHA256 })
             val policyHash = sha256(canonicalJson(policyWithoutClaim).toByteArray(StandardCharsets.UTF_8))
             val locks = try {
                 if (!lockDirectory.isAbsolute || lockDirectory.normalize().startsWith(root))
@@ -168,9 +168,9 @@ class WorkspaceManager private constructor(
                 throw Refused(WorkspaceDenialCodes.WORKSPACE_LOCKED, "policy", "Workspace already has an active session")
             }
             try {
-                val manager = WorkspaceManager(root, request.workspace["workspaceId"]!!.jsonPrimitive.content,
+                val manager = WorkspaceManager(root, request.workspace[WorkspaceFields.WORKSPACE_ID]!!.jsonPrimitive.content,
                     head, currentBranch, policyHash, allowed.toSet(), denied.toSet(), patterns, tree,
-                    request.budgets["maxToolCalls"]!!.jsonPrimitive.int, git,
+                    request.budgets[SessionBudgetFields.MAX_TOOL_CALLS]!!.jsonPrimitive.int, git,
                     sha256(localConfig.toByteArray(StandardCharsets.UTF_8)), rootKey, gitKey,
                     channel, lease, request.sessionId, request.rootPath, onAudit, onStart)
                 manager.checkCurrent()

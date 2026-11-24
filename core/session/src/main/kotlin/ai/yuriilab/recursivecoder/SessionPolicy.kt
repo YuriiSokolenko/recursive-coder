@@ -152,7 +152,7 @@ internal object SessionAdmissionPolicy {
             else -> false
         }
         if (!supportedInvocation) return deny(AdmissionDenial.INVOCATION)
-        if (f.resumeMode != "fresh" || f.fenceGeneration != 1L)
+        if (f.resumeMode != SessionResumeModes.FRESH || f.fenceGeneration != 1L)
             return deny(AdmissionDenial.RESUME)
         if (!capabilities.containsAll(f.requiredCapabilities) ||
             SessionCapabilityIds.EVENTS_V1 !in f.requiredCapabilities)
@@ -191,7 +191,7 @@ internal object SessionResumePreflightPolicy {
         val decision = SessionAdmissionPolicy.decide(facts)
         if (decision !is AdmissionDecision.Denied) return null
         return decision.reason.takeUnless {
-            it == AdmissionDenial.RESUME && facts.resumeMode == "resume"
+            it == AdmissionDenial.RESUME && facts.resumeMode == SessionResumeModes.RESUME
         }
     }
 }

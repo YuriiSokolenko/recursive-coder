@@ -52,7 +52,7 @@ class SessionRequest private constructor(val raw: JsonObject) {
     val workspace get() = raw.objectAt(SessionRequestFields.WORKSPACE)
     val invocation get() = raw.objectAt(SessionRequestFields.INVOCATION)
     val deadline get() = Instant.parse(budgets.textAt(SessionBudgetFields.DEADLINE_AT))
-    val taskPath get() = absolute(task.objectAt(TaskInputFields.TASK_INPUT_REF).textAt("path"))
+    val taskPath get() = absolute(task.objectAt(TaskInputFields.TASK_INPUT_REF).textAt(SessionArtifactReferenceFields.PATH))
     val rootPath get() = absolute(workspace.textAt(WorkspaceFields.ROOT_PATH))
     val outputRoot get() = absolute(outputs.textAt(SessionOutputFields.ROOT_DIR))
     fun output(key: String) = absolute(outputs.textAt(key))
@@ -92,9 +92,9 @@ class SessionRequest private constructor(val raw: JsonObject) {
         listOf(TaskInputFields.STAGE, TaskInputFields.ROLE, TaskInputFields.TASK_ID).forEach { identifier(task.textAt(it)) }
         task[TaskInputFields.PARENT_AGENT_ID]?.let { if (it != JsonNull) identifier(task.textAt(TaskInputFields.PARENT_AGENT_ID)) }
         val ref = task.objectAt(TaskInputFields.TASK_INPUT_REF)
-        ref.fields(setOf("path", "sha256"))
-        absolute(ref.textAt("path"))
-        hash(ref.textAt("sha256"))
+        ref.fields(setOf(SessionArtifactReferenceFields.PATH, SessionArtifactReferenceFields.SHA256))
+        absolute(ref.textAt(SessionArtifactReferenceFields.PATH))
+        hash(ref.textAt(SessionArtifactReferenceFields.SHA256))
 
         model.fields(setOf(ModelConfigFields.PROVIDER, ModelConfigFields.MODEL_ID, ModelConfigFields.BASE_URL, ModelConfigFields.CREDENTIAL_REF,
             ModelConfigFields.CONTEXT_TOKENS, ModelConfigFields.MAX_OUTPUT_TOKENS, ModelConfigFields.FEATURES), setOf(ModelConfigFields.TEMPERATURE, ModelConfigFields.CONNECT_TIMEOUT_MS, ModelConfigFields.REQUEST_TIMEOUT_MS))
@@ -121,9 +121,9 @@ class SessionRequest private constructor(val raw: JsonObject) {
             val refs = it as? JsonArray ?: refuse("Invalid immutable inputs")
             refs.forEach { element ->
                 val value = element as? JsonObject ?: refuse("Invalid immutable reference")
-                value.fields(setOf("path", "sha256"))
-                absolute(value.textAt("path"))
-                hash(value.textAt("sha256"))
+                value.fields(setOf(SessionArtifactReferenceFields.PATH, SessionArtifactReferenceFields.SHA256))
+                absolute(value.textAt(SessionArtifactReferenceFields.PATH))
+                hash(value.textAt(SessionArtifactReferenceFields.SHA256))
             }
         }
 
@@ -148,13 +148,13 @@ class SessionRequest private constructor(val raw: JsonObject) {
 
         val resume = raw.objectAt(SessionRequestFields.RESUME)
         resume.fields(setOf(SessionResumeFields.MODE, SessionResumeFields.FENCE_GENERATION, "checkpoint"))
-        if (resume.textAt(SessionResumeFields.MODE) !in setOf("fresh", "resume") || resume.longAt(SessionResumeFields.FENCE_GENERATION) < 1)
+        if (resume.textAt(SessionResumeFields.MODE) !in setOf(SessionResumeModes.FRESH, SessionResumeModes.RESUME) || resume.longAt(SessionResumeFields.FENCE_GENERATION) < 1)
             refuse("Invalid resume mode")
         if (resume["checkpoint"] != JsonNull) {
             val cp = resume.objectAt("checkpoint")
-            cp.fields(setOf("path", "sha256"))
-            absolute(cp.textAt("path"))
-            hash(cp.textAt("sha256"))
+            cp.fields(setOf(SessionArtifactReferenceFields.PATH, SessionArtifactReferenceFields.SHA256))
+            absolute(cp.textAt(SessionArtifactReferenceFields.PATH))
+            hash(cp.textAt(SessionArtifactReferenceFields.SHA256))
         }
         raw.stringsAt(SessionRequestFields.REQUIRED_CAPABILITIES).forEach { identifier(it) }
         raw[SessionRequestFields.EXTENSIONS]?.let {

@@ -105,3 +105,63 @@ object SessionResumeFields {
     const val FENCE_GENERATION = "fenceGeneration"
     const val MODE = "mode"
 }
+
+/** Session Event Fields for Session Protocol v1. */
+object SessionEventFields {
+    const val EVENT_ID = "eventId"
+    const val SEQUENCE = "sequence"
+    const val TIMESTAMP = "timestamp"
+    const val TYPE = "type"
+    const val STATUS = "status"
+    const val CORRELATION_ID = "correlationId"
+    const val CAUSATION_ID = "causationId"
+    const val ACTOR = "actor"
+    const val TRANSITION = "transition"
+    const val TIMING = "timing"
+    const val REDACTION = "redaction"
+    const val METADATA = "metadata"
+}
+
+/** Session Event Actor Fields for Session Protocol v1. */
+object SessionEventActorFields {
+    const val AGENT_ID = "agentId"
+    const val PARENT_AGENT_ID = "parentAgentId"
+    const val CHILD_AGENT_ID = "childAgentId"
+    const val TOOL_EXECUTION_ID = "toolExecutionId"
+    const val CHILD_SESSION_ID = "childSessionId"
+}
+
+/** Session Event Transition Fields for Session Protocol v1. */
+object SessionEventTransitionFields {
+    const val FROM = "from"
+    const val TO = "to"
+}
+
+/** Session Event Timing Fields for Session Protocol v1. */
+object SessionEventTimingFields {
+    const val STARTED_AT = "startedAt"
+    const val DURATION_MS = "durationMs"
+}
+
+/** Session Event Redaction Fields for Session Protocol v1. */
+object SessionEventRedactionFields {
+    const val MODE = "mode"
+    const val REMOVED_FIELDS = "removedFields"
+}
+
+/** Session Artifact Reference Fields for Session Protocol v1. */
+object SessionArtifactReferenceFields {
+    const val PATH = "path"
+    const val SHA256 = "sha256"
+}
+
+/** Session Resume Modes for Session Protocol v1. */
+object SessionResumeModes {
+    const val FRESH = "fresh"
+    const val RESUME = "resume"
+}
+
+/** Stable metadata-only redaction mode emitted by v1 sessions. */
+object SessionEventRedactionMode {
+    const val METADATA_ONLY = "metadata-only"
+}
