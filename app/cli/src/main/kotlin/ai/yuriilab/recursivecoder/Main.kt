@@ -50,7 +50,11 @@ internal fun executeSession(requestPath: Path, delayMs: Long): Int {
     System.err.println("Session " + request.sessionId + ": " + status +
         " | result=" + request.output(SessionOutputFields.RESULT_PATH) +
         " | events=" + request.output(SessionOutputFields.EVENTS_PATH))
-    return if (status == "succeeded") 0 else if (status == "rejected") 2 else 1
+    return when (result.outcome) {
+        SessionOutcome.SUCCEEDED -> 0
+        SessionOutcome.REJECTED -> 2
+        else -> 1
+    }
 }
 
 /** CLI-owned JSONL adapter selection shared by CLI integration fixtures. */

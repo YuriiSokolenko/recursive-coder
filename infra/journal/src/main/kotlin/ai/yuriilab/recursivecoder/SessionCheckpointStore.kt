@@ -888,9 +888,9 @@ object SessionCheckpointStore {
         val unmatched = mutableMapOf<String, ArrayDeque<String>>()
         for (event in ledger.events) {
             val type = event["type"]!!.jsonPrimitive.content
-            if (type != "tool.started" && type != "tool.completed") continue
+            if (type != SessionEventKinds.TOOL_STARTED && type != SessionEventKinds.TOOL_COMPLETED) continue
             val key = toolKey(event)
-            if (type == "tool.started")
+            if (type == SessionEventKinds.TOOL_STARTED)
                 unmatched.getOrPut(key) { ArrayDeque() }
                     .addLast(event["correlationId"]!!.jsonPrimitive.content)
             else unmatched[key]?.removeFirstOrNull()

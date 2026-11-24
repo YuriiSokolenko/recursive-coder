@@ -29,7 +29,7 @@ object PreExecutionPhasePolicy {
     fun step(event: JsonObject, currentPhase: String): String? {
         if (currentPhase !in setOf(CREATED, ACCEPTED) ||
             !noExecutionActor(event) ||
-            (event["status"] as? JsonPrimitive)?.content != "completed")
+            (event["status"] as? JsonPrimitive)?.content != SessionEventStatuses.COMPLETED)
             return null
         // A phase-neutral event must also be execution-neutral. The same
         // metadata restriction applies to both allowed event types.
@@ -37,9 +37,9 @@ object PreExecutionPhasePolicy {
         if (metadata != null && (metadata !is JsonObject ||
             metadata.keys.any { it != "graphId" })) return null
         return when ((event["type"] as? JsonPrimitive)?.content) {
-            "checkpoint.saved" ->
+            SessionEventKinds.CHECKPOINT_SAVED ->
                 if ("transition" !in event) currentPhase else null
-            "session.transition" -> {
+            SessionEventKinds.SESSION_TRANSITION -> {
                 val edge = event["transition"] as? JsonObject ?: return null
                 if (edge.keys != setOf("from", "to")) return null
                 val from = (edge["from"] as? JsonPrimitive)?.content
