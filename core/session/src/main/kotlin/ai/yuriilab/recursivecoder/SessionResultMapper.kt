@@ -55,17 +55,17 @@ internal object SessionResultMapper {
             digestPattern.matches(result.diagnostics.sha256)) { "Invalid session artifact digest" }
 
         return buildJsonObject {
-            put("kind", "session-result"); put("version", SessionProtocol.VERSION)
-            put("sessionId", request.sessionId); put("traceId", request.traceId)
-            put("requestId", request.requestId); put("status", result.outcome.wire)
+            put(SessionEnvelopeFields.KIND, SessionEnvelopeKinds.RESULT); put(SessionEnvelopeFields.VERSION, SessionProtocol.VERSION)
+            put(SessionEnvelopeFields.SESSION_ID, request.sessionId); put(SessionEnvelopeFields.TRACE_ID, request.traceId)
+            put(SessionEnvelopeFields.REQUEST_ID, request.requestId); put("status", result.outcome.wire)
             put("startedAt", result.startedAt.toString()); put("finishedAt", result.finishedAt.toString())
             put("durationMs", Duration.between(result.startedAt, result.finishedAt).toMillis().coerceAtLeast(0))
             put("lastEventSeq", result.lastEventSeq)
             put("provenance", buildJsonObject {
-                put("workspaceId", request.workspace.textAt("workspaceId"))
-                put("baselineSha", request.workspace.textAt("baselineSha"))
-                put("policySha256", request.policy.textAt("policySha256"))
-                put("fenceGeneration", request.raw.objectAt("resume").longAt("fenceGeneration"))
+                put("workspaceId", request.workspace.textAt(WorkspaceFields.WORKSPACE_ID))
+                put("baselineSha", request.workspace.textAt(WorkspaceFields.BASELINE_SHA))
+                put("policySha256", request.policy.textAt(ToolPolicyFields.POLICY_SHA256))
+                put("fenceGeneration", request.raw.objectAt(SessionRequestFields.RESUME).longAt(SessionResumeFields.FENCE_GENERATION))
             })
             put("outputs", buildJsonObject {
                 put("eventLog", buildJsonObject {
@@ -95,7 +95,7 @@ internal object SessionResultMapper {
                 put("completeness", if (result.usage.completeUsage) "complete" else "unknown")
             })
             // This validated DTO is copied unchanged to preserve field order and v1 wire form.
-            put("invocation", request.invocation)
+            put(SessionRequestFields.INVOCATION, request.invocation)
         }
     }
 }

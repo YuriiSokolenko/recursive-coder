@@ -58,7 +58,7 @@ class SessionEventJournal(
     companion object {
         /** Exact root field set written by this emitter; not the entire Protocol v1 schema. */
         val emittedFields: Set<String> = setOf(
-            "kind", "version", "sessionId", "traceId", "eventId", "sequence",
+            SessionEnvelopeFields.KIND, SessionEnvelopeFields.VERSION, SessionEnvelopeFields.SESSION_ID, SessionEnvelopeFields.TRACE_ID, "eventId", "sequence",
             "timestamp", "type", "status", "correlationId", "causationId",
             "actor", "transition", "timing", "redaction", "metadata"
         )
@@ -91,8 +91,8 @@ class SessionEventJournal(
             require(correlationId == null ||
                 ToolAuthorizationPolicy.validHostIdentifier(correlationId))
             return buildJsonObject {
-                put("kind", "session-event"); put("version", SessionProtocol.VERSION)
-                put("sessionId", sessionId); put("traceId", traceId)
+                put(SessionEnvelopeFields.KIND, SessionEnvelopeKinds.EVENT); put(SessionEnvelopeFields.VERSION, SessionProtocol.VERSION)
+                put(SessionEnvelopeFields.SESSION_ID, sessionId); put(SessionEnvelopeFields.TRACE_ID, traceId)
                 put("eventId", eventId(sessionId, sequence))
                 put("sequence", sequence)
                 put("timestamp", timestamp.toString())

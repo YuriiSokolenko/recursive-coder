@@ -48,8 +48,8 @@ internal fun executeSession(requestPath: Path, delayMs: Long): Int {
     val status = result.outcome.wire
     System.out.println(result.protocol.toString())
     System.err.println("Session " + request.sessionId + ": " + status +
-        " | result=" + request.output("resultPath") +
-        " | events=" + request.output("eventsPath"))
+        " | result=" + request.output(SessionOutputFields.RESULT_PATH) +
+        " | events=" + request.output(SessionOutputFields.EVENTS_PATH))
     return if (status == "succeeded") 0 else if (status == "rejected") 2 else 1
 }
 

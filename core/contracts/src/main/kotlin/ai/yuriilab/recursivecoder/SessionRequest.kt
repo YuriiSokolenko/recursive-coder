@@ -41,20 +41,20 @@ private fun absolute(value: String): Path {
     return path
 }
 class SessionRequest private constructor(val raw: JsonObject) {
-    val requestId get() = raw.textAt("requestId")
-    val sessionId get() = raw.textAt("sessionId")
-    val traceId get() = raw.textAt("traceId")
-    val task get() = raw.objectAt("task")
-    val model get() = raw.objectAt("model")
-    val policy get() = raw.objectAt("toolPolicy")
-    val budgets get() = raw.objectAt("budgets")
-    val outputs get() = raw.objectAt("outputs")
-    val workspace get() = raw.objectAt("workspace")
-    val invocation get() = raw.objectAt("invocation")
-    val deadline get() = Instant.parse(budgets.textAt("deadlineAt"))
-    val taskPath get() = absolute(task.objectAt("taskInputRef").textAt("path"))
-    val rootPath get() = absolute(workspace.textAt("rootPath"))
-    val outputRoot get() = absolute(outputs.textAt("rootDir"))
+    val requestId get() = raw.textAt(SessionEnvelopeFields.REQUEST_ID)
+    val sessionId get() = raw.textAt(SessionEnvelopeFields.SESSION_ID)
+    val traceId get() = raw.textAt(SessionEnvelopeFields.TRACE_ID)
+    val task get() = raw.objectAt(SessionRequestFields.TASK)
+    val model get() = raw.objectAt(SessionRequestFields.MODEL)
+    val policy get() = raw.objectAt(SessionRequestFields.TOOL_POLICY)
+    val budgets get() = raw.objectAt(SessionRequestFields.BUDGETS)
+    val outputs get() = raw.objectAt(SessionRequestFields.OUTPUTS)
+    val workspace get() = raw.objectAt(SessionRequestFields.WORKSPACE)
+    val invocation get() = raw.objectAt(SessionRequestFields.INVOCATION)
+    val deadline get() = Instant.parse(budgets.textAt(SessionBudgetFields.DEADLINE_AT))
+    val taskPath get() = absolute(task.objectAt(TaskInputFields.TASK_INPUT_REF).textAt("path"))
+    val rootPath get() = absolute(workspace.textAt(WorkspaceFields.ROOT_PATH))
+    val outputRoot get() = absolute(outputs.textAt(SessionOutputFields.ROOT_DIR))
     fun output(key: String) = absolute(outputs.textAt(key))
 
     companion object {
@@ -62,12 +62,12 @@ class SessionRequest private constructor(val raw: JsonObject) {
             val obj = try { Json.parseToJsonElement(content) as? JsonObject }
                 catch (_: Exception) { null } ?: refuse("Invalid JSON object")
             // Parse the entire v1 envelope before any filesystem or model action.
-            obj.fields(setOf("kind", "version", "requestId", "sessionId", "traceId",
-                "invocation", "workspace", "task", "model", "toolPolicy", "budgets",
-                "outputs", "resume", "requiredCapabilities"), setOf("extensions"))
-            if (obj.textAt("kind") != "session-request") refuse("Expected session-request")
-            listOf("requestId", "sessionId", "traceId").forEach { identifier(obj.textAt(it)) }
-            if (!Regex("1\\.[0-9]+").matches(obj.textAt("version"))) refuse("Invalid protocol version")
+            obj.fields(setOf(SessionEnvelopeFields.KIND, SessionEnvelopeFields.VERSION, SessionEnvelopeFields.REQUEST_ID, SessionEnvelopeFields.SESSION_ID, SessionEnvelopeFields.TRACE_ID,
+                SessionRequestFields.INVOCATION, SessionRequestFields.WORKSPACE, SessionRequestFields.TASK, SessionRequestFields.MODEL, SessionRequestFields.TOOL_POLICY, SessionRequestFields.BUDGETS,
+                SessionRequestFields.OUTPUTS, SessionRequestFields.RESUME, SessionRequestFields.REQUIRED_CAPABILITIES), setOf(SessionRequestFields.EXTENSIONS))
+            if (obj.textAt(SessionEnvelopeFields.KIND) != SessionEnvelopeKinds.REQUEST) refuse("Expected session-request")
+            listOf(SessionEnvelopeFields.REQUEST_ID, SessionEnvelopeFields.SESSION_ID, SessionEnvelopeFields.TRACE_ID).forEach { identifier(obj.textAt(it)) }
+            if (!Regex("1\\.[0-9]+").matches(obj.textAt(SessionEnvelopeFields.VERSION))) refuse("Invalid protocol version")
             val req = SessionRequest(obj)
             req.validateShape()
             return req
@@ -75,49 +75,49 @@ class SessionRequest private constructor(val raw: JsonObject) {
     }
 
     private fun validateShape() {
-        invocation.fields(setOf("source", "invocationId", "attempt"))
-        identifier(invocation.textAt("invocationId"))
-        if (invocation.longAt("attempt") < SessionProtocol.FIRST_INVOCATION_ATTEMPT) refuse("Invalid attempt")
+        invocation.fields(setOf(InvocationFields.SOURCE, InvocationFields.INVOCATION_ID, InvocationFields.ATTEMPT))
+        identifier(invocation.textAt(InvocationFields.INVOCATION_ID))
+        if (invocation.longAt(InvocationFields.ATTEMPT) < SessionProtocol.FIRST_INVOCATION_ATTEMPT) refuse("Invalid attempt")
 
-        workspace.fields(setOf("workspaceId", "rootPath", "baselineSha", "headSha"), setOf("branch"))
-        identifier(workspace.textAt("workspaceId"))
-        absolute(workspace.textAt("rootPath"))
-        hash(workspace.textAt("baselineSha"), gitShaPattern)
-        hash(workspace.textAt("headSha"), gitShaPattern)
-        workspace["branch"]?.let { workspace.textAt("branch").also { b ->
+        workspace.fields(setOf(WorkspaceFields.WORKSPACE_ID, WorkspaceFields.ROOT_PATH, WorkspaceFields.BASELINE_SHA, WorkspaceFields.HEAD_SHA), setOf(WorkspaceFields.BRANCH))
+        identifier(workspace.textAt(WorkspaceFields.WORKSPACE_ID))
+        absolute(workspace.textAt(WorkspaceFields.ROOT_PATH))
+        hash(workspace.textAt(WorkspaceFields.BASELINE_SHA), gitShaPattern)
+        hash(workspace.textAt(WorkspaceFields.HEAD_SHA), gitShaPattern)
+        workspace[WorkspaceFields.BRANCH]?.let { workspace.textAt(WorkspaceFields.BRANCH).also { b ->
             if (b.isBlank() || b.length > 128) refuse("Invalid branch")
         } }
 
-        task.fields(setOf("stage", "role", "taskId", "taskInputRef"), setOf("parentAgentId"))
-        listOf("stage", "role", "taskId").forEach { identifier(task.textAt(it)) }
-        task["parentAgentId"]?.let { if (it != JsonNull) identifier(task.textAt("parentAgentId")) }
-        val ref = task.objectAt("taskInputRef")
+        task.fields(setOf(TaskInputFields.STAGE, TaskInputFields.ROLE, TaskInputFields.TASK_ID, TaskInputFields.TASK_INPUT_REF), setOf(TaskInputFields.PARENT_AGENT_ID))
+        listOf(TaskInputFields.STAGE, TaskInputFields.ROLE, TaskInputFields.TASK_ID).forEach { identifier(task.textAt(it)) }
+        task[TaskInputFields.PARENT_AGENT_ID]?.let { if (it != JsonNull) identifier(task.textAt(TaskInputFields.PARENT_AGENT_ID)) }
+        val ref = task.objectAt(TaskInputFields.TASK_INPUT_REF)
         ref.fields(setOf("path", "sha256"))
         absolute(ref.textAt("path"))
         hash(ref.textAt("sha256"))
 
-        model.fields(setOf("provider", "modelId", "baseUrl", "credentialRef",
-            "contextTokens", "maxOutputTokens", "features"), setOf("temperature", "connectTimeoutMs", "requestTimeoutMs"))
-        identifier(model.textAt("provider"))
-        if (model.textAt("modelId").isBlank() || model.textAt("modelId").length > 256) refuse("Invalid model")
-        if (!Regex("https?://[^\\s?#]+/?").matches(model.textAt("baseUrl"))) refuse("Invalid model URL")
-        if (!Regex("env:[A-Z][A-Z0-9_]*").matches(model.textAt("credentialRef"))) refuse("Invalid credential reference")
-        if (model.longAt("contextTokens") < 1 || model.longAt("maxOutputTokens") < 1) refuse("Invalid model limits")
-        model.stringsAt("features")
-        listOf("connectTimeoutMs", "requestTimeoutMs").forEach { key ->
+        model.fields(setOf(ModelConfigFields.PROVIDER, ModelConfigFields.MODEL_ID, ModelConfigFields.BASE_URL, ModelConfigFields.CREDENTIAL_REF,
+            ModelConfigFields.CONTEXT_TOKENS, ModelConfigFields.MAX_OUTPUT_TOKENS, ModelConfigFields.FEATURES), setOf(ModelConfigFields.TEMPERATURE, ModelConfigFields.CONNECT_TIMEOUT_MS, ModelConfigFields.REQUEST_TIMEOUT_MS))
+        identifier(model.textAt(ModelConfigFields.PROVIDER))
+        if (model.textAt(ModelConfigFields.MODEL_ID).isBlank() || model.textAt(ModelConfigFields.MODEL_ID).length > 256) refuse("Invalid model")
+        if (!Regex("https?://[^\\s?#]+/?").matches(model.textAt(ModelConfigFields.BASE_URL))) refuse("Invalid model URL")
+        if (!Regex("env:[A-Z][A-Z0-9_]*").matches(model.textAt(ModelConfigFields.CREDENTIAL_REF))) refuse("Invalid credential reference")
+        if (model.longAt(ModelConfigFields.CONTEXT_TOKENS) < 1 || model.longAt(ModelConfigFields.MAX_OUTPUT_TOKENS) < 1) refuse("Invalid model limits")
+        model.stringsAt(ModelConfigFields.FEATURES)
+        listOf(ModelConfigFields.CONNECT_TIMEOUT_MS, ModelConfigFields.REQUEST_TIMEOUT_MS).forEach { key ->
             model[key]?.let { if (model.longAt(key) !in 100..120000) refuse("Invalid model timeout") }
         }
-        model["temperature"]?.let {
+        model[ModelConfigFields.TEMPERATURE]?.let {
             val n = (it as? JsonPrimitive)?.takeIf { p -> !p.isString }?.doubleOrNull
             if (n == null || !n.isFinite() || n < 0) refuse("Invalid temperature")
         }
 
-        policy.fields(setOf("mode", "allowedTools", "deniedTools", "protectedPaths",
-            "writablePaths", "policySha256"), setOf("immutableInputs"))
-        if (policy.textAt("mode") !in setOf("read-only", "scoped-write")) refuse("Invalid tool mode")
-        listOf("allowedTools", "deniedTools", "protectedPaths", "writablePaths").forEach { policy.stringsAt(it) }
-        hash(policy.textAt("policySha256"))
-        policy["immutableInputs"]?.let {
+        policy.fields(setOf(ToolPolicyFields.MODE, ToolPolicyFields.ALLOWED_TOOLS, ToolPolicyFields.DENIED_TOOLS, ToolPolicyFields.PROTECTED_PATHS,
+            ToolPolicyFields.WRITABLE_PATHS, ToolPolicyFields.POLICY_SHA256), setOf(ToolPolicyFields.IMMUTABLE_INPUTS))
+        if (policy.textAt(ToolPolicyFields.MODE) !in setOf("read-only", "scoped-write")) refuse("Invalid tool mode")
+        listOf(ToolPolicyFields.ALLOWED_TOOLS, ToolPolicyFields.DENIED_TOOLS, ToolPolicyFields.PROTECTED_PATHS, ToolPolicyFields.WRITABLE_PATHS).forEach { policy.stringsAt(it) }
+        hash(policy.textAt(ToolPolicyFields.POLICY_SHA256))
+        policy[ToolPolicyFields.IMMUTABLE_INPUTS]?.let {
             val refs = it as? JsonArray ?: refuse("Invalid immutable inputs")
             refs.forEach { element ->
                 val value = element as? JsonObject ?: refuse("Invalid immutable reference")
@@ -127,28 +127,28 @@ class SessionRequest private constructor(val raw: JsonObject) {
             }
         }
 
-        budgets.fields(setOf("deadlineAt", "maxWallTimeMs", "maxTotalTokens", "maxToolCalls",
-            "maxChildAgents", "maxDepth"), setOf("maxModelRequests"))
-        try { Instant.parse(budgets.textAt("deadlineAt")) } catch (_: Exception) { refuse("Invalid deadline") }
-        listOf("maxWallTimeMs", "maxTotalTokens").forEach {
+        budgets.fields(setOf(SessionBudgetFields.DEADLINE_AT, SessionBudgetFields.MAX_WALL_TIME_MS, SessionBudgetFields.MAX_TOTAL_TOKENS, SessionBudgetFields.MAX_TOOL_CALLS,
+            SessionBudgetFields.MAX_CHILD_AGENTS, SessionBudgetFields.MAX_DEPTH), setOf(SessionBudgetFields.MAX_MODEL_REQUESTS))
+        try { Instant.parse(budgets.textAt(SessionBudgetFields.DEADLINE_AT)) } catch (_: Exception) { refuse("Invalid deadline") }
+        listOf(SessionBudgetFields.MAX_WALL_TIME_MS, SessionBudgetFields.MAX_TOTAL_TOKENS).forEach {
             if (budgets.longAt(it) < 1) refuse("Invalid budget")
         }
-        listOf("maxToolCalls", "maxChildAgents", "maxDepth").forEach {
+        listOf(SessionBudgetFields.MAX_TOOL_CALLS, SessionBudgetFields.MAX_CHILD_AGENTS, SessionBudgetFields.MAX_DEPTH).forEach {
             if (budgets.longAt(it) < 0) refuse("Invalid budget")
         }
-        budgets["maxModelRequests"]?.let { if (budgets.longAt("maxModelRequests") < 1) refuse("Invalid budget") }
+        budgets[SessionBudgetFields.MAX_MODEL_REQUESTS]?.let { if (budgets.longAt(SessionBudgetFields.MAX_MODEL_REQUESTS) < 1) refuse("Invalid budget") }
 
-        outputs.fields(setOf("rootDir", "resultPath", "eventsPath", "checkpointDir", "diagnosticsPath"))
-        listOf("rootDir", "resultPath", "eventsPath", "checkpointDir", "diagnosticsPath").forEach {
+        outputs.fields(setOf(SessionOutputFields.ROOT_DIR, SessionOutputFields.RESULT_PATH, SessionOutputFields.EVENTS_PATH, SessionOutputFields.CHECKPOINT_DIR, SessionOutputFields.DIAGNOSTICS_PATH))
+        listOf(SessionOutputFields.ROOT_DIR, SessionOutputFields.RESULT_PATH, SessionOutputFields.EVENTS_PATH, SessionOutputFields.CHECKPOINT_DIR, SessionOutputFields.DIAGNOSTICS_PATH).forEach {
             absolute(outputs.textAt(it))
         }
-        val targets = listOf("resultPath", "eventsPath", "diagnosticsPath", "checkpointDir").map { output(it) }
+        val targets = listOf(SessionOutputFields.RESULT_PATH, SessionOutputFields.EVENTS_PATH, SessionOutputFields.DIAGNOSTICS_PATH, SessionOutputFields.CHECKPOINT_DIR).map { output(it) }
         if (targets.toSet().size != targets.size || targets.any { !it.startsWith(outputRoot) || it == outputRoot })
             refuse("Output files must be distinct and below the output root")
 
-        val resume = raw.objectAt("resume")
-        resume.fields(setOf("mode", "fenceGeneration", "checkpoint"))
-        if (resume.textAt("mode") !in setOf("fresh", "resume") || resume.longAt("fenceGeneration") < 1)
+        val resume = raw.objectAt(SessionRequestFields.RESUME)
+        resume.fields(setOf(SessionResumeFields.MODE, SessionResumeFields.FENCE_GENERATION, "checkpoint"))
+        if (resume.textAt(SessionResumeFields.MODE) !in setOf("fresh", "resume") || resume.longAt(SessionResumeFields.FENCE_GENERATION) < 1)
             refuse("Invalid resume mode")
         if (resume["checkpoint"] != JsonNull) {
             val cp = resume.objectAt("checkpoint")
@@ -156,8 +156,8 @@ class SessionRequest private constructor(val raw: JsonObject) {
             absolute(cp.textAt("path"))
             hash(cp.textAt("sha256"))
         }
-        raw.stringsAt("requiredCapabilities").forEach { identifier(it) }
-        raw["extensions"]?.let {
+        raw.stringsAt(SessionRequestFields.REQUIRED_CAPABILITIES).forEach { identifier(it) }
+        raw[SessionRequestFields.EXTENSIONS]?.let {
             val extensions = it as? JsonObject ?: refuse("Invalid extensions")
             if (extensions.keys.any { key -> !key.startsWith("x-") }) refuse("Invalid extension key")
         }
