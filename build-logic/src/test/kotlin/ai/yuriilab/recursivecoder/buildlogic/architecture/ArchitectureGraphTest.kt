@@ -357,7 +357,7 @@ class ArchitectureGraphTest {
 
     @Test
     fun unknownForbiddenEdgeIsReportedOnceWithoutHidingOtherViolations() {
-        val allowed = mapOf(
+        val allowed = mapOf<String, Set<String>>(
             ":core:owner" to emptySet(),
             ":infra:known" to emptySet(),
         )
