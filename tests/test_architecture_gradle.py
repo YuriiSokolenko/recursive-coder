@@ -1506,6 +1506,9 @@ class ArchitectureConfigurationCacheRegressionTest(_GradleOutputAssertions):
     def assert_cache_file_reason(self, output: str, fixture: Path, relative: Path) -> None:
         # Compare complete quoted paths, not suffixes: an absolute path in
         # another checkout must never count as the expected fixture input.
+        # Resolve the fixture root once, then compare paths lexically and case
+        # sensitively (Ubuntu CI). Do not dereference candidate symlinks: the
+        # reported input path, rather than its target, must match.
         root = fixture.resolve().as_posix()
         expected = posixpath.normpath(root + "/" + relative.as_posix())
         prefix = "Calculating task graph as configuration cache cannot be reused because "
@@ -1570,8 +1573,13 @@ class ArchitectureConfigurationCacheRegressionTest(_GradleOutputAssertions):
             )
 
     def assert_cache_invalidated(
-        self, fixture: Path, diagnostic: str, input_pattern: str | Path, *, scenario: str
+        self, fixture: Path, diagnostic: str, expected_input: str | Path, *, scenario: str
     ) -> None:
+        """Require rejection and a reason naming the expected configuration input.
+
+        A Path identifies an exact fixture-relative file; a str is a regex
+        for non-file inputs such as Gradle properties.
+        """
         rejected = self.check_architecture(fixture, scenario=scenario, phase="invalidated")
         self.assertNotEqual(
             0, rejected.returncode, "Expected Gradle rejection; see streamed output."
@@ -1584,10 +1592,10 @@ class ArchitectureConfigurationCacheRegressionTest(_GradleOutputAssertions):
         self.assert_gradle_not_contains("Reusing configuration cache.", rejected.stdout)
         # Name the changed input in the invalidation reason, rather than
         # matching an unrelated Gradle progress message.
-        if isinstance(input_pattern, Path):
-            self.assert_cache_file_reason(rejected.stdout, fixture, input_pattern)
+        if isinstance(expected_input, Path):
+            self.assert_cache_file_reason(rejected.stdout, fixture, expected_input)
         else:
-            self.assert_cache_invalidation_reason(rejected.stdout, input_pattern)
+            self.assert_cache_invalidation_reason(rejected.stdout, expected_input)
 
     def test_early_realization_captures_later_subproject_edge_on_cache_hit(self):
         # Root-project evaluation precedes :core:tasks evaluation. Realizing the

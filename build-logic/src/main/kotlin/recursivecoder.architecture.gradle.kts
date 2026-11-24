@@ -1,5 +1,6 @@
 import ai.yuriilab.recursivecoder.buildlogic.architecture.ArchitectureGraph
 import ai.yuriilab.recursivecoder.buildlogic.architecture.ArchitectureInputCodec
+import ai.yuriilab.recursivecoder.buildlogic.architecture.BuildScripts
 import ai.yuriilab.recursivecoder.buildlogic.architecture.CheckArchitectureTask
 import ai.yuriilab.recursivecoder.buildlogic.architecture.TrustedRunningOptInPolicy
 import org.gradle.api.artifacts.FileCollectionDependency
@@ -34,7 +35,6 @@ gradle.projectsEvaluated {
         // cache. Conventional candidates are a conservative classification
         // signal even when settings selects a custom script; they need not be
         // executed by Gradle. Only the selected script is inspected as build code.
-        data class BuildScripts(val present: Boolean, val selectedText: String?)
         fun trackedBuildScripts(project: org.gradle.api.Project): BuildScripts {
             val selected = project.buildFile.toPath().toAbsolutePath().normalize().toFile()
             val candidates = listOf(
