@@ -22,7 +22,13 @@ IMPORT_FILES = (
     "infra/workspace/TrustedWriteRuntimeTest.kt",
     "infra/workspace/WorkspaceBoundaryUnitTest.kt",
 )
-TARGETS = ("test", "integrationTest", "e2eTest")
+UNFILTERED_TARGET = "test"
+INTEGRATION_TARGET = "integrationTest"
+E2E_TARGET = "e2eTest"
+TARGETS = (UNFILTERED_TARGET, INTEGRATION_TARGET, E2E_TARGET)
+UNIT_TAG = "unit"
+INTEGRATION_TAG = "integration"
+E2E_TAG = "e2e"
 
 
 def load_tier_classifier():
@@ -56,13 +62,13 @@ def expected_targets(root):
                 continue
             for method in guard.test_methods(info, classes):
                 tags = guard.class_tiers(info, classes) | guard.tier_tags(method.annotations, classes)
-                if tags not in ({"unit"}, {"integration"}, {"e2e"}, {"integration", "e2e"}):
+                if tags not in ({UNIT_TAG}, {INTEGRATION_TAG}, {E2E_TAG}, {INTEGRATION_TAG, E2E_TAG}):
                     raise ValueError(f"{module}: invalid test tiers {tags} for {info.name}#{method.name}")
-                targets.add("test")
-                if "e2e" in tags:
-                    targets.add("e2eTest")
-                elif "integration" in tags:
-                    targets.add("integrationTest")
+                targets.add(UNFILTERED_TARGET)
+                if E2E_TAG in tags:
+                    targets.add(E2E_TARGET)
+                elif INTEGRATION_TAG in tags:
+                    targets.add(INTEGRATION_TARGET)
         if not targets:
             raise ValueError(f"{module}: no compiled runnable JUnit methods")
         result[module] = targets
@@ -93,7 +99,7 @@ def verify(root, expected):
     if not expected or set().union(*expected.values()) != set(TARGETS):
         raise ValueError("Expected inventory must cover all three JVM targets")
     for module, targets in sorted(expected.items()):
-        if "test" not in targets:
+        if UNFILTERED_TARGET not in targets:
             raise ValueError(f"{module}: missing expected unfiltered target")
         unfiltered = None
         for target in TARGETS:
@@ -101,7 +107,7 @@ def verify(root, expected):
             cases, passed, skipped, reports = read_cases(directory)
             if target in targets and not passed:
                 raise ValueError(f"{module}:{target}: no passing testcase ({reports} reports, {skipped} skipped)")
-            if target == "test":
+            if target == UNFILTERED_TARGET:
                 unfiltered = cases
             elif cases - unfiltered:
                 raise ValueError(f"{module}:{target}: cases absent from unfiltered test: {cases - unfiltered}")

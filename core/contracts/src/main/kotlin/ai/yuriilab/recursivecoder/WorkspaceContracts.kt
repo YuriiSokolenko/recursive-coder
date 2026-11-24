@@ -5,12 +5,12 @@ import java.time.Instant
 /** Model-visible arguments contain data, never a command, working directory or execution authority. */
 sealed interface WorkspaceTool {
     val name: String
-    data class Read(val path: String) : WorkspaceTool { override val name = "read" }
-    data class ListFiles(val directory: String = "") : WorkspaceTool { override val name = "list" }
-    data class Find(val nameFragment: String) : WorkspaceTool { override val name = "find" }
-    data class Search(val literal: String) : WorkspaceTool { override val name = "search" }
-    data object GitStatus : WorkspaceTool { override val name = "git_status" }
-    data class GitDiff(val path: String) : WorkspaceTool { override val name = "git_diff" }
+    data class Read(val path: String) : WorkspaceTool { override val name = WorkspaceToolNames.READ }
+    data class ListFiles(val directory: String = "") : WorkspaceTool { override val name = WorkspaceToolNames.LIST }
+    data class Find(val nameFragment: String) : WorkspaceTool { override val name = WorkspaceToolNames.FIND }
+    data class Search(val literal: String) : WorkspaceTool { override val name = WorkspaceToolNames.SEARCH }
+    data object GitStatus : WorkspaceTool { override val name = WorkspaceToolNames.GIT_STATUS }
+    data class GitDiff(val path: String) : WorkspaceTool { override val name = WorkspaceToolNames.GIT_DIFF }
 }
 
 sealed interface ToolData {
@@ -48,4 +48,20 @@ fun interface WorkspaceOpener {
         onAudit: (ToolAudit) -> Unit,
         onStart: (String, String, java.time.Instant) -> Unit
     ): WorkspaceSession
+}
+
+/** Stable read-tool policy and audit names. */
+object WorkspaceToolNames {
+    const val READ = "read"
+    const val LIST = "list"
+    const val FIND = "find"
+    const val SEARCH = "search"
+    const val GIT_STATUS = "git_status"
+    const val GIT_DIFF = "git_diff"
+}
+
+/** Session request tool-policy mode identifiers, not an authorization grant. */
+object ToolPolicyModes {
+    const val READ_ONLY = "read-only"
+    const val SCOPED_WRITE = "scoped-write"
 }

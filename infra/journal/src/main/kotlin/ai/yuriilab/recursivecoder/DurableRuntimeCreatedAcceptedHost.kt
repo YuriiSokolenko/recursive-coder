@@ -36,21 +36,21 @@ internal object RuntimeTrustedHandoffChecks {
         // Missing paths, invalid fields and IO failures have the same sanitized
         // code. Never attach the cause: it can contain an absolute host path.
         val matches = try {
-            val suppliedBranch = request.workspace["branch"]
+            val suppliedBranch = request.workspace[WorkspaceFields.BRANCH]
             // No requested branch: the independently checked host Git context
             // remains authoritative; do not invent a branch from the request.
             (suppliedBranch == null ||
                 (suppliedBranch != JsonNull &&
-                    context.gitBranch == "refs/heads/" + request.workspace.textAt("branch"))) &&
-                request.output("checkpointDir").toAbsolutePath().normalize() ==
+                    context.gitBranch == "refs/heads/" + request.workspace.textAt(WorkspaceFields.BRANCH))) &&
+                request.output(SessionOutputFields.CHECKPOINT_DIR).toAbsolutePath().normalize() ==
                     checkpointDirectory.toAbsolutePath().normalize() &&
-                request.output("eventsPath").toAbsolutePath().normalize() ==
+                request.output(SessionOutputFields.EVENTS_PATH).toAbsolutePath().normalize() ==
                     ledgerPath.toAbsolutePath().normalize() &&
                 request.rootPath.toRealPath() == context.workspaceRoot.toRealPath() &&
-                request.workspace.textAt("headSha") == context.gitHead &&
-                request.policy.textAt("policySha256") == context.policySha256 &&
-                request.raw.objectAt("resume").textAt("mode") == "fresh" &&
-                request.raw.objectAt("resume").longAt("fenceGeneration") == 1L
+                request.workspace.textAt(WorkspaceFields.HEAD_SHA) == context.gitHead &&
+                request.policy.textAt(ToolPolicyFields.POLICY_SHA256) == context.policySha256 &&
+                request.raw.objectAt(SessionRequestFields.RESUME).textAt(SessionResumeFields.MODE) == SessionResumeModes.FRESH &&
+                request.raw.objectAt(SessionRequestFields.RESUME).longAt(SessionResumeFields.FENCE_GENERATION) == 1L
         } catch (_: Exception) {
             false
         }
@@ -111,11 +111,11 @@ class DurableRuntimeCreatedAcceptedHost(
             requestId = request.requestId,
             sequence = c1.journalSequence + 1,
             timestamp = clock.instant(),
-            type = "session.transition",
+            type = SessionEventKinds.SESSION_TRANSITION,
             status = "completed",
             transition = SessionPhaseVocabulary.createdWire to
                 SessionPhaseVocabulary.acceptedWire,
-            extra = buildJsonObject { put("graphId", c1.binding.graphId) }
+            extra = buildJsonObject { put(StageEventMetadataFields.GRAPH_ID, c1.binding.graphId) }
         )
         // Last cooperative gate. A later Cancellation.cancel()/expire()
         // only updates signals, never interrupts the caller's FileChannels.

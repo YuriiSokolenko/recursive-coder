@@ -21,7 +21,7 @@ internal fun executeSession(requestPath: Path, delayMs: Long): Int {
         return 2
     }
     val provider = ModelConfig.from(request.model).provider
-    if (provider != "fake" && delayMs != 0L) {
+    if (provider != ModelProviderIds.FAKE && delayMs != 0L) {
         System.err.println("--fake-delay-ms is supported only for the fake provider")
         return 2
     }
@@ -48,9 +48,13 @@ internal fun executeSession(requestPath: Path, delayMs: Long): Int {
     val status = result.outcome.wire
     System.out.println(result.protocol.toString())
     System.err.println("Session " + request.sessionId + ": " + status +
-        " | result=" + request.output("resultPath") +
-        " | events=" + request.output("eventsPath"))
-    return if (status == "succeeded") 0 else if (status == "rejected") 2 else 1
+        " | result=" + request.output(SessionOutputFields.RESULT_PATH) +
+        " | events=" + request.output(SessionOutputFields.EVENTS_PATH))
+    return when (result.outcome) {
+        SessionOutcome.SUCCEEDED -> 0
+        SessionOutcome.REJECTED -> 2
+        else -> 1
+    }
 }
 
 /** CLI-owned JSONL adapter selection shared by CLI integration fixtures. */

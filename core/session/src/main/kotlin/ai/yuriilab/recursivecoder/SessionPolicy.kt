@@ -105,10 +105,10 @@ internal object SessionLifecyclePolicy {
 internal enum class AdmissionDenial(val code: String, val category: String, val message: String) {
     PROTOCOL("UNSUPPORTED_PROTOCOL", "protocol", "Unsupported protocol version"),
     INVOCATION("UNSUPPORTED_INVOCATION", "protocol", "Unsupported invocation source or attempt"),
-    RESUME("UNSUPPORTED_RESUME", "checkpoint", "Resume is not supported"),
+    RESUME(SessionDenialCodes.UNSUPPORTED_RESUME, "checkpoint", "Resume is not supported"),
     CAPABILITY("UNSUPPORTED_CAPABILITY", "protocol", "Required capability is unavailable"),
-    MODEL("UNSUPPORTED_MODEL", "provider", "Unsupported model provider or configuration"),
-    TOOL_POLICY("UNSUPPORTED_TOOL_POLICY", "policy", "Only read-only task access is supported"),
+    MODEL(ModelDenialCodes.UNSUPPORTED_MODEL, "provider", "Unsupported model provider or configuration"),
+    TOOL_POLICY(ToolDenialCodes.UNSUPPORTED_TOOL_POLICY, "policy", "Only read-only task access is supported"),
     BUDGET("INSUFFICIENT_BUDGET", "policy", "Two model turns and one read are required")
 }
 
@@ -138,7 +138,7 @@ internal data class SessionAdmissionFacts(
 
 internal object SessionAdmissionPolicy {
     private val capabilities = setOf(
-        "session-events-v1", "fake-model-v1", "model-gateway-v1", "read-only-tools-v1"
+        SessionCapabilityIds.EVENTS_V1, SessionCapabilityIds.FAKE_MODEL_V1, SessionCapabilityIds.MODEL_GATEWAY_V1, SessionCapabilityIds.READ_ONLY_TOOLS_V1
     )
 
     fun decide(f: SessionAdmissionFacts): AdmissionDecision {
@@ -152,27 +152,27 @@ internal object SessionAdmissionPolicy {
             else -> false
         }
         if (!supportedInvocation) return deny(AdmissionDenial.INVOCATION)
-        if (f.resumeMode != "fresh" || f.fenceGeneration != 1L)
+        if (f.resumeMode != SessionResumeModes.FRESH || f.fenceGeneration != 1L)
             return deny(AdmissionDenial.RESUME)
         if (!capabilities.containsAll(f.requiredCapabilities) ||
-            "session-events-v1" !in f.requiredCapabilities)
+            SessionCapabilityIds.EVENTS_V1 !in f.requiredCapabilities)
             return deny(AdmissionDenial.CAPABILITY)
-        if (f.provider !in setOf("fake", "openai-compatible") ||
-            (f.provider == "fake" && (
-                "fake-model-v1" !in f.requiredCapabilities ||
-                    "model-gateway-v1" in f.requiredCapabilities ||
-                    f.modelId != "fake-v1" || f.modelFeatures != setOf("tool_calls")
+        if (f.provider !in setOf(ModelProviderIds.FAKE, ModelProviderIds.OPENAI_COMPATIBLE) ||
+            (f.provider == ModelProviderIds.FAKE && (
+                SessionCapabilityIds.FAKE_MODEL_V1 !in f.requiredCapabilities ||
+                    SessionCapabilityIds.MODEL_GATEWAY_V1 in f.requiredCapabilities ||
+                    f.modelId != ModelProviderIds.FAKE_MODEL_ID || f.modelFeatures != setOf(ModelFeatureIds.TOOL_CALLS)
                 )) ||
-            (f.provider == "openai-compatible" && (
-                "model-gateway-v1" !in f.requiredCapabilities ||
-                    "fake-model-v1" in f.requiredCapabilities ||
+            (f.provider == ModelProviderIds.OPENAI_COMPATIBLE && (
+                SessionCapabilityIds.MODEL_GATEWAY_V1 !in f.requiredCapabilities ||
+                    SessionCapabilityIds.FAKE_MODEL_V1 in f.requiredCapabilities ||
                     // Issue #155: without usage_metadata the gateway may return no
                     // usage, and maxTokens could not be enforced. Fail closed.
-                    "usage_metadata" !in f.modelFeatures
+                    ModelFeatureIds.USAGE_METADATA !in f.modelFeatures
                 )))
             return deny(AdmissionDenial.MODEL)
-        if (f.toolPolicyMode != "read-only" ||
-            "read" !in f.allowedTools || "read" in f.deniedTools ||
+        if (f.toolPolicyMode != ToolPolicyModes.READ_ONLY ||
+            WorkspaceToolNames.READ !in f.allowedTools || WorkspaceToolNames.READ in f.deniedTools ||
             f.writablePathCount != 0 || f.immutableInputCount != 0)
             return deny(AdmissionDenial.TOOL_POLICY)
         if (f.maxToolCalls < 1L || f.maxModelRequests < SESSION_MODEL_TURNS.toLong())
@@ -191,7 +191,7 @@ internal object SessionResumePreflightPolicy {
         val decision = SessionAdmissionPolicy.decide(facts)
         if (decision !is AdmissionDecision.Denied) return null
         return decision.reason.takeUnless {
-            it == AdmissionDenial.RESUME && facts.resumeMode == "resume"
+            it == AdmissionDenial.RESUME && facts.resumeMode == SessionResumeModes.RESUME
         }
     }
 }

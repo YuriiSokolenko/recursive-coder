@@ -176,9 +176,9 @@ class LinuxFiveRoleWorkflowHost(
                     identity.first == RecursiveGraphPolicy.childStageId(expectedChild)
             }
         })
-        require("git_diff_check" in requiredChecks &&
-            (requiredChecks - "git_diff_check").isNotEmpty() &&
-            (requiredChecks - "git_diff_check").all { it in checks })
+        require(StageCheckIds.GIT_DIFF_CHECK in requiredChecks &&
+            (requiredChecks - StageCheckIds.GIT_DIFF_CHECK).isNotEmpty() &&
+            (requiredChecks - StageCheckIds.GIT_DIFF_CHECK).all { it in checks })
         require(clean()) {
             "Git baseline rejected: " + (lastGitBaselineDenialCode ?: "UNKNOWN")
         }
@@ -411,7 +411,7 @@ class LinuxFiveRoleWorkflowHost(
         val owner = synchronized(this) {
             val active = writer
             if (quarantined || active == null || active.lease.authority !== authority ||
-                active.opened) return StageToolOpenResult.Denied("STALE_STAGE_AUTHORITY")
+                active.opened) return StageToolOpenResult.Denied(StageDenialCodes.STALE_STAGE_AUTHORITY)
             active.opened = true
             active
         }
@@ -477,7 +477,7 @@ class LinuxFiveRoleWorkflowHost(
                 } else null
                 synchronized(this@LinuxFiveRoleWorkflowHost) {
                     if (writer !== owner || quarantined)
-                        return StageWriteEvidence(null, "STALE_STAGE_AUTHORITY")
+                        return StageWriteEvidence(null, StageDenialCodes.STALE_STAGE_AUTHORITY)
                     owner.failedWrite = failedWrite
                     owner.attemptedWrite = true
                     wrote = true

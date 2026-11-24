@@ -13,9 +13,9 @@ import kotlinx.serialization.json.longOrNull
  * This validates metadata shape, not independent RCEFX1 provenance.
  */
 internal object EffectEvidenceEnvelopePolicy {
-    private val base = setOf("effectOperationId", "effectFenceGeneration",
-        "effectKind", "effectInputSha256", "effectRecordSequence",
-        "effectRecordMacSha256", "effectState")
+    private val base = setOf(EffectEvidenceFields.EFFECT_OPERATION_ID, EffectEvidenceFields.EFFECT_FENCE_GENERATION,
+        EffectEvidenceFields.EFFECT_KIND, EffectEvidenceFields.EFFECT_INPUT_SHA256, EffectEvidenceFields.EFFECT_RECORD_SEQUENCE,
+        EffectEvidenceFields.EFFECT_RECORD_MAC_SHA256, EffectEvidenceFields.EFFECT_STATE)
     private val sha = Regex("[0-9a-f]{64}")
 
     fun hasReservedKey(metadata: JsonObject): Boolean =
@@ -29,32 +29,32 @@ internal object EffectEvidenceEnvelopePolicy {
 
     fun validForEvent(type: String?, status: String?, metadata: JsonObject): Boolean {
         if (!hasReservedKey(metadata)) return false
-        val state = string(metadata, "effectState") ?: return false
+        val state = string(metadata, EffectEvidenceFields.EFFECT_STATE) ?: return false
         val extra = when (state) {
-            "intent", "started" -> emptySet()
-            "committed" -> setOf("effectObservedStateSha256")
-            "unconfirmed" -> setOf("effectErrorCode")
+            EffectRecordStates.INTENT, EffectRecordStates.STARTED -> emptySet()
+            EffectRecordStates.COMMITTED -> setOf(EffectEvidenceFields.EFFECT_OBSERVED_STATE_SHA256)
+            EffectRecordStates.UNCONFIRMED -> setOf(EffectEvidenceFields.EFFECT_ERROR_CODE)
             else -> return false
         }
         if (metadata.keys != base + extra) return false
         val admissible = when (state) {
-            "intent", "started" -> type == "tool.started" && status == "started"
-            "committed" -> type == "tool.completed" && status == "completed"
-            else -> type == "session.error" && status == "failed"
+            EffectRecordStates.INTENT, EffectRecordStates.STARTED -> type == SessionEventKinds.TOOL_STARTED && status == SessionEventStatuses.STARTED
+            EffectRecordStates.COMMITTED -> type == SessionEventKinds.TOOL_COMPLETED && status == SessionEventStatuses.COMPLETED
+            else -> type == SessionEventKinds.SESSION_ERROR && status == SessionEventStatuses.FAILED
         }
         if (!admissible ||
-            number(metadata, "effectFenceGeneration")?.let { it > 0L } != true ||
-            number(metadata, "effectRecordSequence")?.let { it > 0L } != true ||
-            string(metadata, "effectOperationId")?.let(
+            number(metadata, EffectEvidenceFields.EFFECT_FENCE_GENERATION)?.let { it > 0L } != true ||
+            number(metadata, EffectEvidenceFields.EFFECT_RECORD_SEQUENCE)?.let { it > 0L } != true ||
+            string(metadata, EffectEvidenceFields.EFFECT_OPERATION_ID)?.let(
                 ToolAuthorizationPolicy::validHostIdentifier) != true ||
-            string(metadata, "effectInputSha256")?.let(sha::matches) != true ||
-            string(metadata, "effectRecordMacSha256")?.let(sha::matches) != true ||
-            EffectKind.entries.none { it.name == string(metadata, "effectKind") })
+            string(metadata, EffectEvidenceFields.EFFECT_INPUT_SHA256)?.let(sha::matches) != true ||
+            string(metadata, EffectEvidenceFields.EFFECT_RECORD_MAC_SHA256)?.let(sha::matches) != true ||
+            EffectKind.entries.none { it.name == string(metadata, EffectEvidenceFields.EFFECT_KIND) })
             return false
         return when (state) {
-            "committed" -> string(metadata, "effectObservedStateSha256")
+            EffectRecordStates.COMMITTED -> string(metadata, EffectEvidenceFields.EFFECT_OBSERVED_STATE_SHA256)
                 ?.let(sha::matches) == true
-            "unconfirmed" -> string(metadata, "effectErrorCode")
+            EffectRecordStates.UNCONFIRMED -> string(metadata, EffectEvidenceFields.EFFECT_ERROR_CODE)
                 ?.let(ToolAuthorizationPolicy::validHostIdentifier) == true
             else -> true
         }

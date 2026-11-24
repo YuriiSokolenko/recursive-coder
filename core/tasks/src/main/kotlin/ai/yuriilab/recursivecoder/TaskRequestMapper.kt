@@ -11,32 +11,32 @@ internal object TaskRequestMapper {
     fun submission(content: String): Submission {
         require(content.toByteArray(StandardCharsets.UTF_8).size <= 262144) { "Request too large" }
         val request = SessionRequest.parse(content)
-        return Submission(request.task.textAt("taskId"), request.raw.toString())
+        return Submission(request.task.textAt(TaskInputFields.TASK_ID), request.raw.toString())
     }
 
     fun forAttempt(task: Task, runRoot: Path): SessionRequest {
         require(task.state == TaskState.RUNNING && task.sessionId != null)
         // A durable snapshot is not automatically a valid request or a trusted task identity.
         val source = SessionRequest.parse(task.requestTemplate)
-        require(source.task.textAt("taskId") == task.id) { "Task template ID mismatch" }
+        require(source.task.textAt(TaskInputFields.TASK_ID) == task.id) { "Task template ID mismatch" }
         val invocation = source.invocation
         val adjustedInvocation = JsonObject(invocation + mapOf(
-            "source" to JsonPrimitive(SessionProtocol.INVOCATION_SOURCE_SCHEDULER),
-            "attempt" to JsonPrimitive(task.attempt),
-            "invocationId" to JsonPrimitive("invoke-" + task.id + "-" + task.attempt)
+            InvocationFields.SOURCE to JsonPrimitive(SessionProtocol.INVOCATION_SOURCE_SCHEDULER),
+            InvocationFields.ATTEMPT to JsonPrimitive(task.attempt),
+            InvocationFields.INVOCATION_ID to JsonPrimitive("invoke-" + task.id + "-" + task.attempt)
         ))
         val outputs = buildJsonObject {
-            put("rootDir", runRoot.toString())
-            put("resultPath", runRoot.resolve("result.json").toString())
-            put("eventsPath", runRoot.resolve("events.jsonl").toString())
-            put("checkpointDir", runRoot.resolve("checkpoints").toString())
-            put("diagnosticsPath", runRoot.resolve("diagnostics.json").toString())
+            put(SessionOutputFields.ROOT_DIR, runRoot.toString())
+            put(SessionOutputFields.RESULT_PATH, runRoot.resolve("result.json").toString())
+            put(SessionOutputFields.EVENTS_PATH, runRoot.resolve("events.jsonl").toString())
+            put(SessionOutputFields.CHECKPOINT_DIR, runRoot.resolve("checkpoints").toString())
+            put(SessionOutputFields.DIAGNOSTICS_PATH, runRoot.resolve("diagnostics.json").toString())
         }
         return SessionRequest.parse(JsonObject(source.raw + mapOf(
-            "requestId" to JsonPrimitive("request-" + task.id + "-" + task.attempt),
-            "sessionId" to JsonPrimitive(task.sessionId),
-            "invocation" to adjustedInvocation,
-            "outputs" to outputs
+            SessionEnvelopeFields.REQUEST_ID to JsonPrimitive("request-" + task.id + "-" + task.attempt),
+            SessionEnvelopeFields.SESSION_ID to JsonPrimitive(task.sessionId),
+            SessionRequestFields.INVOCATION to adjustedInvocation,
+            SessionRequestFields.OUTPUTS to outputs
         )).toString())
     }
 }

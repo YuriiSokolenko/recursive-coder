@@ -43,7 +43,7 @@ class LinuxStageToolSessionOpener(
     override fun open(authority: StageToolAuthoritySource): StageToolOpenResult {
         val snapshot = try { authority.current()?.frozen() }
             catch (_: Exception) { null }
-            ?: return StageToolOpenResult.Denied("STAGE_AUTHORITY_UNAVAILABLE")
+            ?: return StageToolOpenResult.Denied(StageDenialCodes.STAGE_AUTHORITY_UNAVAILABLE)
         if (!ToolAuthorizationPolicy.validHostIdentifier(snapshot.requestId))
             return StageToolOpenResult.Denied("INVALID_REQUEST_ID")
         val graph = snapshot.graph
@@ -53,9 +53,9 @@ class LinuxStageToolSessionOpener(
         if (stage.correlation.requestId != snapshot.requestId)
             return StageToolOpenResult.Denied("REQUEST_CORRELATION_MISMATCH")
         if (stage.kind.role == EngineeringRole.REVIEWER)
-            return StageToolOpenResult.Denied("ROLE_NOT_AUTHORIZED")
+            return StageToolOpenResult.Denied(ToolDenialCodes.ROLE_NOT_AUTHORIZED)
         if (stage.state != StageState.READY && stage.state != StageState.RUNNING)
-            return StageToolOpenResult.Denied("STAGE_NOT_READY")
+            return StageToolOpenResult.Denied(StageDenialCodes.STAGE_NOT_READY)
         val actor = stage.agentId ?: return StageToolOpenResult.Denied("MISSING_STAGE_ACTOR")
 
         // A RUNNING stage has already crossed the READY -> RUNNING boundary.
@@ -123,7 +123,7 @@ class LinuxStageToolSessionOpener(
             catch (_: Exception) { false }
         if (!stillCurrent) {
             runtime.close()
-            return StageToolOpenResult.Denied("STALE_STAGE_AUTHORITY")
+            return StageToolOpenResult.Denied(StageDenialCodes.STALE_STAGE_AUTHORITY)
         }
         return StageToolOpenResult.Granted(
             LinuxStageToolSession(authority, snapshot, actor, stage.correlation, runtime)
@@ -146,14 +146,14 @@ private class LinuxStageToolSession(
 
     private fun currentDenial(): String? {
         if (closed) return "WRITE_SESSION_INVALID"
-        if (revoked) return "STALE_STAGE_AUTHORITY"
+        if (revoked) return StageDenialCodes.STALE_STAGE_AUTHORITY
         if (finished) return "STAGE_TOOL_FINISHED"
         val now = try { authority.current()?.frozen() } catch (_: Exception) { null }
         if (now == null || now != admitted) {
             revoked = true
             passed.clear()
             attempted.clear()
-            return "STALE_STAGE_AUTHORITY"
+            return StageDenialCodes.STALE_STAGE_AUTHORITY
         }
         return null
     }

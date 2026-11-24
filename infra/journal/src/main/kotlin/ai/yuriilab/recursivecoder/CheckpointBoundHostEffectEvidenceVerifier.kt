@@ -33,7 +33,7 @@ fun interface IndependentEffectStateProbe {
  */
 internal object EffectEvidenceProjection {
     private val sha = Regex("[0-9a-f]{64}")
-    private val toolEvents = setOf("tool.started", "tool.completed")
+    private val toolEvents = setOf(SessionEventKinds.TOOL_STARTED, SessionEventKinds.TOOL_COMPLETED)
     private fun value(o: JsonObject, field: String): String? =
         (o[field] as? JsonPrimitive)?.takeIf { it.isString }?.content
     private fun number(o: JsonObject, field: String): Long? =
@@ -74,12 +74,12 @@ internal object EffectEvidenceProjection {
         val output = mutableListOf<EffectJournalEntry>()
         var previousEventSequence = 0L
         for (event in events) {
-            val type = value(event, "type") ?: return deny("PROJECTION_EVENT_INVALID")
-            val status = value(event, "status") ?: return deny("PROJECTION_EVENT_INVALID")
-            val metadata = event["metadata"] as? JsonObject
+            val type = value(event, SessionEventFields.TYPE) ?: return deny("PROJECTION_EVENT_INVALID")
+            val status = value(event, SessionEventFields.STATUS) ?: return deny("PROJECTION_EVENT_INVALID")
+            val metadata = event[SessionEventFields.METADATA] as? JsonObject
             if (metadata == null) {
                 if (type in toolEvents) return deny("PROJECTION_UNMARKED_TOOL_EVENT")
-                if ("metadata" in event) return deny("PROJECTION_METADATA_INVALID")
+                if (SessionEventFields.METADATA in event) return deny("PROJECTION_METADATA_INVALID")
                 continue
             }
             if (!EffectEvidenceEnvelopePolicy.hasReservedKey(metadata)) {
@@ -88,24 +88,24 @@ internal object EffectEvidenceProjection {
             }
             if (!EffectEvidenceEnvelopePolicy.validForEvent(type, status, metadata))
                 return deny("PROJECTION_ENVELOPE_INVALID")
-            val state = value(metadata, "effectState")
+            val state = value(metadata, EffectEvidenceFields.EFFECT_STATE)
                 ?: return deny("PROJECTION_ENVELOPE_INVALID")
-            val sessionId = value(event, "sessionId")
+            val sessionId = value(event, SessionEnvelopeFields.SESSION_ID)
                 ?: return deny("PROJECTION_EVENT_INVALID")
-            val eventSequence = number(event, "sequence")
+            val eventSequence = number(event, SessionEventFields.SEQUENCE)
                 ?: return deny("PROJECTION_EVENT_INVALID")
-            val physicalSequence = number(metadata, "effectRecordSequence")
+            val physicalSequence = number(metadata, EffectEvidenceFields.EFFECT_RECORD_SEQUENCE)
                 ?: return deny("PROJECTION_ENVELOPE_INVALID")
-            val fence = number(metadata, "effectFenceGeneration")
+            val fence = number(metadata, EffectEvidenceFields.EFFECT_FENCE_GENERATION)
                 ?: return deny("PROJECTION_ENVELOPE_INVALID")
-            val operationId = value(metadata, "effectOperationId")
+            val operationId = value(metadata, EffectEvidenceFields.EFFECT_OPERATION_ID)
                 ?: return deny("PROJECTION_ENVELOPE_INVALID")
             val kind = EffectKind.entries.firstOrNull {
-                it.name == value(metadata, "effectKind")
+                it.name == value(metadata, EffectEvidenceFields.EFFECT_KIND)
             } ?: return deny("PROJECTION_ENVELOPE_INVALID")
-            val input = value(metadata, "effectInputSha256")
+            val input = value(metadata, EffectEvidenceFields.EFFECT_INPUT_SHA256)
                 ?: return deny("PROJECTION_ENVELOPE_INVALID")
-            val mac = value(metadata, "effectRecordMacSha256")
+            val mac = value(metadata, EffectEvidenceFields.EFFECT_RECORD_MAC_SHA256)
                 ?: return deny("PROJECTION_ENVELOPE_INVALID")
             if (eventSequence <= previousEventSequence ||
                 physicalSequence != output.size.toLong() + 1L)
@@ -119,17 +119,17 @@ internal object EffectEvidenceProjection {
                 return deny("PROJECTION_ENVELOPE_INVALID")
             val identity = EffectIdentity(sessionId, operationId, fence, kind, input)
             val record = when (state) {
-                "intent" -> EffectRecord.Intent(identity)
-                "started" -> EffectRecord.Started(identity)
-                "committed" -> {
-                    val observed = value(metadata, "effectObservedStateSha256")
+                EffectRecordStates.INTENT -> EffectRecord.Intent(identity)
+                EffectRecordStates.STARTED -> EffectRecord.Started(identity)
+                EffectRecordStates.COMMITTED -> {
+                    val observed = value(metadata, EffectEvidenceFields.EFFECT_OBSERVED_STATE_SHA256)
                         ?: return deny("PROJECTION_ENVELOPE_INVALID")
                     if (!sha.matches(observed))
                         return deny("PROJECTION_ENVELOPE_INVALID")
                     EffectRecord.Committed(identity, observed)
                 }
                 else -> {
-                    val code = value(metadata, "effectErrorCode")
+                    val code = value(metadata, EffectEvidenceFields.EFFECT_ERROR_CODE)
                         ?: return deny("PROJECTION_ENVELOPE_INVALID")
                     if (!ToolAuthorizationPolicy.validHostIdentifier(code))
                         return deny("PROJECTION_ENVELOPE_INVALID")

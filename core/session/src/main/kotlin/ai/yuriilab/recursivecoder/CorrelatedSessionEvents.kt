@@ -20,22 +20,22 @@ class CorrelatedRecursiveSessionEvents(
 ) : RecursiveEventSink {
     override fun emit(event: RecursiveEvent) {
         val kind = when (event.kind) {
-            RecursiveEventKind.STARTED -> "agent.started"
-            RecursiveEventKind.CHILD_RESERVED -> "session.transition"
-            RecursiveEventKind.DENIED -> "policy.denied"
-            RecursiveEventKind.USAGE_CHARGED, RecursiveEventKind.INTEGRATED -> "tool.completed"
+            RecursiveEventKind.STARTED -> SessionEventKinds.AGENT_STARTED
+            RecursiveEventKind.CHILD_RESERVED -> SessionEventKinds.SESSION_TRANSITION
+            RecursiveEventKind.DENIED -> SessionEventKinds.POLICY_DENIED
+            RecursiveEventKind.USAGE_CHARGED, RecursiveEventKind.INTEGRATED -> SessionEventKinds.TOOL_COMPLETED
             RecursiveEventKind.SUCCEEDED, RecursiveEventKind.CANCELLED,
-            RecursiveEventKind.TIMED_OUT -> "agent.completed"
-            RecursiveEventKind.FAILED -> "session.error"
+            RecursiveEventKind.TIMED_OUT -> SessionEventKinds.AGENT_COMPLETED
+            RecursiveEventKind.FAILED -> SessionEventKinds.SESSION_ERROR
         }
         val status = when (event.kind) {
-            RecursiveEventKind.STARTED, RecursiveEventKind.CHILD_RESERVED -> "started"
-            RecursiveEventKind.DENIED -> "denied"
+            RecursiveEventKind.STARTED, RecursiveEventKind.CHILD_RESERVED -> SessionEventStatuses.STARTED
+            RecursiveEventKind.DENIED -> SessionEventStatuses.DENIED
             RecursiveEventKind.USAGE_CHARGED, RecursiveEventKind.INTEGRATED,
-            RecursiveEventKind.SUCCEEDED -> "completed"
-            RecursiveEventKind.FAILED -> "failed"
-            RecursiveEventKind.CANCELLED -> "cancelled"
-            RecursiveEventKind.TIMED_OUT -> "timed_out"
+            RecursiveEventKind.SUCCEEDED -> SessionEventStatuses.COMPLETED
+            RecursiveEventKind.FAILED -> SessionEventStatuses.FAILED
+            RecursiveEventKind.CANCELLED -> SessionEventStatuses.CANCELLED
+            RecursiveEventKind.TIMED_OUT -> SessionEventStatuses.TIMED_OUT
         }
         val parentActorId = event.parentStageRunId?.let { "agent-" + it.value }
         val childActorId = when (event.kind) {
@@ -58,21 +58,21 @@ class CorrelatedRecursiveSessionEvents(
                 // Unknown child session identity must remain null.
             ),
             extra = buildJsonObject {
-                put("recursiveEvent", event.kind.name)
-                put("graphId", event.graphId.value)
-                put("stageRunId", event.stageRunId.value)
+                put(StageEventMetadataFields.RECURSIVE_EVENT, event.kind.name)
+                put(StageEventMetadataFields.GRAPH_ID, event.graphId.value)
+                put(StageEventMetadataFields.STAGE_RUN_ID, event.stageRunId.value)
                 put("origin", event.origin.name)
-                put("role", event.origin.role.name)
+                put(StageEventMetadataFields.ROLE, event.origin.role.name)
                 // Graph scope is not a host-issued budget correlation identifier.
-                put("budgetScopeGraphId", event.graphId.value)
-                put("grantTokens", event.granted.tokens)
-                put("grantToolCalls", event.granted.toolCalls)
-                put("spentTokens", event.usage.tokens)
-                put("spentToolCalls", event.usage.toolCalls)
-                put("delegatedTokens", event.delegated.tokens)
-                put("delegatedToolCalls", event.delegated.toolCalls)
-                put("parentGraphId", event.parentGraphId?.value?.let(::JsonPrimitive) ?: JsonNull)
-                put("childGraphId", event.childGraphId?.value?.let(::JsonPrimitive) ?: JsonNull)
+                put(StageEventMetadataFields.BUDGET_SCOPE_GRAPH_ID, event.graphId.value)
+                put(StageEventMetadataFields.GRANT_TOKENS, event.granted.tokens)
+                put(StageEventMetadataFields.GRANT_TOOL_CALLS, event.granted.toolCalls)
+                put(StageEventMetadataFields.SPENT_TOKENS, event.usage.tokens)
+                put(StageEventMetadataFields.SPENT_TOOL_CALLS, event.usage.toolCalls)
+                put(StageEventMetadataFields.DELEGATED_TOKENS, event.delegated.tokens)
+                put(StageEventMetadataFields.DELEGATED_TOOL_CALLS, event.delegated.toolCalls)
+                put(StageEventMetadataFields.PARENT_GRAPH_ID, event.parentGraphId?.value?.let(::JsonPrimitive) ?: JsonNull)
+                put(StageEventMetadataFields.CHILD_GRAPH_ID, event.childGraphId?.value?.let(::JsonPrimitive) ?: JsonNull)
                 put("requestId", event.requestId?.let(::JsonPrimitive) ?: JsonNull)
                 event.code?.let { put("code", it) }
             })
@@ -84,26 +84,26 @@ class CorrelatedRoleSessionEvents(
 ) : StageRoleEventSink {
     override fun emit(event: StageRoleEvent) {
         val status = when (event.kind) {
-            StageRoleEventKind.STARTED -> "started"
-            StageRoleEventKind.PROPOSED -> "completed"
-            StageRoleEventKind.DENIED -> "denied"
-            StageRoleEventKind.FAILED -> "failed"
-            StageRoleEventKind.CANCELLED -> "cancelled"
-            StageRoleEventKind.TIMED_OUT -> "timed_out"
+            StageRoleEventKind.STARTED -> SessionEventStatuses.STARTED
+            StageRoleEventKind.PROPOSED -> SessionEventStatuses.COMPLETED
+            StageRoleEventKind.DENIED -> SessionEventStatuses.DENIED
+            StageRoleEventKind.FAILED -> SessionEventStatuses.FAILED
+            StageRoleEventKind.CANCELLED -> SessionEventStatuses.CANCELLED
+            StageRoleEventKind.TIMED_OUT -> SessionEventStatuses.TIMED_OUT
         }
         journal.append(
             when (event.kind) {
-                StageRoleEventKind.STARTED -> "agent.started"
-                StageRoleEventKind.DENIED -> "policy.denied"
-                StageRoleEventKind.FAILED -> "session.error"
-                else -> "agent.completed"
+                StageRoleEventKind.STARTED -> SessionEventKinds.AGENT_STARTED
+                StageRoleEventKind.DENIED -> SessionEventKinds.POLICY_DENIED
+                StageRoleEventKind.FAILED -> SessionEventKinds.SESSION_ERROR
+                else -> SessionEventKinds.AGENT_COMPLETED
             }, status, correlationId = event.correlation.requestId,
             actor = event.agentId?.let { SessionEventActor(it.value) },
             extra = buildJsonObject {
-                put("roleEvent", event.kind.name)
-                put("graphId", event.correlation.graphId.value)
-                put("stageRunId", event.correlation.stageRunId.value)
-                put("role", event.role.name)
+                put(StageEventMetadataFields.ROLE_EVENT, event.kind.name)
+                put(StageEventMetadataFields.GRAPH_ID, event.correlation.graphId.value)
+                put(StageEventMetadataFields.STAGE_RUN_ID, event.correlation.stageRunId.value)
+                put(StageEventMetadataFields.ROLE, event.role.name)
                 put("requestId", event.correlation.requestId)
                 put("modelRequests", event.usage.modelRequests)
                 event.usage.inputTokens?.let { put("inputTokens", it) }
@@ -119,26 +119,26 @@ class CorrelatedPreparationSessionEvents(
 ) : PreparationStageEventSink {
     override fun emit(event: PreparationStageEvent) {
         val type = when (event.state) {
-            StageState.CREATED, StageState.READY -> "session.transition"
-            StageState.RUNNING -> "agent.started"
-            StageState.ACCEPTED -> "agent.completed"
-            StageState.REJECTED -> "policy.denied"
-            StageState.FAILED -> "session.error"
-            StageState.CANCELLED -> "agent.completed"
+            StageState.CREATED, StageState.READY -> SessionEventKinds.SESSION_TRANSITION
+            StageState.RUNNING -> SessionEventKinds.AGENT_STARTED
+            StageState.ACCEPTED -> SessionEventKinds.AGENT_COMPLETED
+            StageState.REJECTED -> SessionEventKinds.POLICY_DENIED
+            StageState.FAILED -> SessionEventKinds.SESSION_ERROR
+            StageState.CANCELLED -> SessionEventKinds.AGENT_COMPLETED
         }
         val status = when (event.state) {
-            StageState.CREATED, StageState.READY, StageState.RUNNING -> "started"
-            StageState.ACCEPTED -> "completed"
-            StageState.REJECTED -> "denied"
-            StageState.FAILED -> "failed"
-            StageState.CANCELLED -> "cancelled"
+            StageState.CREATED, StageState.READY, StageState.RUNNING -> SessionEventStatuses.STARTED
+            StageState.ACCEPTED -> SessionEventStatuses.COMPLETED
+            StageState.REJECTED -> SessionEventStatuses.DENIED
+            StageState.FAILED -> SessionEventStatuses.FAILED
+            StageState.CANCELLED -> SessionEventStatuses.CANCELLED
         }
         journal.append(type, status,
             correlationId = event.correlation.requestId,
             extra = buildJsonObject {
-                put("stageRunId", event.correlation.stageRunId.value)
+                put(StageEventMetadataFields.STAGE_RUN_ID, event.correlation.stageRunId.value)
                 put("kind", event.kind.name)
-                put("stageState", event.state.name)
+                put(StageEventMetadataFields.STAGE_STATE, event.state.name)
                 event.artifactId?.let { put("artifactId", it.value) }
                 event.sha256?.let { put("artifactSha256", it) }
                 event.approval?.let { put("approval", it.name) }
@@ -151,12 +151,12 @@ class CorrelatedReviewerSessionEvents(
     private val journal: SessionEventJournal
 ) : ReviewerDecisionSink {
     override fun emit(decision: ReviewerDecisionRecord) {
-        journal.append("agent.completed",
-            if (decision.verdict == ReviewerDisposition.ACCEPT) "completed" else "denied",
+        journal.append(SessionEventKinds.AGENT_COMPLETED,
+            if (decision.verdict == ReviewerDisposition.ACCEPT) SessionEventStatuses.COMPLETED else SessionEventStatuses.DENIED,
             correlationId = decision.correlation.requestId,
             extra = buildJsonObject {
-                put("stageRunId", decision.correlation.stageRunId.value)
-                put("role", EngineeringRole.REVIEWER.name)
+                put(StageEventMetadataFields.STAGE_RUN_ID, decision.correlation.stageRunId.value)
+                put(StageEventMetadataFields.ROLE, EngineeringRole.REVIEWER.name)
                 put("verdict", decision.verdict.name)
                 put("reasonCode", decision.reasonCode)
                 put("scope", decision.scope.name)

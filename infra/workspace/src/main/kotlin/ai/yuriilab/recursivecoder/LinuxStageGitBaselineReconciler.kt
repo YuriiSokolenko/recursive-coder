@@ -173,10 +173,10 @@ class LinuxStageGitBaselineReconciler internal constructor(
         check(ToolAuthorizationPolicy.validDeclaredPath(path), "INVALID_STAGE_PATH")
         val key = Files.readAttributes(root, BasicFileAttributes::class.java,
             LinkOption.NOFOLLOW_LINKS).fileKey()
-        check(key != null, "SANDBOX_UNAVAILABLE")
+        check(key != null, WorkspaceDenialCodes.SANDBOX_UNAVAILABLE)
         Files.newDirectoryStream(root).use { openedRoot ->
             val first = openedRoot as? SecureDirectoryStream<Path>
-                ?: throw Reject("SANDBOX_UNAVAILABLE")
+                ?: throw Reject(WorkspaceDenialCodes.SANDBOX_UNAVAILABLE)
             check(first.getFileAttributeView(BasicFileAttributeView::class.java)
                 .readAttributes().fileKey() == key, "WORKSPACE_REPLACED")
             var cursor = first
@@ -769,7 +769,7 @@ class LinuxStageGitBaselineReconciler internal constructor(
             LinkOption.NOFOLLOW_LINKS).fileKey()
         Files.newDirectoryStream(root).use { opened ->
             val stream = opened as? SecureDirectoryStream<Path>
-                ?: throw Reject("SANDBOX_UNAVAILABLE")
+                ?: throw Reject(WorkspaceDenialCodes.SANDBOX_UNAVAILABLE)
             check(stream.getFileAttributeView(BasicFileAttributeView::class.java)
                 .readAttributes().fileKey() == rootKey, "WORKSPACE_REPLACED")
             var current = stream

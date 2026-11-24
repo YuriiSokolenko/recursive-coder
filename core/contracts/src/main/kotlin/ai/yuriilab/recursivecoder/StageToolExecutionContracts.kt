@@ -36,7 +36,7 @@ data class StageToolHostSnapshot(
     val baselineHead: String,
     val branch: String,
     val checks: Map<String, StageIsolatedCheck> = emptyMap(),
-    val requiredChecks: Set<String> = setOf("git_diff_check"),
+    val requiredChecks: Set<String> = setOf(StageCheckIds.GIT_DIFF_CHECK),
     val revisionAuthorization: StageRevisionAuthorization? = null,
     val maxToolCalls: Int = 64
 )
@@ -89,4 +89,9 @@ sealed interface StageToolOpenResult {
 /** Optional trusted port. Never bound by the read-only CLI composition. */
 fun interface StageToolSessionOpener {
     fun open(authority: StageToolAuthoritySource): StageToolOpenResult
+}
+
+/** Host-owned fixed check identifier, separate from model-visible tool names. */
+object StageCheckIds {
+    const val GIT_DIFF_CHECK = "git_diff_check"
 }

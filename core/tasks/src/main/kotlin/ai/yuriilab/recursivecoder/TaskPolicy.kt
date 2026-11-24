@@ -61,7 +61,7 @@ internal data class TaskUpdate(val task: Task, val nextOrder: Long)
 
 /** Validation entrypoint for persistence adapters decoding TaskQueue snapshots. */
 fun validateStoredTasks(tasks: List<Task>) {
-    require(tasks.all { safeTaskId.matches(it.id) && it.priority in 0..100 &&
+    require(tasks.all { safeTaskId.matches(it.id) && it.priority in TaskPriority.MIN..TaskPriority.MAX &&
         it.attempt >= 0 && it.waitTurns >= 0 && it.queueOrder >= 0 &&
         it.prunedTransitions >= 0 })
     validateGraph(tasks)
@@ -171,7 +171,7 @@ internal object TaskPolicy {
         priority: Int, dependencies: List<String>, at: String
     ): TaskQueue {
         require(safeTaskId.matches(id)) { "Unsafe task ID" }
-        require(priority in 0..100) { "Priority must be 0..100" }
+        require(priority in TaskPriority.MIN..TaskPriority.MAX) { "Priority must be 0..100" }
         require(queue.tasks.none { it.id == id }) { "Task already exists" }
         require(dependencies.distinct().size == dependencies.size) { "Duplicate dependency" }
         require(dependencies.all { dep -> queue.tasks.any { it.id == dep } }) { "Unknown dependency" }

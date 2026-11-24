@@ -89,7 +89,7 @@ object PreparationStageFinishPolicy {
             if (!evidence.successful || evidence.correlation != nextStage.correlation ||
                 evidence.actor != nextStage.agentId ||
                 evidence.requiredChecks.map { it.checkId }.toSet().let {
-                    "git_diff_check" !in it || it.none { check -> check != "git_diff_check" }
+                    StageCheckIds.GIT_DIFF_CHECK !in it || it.none { check -> check != StageCheckIds.GIT_DIFF_CHECK }
                 } || evidence.requiredChecks.any { !it.passed }) return false
             val previouslyPending = priorStage.outputArtifacts == nextStage.outputArtifacts &&
                 authoritativeGraph == updatedGraph &&

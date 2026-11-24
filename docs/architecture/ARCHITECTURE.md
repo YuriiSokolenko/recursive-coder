@@ -91,6 +91,8 @@ Checkpoints contain hashed state snapshots and a journal of side effects. Resumi
 
 ## 3. Public session protocol
 
+See [Semantic vocabulary follow-ups](SEMANTIC_VOCABULARY_FOLLOWUPS.md) for field ownership, migration scope and exclusions.
+
 `contracts/v1/session-v1.schema.json` is the canonical transport schema of the project:
 
 - **SessionRequest:** invocation source (`cli|api|scheduler`), workspace, task, model, policy, budgets, outputs, and checkpoint/resume request.

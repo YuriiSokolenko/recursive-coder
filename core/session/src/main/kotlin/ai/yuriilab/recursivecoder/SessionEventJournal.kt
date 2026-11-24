@@ -58,9 +58,9 @@ class SessionEventJournal(
     companion object {
         /** Exact root field set written by this emitter; not the entire Protocol v1 schema. */
         val emittedFields: Set<String> = setOf(
-            "kind", "version", "sessionId", "traceId", "eventId", "sequence",
-            "timestamp", "type", "status", "correlationId", "causationId",
-            "actor", "transition", "timing", "redaction", "metadata"
+            SessionEnvelopeFields.KIND, SessionEnvelopeFields.VERSION, SessionEnvelopeFields.SESSION_ID, SessionEnvelopeFields.TRACE_ID, SessionEventFields.EVENT_ID, SessionEventFields.SEQUENCE,
+            SessionEventFields.TIMESTAMP, SessionEventFields.TYPE, SessionEventFields.STATUS, SessionEventFields.CORRELATION_ID, SessionEventFields.CAUSATION_ID,
+            SessionEventFields.ACTOR, SessionEventFields.TRANSITION, SessionEventFields.TIMING, SessionEventFields.REDACTION, SessionEventFields.METADATA
         )
 
         fun eventId(sessionId: String, sequence: Int): String =
@@ -91,42 +91,42 @@ class SessionEventJournal(
             require(correlationId == null ||
                 ToolAuthorizationPolicy.validHostIdentifier(correlationId))
             return buildJsonObject {
-                put("kind", "session-event"); put("version", SessionProtocol.VERSION)
-                put("sessionId", sessionId); put("traceId", traceId)
-                put("eventId", eventId(sessionId, sequence))
-                put("sequence", sequence)
-                put("timestamp", timestamp.toString())
-                put("type", type); put("status", status)
-                put("correlationId", correlationId ?: requestId)
-                put("causationId", if (sequence == 1) JsonNull else
+                put(SessionEnvelopeFields.KIND, SessionEnvelopeKinds.EVENT); put(SessionEnvelopeFields.VERSION, SessionProtocol.VERSION)
+                put(SessionEnvelopeFields.SESSION_ID, sessionId); put(SessionEnvelopeFields.TRACE_ID, traceId)
+                put(SessionEventFields.EVENT_ID, eventId(sessionId, sequence))
+                put(SessionEventFields.SEQUENCE, sequence)
+                put(SessionEventFields.TIMESTAMP, timestamp.toString())
+                put(SessionEventFields.TYPE, type); put(SessionEventFields.STATUS, status)
+                put(SessionEventFields.CORRELATION_ID, correlationId ?: requestId)
+                put(SessionEventFields.CAUSATION_ID, if (sequence == 1) JsonNull else
                     JsonPrimitive(eventId(sessionId, sequence - 1)))
-                put("actor", buildJsonObject {
-                    put("agentId", actor?.agentId ?: "agent-" + sessionId)
-                    put("parentAgentId",
+                put(SessionEventFields.ACTOR, buildJsonObject {
+                    put(SessionEventActorFields.AGENT_ID, actor?.agentId ?: "agent-" + sessionId)
+                    put(SessionEventActorFields.PARENT_AGENT_ID,
                         actor?.parentAgentId?.let(::JsonPrimitive) ?: JsonNull)
-                    put("childAgentId",
+                    put(SessionEventActorFields.CHILD_AGENT_ID,
                         actor?.childAgentId?.let(::JsonPrimitive) ?: JsonNull)
-                    put("toolExecutionId",
+                    put(SessionEventActorFields.TOOL_EXECUTION_ID,
                         (actor?.toolExecutionId ?: toolId)?.let(::JsonPrimitive) ?: JsonNull)
-                    put("childSessionId",
+                    put(SessionEventActorFields.CHILD_SESSION_ID,
                         actor?.childSessionId?.let(::JsonPrimitive) ?: JsonNull)
                 })
-                transition?.let { (from, to) -> put("transition", buildJsonObject {
-                    put("from", from); put("to", to)
+                transition?.let { (from, to) -> put(SessionEventFields.TRANSITION, buildJsonObject {
+                    put(SessionEventTransitionFields.FROM, from); put(SessionEventTransitionFields.TO, to)
                 }) }
-                started?.let { put("timing", buildJsonObject {
-                    put("startedAt", it.toString())
-                    put("durationMs", Duration.between(started, timestamp)
+                started?.let { put(SessionEventFields.TIMING, buildJsonObject {
+                    put(SessionEventTimingFields.STARTED_AT, it.toString())
+                    put(SessionEventTimingFields.DURATION_MS, Duration.between(started, timestamp)
                         .toMillis().coerceAtLeast(0))
                 }) }
-                put("redaction", buildJsonObject {
-                    put("mode", "metadata-only")
-                    put("removedFields", buildJsonArray {
+                put(SessionEventFields.REDACTION, buildJsonObject {
+                    put(SessionEventRedactionFields.MODE, SessionEventRedactionMode.METADATA_ONLY)
+                    put(SessionEventRedactionFields.REMOVED_FIELDS, buildJsonArray {
                         listOf("rawPrompt", "rawResponse", "rawToolOutput",
                             "credentialRef", "authorizationHeader").forEach { add(it) }
                     })
                 })
-                extra?.let { put("metadata", it) }
+                extra?.let { put(SessionEventFields.METADATA, it) }
             }
         }
     }
