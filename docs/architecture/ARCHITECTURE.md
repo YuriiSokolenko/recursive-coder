@@ -92,6 +92,7 @@ Checkpoints contain hashed state snapshots and a journal of side effects. Resumi
 ## 3. Public session protocol
 
 See [Semantic vocabulary follow-ups](SEMANTIC_VOCABULARY_FOLLOWUPS.md) for field ownership, migration scope and exclusions.
+See [Build logic and tooling vocabulary audit](SEMANTIC_VOCABULARY_TOOLING.md) (#205) for tooling ownership and independent verifier exclusions.
 The [diagnostic literal audit (#218)](DIAGNOSTIC_LITERAL_AUDIT_218.md) records per-value ownership, compatibility oracles and retained exclusions.
 
 `contracts/v1/session-v1.schema.json` is the canonical transport schema of the project:

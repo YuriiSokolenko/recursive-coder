@@ -3,10 +3,10 @@
 Parent: #194. This is a follow-up to the initial changes already in dev, not a
 change to the test-tier, bytecode, dependency or CI security policy.
 
-Audit baseline: dev at `5a31bae85341a2083f0cf982eb4b1f83db2d67cb`. The inventory
-below records files found via repository code search and inspected for repeated
-literal candidates, with targeted source inspection of the affected paths and
-guard boundaries. This is not a proof that every literal in every test is unique.
+Initial audit baseline: dev at
+`5a31bae85341a2083f0cf982eb4b1f83db2d67cb`. The inventory below records files
+found via repository code search and inspected for repeated literal candidates,
+with targeted source inspection of the affected paths and guard boundaries. This is not a proof that every literal in every test is unique.
 
 ## Ownership and disposition
 
@@ -30,11 +30,16 @@ guard boundaries. This is not a proof that every literal in every test is unique
 ## Updated dev baseline
 
 The initial audit was refreshed against dev at
-`2eb9d2d05905a0c443a65a0bfc26edc0c55803ad`. The recursive Git tree lists
-all Python, JavaScript, Gradle Kotlin DSL, TOML, YAML and properties files;
-the new review tools and root Gradle properties are classified below. The
+`2eb9d2d05905a0c443a65a0bfc26edc0c55803ad`. The current audit base is
+`28d6d092ed727869f25b51d90981875f0ef71fe0` (PR #227). Comparing the two
+base revisions shows changes only to the strict reviewer agent, its skill,
+and CONTRIBUTING.md; no tooling sources, tests, or CI workflow changed.
+The recursive Git tree at the current base and PR head was checked for the
+Python, JavaScript, Gradle Kotlin DSL, TOML, YAML and properties inventory.
+The review tools and root Gradle properties are classified below. The
 existing inventory link and archive-name assertion are applied on top of
-this dev revision without replacing its diagnostic inventory or review tests.
+the current dev revision without replacing its diagnostic inventory or
+review tests.
 
 | Reviewed files | Ownership and disposition |
 | --- | --- |
