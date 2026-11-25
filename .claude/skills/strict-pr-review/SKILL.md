@@ -218,18 +218,14 @@ Run all of these and record the result of each one:
    or the PR is squash-merged.
 
    For PRs into `dev`, verify before merge that both repository settings
-   `squash_merge_commit_title` and `merge_commit_title` are `PR_TITLE` and
-   that the active `dev` ruleset allows only merge and squash. Record the
-   observed methods. The known rebase-enforcement gap is tracked in
-   [#226](https://github.com/YuriiSokolenko/recursive-coder/issues/226).
-   While that issue is open, record the verified gap and its issue link; do
-   not treat it as permission to rebase-merge. Missing evidence, an untracked
-   settings deviation or a rebase allowance after #226 is closed is a
-   finding. The resulting commit subject must be the PR title followed by
-   GitHub's ` (#<pr>)` suffix, where `<pr>` is the pull request number. The
-   merger checks the proposed subject before merging and verifies the actual
-   subject afterward. The reviewer does not require future merge-message or
-   post-merge evidence during pre-merge review.
+   `squash_merge_commit_title` and `merge_commit_title` are `PR_TITLE` and that
+   the active `dev` ruleset allows only merge and squash. Record the observed
+   methods. Missing evidence or any deviation from these settings, including a
+   rebase allowance, is a finding. The resulting commit subject must be the PR
+   title followed by GitHub's ` (#<pr>)` suffix, where `<pr>` is the pull
+   request number. The merger checks the proposed subject before merging and
+   verifies the actual subject afterward. The reviewer does not require future
+   merge-message or post-merge evidence during pre-merge review.
 10. **CI:** the head SHA must have all checks completed and successful.
 
     ```bash

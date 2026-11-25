@@ -81,10 +81,10 @@ review. At a minimum:
   a finding.
   Integration into `dev` uses squash or merge commits, not rebase merges.
   The resulting subject is the PR title followed by GitHub's ` (#<pr>)`
-  suffix. Verify pre-merge settings and the tracked enforcement gap as
-  specified in the skill; the merger verifies the subject before and after
-  merge. Review-fix commits must be folded into the commits they fix, or the
-  PR must be squash-merged.
+  suffix. Verify pre-merge settings as specified in the skill; missing
+  evidence or any deviation is a finding. The merger verifies the subject
+  before and after merge. Review-fix commits must be folded into the commits
+  they fix, or the PR must be squash-merged.
 
 ## Environment limits
 
