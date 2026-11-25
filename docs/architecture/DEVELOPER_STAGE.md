@@ -130,6 +130,24 @@ writer lease: the comparison detects stale or corrupted evidence, not an
 independent external CAS authority.
 Preimage capture failures return precise known denial codes and do not consume
 the one-shot write session because no physical write has begun.
+
+Ownership review (#221): the host constructs a fresh list from the operations,
+copies each read before-image, hashes immutable postimage text, and builds a
+fresh ordered map from graph artifacts. It retains these only in the private
+writer/terminal recovery fields; no receipt, model result or audit exposes the
+collections or arrays. Terminalization transfers the private record under the
+host monitor; the recovery-in-progress fence and quarantine keep it owned
+while the reconciler runs outside that monitor. The reconciler is also a
+host-only boundary in its own right: callers must keep the list, map, and
+before-image contents stable during capture (exclusive ownership or external
+synchronization). The reconciler checks immutable baseline syntax first,
+bounds the list and arrays before copying, and captures ordered collections
+and independent byte arrays before evidence authorization. Copying does not
+provide an atomic snapshot across concurrent writers. Only the private
+snapshot is used for authorization, blob comparison, restoration, readback,
+frozen checks and audit hashing. The existing result types, audit domain,
+quarantine, immutable-input policy and restart limitations are unchanged.
+
 After a terminal **non-accepted** graph/CAS outcome, the host quarantines the
 workspace. An operator may call `reconcileFailedDeveloper(stageRunId)`:
 `LinuxStageGitBaselineReconciler.recoverFailedDeveloper` obtains the same

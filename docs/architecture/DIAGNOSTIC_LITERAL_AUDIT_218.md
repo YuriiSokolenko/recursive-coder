@@ -162,16 +162,12 @@ traversal and asserts `UNSAFE_STAGE_PATH`.
 The same `read` guard and the private `withFailedWriteParent` guard also
 serve `recoverFailedDeveloper`. Stable recovery inputs pass initial
 authorization or frozen-path validation before reaching either guard.
-However, recovery currently aliases `request.files` and
-`request.frozenArtifacts`; those collections can still drift after evidence
-validation. In addition, `StageGitUnacceptedFile.beforeBytes` is a mutable
-array retained through baseline blob verification, physical restoration,
-post-restore checks and audit hashing. A shallow list copy would not isolate
-those bytes. This analogous gap is tracked in
-[#221](https://github.com/YuriiSokolenko/recursive-coder/issues/221);
-recovery behavior is intentionally unchanged in #220. The read-only
-`inspectCleanBaseline` and its Boolean wrapper take immutable strings, not
-caller collections.
+At the #220 baseline, recovery still aliased `request.files` and
+`request.frozenArtifacts`, as well as the mutable
+`StageGitUnacceptedFile.beforeBytes`. A shallow list copy would not isolate
+those bytes. Recovery was intentionally unchanged in #220; see the separate
+#221 follow-up below. The read-only `inspectCleanBaseline` and its Boolean
+wrapper take immutable strings, not caller collections.
 
 The existing Linux integration observer is after the second verification
 at BEFORE_REF_UPDATE, or after the CAS at AFTER_REF_UPDATE; it is not a seam
@@ -182,6 +178,47 @@ clean. Coverage of earlier stages follows from the single private snapshot
 and source review, not a new public or internal observer. Existing CAS
 competition and post-CAS fault tests remain in the integration tier.
 No C3 source, pin, verifier, contract, module edge or test-tier tag changes.
+
+### Follow-up #221: failed Developer recovery snapshot
+
+Failed-write recovery now preserves the immutable baseline syntax denial
+first, then bounds the file count and each before-image length before copying.
+It captures an ordered list of new entries with independent arrays and an
+ordered map before authorization or filesystem/lease work. For stable inputs
+the moved size gates still report `INVALID_FAILED_WRITE_EVIDENCE`, as do
+malformed paths, duplicates or invalid hashes; later Git and frozen-fact
+checks retain their original order and diagnostics. No evidence or snapshot
+is returned. The producer ownership and exclusive-capture contract are
+documented in [DEVELOPER_STAGE.md](DEVELOPER_STAGE.md).
+
+With recovery also using a private snapshot, neither `read` nor
+`withFailedWriteParent` can receive a syntactically invalid path through the
+current recovery entry point after successful evidence validation. Write
+authorization checks path syntax, and frozen path validation uses the same
+predicate. Neither input can subsequently drift. Retain both private guards
+as defense in depth for future callers. The independent literal unit oracle
+for `INVALID_STAGE_PATH` remains unchanged; it establishes spelling, not
+execution. Malformed failed-write paths are rejected at evidence validation
+with the literal `INVALID_FAILED_WRITE_EVIDENCE`; existing valid-path
+filesystem-denial tests remain intact.
+
+Deterministic Linux tests extend the existing internal observer with points
+after evidence authorization and after Git blob/status preflight, before
+restoration. They exercise caller list, map and byte-array mutations at
+both early and late checkpoints, and reuse the final-baseline observation
+point for late frozen-map mutation. A changing traversal tests authorization
+from the captured list; a nine-entry traversal reporting size two tests
+the second count gate before lease creation. The tests verify the exact
+recovered audit, restored bytes, literal denials, raw index/HEAD/ref bytes
+and unchanged frozen files; capture failures and bounds are checked before
+lease creation. No new public test seam, model capability, C3 source/pin,
+CI gate, or accepted-stage behavior changes.
+
+The existing 4 MiB per-file stage limit is now owned by the reconciler's
+private `MAX_STAGE_FILE_BYTES` constant. Capture, regular-file attribute
+checks, bounded reads and failed-write restore checks share that limit;
+no value, denial code or check ordering changes. Test bounds remain literal
+as independent oracles.
 
 ## Cross-file and non-diagnostic scanner reconciliation
 
