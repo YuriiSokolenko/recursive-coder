@@ -589,6 +589,49 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+          fetch-depth: 0
+      - name: Review evidence (base helpers)
+        if: github.event_name == 'pull_request'
+        # Explicit bash runs as bash --noprofile --norc -eo pipefail {0};
+        # tests/test_ci_bootstrap.py executes this step with the same flags.
+        shell: bash
+        env:
+          REVIEW_BASE: ${{ github.event.pull_request.base.sha }}
+          REVIEW_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          [[ "$REVIEW_BASE" =~ ^[0-9a-f]{40}$ && "$REVIEW_HEAD" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse "$REVIEW_BASE^{commit}")" = "$REVIEW_BASE"
+          test "$(git rev-parse "$REVIEW_HEAD^{commit}")" = "$REVIEW_HEAD"
+          git merge-base "$REVIEW_BASE" "$REVIEW_HEAD" >/dev/null
+          printf 'Review base: %s\nReview head: %s\n' "$REVIEW_BASE" "$REVIEW_HEAD"
+          pin_helper=.claude/skills/c3-pin-check/scripts/check_c3_pins.py
+          scan_helper=.claude/skills/diagnostic-vocabulary-audit/scripts/scan_literals.py
+          missing=()
+          for helper in "$pin_helper" "$scan_helper"; do
+            git cat-file -e "$REVIEW_BASE:$helper" 2>/dev/null || missing+=("$helper")
+          done
+          if (( ${#missing[@]} )); then
+            # A base without the review gate (for example main before its first
+            # release merge) has no trusted helpers. Report the gap and let the
+            # reviewer's missing-evidence rule decide; never fall back to head.
+            printf 'Trusted base helpers unavailable at %s: %s\nNo review evidence produced.\n' "$REVIEW_BASE" "${missing[*]}"
+            exit 0
+          fi
+          helpers=$(mktemp -d "$RUNNER_TEMP/review-helpers.XXXXXX")
+          trap 'rm -rf -- "$helpers"' EXIT
+          git show "$REVIEW_BASE:$pin_helper" > "$helpers/check_c3_pins.py"
+          git show "$REVIEW_BASE:$scan_helper" > "$helpers/scan_literals.py"
+          sha256sum "$helpers/check_c3_pins.py" "$helpers/scan_literals.py"
+          # Helper output contains PR-controlled text. Disable workflow commands.
+          token=$(python3 -I -c 'import secrets; print(secrets.token_hex(32))')
+          echo "::stop-commands::$token"
+          pin_status=0
+          scan_status=0
+          python3 -I "$helpers/check_c3_pins.py" --repo "$GITHUB_WORKSPACE" --base "$REVIEW_BASE" --head "$REVIEW_HEAD" || pin_status=$?
+          python3 -I "$helpers/scan_literals.py" --repo "$GITHUB_WORKSPACE" --base "$REVIEW_BASE" --head "$REVIEW_HEAD" || scan_status=$?
+          echo "::$token::"
+          printf 'C3 pin check exit: %s\nVocabulary scanner exit: %s\n' "$pin_status" "$scan_status"
+          test "$pin_status" -eq 0 && test "$scan_status" -eq 0
       - name: Audit reviewed CI action SHAs and Gradle bootstrap
         run: python3 -I tools/check_ci_bootstrap.py --audit
       - name: Set up Python 3.12
@@ -607,12 +650,28 @@ jobs:
         run: python3 -I -m unittest discover -s tests -p 'test_junit_evidence.py' -v
       - name: Check import order in issue 36 test classes
         run: python3 -I tools/check_junit_evidence.py --root . --imports-only
+      - name: Test review gate helper scripts
+        run: python3 -I -m unittest discover -s tests -p 'test_review_skill_scripts.py' -v
       - name: Enforce English-only repository documentation
+        shell: bash
         run: |
-          if LC_ALL=C.UTF-8 grep -nP '[\p{Cyrillic}]' README.md CONTRIBUTING.md contracts/README.md docs/architecture/*.md; then
-            echo 'Documentation must use English only'
+          # Scan every tracked Markdown file. The listing goes through a file
+          # so that a failing git ls-files fails the step; a process
+          # substitution would drop its exit status. grep exits 1 only when no
+          # file matches; a match (0) or any error such as a missing file
+          # (>= 2) fails the guard.
+          listing=$(mktemp)
+          trap 'rm -f -- "$listing"' EXIT
+          git ls-files -z -- '*.md' > "$listing"
+          mapfile -d '' docs < "$listing"
+          test "${#docs[@]}" -gt 0
+          status=0
+          LC_ALL=C.UTF-8 grep -nP '[\p{Cyrillic}]' -- "${docs[@]}" || status=$?
+          if [ "$status" -ne 1 ]; then
+            echo "Documentation must use English only (grep exit $status)"
             exit 1
           fi
+          echo "Verified ${#docs[@]} tracked Markdown files contain no Cyrillic"
       - name: Validate full schema, fixtures and negative compatibility cases
         run: python -m unittest discover -s tests -p 'test_contract*.py' -v
       - name: Run standalone legacy compatibility cases and keyword guard

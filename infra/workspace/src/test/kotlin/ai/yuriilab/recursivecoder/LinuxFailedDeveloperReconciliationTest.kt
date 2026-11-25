@@ -163,4 +163,302 @@ class LinuxFailedDeveloperReconciliationTest {
             f.reconciler.recoverFailedDeveloper(f.request)).code)
         assertEquals(newSource, Files.readString(f.root.resolve("src/main/Feature.kt")))
     }
+
+    private data class RecoveryState(
+        val index: ByteArray,
+        val head: ByteArray,
+        val branchRef: ByteArray,
+        val status: String,
+        val files: Map<String, ByteArray>
+    )
+
+    private fun captureState(f: Fixture): RecoveryState = RecoveryState(
+        Files.readAllBytes(f.root.resolve(".git/index")),
+        Files.readAllBytes(f.root.resolve(".git/HEAD")),
+        Files.readAllBytes(f.root.resolve(".git/refs/heads/dev")),
+        git(f.root, "--no-optional-locks", "status", "--porcelain"),
+        (f.request.frozenArtifacts.keys + f.request.files.map { it.path })
+            .associateWith { Files.readAllBytes(f.root.resolve(it)) }
+    )
+
+    private fun assertGitUnchanged(f: Fixture, before: RecoveryState) {
+        assertContentEquals(before.index, Files.readAllBytes(f.root.resolve(".git/index")))
+        assertContentEquals(before.head, Files.readAllBytes(f.root.resolve(".git/HEAD")))
+        assertContentEquals(before.branchRef,
+            Files.readAllBytes(f.root.resolve(".git/refs/heads/dev")))
+        assertEquals(f.baseline, git(f.root, "rev-parse", "HEAD"))
+        assertEquals(f.baseline, git(f.root, "rev-parse", "refs/heads/dev"))
+        assertEquals("refs/heads/dev", git(f.root, "symbolic-ref", "HEAD"))
+    }
+
+    private fun assertUnchanged(f: Fixture, before: RecoveryState) {
+        assertGitUnchanged(f, before)
+        assertEquals(before.status, git(f.root, "--no-optional-locks", "status", "--porcelain"))
+        before.files.forEach { (path, bytes) ->
+            assertContentEquals(bytes, Files.readAllBytes(f.root.resolve(path)), path)
+        }
+    }
+
+    private fun expectedAudit(f: Fixture): String = sha(
+        "recursive-coder/developer-failed-write-recovery/v1\u0000" +
+            f.request.stageRunId.value + "\u0000" + f.request.leaseGeneration +
+            "\u0000" + f.baseline + "\u0000" +
+            "src/main/Feature.kt:" + sha(oldSource) + ":" + sha(newSource) +
+            "\u0000src/main/Implementation.txt:CREATE:" + sha(created)
+    )
+
+    private fun assertSnapshotRecovered(f: Fixture, before: RecoveryState,
+        result: StageGitFailedWriteResult) {
+        assertEquals(StageGitFailedWriteResult.Recovered(2, expectedAudit(f)), result)
+        assertGitUnchanged(f, before)
+        assertContentEquals(oldSource.toByteArray(),
+            Files.readAllBytes(f.root.resolve("src/main/Feature.kt")))
+        assertFalse(Files.exists(f.root.resolve("src/main/Implementation.txt")))
+        before.files.filterKeys { !it.startsWith("src/main/") }.forEach { (path, bytes) ->
+            assertContentEquals(bytes, Files.readAllBytes(f.root.resolve(path)), path)
+        }
+        assertEquals("", git(f.root, "--no-optional-locks", "status", "--porcelain"))
+        assertEquals(StageGitBaselineResult.Clean,
+            f.reconciler.inspectCleanBaseline(f.baseline, "dev"))
+        assertGitUnchanged(f, before)
+    }
+
+    private fun withObserver(f: Fixture, name: String, observer: StageGitTestObserver) =
+        LinuxStageGitBaselineReconciler(f.root, temp.resolve("locks-$name"),
+            Path.of("/usr/bin/git"), observer)
+
+    @Test fun callerBeforeImageMutationAfterBlobValidationCannotChangeRestorationOrAudit() {
+        val name = "before-image-snapshot"
+        val f = checkout(name)
+        val before = captureState(f)
+        val callerBytes = requireNotNull(f.request.files.first().beforeBytes)
+        var reached = 0
+        val reconciler = withObserver(f, name, StageGitTestObserver { checkpoint ->
+            if (checkpoint == StageGitTestCheckpoint.BEFORE_FAILED_WRITE_RESTORE) {
+                reached++
+                // The original array already passed Git blob comparison.
+                callerBytes.fill('X'.code.toByte())
+            }
+        })
+        val result = reconciler.recoverFailedDeveloper(f.request)
+        assertEquals(1, reached)
+        assertTrue(callerBytes.all { it == 'X'.code.toByte() })
+        assertSnapshotRecovered(f, before, result)
+    }
+
+    @Test fun callerListMutationAfterValidationCannotChangePostRestoreChecksOrAudit() {
+        val name = "file-list-snapshot"
+        val f = checkout(name)
+        val before = captureState(f)
+        val files = f.request.files.toMutableList()
+        var reached = 0
+        val reconciler = withObserver(f, name, StageGitTestObserver { checkpoint ->
+            if (checkpoint == StageGitTestCheckpoint.BEFORE_FAILED_WRITE_RESTORE) {
+                reached++
+                files.clear()
+                files.add(StageGitUnacceptedFile("../outside.kt", null, sha("outside")))
+            }
+        })
+        val result = reconciler.recoverFailedDeveloper(f.request.copy(files = files))
+        assertEquals(1, reached)
+        assertEquals("../outside.kt", files.single().path)
+        assertSnapshotRecovered(f, before, result)
+    }
+
+    @Test fun callerBeforeImageMutationAfterEvidenceValidationCannotChangeBlobVerification() {
+        val name = "early-before-image-snapshot"
+        val f = checkout(name)
+        val before = captureState(f)
+        val callerBytes = requireNotNull(f.request.files.first().beforeBytes)
+        var reached = 0
+        val reconciler = withObserver(f, name, StageGitTestObserver { checkpoint ->
+            if (checkpoint == StageGitTestCheckpoint.AFTER_FAILED_WRITE_EVIDENCE_VALIDATION) {
+                reached++
+                callerBytes.fill('X'.code.toByte())
+            }
+        })
+        val result = reconciler.recoverFailedDeveloper(f.request)
+        assertEquals(1, reached)
+        assertTrue(callerBytes.all { it == 'X'.code.toByte() })
+        assertSnapshotRecovered(f, before, result)
+    }
+
+    @Test fun callerListMutationAfterEvidenceValidationCannotChangeGitPreflight() {
+        val name = "early-file-list-snapshot"
+        val f = checkout(name)
+        val before = captureState(f)
+        val files = f.request.files.toMutableList()
+        var reached = 0
+        val reconciler = withObserver(f, name, StageGitTestObserver { checkpoint ->
+            if (checkpoint == StageGitTestCheckpoint.AFTER_FAILED_WRITE_EVIDENCE_VALIDATION) {
+                reached++
+                files.clear()
+                files.add(StageGitUnacceptedFile("../outside.kt", null, sha("outside")))
+            }
+        })
+        val result = reconciler.recoverFailedDeveloper(f.request.copy(files = files))
+        assertEquals(1, reached)
+        assertEquals("../outside.kt", files.single().path)
+        assertSnapshotRecovered(f, before, result)
+    }
+
+    @Test fun callerListIsTraversedOnlyOnceBeforeAuthorization() {
+        val name = "single-capture-traversal"
+        val f = checkout(name)
+        val before = captureState(f)
+        val valid = f.request.files
+        val invalid = valid.map { it.copy(path = "../outside.kt") }
+        var traversals = 0
+        val files = object : AbstractList<StageGitUnacceptedFile>() {
+            override val size = valid.size
+            override fun get(index: Int): StageGitUnacceptedFile = invalid[index]
+            override fun iterator(): Iterator<StageGitUnacceptedFile> {
+                traversals++
+                return (if (traversals == 1) valid else invalid).iterator()
+            }
+        }
+        val result = f.reconciler.recoverFailedDeveloper(f.request.copy(files = files))
+        assertEquals(1, traversals)
+        assertSnapshotRecovered(f, before, result)
+    }
+
+    @Test fun capturedFileCountIsCheckedEvenWhenCallerReportsSmallerSize() {
+        val name = "captured-size-drift"
+        val f = checkout(name)
+        val before = captureState(f)
+        // All nine entries are otherwise valid; the extra CREATE paths are absent.
+        // Without the second size gate they could reach the workspace lease.
+        val entries = f.request.files + List(7) { index ->
+            StageGitUnacceptedFile("src/main/Extra$index.kt", null, sha("extra-$index"))
+        }
+        var traversals = 0
+        val files = object : AbstractList<StageGitUnacceptedFile>() {
+            override val size = 2
+            override fun get(index: Int): StageGitUnacceptedFile = entries[index]
+            override fun iterator(): Iterator<StageGitUnacceptedFile> {
+                traversals++
+                return entries.iterator()
+            }
+        }
+        assertEquals(StageGitFailedWriteResult.NeedsHuman("INVALID_FAILED_WRITE_EVIDENCE"),
+            f.reconciler.recoverFailedDeveloper(f.request.copy(files = files)))
+        assertEquals(1, traversals)
+        assertUnchanged(f, before)
+        assertFalse(Files.exists(temp.resolve("locks-$name")))
+    }
+
+    @Test fun callerFrozenFactsCannotChangeAfterEvidenceValidationOrFinalBaselineRead() {
+        val name = "frozen-map-snapshot"
+        val f = checkout(name)
+        val before = captureState(f)
+        val frozen = f.request.frozenArtifacts.toMutableMap()
+        var early = 0
+        var late = 0
+        val reconciler = withObserver(f, name, StageGitTestObserver { checkpoint ->
+            if (checkpoint == StageGitTestCheckpoint.AFTER_FAILED_WRITE_EVIDENCE_VALIDATION) {
+                early++
+                frozen.clear()
+                frozen["specs/Frozen.md"] = sha("caller substituted digest")
+            }
+            if (checkpoint == StageGitTestCheckpoint.BEFORE_BASELINE_FINAL_READ) {
+                late++
+                frozen.clear()
+                frozen["../outside.md"] = sha("outside")
+            }
+        })
+        val result = reconciler.recoverFailedDeveloper(f.request.copy(frozenArtifacts = frozen))
+        assertEquals(1, early)
+        assertEquals(1, late)
+        assertEquals(setOf("../outside.md"), frozen.keys)
+        assertSnapshotRecovered(f, before, result)
+    }
+
+    @Test fun removingFrozenFactsAfterEvidenceValidationCannotAuthorizeRecoveryOfDrift() {
+        val name = "frozen-drift-snapshot"
+        val f = checkout(name)
+        Files.writeString(f.root.resolve("specs/Frozen.md"), "external edit\n")
+        val before = captureState(f)
+        val frozen = f.request.frozenArtifacts.toMutableMap()
+        var reached = 0
+        val reconciler = withObserver(f, name, StageGitTestObserver { checkpoint ->
+            if (checkpoint == StageGitTestCheckpoint.AFTER_FAILED_WRITE_EVIDENCE_VALIDATION) {
+                reached++
+                frozen.clear()
+            }
+        })
+        val result = reconciler.recoverFailedDeveloper(f.request.copy(frozenArtifacts = frozen))
+        assertEquals(1, reached)
+        assertTrue(frozen.isEmpty())
+        assertEquals(StageGitFailedWriteResult.NeedsHuman("FROZEN_ARTIFACT_CHANGED"), result)
+        assertUnchanged(f, before)
+    }
+
+    @Test fun captureFailuresAreFailClosedBeforeWorkspaceLeaseOrMutation() {
+        val name = "capture-failure"
+        val f = checkout(name)
+        val before = captureState(f)
+        var listRead = false
+        val files = object : AbstractList<StageGitUnacceptedFile>() {
+            override val size = 2
+            override fun get(index: Int): StageGitUnacceptedFile {
+                listRead = true
+                error("caller list traversal failed")
+            }
+        }
+        var mapRead = false
+        val frozen = object : AbstractMap<String, String>() {
+            override val size = 2
+            override val entries: Set<Map.Entry<String, String>>
+                get() {
+                    mapRead = true
+                    error("caller map traversal failed")
+                }
+        }
+        for (request in listOf(f.request.copy(files = files),
+                f.request.copy(frozenArtifacts = frozen))) {
+            assertEquals(StageGitFailedWriteResult.NeedsHuman("RECOVERY_UNAVAILABLE"),
+                f.reconciler.recoverFailedDeveloper(request))
+            assertUnchanged(f, before)
+            assertFalse(Files.exists(temp.resolve("locks-$name")))
+        }
+        assertTrue(listRead)
+        assertTrue(mapRead)
+    }
+
+    @Test fun snapshotPreservesBoundsAndBaselineDenialPrecedenceBeforeLease() {
+        val name = "snapshot-bounds"
+        val f = checkout(name)
+        val before = captureState(f)
+        val oversized = f.request.files.first().copy(beforeBytes = ByteArray(4 * 1024 * 1024 + 1))
+        val requests = listOf(
+            f.request.copy(files = emptyList()),
+            f.request.copy(files = List(9) { f.request.files.first() }),
+            f.request.copy(files = listOf(oversized)),
+            f.request.copy(files = listOf(
+                StageGitUnacceptedFile("../outside.kt", null, sha("outside")))),
+            f.request.copy(frozenArtifacts = mapOf("../outside.md" to sha("outside")))
+        )
+        for (request in requests) {
+            assertEquals(StageGitFailedWriteResult.NeedsHuman("INVALID_GIT_BASELINE"),
+                f.reconciler.recoverFailedDeveloper(request.copy(expectedHead = "invalid")))
+            assertEquals(StageGitFailedWriteResult.NeedsHuman("INVALID_FAILED_WRITE_EVIDENCE"),
+                f.reconciler.recoverFailedDeveloper(request))
+            assertUnchanged(f, before)
+            assertFalse(Files.exists(temp.resolve("locks-$name")))
+        }
+    }
+
+    @Test fun snapshotPreservesFrozenFactDenialOrder() {
+        val f = checkout("snapshot-order")
+        val before = captureState(f)
+        val wrong = "specs/Frozen.md" to sha("wrong")
+        val missing = "specs/Missing.md" to sha("missing")
+        for ((frozen, code) in listOf(
+                linkedMapOf(wrong, missing) to "FROZEN_ARTIFACT_CHANGED",
+                linkedMapOf(missing, wrong) to "UNSAFE_STAGE_FILE")) {
+            assertEquals(StageGitFailedWriteResult.NeedsHuman(code),
+                f.reconciler.recoverFailedDeveloper(f.request.copy(frozenArtifacts = frozen)))
+            assertUnchanged(f, before)
+        }
+    }
 }

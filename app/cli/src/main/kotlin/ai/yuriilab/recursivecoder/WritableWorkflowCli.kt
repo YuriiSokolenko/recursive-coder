@@ -10,6 +10,8 @@ import java.time.Instant
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.*
 
+private const val INVALID_EVENT_JOURNAL_PATH = "INVALID_EVENT_JOURNAL_PATH"
+
 /**
  * A deliberately separate, fake-only installed CLI entry point. It does not make
  * SessionRequest v1 or the native task scheduler writable. Only the Linux host
@@ -179,9 +181,9 @@ internal object WritableWorkflowCli {
         gate(root.isAbsolute && locks.isAbsolute &&
             headPattern.matches(expectedHead) &&
             Files.isDirectory(root.resolve(".git"), LinkOption.NOFOLLOW_LINKS),
-            "INVALID_WORKSPACE")
+            WorkspaceDenialCodes.INVALID_WORKSPACE)
         val checkout = root.toRealPath()
-        gate(checkout == root.normalize(), "INVALID_WORKSPACE")
+        gate(checkout == root.normalize(), WorkspaceDenialCodes.INVALID_WORKSPACE)
         gate(!Path.of("").toAbsolutePath().toRealPath().startsWith(checkout),
             "CWD_INSIDE_CHECKOUT")
         gate(!realLocation(planPath).startsWith(checkout) &&
@@ -194,21 +196,21 @@ internal object WritableWorkflowCli {
         // lock scope. The journal is metadata-only, never an artifact approval.
         val eventsPath = plan["eventsPath"]?.let {
             val name = (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content
-                ?: throw WorkflowDenied("INVALID_EVENT_JOURNAL_PATH")
+                ?: throw WorkflowDenied(INVALID_EVENT_JOURNAL_PATH)
             val path = try { Path.of(name) }
                 catch (_: InvalidPathException) {
-                    throw WorkflowDenied("INVALID_EVENT_JOURNAL_PATH")
+                    throw WorkflowDenied(INVALID_EVENT_JOURNAL_PATH)
                 }
-            gate(path.isAbsolute, "INVALID_EVENT_JOURNAL_PATH")
+            gate(path.isAbsolute, INVALID_EVENT_JOURNAL_PATH)
             val location = try { realLocation(path) }
                 catch (_: Exception) {
-                    throw WorkflowDenied("INVALID_EVENT_JOURNAL_PATH")
+                    throw WorkflowDenied(INVALID_EVENT_JOURNAL_PATH)
                 }
             gate(!location.startsWith(checkout) &&
                 !location.startsWith(realLocks) &&
                 !realLocks.startsWith(location) &&
                 !Files.exists(path, LinkOption.NOFOLLOW_LINKS),
-                "INVALID_EVENT_JOURNAL_PATH")
+                INVALID_EVENT_JOURNAL_PATH)
             path
         }
         val marker = checkout.resolve(".git/recursive-coder-isolated-workflow")
@@ -251,7 +253,7 @@ internal object WritableWorkflowCli {
                 DeveloperFileTarget(stringAt(target, "path"), before)
             } ?: error("Developer targets are required")
         val verdict = stringAt(plan, "fakeReviewerVerdict")
-        require(verdict in setOf("ACCEPT", "REJECT", "NEEDS_HUMAN"))
+        require(verdict in setOf(ReviewerDisposition.ACCEPT.name, ReviewerDisposition.REJECT.name, ReviewerDisposition.NEEDS_HUMAN.name))
 
         val check = objectAt(plan, "check")
         only(check, setOf("executable", "arguments"))
@@ -392,7 +394,7 @@ internal object WritableWorkflowCli {
         // Child review is independently accepted in the offline fixture. The
         // configured verdict remains authoritative for the parent Reviewer,
         // including a rejection *after* successful child integration.
-        val childExecutor = ConfiguredFakeRoleExecutor(fixtureProposals, "ACCEPT")
+        val childExecutor = ConfiguredFakeRoleExecutor(fixtureProposals, ReviewerDisposition.ACCEPT.name)
         // One deadline and one cancellation token for the parent plan AND its
         // recursive children, so stopping the workflow stops both (issue #163).
         val workflowDeadline = Instant.now().plusSeconds(deadlineSeconds)
@@ -459,7 +461,7 @@ internal object WritableWorkflowCli {
             }
         }
         if (recursive?.reconciliationRequired == true)
-            return CliOutcome("reconciliation_required", "CHILD_EXECUTION_UNCONFIRMED")
+            return CliOutcome("reconciliation_required", InstalledChildDenialCodes.CHILD_EXECUTION_UNCONFIRMED)
         return summarize(result)
     }
 
@@ -501,9 +503,9 @@ internal object WritableWorkflowCli {
                     "\"$it\""
                 }
                 val (code, scope) = when (verdict) {
-                    "ACCEPT" -> "OK" to "NONE"
-                    "REJECT" -> "IMPLEMENTATION_DEFECT" to "IMPLEMENTATION_ONLY"
-                    else -> "EVIDENCE_MISSING" to "NONE"
+                    ReviewerDisposition.ACCEPT.name -> ReviewerReasonCode.OK.wire to ReviewerCorrectionScope.NONE.name
+                    ReviewerDisposition.REJECT.name -> ReviewerReasonCode.IMPLEMENTATION_DEFECT.wire to ReviewerCorrectionScope.IMPLEMENTATION_ONLY.name
+                    else -> ReviewerReasonCode.EVIDENCE_MISSING.wire to ReviewerCorrectionScope.NONE.name
                 }
                 """{"verdict":"$verdict","code":"$code","scope":"$scope","evidence":[$refs]}"""
             } else proposals.getValue(stage.kind)

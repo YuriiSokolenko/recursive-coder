@@ -8,22 +8,32 @@ package ai.yuriilab.recursivecoder
 enum class ReviewerDisposition { ACCEPT, REJECT, NEEDS_HUMAN }
 enum class ReviewerCorrectionScope { NONE, IMPLEMENTATION_ONLY, FROZEN_INPUTS }
 
+/** Stable wire reason values; ReviewerVerdictPolicy owns allowed combinations. */
+enum class ReviewerReasonCode(val wire: String) {
+    OK("OK"),
+    IMPLEMENTATION_DEFECT("IMPLEMENTATION_DEFECT"),
+    FROZEN_ARTIFACT_CHANGE("FROZEN_ARTIFACT_CHANGE"),
+    EVIDENCE_MISSING("EVIDENCE_MISSING"),
+    CHECK_FAILED("CHECK_FAILED"),
+    OTHER_REQUIRES_HUMAN("OTHER_REQUIRES_HUMAN")
+}
+
 /**
  * Single allowlist for the Reviewer JSON decoder and the authoritative CAS
  * finish policy. A model cannot invent codes or choose a wider repair scope.
  */
 object ReviewerVerdictPolicy {
     private val allowed = linkedSetOf(
-        Triple(ReviewerDisposition.ACCEPT, "OK", ReviewerCorrectionScope.NONE),
-        Triple(ReviewerDisposition.REJECT, "IMPLEMENTATION_DEFECT",
+        Triple(ReviewerDisposition.ACCEPT, ReviewerReasonCode.OK.wire, ReviewerCorrectionScope.NONE),
+        Triple(ReviewerDisposition.REJECT, ReviewerReasonCode.IMPLEMENTATION_DEFECT.wire,
             ReviewerCorrectionScope.IMPLEMENTATION_ONLY),
-        Triple(ReviewerDisposition.NEEDS_HUMAN, "FROZEN_ARTIFACT_CHANGE",
+        Triple(ReviewerDisposition.NEEDS_HUMAN, ReviewerReasonCode.FROZEN_ARTIFACT_CHANGE.wire,
             ReviewerCorrectionScope.FROZEN_INPUTS),
-        Triple(ReviewerDisposition.NEEDS_HUMAN, "EVIDENCE_MISSING",
+        Triple(ReviewerDisposition.NEEDS_HUMAN, ReviewerReasonCode.EVIDENCE_MISSING.wire,
             ReviewerCorrectionScope.NONE),
-        Triple(ReviewerDisposition.NEEDS_HUMAN, "CHECK_FAILED",
+        Triple(ReviewerDisposition.NEEDS_HUMAN, ReviewerReasonCode.CHECK_FAILED.wire,
             ReviewerCorrectionScope.NONE),
-        Triple(ReviewerDisposition.NEEDS_HUMAN, "OTHER_REQUIRES_HUMAN",
+        Triple(ReviewerDisposition.NEEDS_HUMAN, ReviewerReasonCode.OTHER_REQUIRES_HUMAN.wire,
             ReviewerCorrectionScope.NONE)
     )
 
@@ -169,34 +179,34 @@ object ReviewerStageFinishPolicy {
         hostVerifiedEvidence: Boolean
     ): StageGateDecision {
         fun deny(code: String) = StageGateDecision.Deny(code)
-        if (!hostVerifiedEvidence) return deny("UNVERIFIED_DEVELOPER_EVIDENCE")
+        if (!hostVerifiedEvidence) return deny(StageDenialCodes.UNVERIFIED_DEVELOPER_EVIDENCE)
         if (next.copy(stages = lease.graph.stages) != lease.graph ||
             acceptedIds != lease.acceptedIds || next.stages.size != lease.graph.stages.size)
-            return deny("REVIEW_MUTATED_OTHER_STATE")
+            return deny(ReviewerStageContractsDiagnosticCodes.REVIEW_MUTATED_OTHER_STATE)
         val before = lease.graph.stages.singleOrNull {
             it.correlation.stageRunId == lease.stageRunId
-        } ?: return deny("UNKNOWN_STAGE")
+        } ?: return deny(StageDenialCodes.UNKNOWN_STAGE)
         val after = next.stages.singleOrNull {
             it.correlation.stageRunId == lease.stageRunId
-        } ?: return deny("UNKNOWN_STAGE")
+        } ?: return deny(StageDenialCodes.UNKNOWN_STAGE)
         if (before.state != StageState.RUNNING || before.kind != StageKind.REVIEW ||
             after.copy(state = before.state, review = before.review) != before ||
             next.stages.zip(lease.graph.stages).any { (a, b) ->
                 a.correlation.stageRunId != b.correlation.stageRunId ||
                     (a.correlation.stageRunId != lease.stageRunId && a != b)
-            }) return deny("REVIEW_MUTATED_OTHER_STATE")
+            }) return deny(ReviewerStageContractsDiagnosticCodes.REVIEW_MUTATED_OTHER_STATE)
         val handoff = lease.handoff.developerResult
         val manifest = handoff.manifest
         val dev = lease.graph.stages.singleOrNull {
             it.correlation.stageRunId == manifest.producerStageRunId &&
                 it.kind == StageKind.DEVELOP
-        } ?: return deny("INVALID_DEVELOPER_HANDOFF")
+        } ?: return deny(StageDenialCodes.INVALID_DEVELOPER_HANDOFF)
         val record = after.review ?: return deny("MISSING_REVIEW")
         if (decision.correlation != before.correlation ||
             decision.reviewedManifestSha256 != manifest.sha256 ||
             record != StageReviewDecision(dev.correlation.stageRunId, manifest.id,
-                manifest.sha256, dev.agentId ?: return deny("MISSING_DEVELOPER_ACTOR"),
-                before.agentId ?: return deny("MISSING_REVIEWER_ACTOR"),
+                manifest.sha256, dev.agentId ?: return deny(StageDenialCodes.MISSING_DEVELOPER_ACTOR),
+                before.agentId ?: return deny(StageDenialCodes.MISSING_REVIEWER_ACTOR),
                 when (decision.verdict) {
                     ReviewerDisposition.ACCEPT -> ReviewVerdict.ACCEPT
                     ReviewerDisposition.REJECT -> ReviewVerdict.REQUEST_CHANGES
@@ -262,23 +272,23 @@ object ReviewerRepairPlanner {
             it.correlation.stageRunId == rejectedReviewId &&
                 it.kind == StageKind.REVIEW && it.supersededBy == null
         } ?: return deny("INVALID_REJECTED_REVIEW")
-        val record = review.review ?: return deny("UNAUTHORIZED_REPAIR")
+        val record = review.review ?: return deny(ReviewerStageContractsDiagnosticCodes.UNAUTHORIZED_REPAIR)
         if (review.state != StageState.REJECTED ||
             record.verdict != ReviewVerdict.REQUEST_CHANGES ||
             verifiedDecision.correlation != review.correlation ||
             verifiedDecision.verdict != ReviewerDisposition.REJECT ||
             verifiedDecision.scope != ReviewerCorrectionScope.IMPLEMENTATION_ONLY ||
-            verifiedDecision.reasonCode != "IMPLEMENTATION_DEFECT" ||
+            verifiedDecision.reasonCode != ReviewerReasonCode.IMPLEMENTATION_DEFECT.wire ||
             verifiedDecision.reviewedManifestSha256 != record.reviewedSha256 ||
             rejectedReviewId !in hostVerifiedReviewIds ||
             StageGraphPolicy.authorizeReview(graph, rejectedReviewId,
                 hostVerifiedReviewIds) != StageGateDecision.Permit)
-            return deny("UNAUTHORIZED_REPAIR")
+            return deny(ReviewerStageContractsDiagnosticCodes.UNAUTHORIZED_REPAIR)
         val developer = graph.stages.singleOrNull {
             it.correlation.stageRunId == record.targetStageRunId &&
                 it.kind == StageKind.DEVELOP && it.state == StageState.ACCEPTED &&
                 it.supersededBy == null
-        } ?: return deny("INVALID_DEVELOPER_HANDOFF")
+        } ?: return deny(StageDenialCodes.INVALID_DEVELOPER_HANDOFF)
         // Every historical Developer attempt consumes one slot; the original
         // attempt is free, additional attempts are bounded by maxDeveloperRetries.
         if (graph.stages.count { it.kind == StageKind.DEVELOP } > maxDeveloperRetries)
@@ -319,4 +329,10 @@ object ReviewerRepairPlanner {
             ReviewerRepairResult.Planned(next)
         else deny("INVALID_REPAIR_GRAPH")
     }
+}
+
+/** Diagnostic codes emitted by ReviewerStageContracts; not shared protocol vocabulary. */
+internal object ReviewerStageContractsDiagnosticCodes {
+    const val REVIEW_MUTATED_OTHER_STATE = "REVIEW_MUTATED_OTHER_STATE"
+    const val UNAUTHORIZED_REPAIR = "UNAUTHORIZED_REPAIR"
 }

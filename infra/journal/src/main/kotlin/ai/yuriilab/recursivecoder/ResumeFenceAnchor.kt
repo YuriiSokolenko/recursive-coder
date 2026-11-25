@@ -48,7 +48,7 @@ internal object ResumeImmutablePublication {
                 entries.filter { matchesProbe(it.fileName.toString(), scope) }.forEach { file ->
                     if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS))
                         throw SessionResumeUnconfirmed(
-                            "RESUME_FENCE_HARD_LINK_PROBE_CLEANUP_UNCONFIRMED")
+                            ResumeFenceAnchorDiagnosticCodes.RESUME_FENCE_HARD_LINK_PROBE_CLEANUP_UNCONFIRMED)
                     if (Files.deleteIfExists(file)) removed = true
                 }
             }
@@ -58,7 +58,7 @@ internal object ResumeImmutablePublication {
             throw e
         } catch (e: Exception) {
             throw SessionResumeUnconfirmed(
-                "RESUME_FENCE_HARD_LINK_PROBE_CLEANUP_UNCONFIRMED", e)
+                ResumeFenceAnchorDiagnosticCodes.RESUME_FENCE_HARD_LINK_PROBE_CLEANUP_UNCONFIRMED, e)
         }
     }
 
@@ -107,7 +107,7 @@ internal object ResumeImmutablePublication {
                 FileChannel.open(directory, StandardOpenOption.READ).use { it.force(true) }
             } catch (e: Exception) {
                 val cleanup = SessionResumeUnconfirmed(
-                    "RESUME_FENCE_HARD_LINK_PROBE_CLEANUP_UNCONFIRMED", e)
+                    ResumeFenceAnchorDiagnosticCodes.RESUME_FENCE_HARD_LINK_PROBE_CLEANUP_UNCONFIRMED, e)
                 if (error == null) error = cleanup else error.addSuppressed(cleanup)
             }
         }
@@ -157,14 +157,14 @@ internal object ResumeFenceAnchor {
     private fun fail(code: String): Nothing = throw SessionResumeUnconfirmed(code)
     private fun parent(ledger: Path): Path {
         val absolute = ledger.toAbsolutePath().normalize()
-        val directory = absolute.parent ?: fail("RESUME_FENCE_ANCHOR_UNCONFIRMED")
+        val directory = absolute.parent ?: fail(ResumeDenialCodes.RESUME_FENCE_ANCHOR_UNCONFIRMED)
         try {
             if (!Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS) ||
                 directory.toRealPath() != directory ||
                 Files.getPosixFilePermissions(directory, LinkOption.NOFOLLOW_LINKS) != setOf(
                     PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE,
                     PosixFilePermission.OWNER_EXECUTE))
-                fail("RESUME_FENCE_ANCHOR_UNSAFE_DIRECTORY")
+                fail(ResumeFenceAnchorDiagnosticCodes.RESUME_FENCE_ANCHOR_UNSAFE_DIRECTORY)
             LinuxCheckpointOwner.requireMatchingUid(
                 Files.getAttribute(directory, "unix:uid", LinkOption.NOFOLLOW_LINKS),
                 LinuxCheckpointOwner.effectiveUid())
@@ -172,7 +172,7 @@ internal object ResumeFenceAnchor {
         } catch (e: SessionResumeUnconfirmed) {
             throw e
         } catch (e: Exception) {
-            throw SessionResumeUnconfirmed("RESUME_FENCE_ANCHOR_UNSAFE_DIRECTORY", e)
+            throw SessionResumeUnconfirmed(ResumeFenceAnchorDiagnosticCodes.RESUME_FENCE_ANCHOR_UNSAFE_DIRECTORY, e)
         }
     }
 
@@ -201,19 +201,19 @@ internal object ResumeFenceAnchor {
 
     private fun read(path: Path): ResumeFenceAnchorRecord {
         if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) ||
-            Files.size(path) !in 1L..512L) fail("RESUME_FENCE_ANCHOR_MISMATCH")
+            Files.size(path) !in 1L..512L) fail(ResumeDenialCodes.RESUME_FENCE_ANCHOR_MISMATCH)
         val raw = Files.readAllBytes(path).toString(StandardCharsets.UTF_8)
         val parts = raw.split("\n")
         if (parts.size != 6 || parts[0] != ANCHOR_FORMAT_MARKER || parts.last() != "")
-            fail("RESUME_FENCE_ANCHOR_MISMATCH")
-        val gen = parts[1].toLongOrNull() ?: fail("RESUME_FENCE_ANCHOR_MISMATCH")
+            fail(ResumeDenialCodes.RESUME_FENCE_ANCHOR_MISMATCH)
+        val gen = parts[1].toLongOrNull() ?: fail(ResumeDenialCodes.RESUME_FENCE_ANCHOR_MISMATCH)
         val previous = parts[3].takeUnless { it == "-" }
         if (gen !in 1L..ResumeFenceStorage.MAX_FENCES.toLong() || !SHA.matches(parts[2]) ||
             (gen == 1L) != (previous == null) ||
             (previous != null && !SHA.matches(previous)) ||
             raw != body(gen, parts[2], previous) + parts[4] + "\n" ||
             digest(body(gen, parts[2], previous)) != parts[4])
-            fail("RESUME_FENCE_ANCHOR_MISMATCH")
+            fail(ResumeDenialCodes.RESUME_FENCE_ANCHOR_MISMATCH)
         return ResumeFenceAnchorRecord(gen, parts[2], previous, parts[4])
     }
 
@@ -223,36 +223,36 @@ internal object ResumeFenceAnchor {
     private fun readAudit(file: Path): ResumeReconciliationAudit {
         try {
             if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS) ||
-                Files.size(file) !in 1L..2048L) fail("RESUME_FENCE_AUDIT_UNCONFIRMED")
+                Files.size(file) !in 1L..2048L) fail(ResumeDenialCodes.RESUME_FENCE_AUDIT_UNCONFIRMED)
             val raw = Files.readAllBytes(file).toString(StandardCharsets.UTF_8)
             val parts = raw.split("\n")
             if (parts.size != 11 || parts[0] != AUDIT_FORMAT_MARKER || parts.last() != "")
-                fail("RESUME_FENCE_AUDIT_UNCONFIRMED")
+                fail(ResumeDenialCodes.RESUME_FENCE_AUDIT_UNCONFIRMED)
             val generation = parts[1].toLongOrNull()
-                ?: fail("RESUME_FENCE_AUDIT_UNCONFIRMED")
+                ?: fail(ResumeDenialCodes.RESUME_FENCE_AUDIT_UNCONFIRMED)
             if (generation !in 1L..ResumeFenceStorage.MAX_FENCES.toLong() ||
                 !listOf(parts[2], parts[3], parts[4], parts[5], parts[9]).all(SHA::matches) ||
                 !ToolAuthorizationPolicy.validHostIdentifier(parts[6]) ||
                 parts[7] != "true" ||
                 runCatching { Instant.parse(parts[8]) }.isFailure)
-                fail("RESUME_FENCE_AUDIT_UNCONFIRMED")
+                fail(ResumeDenialCodes.RESUME_FENCE_AUDIT_UNCONFIRMED)
             val canonical = auditBody(generation, parts[2], parts[3], parts[4],
                 parts[5], parts[6], true, parts[8])
             if (raw != canonical + parts[9] + "\n" || digest(canonical) != parts[9])
-                fail("RESUME_FENCE_AUDIT_UNCONFIRMED")
+                fail(ResumeDenialCodes.RESUME_FENCE_AUDIT_UNCONFIRMED)
             return ResumeReconciliationAudit(generation, parts[2], parts[3],
                 parts[4], parts[5], parts[6], true, parts[8], parts[9])
         } catch (e: SessionResumeUnconfirmed) {
             throw e
         } catch (e: Exception) {
-            throw SessionResumeUnconfirmed("RESUME_FENCE_AUDIT_UNCONFIRMED", e)
+            throw SessionResumeUnconfirmed(ResumeDenialCodes.RESUME_FENCE_AUDIT_UNCONFIRMED, e)
         }
     }
 
     private fun verifyAuditIfPresent(ledger: Path, anchor: ResumeFenceAnchorRecord,
                                      fence: ResumeFenceRecord) {
         if (anchor.generation != fence.generation || anchor.fenceSha256 != fence.sha256)
-            fail("RESUME_FENCE_ANCHOR_MISMATCH")
+            fail(ResumeDenialCodes.RESUME_FENCE_ANCHOR_MISMATCH)
         val file = parent(ledger).resolve(auditName(ledger, anchor.generation))
         if (!Files.exists(file, LinkOption.NOFOLLOW_LINKS)) return
         val record = readAudit(file)
@@ -261,7 +261,7 @@ internal object ResumeFenceAnchor {
             record.fenceSha256 != anchor.fenceSha256 ||
             record.checkpointSha256 != fence.checkpointSha256 ||
             record.policySha256 != fence.policySha256)
-            fail("RESUME_FENCE_AUDIT_UNCONFIRMED")
+            fail(ResumeDenialCodes.RESUME_FENCE_AUDIT_UNCONFIRMED)
     }
 
     /** Write-once audited operator approval, fsynced before the missing fence. */
@@ -276,7 +276,7 @@ internal object ResumeFenceAnchor {
             operator.expectedPreparedFenceSha256 != fence.sha256 ||
             !operator.operatorApproved ||
             !ToolAuthorizationPolicy.validHostIdentifier(operator.operatorId))
-            fail("RESUME_FENCE_AUDIT_UNCONFIRMED")
+            fail(ResumeDenialCodes.RESUME_FENCE_AUDIT_UNCONFIRMED)
         val target = directory.resolve(auditName(ledger, fence.generation))
         fun requireSame(record: ResumeReconciliationAudit): ResumeReconciliationAudit {
             if (record.generation != fence.generation || record.fenceSha256 != fence.sha256 ||
@@ -284,7 +284,7 @@ internal object ResumeFenceAnchor {
                 record.checkpointSha256 != fence.checkpointSha256 ||
                 record.policySha256 != fence.policySha256 ||
                 record.operatorId != operator.operatorId || !record.operatorApproved)
-                fail("RESUME_FENCE_AUDIT_CONFLICT")
+                fail(ResumeFenceAnchorDiagnosticCodes.RESUME_FENCE_AUDIT_CONFLICT)
             return record
         }
         if (Files.exists(target, LinkOption.NOFOLLOW_LINKS))
@@ -302,17 +302,18 @@ internal object ResumeFenceAnchor {
                 LinkOption.NOFOLLOW_LINKS).use { channel ->
                 val buffer = ByteBuffer.wrap(payload)
                 while (buffer.hasRemaining()) {
-                    if (channel.write(buffer) <= 0) fail("RESUME_FENCE_AUDIT_UNCONFIRMED")
+                    if (channel.write(buffer) <= 0) fail(ResumeDenialCodes.RESUME_FENCE_AUDIT_UNCONFIRMED)
                 }
                 channel.force(true)
             }
             ResumeImmutablePublication.linkAndSync(directory, temporary, target,
-                "RESUME_FENCE_AUDIT_CONFLICT", "RESUME_FENCE_AUDIT_UNCONFIRMED")
+                ResumeFenceAnchorDiagnosticCodes.RESUME_FENCE_AUDIT_CONFLICT,
+                    ResumeDenialCodes.RESUME_FENCE_AUDIT_UNCONFIRMED)
             return requireSame(readAudit(target))
         } catch (e: SessionResumeUnconfirmed) {
             throw e
         } catch (e: Exception) {
-            throw SessionResumeUnconfirmed("RESUME_FENCE_AUDIT_UNCONFIRMED", e)
+            throw SessionResumeUnconfirmed(ResumeDenialCodes.RESUME_FENCE_AUDIT_UNCONFIRMED, e)
         } finally {
             try { Files.deleteIfExists(temporary) } catch (_: Exception) { /* unconfirmed */ }
         }
@@ -330,7 +331,7 @@ internal object ResumeFenceAnchor {
             if (count == 0L && !Files.exists(first, LinkOption.NOFOLLOW_LINKS)) {
                 val auditOne = first.resolveSibling(auditName(ledger, 1L))
                 if (Files.exists(auditOne, LinkOption.NOFOLLOW_LINKS))
-                    fail("RESUME_FENCE_AUDIT_UNCONFIRMED")
+                    fail(ResumeDenialCodes.RESUME_FENCE_AUDIT_UNCONFIRMED)
                 return null
             }
             val directory = parent(ledger)
@@ -338,7 +339,7 @@ internal object ResumeFenceAnchor {
             for (gen in 1L..count) {
                 val record = read(directory.resolve(name(ledger, gen)))
                 if (record.generation != gen || record.previousSha256 != previous?.sha256)
-                    fail("RESUME_FENCE_ANCHOR_MISMATCH")
+                    fail(ResumeDenialCodes.RESUME_FENCE_ANCHOR_MISMATCH)
                 verifyAuditIfPresent(ledger, record,
                     ResumeFenceStorage.atGeneration(fenceDirectory, gen))
                 previous = record
@@ -348,12 +349,12 @@ internal object ResumeFenceAnchor {
                     LinkOption.NOFOLLOW_LINKS) ||
                 Files.exists(directory.resolve(auditName(ledger, count + 1L)),
                     LinkOption.NOFOLLOW_LINKS))
-                fail("RESUME_FENCE_ANCHOR_MISMATCH")
+                fail(ResumeDenialCodes.RESUME_FENCE_ANCHOR_MISMATCH)
             return previous
         } catch (e: SessionResumeUnconfirmed) {
             throw e
         } catch (e: Exception) {
-            throw SessionResumeUnconfirmed("RESUME_FENCE_ANCHOR_UNCONFIRMED", e)
+            throw SessionResumeUnconfirmed(ResumeDenialCodes.RESUME_FENCE_ANCHOR_UNCONFIRMED, e)
         }
     }
 
@@ -371,25 +372,25 @@ internal object ResumeFenceAnchor {
             for (gen in 1L..count) {
                 val anchor = read(dir.resolve(name(ledger, gen)))
                 if (anchor.generation != gen || anchor.previousSha256 != previous?.sha256)
-                    fail("RESUME_FENCE_ANCHOR_MISMATCH")
+                    fail(ResumeDenialCodes.RESUME_FENCE_ANCHOR_MISMATCH)
                 verifyAuditIfPresent(ledger, anchor,
                     ResumeFenceStorage.atGeneration(fenceDirectory, gen))
                 previous = anchor
             }
             if (previous?.fenceSha256 != head?.sha256)
-                fail("RESUME_FENCE_ANCHOR_MISMATCH")
+                fail(ResumeDenialCodes.RESUME_FENCE_ANCHOR_MISMATCH)
             val pendingName = dir.resolve(name(ledger, count + 1L))
             val pendingAudit = dir.resolve(auditName(ledger, count + 1L))
             val strayLaterAnchor = dir.resolve(name(ledger, count + 2L))
             val strayLaterAudit = dir.resolve(auditName(ledger, count + 2L))
             if (Files.exists(strayLaterAnchor, LinkOption.NOFOLLOW_LINKS) ||
                 Files.exists(strayLaterAudit, LinkOption.NOFOLLOW_LINKS))
-                fail("RESUME_FENCE_ANCHOR_MISMATCH")
+                fail(ResumeDenialCodes.RESUME_FENCE_ANCHOR_MISMATCH)
             if (Files.exists(pendingName, LinkOption.NOFOLLOW_LINKS)) {
                 val prepared = read(pendingName)
                 if (prepared.generation != count + 1L ||
                     prepared.previousSha256 != previous?.sha256)
-                    fail("RESUME_FENCE_ANCHOR_MISMATCH")
+                    fail(ResumeDenialCodes.RESUME_FENCE_ANCHOR_MISMATCH)
                 if (!Files.exists(pendingAudit, LinkOption.NOFOLLOW_LINKS))
                     return ResumeReconciliationStatus(prepared.generation,
                         prepared.fenceSha256, null,
@@ -400,13 +401,13 @@ internal object ResumeFenceAnchor {
                     audit.fenceSha256 != prepared.fenceSha256 ||
                     audit.checkpointSha256 != checkpointSha ||
                     audit.policySha256 != policySha)
-                    fail("RESUME_FENCE_AUDIT_UNCONFIRMED")
+                    fail(ResumeDenialCodes.RESUME_FENCE_AUDIT_UNCONFIRMED)
                 return ResumeReconciliationStatus(prepared.generation,
                     prepared.fenceSha256, audit.operatorId,
                     ResumeReconciliationState.APPROVED_PENDING)
             }
             if (Files.exists(pendingAudit, LinkOption.NOFOLLOW_LINKS))
-                fail("RESUME_FENCE_AUDIT_UNCONFIRMED")
+                fail(ResumeDenialCodes.RESUME_FENCE_AUDIT_UNCONFIRMED)
             if (head == null) return null
             val committedAudit = dir.resolve(auditName(ledger, count))
             if (!Files.exists(committedAudit, LinkOption.NOFOLLOW_LINKS)) return null
@@ -415,13 +416,13 @@ internal object ResumeFenceAnchor {
                 audit.fenceSha256 != head.sha256 ||
                 audit.checkpointSha256 != head.checkpointSha256 ||
                 audit.policySha256 != head.policySha256)
-                fail("RESUME_FENCE_AUDIT_UNCONFIRMED")
+                fail(ResumeDenialCodes.RESUME_FENCE_AUDIT_UNCONFIRMED)
             return ResumeReconciliationStatus(count, head.sha256, audit.operatorId,
                 ResumeReconciliationState.COMPLETED)
         } catch (e: SessionResumeUnconfirmed) {
             throw e
         } catch (e: Exception) {
-            throw SessionResumeUnconfirmed("RESUME_FENCE_ANCHOR_UNCONFIRMED", e)
+            throw SessionResumeUnconfirmed(ResumeDenialCodes.RESUME_FENCE_ANCHOR_UNCONFIRMED, e)
         }
     }
 
@@ -433,35 +434,35 @@ internal object ResumeFenceAnchor {
             val priorCount = head?.generation ?: 0L
             if (proposed.generation != priorCount + 1L ||
                 proposed.generation !in 1L..ResumeFenceStorage.MAX_FENCES.toLong())
-                fail("RESUME_FENCE_RECONCILIATION_UNCONFIRMED")
+                fail(ResumeDenialCodes.RESUME_FENCE_RECONCILIATION_UNCONFIRMED)
             var previous: ResumeFenceAnchorRecord? = null
             for (gen in 1L..priorCount) {
                 val record = read(directory.resolve(name(ledger, gen)))
                 if (record.generation != gen || record.previousSha256 != previous?.sha256)
-                    fail("RESUME_FENCE_RECONCILIATION_UNCONFIRMED")
+                    fail(ResumeDenialCodes.RESUME_FENCE_RECONCILIATION_UNCONFIRMED)
                 verifyAuditIfPresent(ledger, record,
                     ResumeFenceStorage.atGeneration(fenceDirectory, gen))
                 previous = record
             }
             if (previous?.fenceSha256 != head?.sha256)
-                fail("RESUME_FENCE_RECONCILIATION_UNCONFIRMED")
+                fail(ResumeDenialCodes.RESUME_FENCE_RECONCILIATION_UNCONFIRMED)
             val prepared = read(directory.resolve(name(ledger, proposed.generation)))
             if (prepared.generation != proposed.generation ||
                 prepared.previousSha256 != previous?.sha256 ||
                 prepared.fenceSha256 != proposed.sha256 ||
                 Files.exists(directory.resolve(name(ledger, proposed.generation + 1L)),
                     LinkOption.NOFOLLOW_LINKS))
-                fail("RESUME_FENCE_RECONCILIATION_UNCONFIRMED")
+                fail(ResumeDenialCodes.RESUME_FENCE_RECONCILIATION_UNCONFIRMED)
             return prepared
         } catch (e: SessionResumeUnconfirmed) {
             // Historical anchor/fence mismatches during operator repair have
             // the same outward contract as other reconciliation refusals.
             // Preserve the original typed reason for operator diagnostics.
-            if (e.code == "RESUME_FENCE_ANCHOR_MISMATCH")
-                throw SessionResumeUnconfirmed("RESUME_FENCE_RECONCILIATION_UNCONFIRMED", e)
+            if (e.code == ResumeDenialCodes.RESUME_FENCE_ANCHOR_MISMATCH)
+                throw SessionResumeUnconfirmed(ResumeDenialCodes.RESUME_FENCE_RECONCILIATION_UNCONFIRMED, e)
             throw e
         } catch (e: Exception) {
-            throw SessionResumeUnconfirmed("RESUME_FENCE_RECONCILIATION_UNCONFIRMED", e)
+            throw SessionResumeUnconfirmed(ResumeDenialCodes.RESUME_FENCE_RECONCILIATION_UNCONFIRMED, e)
         }
     }
 
@@ -480,7 +481,7 @@ internal object ResumeFenceAnchor {
                     }
                 }.forEach { file ->
                     if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS))
-                        fail("RESUME_FENCE_ANCHOR_UNCONFIRMED")
+                        fail(ResumeDenialCodes.RESUME_FENCE_ANCHOR_UNCONFIRMED)
                     Files.delete(file)
                     removed = true
                 }
@@ -500,7 +501,7 @@ internal object ResumeFenceAnchor {
         val directory = parent(ledger)
         if (fence.generation !in 1L..ResumeFenceStorage.MAX_FENCES.toLong() ||
             fence.generation != (previous?.generation ?: 0L) + 1L)
-            fail("RESUME_FENCE_ANCHOR_MISMATCH")
+            fail(ResumeDenialCodes.RESUME_FENCE_ANCHOR_MISMATCH)
         val header = body(fence.generation, fence.sha256, previous?.sha256)
         val checksum = digest(header)
         val value = ResumeFenceAnchorRecord(fence.generation, fence.sha256,
@@ -510,24 +511,24 @@ internal object ResumeFenceAnchor {
         val temporary = directory.resolve(tempPrefix(ledger) + UUID.randomUUID() + ".tmp")
         try {
             if (Files.exists(destination, LinkOption.NOFOLLOW_LINKS))
-                fail("RESUME_FENCE_CAS_FAILED")
+                fail(ResumeDenialCodes.RESUME_FENCE_CAS_FAILED)
             Files.createFile(temporary, PosixFilePermissions.asFileAttribute(setOf(
                 PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE)))
             FileChannel.open(temporary, StandardOpenOption.WRITE,
                 LinkOption.NOFOLLOW_LINKS).use { channel ->
                 val buffer = ByteBuffer.wrap(bytes)
                 while (buffer.hasRemaining()) {
-                    if (channel.write(buffer) <= 0) fail("RESUME_FENCE_ANCHOR_UNCONFIRMED")
+                    if (channel.write(buffer) <= 0) fail(ResumeDenialCodes.RESUME_FENCE_ANCHOR_UNCONFIRMED)
                 }
                 channel.force(true)
             }
             ResumeImmutablePublication.linkAndSync(directory, temporary, destination,
-                "RESUME_FENCE_CAS_FAILED", "RESUME_FENCE_ANCHOR_UNCONFIRMED")
-            if (read(destination) != value) fail("RESUME_FENCE_ANCHOR_UNCONFIRMED")
+                ResumeDenialCodes.RESUME_FENCE_CAS_FAILED, ResumeDenialCodes.RESUME_FENCE_ANCHOR_UNCONFIRMED)
+            if (read(destination) != value) fail(ResumeDenialCodes.RESUME_FENCE_ANCHOR_UNCONFIRMED)
             return value
         } catch (e: Exception) {
             if (e is SessionResumeUnconfirmed) throw e
-            throw SessionResumeUnconfirmed("RESUME_FENCE_ANCHOR_UNCONFIRMED", e)
+            throw SessionResumeUnconfirmed(ResumeDenialCodes.RESUME_FENCE_ANCHOR_UNCONFIRMED, e)
         } finally {
             try { Files.deleteIfExists(temporary) } catch (_: Exception) { /* unconfirmed */ }
         }
@@ -542,15 +543,22 @@ internal object ResumeFenceAnchor {
             actual.sha256 != anchorSha ||
             Files.exists(directory.resolve(name(ledger, fence.generation + 1L)),
                 LinkOption.NOFOLLOW_LINKS))
-            fail("RESUME_FENCE_STALE_WRITER")
+            fail(ResumeDenialCodes.RESUME_FENCE_STALE_WRITER)
         verifyAuditIfPresent(ledger, actual, fence)
         } catch (e: SessionResumeUnconfirmed) {
             throw e
         } catch (e: Exception) {
-            throw SessionResumeUnconfirmed("RESUME_FENCE_ANCHOR_UNCONFIRMED", e)
+            throw SessionResumeUnconfirmed(ResumeDenialCodes.RESUME_FENCE_ANCHOR_UNCONFIRMED, e)
         }
     }
 }
 
 private const val AUDIT_FORMAT_MARKER = "RCAUD1"
 private const val ANCHOR_FORMAT_MARKER = "RCANCH1"
+
+/** Diagnostic codes emitted by ResumeFenceAnchor; not shared protocol vocabulary. */
+internal object ResumeFenceAnchorDiagnosticCodes {
+    const val RESUME_FENCE_HARD_LINK_PROBE_CLEANUP_UNCONFIRMED = "RESUME_FENCE_HARD_LINK_PROBE_CLEANUP_UNCONFIRMED"
+    const val RESUME_FENCE_ANCHOR_UNSAFE_DIRECTORY = "RESUME_FENCE_ANCHOR_UNSAFE_DIRECTORY"
+    const val RESUME_FENCE_AUDIT_CONFLICT = "RESUME_FENCE_AUDIT_CONFLICT"
+}

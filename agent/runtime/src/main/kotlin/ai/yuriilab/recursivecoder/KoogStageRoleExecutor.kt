@@ -74,40 +74,40 @@ class KoogStageRoleExecutor(
         }
         fun terminal(outcome: StageRoleOutcome, kind: StageRoleEventKind, code: String? = null): StageRoleResult =
             if (emit(kind, code)) result(outcome)
-            else result(StageRoleOutcome.Failed("EVENT_SINK_FAILED"))
+            else result(StageRoleOutcome.Failed(KoogStageRoleExecutorDiagnosticCodes.EVENT_SINK_FAILED))
 
         // A malformed graph, missing actor, role escalation or unaccepted input fails
         // BEFORE any model call. Admission is repeated by the host at commit time.
         if (!requestIdValid)
-            return terminal(StageRoleOutcome.Denied("INVALID_REQUEST_ID"),
-                StageRoleEventKind.DENIED, "INVALID_REQUEST_ID")
+            return terminal(StageRoleOutcome.Denied(StageDenialCodes.INVALID_REQUEST_ID),
+                StageRoleEventKind.DENIED, StageDenialCodes.INVALID_REQUEST_ID)
         val gate = StageGraphPolicy.admitStage(
             request.graph, request.stageRunId, request.hostAcceptedArtifactIds)
         if (gate is StageGateDecision.Deny)
             return terminal(StageRoleOutcome.Denied(gate.code), StageRoleEventKind.DENIED, gate.code)
         if (stage?.correlation?.requestId != request.requestId)
-            return terminal(StageRoleOutcome.Denied("REQUEST_CORRELATION_MISMATCH"),
-                StageRoleEventKind.DENIED, "REQUEST_CORRELATION_MISMATCH")
+            return terminal(StageRoleOutcome.Denied(StageDenialCodes.REQUEST_CORRELATION_MISMATCH),
+                StageRoleEventKind.DENIED, StageDenialCodes.REQUEST_CORRELATION_MISMATCH)
         if (stage == null || agentId == null || stage.kind.role != request.expectedRole)
-            return terminal(StageRoleOutcome.Denied("ROLE_IDENTITY_MISMATCH"),
-                StageRoleEventKind.DENIED, "ROLE_IDENTITY_MISMATCH")
+            return terminal(StageRoleOutcome.Denied(KoogStageRoleExecutorDiagnosticCodes.ROLE_IDENTITY_MISMATCH),
+                StageRoleEventKind.DENIED, KoogStageRoleExecutorDiagnosticCodes.ROLE_IDENTITY_MISMATCH)
         if (request.requestedTools.isNotEmpty())
-            return terminal(StageRoleOutcome.Denied("ROLE_TOOL_SURFACE_UNAVAILABLE"),
-                StageRoleEventKind.DENIED, "ROLE_TOOL_SURFACE_UNAVAILABLE")
+            return terminal(StageRoleOutcome.Denied(KoogStageRoleExecutorDiagnosticCodes.ROLE_TOOL_SURFACE_UNAVAILABLE),
+                StageRoleEventKind.DENIED, KoogStageRoleExecutorDiagnosticCodes.ROLE_TOOL_SURFACE_UNAVAILABLE)
         if (request.maxModelRequests != 1 || request.graph.budget.maxTokens < 1 ||
             request.model.maxOutputTokens < 1 || request.model.contextTokens < 1 ||
             request.instruction.isBlank() ||
             request.instruction.toByteArray(Charsets.UTF_8).size > StageRoleLimits.MAX_INSTRUCTION_BYTES)
-            return terminal(StageRoleOutcome.Denied("INVALID_ROLE_BUDGET_OR_INPUT"),
-                StageRoleEventKind.DENIED, "INVALID_ROLE_BUDGET_OR_INPUT")
+            return terminal(StageRoleOutcome.Denied(KoogStageRoleExecutorDiagnosticCodes.INVALID_ROLE_BUDGET_OR_INPUT),
+                StageRoleEventKind.DENIED, KoogStageRoleExecutorDiagnosticCodes.INVALID_ROLE_BUDGET_OR_INPUT)
         // The fake-v1 feature set is the legacy gateway's mandatory protocol
         // marker, NOT a grant to expose any tools through Koog.
         // Fake is the ONLY tested compatibility bridge. Do not silently use the
         // legacy read-only HTTP gateway with a new free-form role prompt.
         if (request.model.provider != ModelProviderIds.FAKE || request.model.modelId != ModelProviderIds.FAKE_MODEL_ID ||
             request.model.features != setOf(ModelFeatureIds.TOOL_CALLS))
-            return terminal(StageRoleOutcome.Denied("MODEL_BRIDGE_UNSUPPORTED"),
-                StageRoleEventKind.DENIED, "MODEL_BRIDGE_UNSUPPORTED")
+            return terminal(StageRoleOutcome.Denied(KoogStageRoleExecutorDiagnosticCodes.MODEL_BRIDGE_UNSUPPORTED),
+                StageRoleEventKind.DENIED, KoogStageRoleExecutorDiagnosticCodes.MODEL_BRIDGE_UNSUPPORTED)
 
         val now = Instant.now()
         val millis = minOf(request.graph.budget.maxDurationMillis,
@@ -116,7 +116,8 @@ class KoogStageRoleExecutor(
             return terminal(StageRoleOutcome.TimedOut, StageRoleEventKind.TIMED_OUT)
         if (request.cancellation.signals().requested)
             return terminal(StageRoleOutcome.Cancelled, StageRoleEventKind.CANCELLED)
-        if (!emit(StageRoleEventKind.STARTED)) return result(StageRoleOutcome.Failed("EVENT_SINK_FAILED"))
+        if (!emit(StageRoleEventKind.STARTED)) return result(StageRoleOutcome.Failed(
+            KoogStageRoleExecutorDiagnosticCodes.EVENT_SINK_FAILED))
 
         var metered: MeteredKoogExecutor? = null
         val outcome: StageRoleOutcome = try {
@@ -125,7 +126,7 @@ class KoogStageRoleExecutor(
             if (!capabilities.features.containsAll(request.model.features) ||
                 capabilities.contextTokens < request.model.contextTokens ||
                 capabilities.maxOutputTokens < request.model.maxOutputTokens)
-                throw RoleExecutionError("MODEL_CAPABILITY_UNSUPPORTED")
+                throw RoleExecutionError(ModelDenialCodes.MODEL_CAPABILITY_UNSUPPORTED)
             val binding = bridge.open(request.model, request.expectedRole)
             try {
                 // One-stage quota, NOT shared-graph reservations; #78 will own
@@ -178,7 +179,7 @@ class KoogStageRoleExecutor(
                     request.cancellation.check(request.deadline)
                     if (proposed.isBlank() ||
                         proposed.toByteArray(Charsets.UTF_8).size > StageRoleLimits.MAX_PROPOSAL_BYTES)
-                        throw RoleExecutionError("MODEL_INVALID_RESPONSE")
+                        throw RoleExecutionError(ModelDenialCodes.MODEL_INVALID_RESPONSE)
                     StageRoleOutcome.Proposed(proposed)
                 } finally {
                     agent.close()
@@ -267,8 +268,9 @@ internal class MeteredKoogExecutor(
         prompt: Prompt, model: LLModel, tools: List<ToolDescriptor>
     ): Message.Assistant {
         cancellation.check(deadline)
-        if (tools.isNotEmpty()) throw RoleExecutionError("ROLE_TOOL_SURFACE_UNAVAILABLE")
-        if (requests != 0) throw RoleExecutionError("MODEL_REQUEST_BUDGET_EXCEEDED")
+        if (tools.isNotEmpty()) throw RoleExecutionError(
+            KoogStageRoleExecutorDiagnosticCodes.ROLE_TOOL_SURFACE_UNAVAILABLE)
+        if (requests != 0) throw RoleExecutionError(ModelDenialCodes.MODEL_REQUEST_BUDGET_EXCEEDED)
         requests++
         val answer = underlying.execute(prompt, model, emptyList())
         cancellation.check(deadline)
@@ -281,7 +283,7 @@ internal class MeteredKoogExecutor(
             input > maxTokens || output > maxOutputTokens ||
             output > maxTokens - input)
             throw RoleExecutionError(if (input == null || output == null) "MODEL_USAGE_MISSING"
-                else "TOKEN_BUDGET_EXCEEDED")
+                else ModelDenialCodes.TOKEN_BUDGET_EXCEEDED)
         inputTokens = input
         outputTokens = output
         return answer
@@ -297,4 +299,13 @@ internal class MeteredKoogExecutor(
     // Koog agent.close() may close this wrapper; the binding is owned/closed
     // exactly once by KoogStageRoleExecutor.
     override fun close() {}
+}
+
+/** Diagnostic codes emitted by KoogStageRoleExecutor; not shared protocol vocabulary. */
+internal object KoogStageRoleExecutorDiagnosticCodes {
+    const val EVENT_SINK_FAILED = "EVENT_SINK_FAILED"
+    const val ROLE_IDENTITY_MISMATCH = "ROLE_IDENTITY_MISMATCH"
+    const val ROLE_TOOL_SURFACE_UNAVAILABLE = "ROLE_TOOL_SURFACE_UNAVAILABLE"
+    const val INVALID_ROLE_BUDGET_OR_INPUT = "INVALID_ROLE_BUDGET_OR_INPUT"
+    const val MODEL_BRIDGE_UNSUPPORTED = "MODEL_BRIDGE_UNSUPPORTED"
 }

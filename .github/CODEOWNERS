@@ -32,3 +32,9 @@
 /agent/ @YuriiSokolenko
 /app/ @YuriiSokolenko
 /contracts/ @YuriiSokolenko
+
+# Review agent, skills and prompts: they define the review gate.
+/.claude/ @YuriiSokolenko
+/AGENTS.md @YuriiSokolenko
+/CLAUDE.md @YuriiSokolenko
+/CONTRIBUTING.md @YuriiSokolenko

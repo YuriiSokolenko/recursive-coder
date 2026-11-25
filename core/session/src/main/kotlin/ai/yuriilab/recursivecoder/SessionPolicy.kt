@@ -103,13 +103,13 @@ internal object SessionLifecyclePolicy {
 }
 
 internal enum class AdmissionDenial(val code: String, val category: String, val message: String) {
-    PROTOCOL("UNSUPPORTED_PROTOCOL", "protocol", "Unsupported protocol version"),
-    INVOCATION("UNSUPPORTED_INVOCATION", "protocol", "Unsupported invocation source or attempt"),
-    RESUME(SessionDenialCodes.UNSUPPORTED_RESUME, "checkpoint", "Resume is not supported"),
-    CAPABILITY("UNSUPPORTED_CAPABILITY", "protocol", "Required capability is unavailable"),
-    MODEL(ModelDenialCodes.UNSUPPORTED_MODEL, "provider", "Unsupported model provider or configuration"),
-    TOOL_POLICY(ToolDenialCodes.UNSUPPORTED_TOOL_POLICY, "policy", "Only read-only task access is supported"),
-    BUDGET("INSUFFICIENT_BUDGET", "policy", "Two model turns and one read are required")
+    PROTOCOL("UNSUPPORTED_PROTOCOL", SessionDiagnosticCategories.PROTOCOL, "Unsupported protocol version"),
+    INVOCATION("UNSUPPORTED_INVOCATION", SessionDiagnosticCategories.PROTOCOL, "Unsupported invocation source or attempt"),
+    RESUME(SessionDenialCodes.UNSUPPORTED_RESUME, SessionDiagnosticCategories.CHECKPOINT, "Resume is not supported"),
+    CAPABILITY("UNSUPPORTED_CAPABILITY", SessionDiagnosticCategories.PROTOCOL, "Required capability is unavailable"),
+    MODEL(ModelDenialCodes.UNSUPPORTED_MODEL, SessionDiagnosticCategories.PROVIDER, "Unsupported model provider or configuration"),
+    TOOL_POLICY(ToolDenialCodes.UNSUPPORTED_TOOL_POLICY, SessionDiagnosticCategories.POLICY, "Only read-only task access is supported"),
+    BUDGET("INSUFFICIENT_BUDGET", SessionDiagnosticCategories.POLICY, "Two model turns and one read are required")
 }
 
 internal sealed interface AdmissionDecision {
@@ -197,8 +197,8 @@ internal object SessionResumePreflightPolicy {
 }
 
 internal enum class BudgetDenial(val code: String, val message: String) {
-    MODEL_REQUESTS("MODEL_REQUEST_BUDGET_EXCEEDED", "Model request budget exceeded"),
-    TOKENS("TOKEN_BUDGET_EXCEEDED", "Model token budget exceeded"),
+    MODEL_REQUESTS(ModelDenialCodes.MODEL_REQUEST_BUDGET_EXCEEDED, "Model request budget exceeded"),
+    TOKENS(ModelDenialCodes.TOKEN_BUDGET_EXCEEDED, "Model token budget exceeded"),
     TOOLS("TOOL_CALL_BUDGET_EXCEEDED", "Tool call budget exceeded")
 }
 

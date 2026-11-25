@@ -92,6 +92,7 @@ Checkpoints contain hashed state snapshots and a journal of side effects. Resumi
 ## 3. Public session protocol
 
 See [Semantic vocabulary follow-ups](SEMANTIC_VOCABULARY_FOLLOWUPS.md) for field ownership, migration scope and exclusions.
+The [diagnostic literal audit (#218)](DIAGNOSTIC_LITERAL_AUDIT_218.md) records per-value ownership, compatibility oracles and retained exclusions.
 
 `contracts/v1/session-v1.schema.json` is the canonical transport schema of the project:
 
@@ -131,7 +132,7 @@ GitHub Actions is used **solely for this repository's CI**, not as an external a
 
 - **Architecture boundaries and pure unit tests:** Gradle dependency and test-tier policies, configuration-cache regressions and pure Kotlin tests.
 - **Full JVM integration and sandbox E2E:** module builds, local Git/filesystem and mock HTTP fixtures, mandatory real bubblewrap case, installed CLI and JUnit artifacts.
-- **Versioned session contracts:** English-language documentation guard, JSON Schema Draft 2020-12, negative fixtures and Node compatibility tests.
+- **Versioned session contracts:** on pull requests, review evidence from the PR base's review helpers (C3 pin check and diagnostic vocabulary scan, extracted with `git show <base>` and run in Python isolated mode against the exact base/head pair; a pin or scanner failure fails the job, and a base without the helpers is reported as missing evidence without failing it); offline regression tests for those helpers and for the CI evidence and documentation guards; the English-only guard over every tracked Markdown file, which also fails on an unreadable file or a failing file listing; JSON Schema Draft 2020-12, negative fixtures and Node compatibility tests.
 
 The [CI migration run](https://github.com/YuriiSokolenko/recursive-coder/actions/runs/43120760211) on 2026-11-11 passed the three jobs that existed then, including non-skipped sandbox E2E. Tests do not call a live inference provider. Real-model evaluation and release packaging remain planned.
 

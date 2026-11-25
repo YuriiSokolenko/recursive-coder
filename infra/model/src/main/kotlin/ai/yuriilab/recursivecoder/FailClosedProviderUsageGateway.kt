@@ -5,6 +5,10 @@ import java.time.Clock
 import java.time.Duration
 import java.time.Instant
 
+private const val MODEL_USAGE_UNCONFIRMED = "MODEL_USAGE_UNCONFIRMED"
+private const val MODEL_DEADLINE_EXCEEDED = "MODEL_DEADLINE_EXCEEDED"
+private const val MODEL_TOKEN_BUDGET_EXHAUSTED = "MODEL_TOKEN_BUDGET_EXHAUSTED"
+
 /**
  * Host-owned, single-workflow usage meter over ModelGateway. This adapter is
  * opt-in and NOT wired into installed writable/recursive CLI (FakeModel-only).
@@ -89,7 +93,7 @@ class FailClosedProviderUsageGateway(
     }
 
     private fun deny(code: String): Nothing =
-        throw Refused(code, "policy", "Provider usage grant cannot authorize further work")
+        throw Refused(code, SessionDiagnosticCategories.POLICY, "Provider usage grant cannot authorize further work")
 
     /** lock must be held */
     private fun poison(code: String, providerCode: String? = null): Nothing {
@@ -110,7 +114,7 @@ class FailClosedProviderUsageGateway(
     private fun gate(config: ModelConfig, deadline: Instant): Instant {
         if (inFlightOperation != null) deny("MODEL_CALL_IN_FLIGHT")
         terminalCode?.let { deny(it) }
-        if (unconfirmed) deny("MODEL_USAGE_UNCONFIRMED")
+        if (unconfirmed) deny(MODEL_USAGE_UNCONFIRMED)
         // Existing SSE parser accepts usage in arbitrary events; no verified
         // terminal usage provenance exists for streaming.
         if (config.provider != ModelProviderIds.OPENAI_COMPATIBLE ||
@@ -118,7 +122,7 @@ class FailClosedProviderUsageGateway(
             ModelFeatureIds.STREAMING in config.features || config.maxOutputTokens <= 0)
             deny("MODEL_USAGE_PROVENANCE_UNAVAILABLE")
         val bounded = minOf(deadline, admittedDeadline)
-        if (!clock.instant().isBefore(bounded)) deny("MODEL_DEADLINE_EXCEEDED")
+        if (!clock.instant().isBefore(bounded)) deny(MODEL_DEADLINE_EXCEEDED)
         return bounded
     }
 
@@ -132,8 +136,9 @@ class FailClosedProviderUsageGateway(
             // dispatched, so corrected requests may reuse the token grant.
             // Discovery HTTP timeouts still respect the admitted deadline.
             val timeout = Duration.between(clock.instant(), bounded).toMillis()
-            if (timeout <= 0L) deny("MODEL_DEADLINE_EXCEEDED")
-            if (config.requestTimeoutMs <= 0L) deny("MODEL_REQUEST_TIMEOUT_INVALID")
+            if (timeout <= 0L) deny(MODEL_DEADLINE_EXCEEDED)
+            if (config.requestTimeoutMs <= 0L) deny(
+                FailClosedProviderUsageGatewayDiagnosticCodes.MODEL_REQUEST_TIMEOUT_INVALID)
             inFlightOperation = Operation.DISCOVERY
             Prepared(config.copy(requestTimeoutMs = minOf(config.requestTimeoutMs, timeout)),
                 bounded)
@@ -169,13 +174,13 @@ class FailClosedProviderUsageGateway(
             checkCancellation(cancellation, bounded)
             val remaining = grantedTokens - this.observed()
             if (remaining <= 0) {
-                terminalCode = "MODEL_TOKEN_BUDGET_EXHAUSTED"
+                terminalCode = MODEL_TOKEN_BUDGET_EXHAUSTED
                 deny(terminalCode!!)
             }
             val timeout = Duration.between(clock.instant(), bounded).toMillis()
             // No zero- or negative-millisecond request may be dispatched.
             if (timeout <= 0L) {
-                terminalCode = "MODEL_DEADLINE_EXCEEDED"
+                terminalCode = MODEL_DEADLINE_EXCEEDED
                 deny(terminalCode!!)
             }
             val boundedConfig = config.copy(
@@ -185,7 +190,7 @@ class FailClosedProviderUsageGateway(
             // error, distinct from expiry of the admitted deadline. No
             // completion reservation/receipt is recorded when nothing ran.
             if (boundedConfig.requestTimeoutMs <= 0L) {
-                terminalCode = "MODEL_REQUEST_TIMEOUT_INVALID"
+                terminalCode = FailClosedProviderUsageGatewayDiagnosticCodes.MODEL_REQUEST_TIMEOUT_INVALID
                 deny(terminalCode!!)
             }
             inFlightOperation = Operation.COMPLETION
@@ -201,7 +206,7 @@ class FailClosedProviderUsageGateway(
             synchronized(lock) {
                 record(prepared.config, ReceiptOutcome.CANCELLED, provenance = "gateway-stopped")
                 unconfirmed = true
-                terminalCode = "MODEL_USAGE_UNCONFIRMED"
+                terminalCode = MODEL_USAGE_UNCONFIRMED
                 inFlightOperation = null
             }
             throw stopped
@@ -209,7 +214,7 @@ class FailClosedProviderUsageGateway(
             synchronized(lock) {
                 record(prepared.config, ReceiptOutcome.CANCELLED, provenance = "gateway-interrupted")
                 unconfirmed = true
-                terminalCode = "MODEL_USAGE_UNCONFIRMED"
+                terminalCode = MODEL_USAGE_UNCONFIRMED
                 inFlightOperation = null
             }
             Thread.currentThread().interrupt()
@@ -218,14 +223,14 @@ class FailClosedProviderUsageGateway(
             synchronized(lock) {
                 record(prepared.config, ReceiptOutcome.UNCONFIRMED, provenance = "gateway-exception")
                 inFlightOperation = null
-                poison("MODEL_USAGE_UNCONFIRMED",
+                poison(MODEL_USAGE_UNCONFIRMED,
                     (failure as? Refused)?.code)
             }
         } catch (fatal: Error) {
             synchronized(lock) {
                 record(prepared.config, ReceiptOutcome.UNCONFIRMED, provenance = "gateway-error")
                 unconfirmed = true
-                terminalCode = "MODEL_USAGE_UNCONFIRMED"
+                terminalCode = MODEL_USAGE_UNCONFIRMED
                 inFlightOperation = null
             }
             throw fatal
@@ -239,7 +244,7 @@ class FailClosedProviderUsageGateway(
             if (usage == null) {
                 record(prepared.config, ReceiptOutcome.UNCONFIRMED, status = turn.statusCode,
                     attempts = turn.attempts)
-                poison("MODEL_USAGE_UNCONFIRMED")
+                poison(MODEL_USAGE_UNCONFIRMED)
             }
             val inputOverflow = usage.input >= 0 && usage.input > Long.MAX_VALUE - input
             val outputOverflow = usage.output >= 0 && usage.output > Long.MAX_VALUE - output
@@ -250,25 +255,25 @@ class FailClosedProviderUsageGateway(
                 input > Long.MAX_VALUE - output) {
                 record(prepared.config, ReceiptOutcome.UNCONFIRMED, usage,
                     turn.statusCode, turn.attempts)
-                poison("MODEL_USAGE_UNCONFIRMED")
+                poison(MODEL_USAGE_UNCONFIRMED)
             }
             val status = turn.statusCode
             if (turn.attempts != 1 || status == null || status !in 200..299) {
                 record(prepared.config, ReceiptOutcome.UNCONFIRMED, usage,
                     status, turn.attempts)
-                poison("MODEL_USAGE_UNCONFIRMED")
+                poison(MODEL_USAGE_UNCONFIRMED)
             }
             if (usage.output > prepared.config.maxOutputTokens ||
                 this.observed() > grantedTokens) {
                 record(prepared.config, ReceiptOutcome.BUDGET_EXCEEDED, usage,
                     status, turn.attempts)
-                terminalCode = "MODEL_TOKEN_BUDGET_EXHAUSTED"
+                terminalCode = MODEL_TOKEN_BUDGET_EXHAUSTED
                 deny(terminalCode!!)
             }
             if (!clock.instant().isBefore(prepared.deadline)) {
                 record(prepared.config, ReceiptOutcome.DEADLINE_EXCEEDED, usage,
                     status, turn.attempts)
-                terminalCode = "MODEL_DEADLINE_EXCEEDED"
+                terminalCode = MODEL_DEADLINE_EXCEEDED
                 deny(terminalCode!!)
             }
             // Cancellation after a complete 2xx usage response is terminal,
@@ -285,4 +290,9 @@ class FailClosedProviderUsageGateway(
             turn
         }
     }
+}
+
+/** Diagnostic codes emitted by FailClosedProviderUsageGateway; not shared protocol vocabulary. */
+internal object FailClosedProviderUsageGatewayDiagnosticCodes {
+    const val MODEL_REQUEST_TIMEOUT_INVALID = "MODEL_REQUEST_TIMEOUT_INVALID"
 }

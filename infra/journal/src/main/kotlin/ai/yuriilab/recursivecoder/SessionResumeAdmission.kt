@@ -52,7 +52,7 @@ internal object ResumeLocalFileStorePolicy {
 
     private fun refuse(checkpointType: String?, ledgerType: String?,
                        cause: Throwable? = null): Nothing =
-        throw SessionResumeUnconfirmed("RESUME_FILESYSTEM_UNSUPPORTED", cause,
+        throw SessionResumeUnconfirmed(ResumeDenialCodes.RESUME_FILESYSTEM_UNSUPPORTED, cause,
             "checkpoint=${shown(checkpointType)} ledger=${shown(ledgerType)}")
 
     fun requireSupportedTypes(checkpointType: String, ledgerType: String) {
@@ -183,12 +183,12 @@ internal object ResumeFenceStorage {
 
     private fun decode(path: Path): ResumeFenceRecord {
         if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) ||
-            Files.size(path) !in 1L..1024L) fail("RESUME_FENCE_CORRUPT")
+            Files.size(path) !in 1L..1024L) fail(ResumeDenialCodes.RESUME_FENCE_CORRUPT)
         val raw = Files.readAllBytes(path).toString(StandardCharsets.UTF_8)
         val fields = raw.split("\n")
         if (fields.size != 10 || fields.last() != "" || fields[0] != FENCE_FORMAT_MARKER)
             fail("RESUME_FENCE_VERSION_UNSUPPORTED")
-        val generation = fields[1].toLongOrNull() ?: fail("RESUME_FENCE_CORRUPT")
+        val generation = fields[1].toLongOrNull() ?: fail(ResumeDenialCodes.RESUME_FENCE_CORRUPT)
         val previous = fields[2].takeUnless { it == "-" }
         if (generation !in 1L..999_999_999_999L ||
             (generation == 1L) != (previous == null) ||
@@ -196,7 +196,7 @@ internal object ResumeFenceStorage {
             !listOf(fields[3], fields[4], fields[7], fields[8]).all(SHA::matches) ||
             !ToolAuthorizationPolicy.validHostIdentifier(fields[5]) ||
             !ToolAuthorizationPolicy.validHostIdentifier(fields[6]))
-            fail("RESUME_FENCE_CORRUPT")
+            fail(ResumeDenialCodes.RESUME_FENCE_CORRUPT)
         val canonical = body(generation, previous, fields[3], fields[4],
             fields[5], fields[6], fields[7])
         if (digest(canonical.toByteArray(StandardCharsets.UTF_8)) != fields[8] ||
@@ -214,7 +214,7 @@ internal object ResumeFenceStorage {
         val files = Files.newDirectoryStream(directory).use { entries ->
             entries.filter { NAME.matches(it.fileName.toString()) }.toList()
         }
-        if (files.size > MAX_FENCES) fail("RESUME_FENCE_LIMIT")
+        if (files.size > MAX_FENCES) fail(SessionResumeAdmissionDiagnosticCodes.RESUME_FENCE_LIMIT)
         var last: ResumeFenceRecord? = null
         files.sortedBy { it.fileName.toString() }.forEach { path ->
             val next = decode(path)
@@ -235,7 +235,7 @@ internal object ResumeFenceStorage {
                 checkpoint: VerifiedSessionCheckpoint, authority: String,
                 beforePublish: (ResumeFenceRecord) -> Unit): ResumeFenceRecord {
         val generation = (previous?.generation ?: 0L) + 1L
-        if (generation > MAX_FENCES) fail("RESUME_FENCE_LIMIT")
+        if (generation > MAX_FENCES) fail(SessionResumeAdmissionDiagnosticCodes.RESUME_FENCE_LIMIT)
         val snapshot = checkpoint.snapshot
         val header = body(generation, previous?.sha256, checkpoint.sha256, authority,
             snapshot.sessionId, snapshot.traceId, snapshot.binding.policySha256)
@@ -247,23 +247,23 @@ internal object ResumeFenceStorage {
             authority, snapshot.sessionId, snapshot.traceId, snapshot.binding.policySha256,
             checksum))
         if (Files.exists(destination, LinkOption.NOFOLLOW_LINKS))
-            fail("RESUME_FENCE_CAS_FAILED")
+            fail(ResumeDenialCodes.RESUME_FENCE_CAS_FAILED)
         val temporary = directory.resolve(".resume-pending-" + UUID.randomUUID() + ".tmp")
         try {
             FileChannel.open(temporary, StandardOpenOption.CREATE_NEW,
                 StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS).use { channel ->
                 val buffer = ByteBuffer.wrap(bytes)
                 while (buffer.hasRemaining()) {
-                    if (channel.write(buffer) <= 0) fail("RESUME_FENCE_PUBLISH_UNCONFIRMED")
+                    if (channel.write(buffer) <= 0) fail(ResumeDenialCodes.RESUME_FENCE_PUBLISH_UNCONFIRMED)
                 }
                 channel.force(true)
             }
             ResumeImmutablePublication.linkAndSync(directory, temporary, destination,
-                "RESUME_FENCE_CAS_FAILED", "RESUME_FENCE_PUBLISH_UNCONFIRMED")
+                ResumeDenialCodes.RESUME_FENCE_CAS_FAILED, ResumeDenialCodes.RESUME_FENCE_PUBLISH_UNCONFIRMED)
             return decode(destination)
         } catch (error: Exception) {
             if (error is SessionResumeUnconfirmed) throw error
-            throw SessionResumeUnconfirmed("RESUME_FENCE_PUBLISH_UNCONFIRMED", error)
+            throw SessionResumeUnconfirmed(ResumeDenialCodes.RESUME_FENCE_PUBLISH_UNCONFIRMED, error)
         } finally {
             // A renamed generation is authoritative even when parent fsync fails.
             // Never delete or overwrite it during cleanup.
@@ -276,7 +276,7 @@ internal object ResumeFenceStorage {
         val record = decode(directory.resolve(name(generation)))
         if (record.generation != generation || record.sha256 != sha256 ||
             Files.exists(directory.resolve(name(generation + 1L)), LinkOption.NOFOLLOW_LINKS))
-            fail("RESUME_FENCE_STALE_WRITER")
+            fail(ResumeDenialCodes.RESUME_FENCE_STALE_WRITER)
         return record
     }
 
@@ -286,19 +286,21 @@ internal object ResumeFenceStorage {
         Files.newDirectoryStream(directory).use { entries ->
             entries.filter { TEMP.matches(it.fileName.toString()) }.forEach { file ->
                 if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS))
-                    fail("RESUME_FENCE_CORRUPT")
+                    fail(ResumeDenialCodes.RESUME_FENCE_CORRUPT)
                 try {
                     Files.delete(file)
                     removed = true
                 } catch (e: Exception) {
-                    throw SessionResumeUnconfirmed("RESUME_FENCE_CLEANUP_UNCONFIRMED", e)
+                    throw SessionResumeUnconfirmed(
+                        SessionResumeAdmissionDiagnosticCodes.RESUME_FENCE_CLEANUP_UNCONFIRMED, e)
                 }
             }
         }
         if (removed) {
             try { FileChannel.open(directory, StandardOpenOption.READ).use { it.force(true) } }
             catch (e: Exception) {
-                throw SessionResumeUnconfirmed("RESUME_FENCE_CLEANUP_UNCONFIRMED", e)
+                throw SessionResumeUnconfirmed(
+                    SessionResumeAdmissionDiagnosticCodes.RESUME_FENCE_CLEANUP_UNCONFIRMED, e)
             }
         }
     }
@@ -308,7 +310,7 @@ internal object ResumeFenceStorage {
                               snapshot: SessionCheckpoint) {
         val current = latest(directory)
         if (current == null) {
-            if (lease != null) fail("RESUME_FENCE_STALE_WRITER")
+            if (lease != null) fail(ResumeDenialCodes.RESUME_FENCE_STALE_WRITER)
             return
         }
         if (lease == null) fail("RESUME_FENCE_REQUIRED")
@@ -316,7 +318,7 @@ internal object ResumeFenceStorage {
         if (snapshot.sessionId != current.sessionId ||
             snapshot.traceId != current.traceId ||
             snapshot.binding.policySha256 != current.policySha256)
-            fail("RESUME_FENCE_CONTEXT_CHANGED")
+            fail(SessionResumeAdmissionDiagnosticCodes.RESUME_FENCE_CONTEXT_CHANGED)
     }
 }
 
@@ -348,14 +350,14 @@ class SessionResumeLease internal constructor(
             generation != current.generation ||
             toolAuthoritySha256 != current.toolAuthoritySha256 ||
             admittedCheckpointSha256 != current.checkpointSha256)
-            throw SessionResumeUnconfirmed("RESUME_FENCE_STALE_WRITER")
+            throw SessionResumeUnconfirmed(ResumeDenialCodes.RESUME_FENCE_STALE_WRITER)
     }
 
     /** Both the admitted path and Linux inode identity must remain unchanged. */
     @Synchronized internal fun requireLedgerPath(candidate: Path) {
         if (closed || candidate.toAbsolutePath().normalize() != ledgerPath.toAbsolutePath().normalize() ||
             SessionResumeAdmission.ledgerFileKey(candidate) != admittedLedgerFileKey)
-            throw SessionResumeUnconfirmed("RESUME_LEDGER_PATH_CHANGED")
+            throw SessionResumeUnconfirmed(SessionResumeAdmissionDiagnosticCodes.RESUME_LEDGER_PATH_CHANGED)
     }
 
     /**
@@ -373,7 +375,7 @@ class SessionResumeLease internal constructor(
     /** Required before callbacks or trusted receipt publication. */
     @Synchronized fun assertCurrent() {
         if (closed || !lock.isValid)
-            throw SessionResumeUnconfirmed("RESUME_FENCE_STALE_WRITER")
+            throw SessionResumeUnconfirmed(ResumeDenialCodes.RESUME_FENCE_STALE_WRITER)
         requireLedgerPath(ledgerPath)
         val fence = ResumeFenceStorage.requireHead(directory, generation, admittedFenceSha256)
         ResumeFenceAnchor.requireHead(ledgerPath, fence, admittedAnchorSha256)
@@ -425,13 +427,13 @@ object SessionResumeAdmission {
             val file = path.toAbsolutePath().normalize()
             val attrs = Files.readAttributes(file, BasicFileAttributes::class.java,
                 LinkOption.NOFOLLOW_LINKS)
-            if (!attrs.isRegularFile) fail("RESUME_LEDGER_IDENTITY_UNCONFIRMED")
+            if (!attrs.isRegularFile) fail(SessionResumeAdmissionDiagnosticCodes.RESUME_LEDGER_IDENTITY_UNCONFIRMED)
             return attrs.fileKey()?.toString()
-                ?: fail("RESUME_LEDGER_IDENTITY_UNCONFIRMED")
+                ?: fail(SessionResumeAdmissionDiagnosticCodes.RESUME_LEDGER_IDENTITY_UNCONFIRMED)
         } catch (e: SessionResumeUnconfirmed) {
             throw e
         } catch (e: Exception) {
-            throw SessionResumeUnconfirmed("RESUME_LEDGER_IDENTITY_UNCONFIRMED", e)
+            throw SessionResumeUnconfirmed(SessionResumeAdmissionDiagnosticCodes.RESUME_LEDGER_IDENTITY_UNCONFIRMED, e)
         }
     }
 
@@ -621,14 +623,14 @@ object SessionResumeAdmission {
         if (genesisOperator != null &&
             (genesisSidecar == null || genesisKey == null ||
                 (operator != null && operator.operatorId != genesisOperator.operatorId)))
-            fail("RESUME_EFFECT_RECONCILIATION_INVALID")
+            fail(SessionResumeAdmissionDiagnosticCodes.RESUME_EFFECT_RECONCILIATION_INVALID)
         if (attestation.expectedFenceGeneration < 0)
             fail("RESUME_FENCE_EXPECTED_GENERATION_INVALID")
         if (operator != null && (!operator.operatorApproved ||
             !ToolAuthorizationPolicy.validHostIdentifier(operator.operatorId) ||
             !SHA.matches(operator.expectedPreparedFenceSha256) ||
             operator.expectedPreparedGeneration != attestation.expectedFenceGeneration + 1L))
-            fail("RESUME_FENCE_RECONCILIATION_UNCONFIRMED")
+            fail(ResumeDenialCodes.RESUME_FENCE_RECONCILIATION_UNCONFIRMED)
         val authoritySha256 = ResumeReadAuthority.fingerprint(context, attestation.readPolicyFacts)
         if (!attestation.externalActionsReconciled)
             fail("RESUME_EXTERNAL_EFFECTS_UNCONFIRMED")
@@ -639,7 +641,7 @@ object SessionResumeAdmission {
         // unsupported mounts must not cause resume.lock creation or fence changes.
         ResumeLocalFileStorePolicy.requireSupportedPaths(dir, ledgerPath, fileStoreType)
         val lockPath = dir.resolve(RESUME_LOCK_NAME)
-        if (!heldLocks.add(lockPath)) fail("RESUME_LEASE_HELD")
+        if (!heldLocks.add(lockPath)) fail(SessionResumeAdmissionDiagnosticCodes.RESUME_LEASE_HELD)
         var owner: FileChannel? = null
         var lock: FileLock? = null
         var transferred = false
@@ -650,7 +652,7 @@ object SessionResumeAdmission {
                 StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)
             lock = try { owner.tryLock() }
                 catch (_: OverlappingFileLockException) { null }
-            if (lock == null) fail("RESUME_LEASE_HELD")
+            if (lock == null) fail(SessionResumeAdmissionDiagnosticCodes.RESUME_LEASE_HELD)
             if (created) {
                 owner.force(true)
                 FileChannel.open(dir, StandardOpenOption.READ).use { it.force(true) }
@@ -669,20 +671,20 @@ object SessionResumeAdmission {
                         (s.effectReconciliation == null || s.effectJournalHead != null)) ||
                     !PreExecutionSnapshotPolicy.safe(s) ||
                     PreExecutionPhasePolicy.phaseFromVerifiedHistory(
-                        s.phase, ledger.events) == null) fail("RESUME_UNSAFE_BOUNDARY")
+                        s.phase, ledger.events) == null) fail(ResumeDenialCodes.RESUME_UNSAFE_BOUNDARY)
                 val prior = ResumeFenceStorage.latest(checkedDir)
                 val priorAnchor = if (operator == null)
                     ResumeFenceAnchor.verify(ledgerPath, prior, checkedDir) else null
                 if ((prior?.generation ?: 0L) != attestation.expectedFenceGeneration)
-                    fail("RESUME_FENCE_CAS_FAILED")
+                    fail(ResumeDenialCodes.RESUME_FENCE_CAS_FAILED)
                 if (prior != null && (prior.sessionId != s.sessionId ||
                     prior.traceId != s.traceId ||
                     prior.policySha256 != s.binding.policySha256 ||
                     prior.toolAuthoritySha256 != authoritySha256))
-                    fail("RESUME_FENCE_CONTEXT_CHANGED")
+                    fail(SessionResumeAdmissionDiagnosticCodes.RESUME_FENCE_CONTEXT_CHANGED)
                 val ledgerKey = ledgerFileKey(ledgerPath)
                 if (ledgerKey != ledgerKeyBeforeInspect)
-                    fail("RESUME_LEDGER_PATH_CHANGED")
+                    fail(SessionResumeAdmissionDiagnosticCodes.RESUME_LEDGER_PATH_CHANGED)
                 // Ignore probe crash leftovers during read-only inspection;
                 // remove them only during admission under both OS locks.
                 ResumeImmutablePublication.cleanOrphanedProbes(checkedDir)
@@ -702,7 +704,7 @@ object SessionResumeAdmission {
                     } else {
                         if (operator.expectedPreparedGeneration != prepared.generation ||
                             operator.expectedPreparedFenceSha256 != prepared.sha256)
-                            fail("RESUME_FENCE_RECONCILIATION_UNCONFIRMED")
+                            fail(ResumeDenialCodes.RESUME_FENCE_RECONCILIATION_UNCONFIRMED)
                         ResumeFenceAnchor.verifyPrepared(ledgerPath, prior, prepared, checkedDir).also { anchor ->
                             ResumeFenceAnchor.recordOperatorApproval(ledgerPath, prepared,
                                 anchor, operator)
@@ -712,9 +714,9 @@ object SessionResumeAdmission {
                     // This must follow the test seam too, to cover an inode swap
                     // after a durable anchor/audit but before fence publication.
                     if (ledgerFileKey(ledgerPath) != ledgerKey)
-                        fail("RESUME_LEDGER_PATH_CHANGED")
+                        fail(SessionResumeAdmissionDiagnosticCodes.RESUME_LEDGER_PATH_CHANGED)
                 }
-                val anchor = preparedAnchor ?: fail("RESUME_FENCE_ANCHOR_UNCONFIRMED")
+                val anchor = preparedAnchor ?: fail(ResumeDenialCodes.RESUME_FENCE_ANCHOR_UNCONFIRMED)
                 SessionResumeLease(next.generation, next.checkpointSha256,
                     next.toolAuthoritySha256, checkedDir, ledgerPath, next.sha256,
                     anchor.sha256, ledgerKey, lockPath, acquiredOwner,
@@ -725,14 +727,14 @@ object SessionResumeAdmission {
                     dir, context, ledgerPath, fileStoreType, commit)
             else SessionCheckpointStore.withGenesisReconciliationEvidence(
                 dir, context, ledgerPath,
-                genesisSidecar ?: fail("RESUME_EFFECT_RECONCILIATION_INVALID"),
-                genesisKey ?: fail("RESUME_EFFECT_RECONCILIATION_INVALID"),
+                genesisSidecar ?: fail(SessionResumeAdmissionDiagnosticCodes.RESUME_EFFECT_RECONCILIATION_INVALID),
+                genesisKey ?: fail(SessionResumeAdmissionDiagnosticCodes.RESUME_EFFECT_RECONCILIATION_INVALID),
                 genesisOperator, operator, afterGenesisCheckpointCommitted, commit)
             transferred = true
             return result
         } catch (error: Exception) {
             if (error is SessionResumeUnconfirmed || error is CheckpointUnconfirmed) throw error
-            throw SessionResumeUnconfirmed("RESUME_ADMISSION_UNCONFIRMED", error)
+            throw SessionResumeUnconfirmed(ResumeDenialCodes.RESUME_ADMISSION_UNCONFIRMED, error)
         } finally {
             if (!transferred) {
                 try { lock?.release() } catch (_: Exception) { /* fail closed */ }
@@ -744,3 +746,14 @@ object SessionResumeAdmission {
 }
 
 private const val FENCE_FORMAT_MARKER = "RCFEN1"
+
+/** Diagnostic codes emitted by SessionResumeAdmission; not shared protocol vocabulary. */
+internal object SessionResumeAdmissionDiagnosticCodes {
+    const val RESUME_FENCE_LIMIT = "RESUME_FENCE_LIMIT"
+    const val RESUME_FENCE_CLEANUP_UNCONFIRMED = "RESUME_FENCE_CLEANUP_UNCONFIRMED"
+    const val RESUME_FENCE_CONTEXT_CHANGED = "RESUME_FENCE_CONTEXT_CHANGED"
+    const val RESUME_LEDGER_PATH_CHANGED = "RESUME_LEDGER_PATH_CHANGED"
+    const val RESUME_LEDGER_IDENTITY_UNCONFIRMED = "RESUME_LEDGER_IDENTITY_UNCONFIRMED"
+    const val RESUME_EFFECT_RECONCILIATION_INVALID = "RESUME_EFFECT_RECONCILIATION_INVALID"
+    const val RESUME_LEASE_HELD = "RESUME_LEASE_HELD"
+}

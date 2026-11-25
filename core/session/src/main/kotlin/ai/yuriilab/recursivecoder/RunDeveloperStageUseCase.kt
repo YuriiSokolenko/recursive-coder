@@ -228,9 +228,10 @@ class RunDeveloperStageUseCase(
         fun denied(code: String) =
             DeveloperStageResult(original, accepted, DeveloperStageOutcome.Denied(code))
         val stage = original.stages.singleOrNull { it.correlation.stageRunId == id }
-            ?: return denied("UNSUPPORTED_DEVELOPER_STAGE")
+            ?: return denied(RunDeveloperStageUseCaseDiagnosticCodes.UNSUPPORTED_DEVELOPER_STAGE)
         if (stage.kind != StageKind.DEVELOP || stage.supersededBy != null ||
-            stage.outputArtifacts.isNotEmpty()) return denied("UNSUPPORTED_DEVELOPER_STAGE")
+            stage.outputArtifacts.isNotEmpty()) return denied(
+                RunDeveloperStageUseCaseDiagnosticCodes.UNSUPPORTED_DEVELOPER_STAGE)
         val targets = command.targets.toList()
         if (targets.isEmpty() || targets.size > 7 ||
             targets.map { it.path.lowercase() }.toSet().size != targets.size ||
@@ -277,18 +278,18 @@ class RunDeveloperStageUseCase(
         val preflightDenials = mutableSetOf<String>()
         for ((target, read) in targetReads) {
             if (read.isFailure) {
-                preflightDenials += "TARGET_READ_UNAVAILABLE"
+                preflightDenials += RunDeveloperStageUseCaseDiagnosticCodes.TARGET_READ_UNAVAILABLE
                 continue
             }
             val before = read.getOrThrow()
             when {
                 target.expectedSha256 != null &&
                     (before == null || sha(before) != target.expectedSha256) ->
-                    preflightDenials += "STALE_TARGET_BASELINE"
+                    preflightDenials += RunDeveloperStageUseCaseDiagnosticCodes.STALE_TARGET_BASELINE
                 target.expectedSha256 == null && before != null ->
-                    preflightDenials += "CREATE_TARGET_EXISTS"
+                    preflightDenials += RunDeveloperStageUseCaseDiagnosticCodes.CREATE_TARGET_EXISTS
                 before != null && utf8(before) == null ->
-                    preflightDenials += "TARGET_ENCODING_INVALID"
+                    preflightDenials += RunDeveloperStageUseCaseDiagnosticCodes.TARGET_ENCODING_INVALID
             }
         }
         for ((artifact, read) in inputReads) {
@@ -306,9 +307,11 @@ class RunDeveloperStageUseCase(
             }
         }
         val preflightPriority = listOf(
-            "STALE_TARGET_BASELINE", "CREATE_TARGET_EXISTS", "TARGET_ENCODING_INVALID",
+            RunDeveloperStageUseCaseDiagnosticCodes.STALE_TARGET_BASELINE,
+                RunDeveloperStageUseCaseDiagnosticCodes.CREATE_TARGET_EXISTS,
+                RunDeveloperStageUseCaseDiagnosticCodes.TARGET_ENCODING_INVALID,
             StageDenialCodes.ARTIFACT_MISSING, StageDenialCodes.ARTIFACT_DIGEST_MISMATCH, StageDenialCodes.ARTIFACT_ENCODING_INVALID,
-            "TARGET_READ_UNAVAILABLE", StageDenialCodes.INPUT_READ_UNAVAILABLE
+            RunDeveloperStageUseCaseDiagnosticCodes.TARGET_READ_UNAVAILABLE, StageDenialCodes.INPUT_READ_UNAVAILABLE
         )
         preflightPriority.firstOrNull { it in preflightDenials }?.let { return denied(it) }
         val instruction = buildString {
@@ -413,14 +416,15 @@ class RunDeveloperStageUseCase(
                 outputTokens > command.graph.budget.maxTokens - inputTokens)
                 return terminal("INVALID_DEVELOPER_USAGE")
             if (proposed.isBlank() || proposed.toByteArray(Charsets.UTF_8).size >
-                StageRoleLimits.MAX_PROPOSAL_BYTES) return terminal("MODEL_INVALID_RESPONSE")
+                StageRoleLimits.MAX_PROPOSAL_BYTES) return terminal(ModelDenialCodes.MODEL_INVALID_RESPONSE)
             val writes = decode(proposed, targets)
-                ?: return terminal("INVALID_DEVELOPER_PROPOSAL")
+                ?: return terminal(RunDeveloperStageUseCaseDiagnosticCodes.INVALID_DEVELOPER_PROPOSAL)
             val changed = writes.mapIndexed { index, operation ->
                 val content = when (operation) {
                     is StageWrite.Create -> operation.content
                     is StageWrite.Edit -> operation.content
-                    is StageWrite.Delete -> return terminal("INVALID_DEVELOPER_PROPOSAL")
+                    is StageWrite.Delete -> return terminal(
+                        RunDeveloperStageUseCaseDiagnosticCodes.INVALID_DEVELOPER_PROPOSAL)
                 }
                 DeveloperChangedFile(targets[index].path, targets[index].expectedSha256,
                     sha(content.toByteArray(Charsets.UTF_8)))
@@ -577,4 +581,14 @@ class RunDeveloperStageUseCase(
             throw cancelled
         }
     }
+}
+
+/** Diagnostic codes emitted by RunDeveloperStageUseCase; not shared protocol vocabulary. */
+internal object RunDeveloperStageUseCaseDiagnosticCodes {
+    const val UNSUPPORTED_DEVELOPER_STAGE = "UNSUPPORTED_DEVELOPER_STAGE"
+    const val TARGET_READ_UNAVAILABLE = "TARGET_READ_UNAVAILABLE"
+    const val STALE_TARGET_BASELINE = "STALE_TARGET_BASELINE"
+    const val CREATE_TARGET_EXISTS = "CREATE_TARGET_EXISTS"
+    const val TARGET_ENCODING_INVALID = "TARGET_ENCODING_INVALID"
+    const val INVALID_DEVELOPER_PROPOSAL = "INVALID_DEVELOPER_PROPOSAL"
 }

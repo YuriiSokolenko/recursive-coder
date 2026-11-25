@@ -209,7 +209,8 @@ class RunFiveRoleWorkflowUseCase(
 
         val initial = try { host.snapshot() }
         catch (cancelled: CancellationException) { throw cancelled }
-        catch (_: Exception) { return uncertain(StageKind.SDD, "HOST_SNAPSHOT_UNAVAILABLE") }
+        catch (_: Exception) { return uncertain(StageKind.SDD,
+            RunFiveRoleWorkflowUseCaseDiagnosticCodes.HOST_SNAPSHOT_UNAVAILABLE) }
         if (StageGraphPolicy.validate(initial.graph) != StageGateDecision.Permit ||
             initial.graph.state != StageGraphState.RUNNING ||
             initial.graph.stages.count { it.supersededBy == null } != 1 ||
@@ -225,7 +226,8 @@ class RunFiveRoleWorkflowUseCase(
             val before = authoritative
             val current = try { host.snapshot() }
             catch (cancelled: CancellationException) { throw cancelled }
-            catch (_: Exception) { return uncertain(kind, "HOST_SNAPSHOT_UNAVAILABLE") }
+            catch (_: Exception) { return uncertain(kind,
+                RunFiveRoleWorkflowUseCaseDiagnosticCodes.HOST_SNAPSHOT_UNAVAILABLE) }
             if (current != before) return uncertain(kind, "WORKFLOW_STATE_CHANGED")
             val stage = current.graph.stages.singleOrNull {
                 it.kind == kind && it.supersededBy == null
@@ -234,7 +236,7 @@ class RunFiveRoleWorkflowUseCase(
                 return stop(kind, "WORKFLOW_STAGE_NOT_READY", current)
             // Never start a model-backed stage once the graph-wide budget is spent.
             if (spentTokens >= maxTokens)
-                return stop(kind, "GRAPH_TOKEN_BUDGET_EXHAUSTED", current)
+                return stop(kind, RunFiveRoleWorkflowUseCaseDiagnosticCodes.GRAPH_TOKEN_BUDGET_EXHAUSTED, current)
             val id = stage.correlation.stageRunId
             var stageUsage = StageRoleUsage()
 
@@ -251,10 +253,13 @@ class RunFiveRoleWorkflowUseCase(
                         is PreparationStageOutcome.Accepted -> {
                             if (outcome.manifest.id != output.id ||
                                 outcome.manifest.declaredPath != output.path)
-                                return uncertain(kind, "WORKFLOW_OUTPUT_MISMATCH")
-                            val graph = done.graph ?: return uncertain(kind, "MISSING_COMMITTED_GRAPH")
+                                return uncertain(kind,
+                                    RunFiveRoleWorkflowUseCaseDiagnosticCodes.WORKFLOW_OUTPUT_MISMATCH)
+                            val graph = done.graph ?: return uncertain(kind,
+                                RunFiveRoleWorkflowUseCaseDiagnosticCodes.MISSING_COMMITTED_GRAPH)
                             val ids = done.hostAcceptedArtifactIds
-                                ?: return uncertain(kind, "MISSING_HOST_ACCEPTANCE")
+                                ?: return uncertain(kind,
+                                    RunFiveRoleWorkflowUseCaseDiagnosticCodes.MISSING_HOST_ACCEPTANCE)
                             stageUsage = outcome.usage
                             PreparationStageSnapshot(graph, ids)
                         }
@@ -273,7 +278,7 @@ class RunFiveRoleWorkflowUseCase(
                                 }
                             })
                         is PreparationStageOutcome.AwaitingHuman ->
-                            return stop(kind, "HUMAN_APPROVAL_REQUIRED", done.graph?.let { graph ->
+                            return stop(kind, StageDenialCodes.HUMAN_APPROVAL_REQUIRED, done.graph?.let { graph ->
                                 done.hostAcceptedArtifactIds?.let { ids ->
                                     PreparationStageSnapshot(graph, ids)
                                 }
@@ -292,7 +297,8 @@ class RunFiveRoleWorkflowUseCase(
                         is DeveloperStageOutcome.Accepted -> {
                             if (outcome.manifest.id != output.id ||
                                 outcome.manifest.declaredPath != output.path)
-                                return uncertain(kind, "WORKFLOW_OUTPUT_MISMATCH")
+                                return uncertain(kind,
+                                    RunFiveRoleWorkflowUseCaseDiagnosticCodes.WORKFLOW_OUTPUT_MISMATCH)
                             developerHandoff = DeveloperReviewEvidence(
                                 outcome.manifest,
                                 outcome.changedFiles.map { file ->
@@ -300,9 +306,11 @@ class RunFiveRoleWorkflowUseCase(
                                 },
                                 outcome.writeToolId, outcome.validation, outcome.usage
                             )
-                            val graph = done.graph ?: return uncertain(kind, "MISSING_COMMITTED_GRAPH")
+                            val graph = done.graph ?: return uncertain(kind,
+                                RunFiveRoleWorkflowUseCaseDiagnosticCodes.MISSING_COMMITTED_GRAPH)
                             val ids = done.hostAcceptedArtifactIds
-                                ?: return uncertain(kind, "MISSING_HOST_ACCEPTANCE")
+                                ?: return uncertain(kind,
+                                    RunFiveRoleWorkflowUseCaseDiagnosticCodes.MISSING_HOST_ACCEPTANCE)
                             stageUsage = outcome.usage
                             PreparationStageSnapshot(graph, ids)
                         }
@@ -336,9 +344,11 @@ class RunFiveRoleWorkflowUseCase(
                         roleEvents, reviewerEvents)
                     when (val outcome = done.outcome) {
                         is ReviewerStageOutcome.Accepted -> {
-                            val graph = done.graph ?: return uncertain(kind, "MISSING_COMMITTED_GRAPH")
+                            val graph = done.graph ?: return uncertain(kind,
+                                RunFiveRoleWorkflowUseCaseDiagnosticCodes.MISSING_COMMITTED_GRAPH)
                             val ids = done.hostAcceptedArtifactIds
-                                ?: return uncertain(kind, "MISSING_HOST_ACCEPTANCE")
+                                ?: return uncertain(kind,
+                                    RunFiveRoleWorkflowUseCaseDiagnosticCodes.MISSING_HOST_ACCEPTANCE)
                             stageUsage = outcome.usage
                             PreparationStageSnapshot(graph, ids)
                         }
@@ -374,19 +384,21 @@ class RunFiveRoleWorkflowUseCase(
             }
             val after = try { host.snapshot() }
             catch (cancelled: CancellationException) { throw cancelled }
-            catch (_: Exception) { return uncertain(kind, "HOST_SNAPSHOT_UNAVAILABLE") }
+            catch (_: Exception) { return uncertain(kind,
+                RunFiveRoleWorkflowUseCaseDiagnosticCodes.HOST_SNAPSHOT_UNAVAILABLE) }
             if (after != result) return uncertain(kind, "UNCONFIRMED_STAGE_COMMIT")
             // The committed stage stays auditable, but the workflow must not advance
             // past a graph-wide overrun or unknown usage (issue #156).
             spentTokens = FiveRoleTokenBudget.charge(spentTokens, stageUsage, maxTokens)
-                ?: return stop(kind, "GRAPH_TOKEN_BUDGET_EXHAUSTED", result)
+                ?: return stop(kind, RunFiveRoleWorkflowUseCaseDiagnosticCodes.GRAPH_TOKEN_BUDGET_EXHAUSTED, result)
             authoritative = result
             if (index < order.lastIndex) {
                 val next = order[index + 1]
                 authoritative = try { host.advance(result, next,
                     if (next == StageKind.REVIEW) developerHandoff else null) }
                 catch (cancelled: CancellationException) { throw cancelled }
-                catch (_: Exception) { return uncertain(kind, "STAGE_RECONCILIATION_UNCONFIRMED") }
+                catch (_: Exception) { return uncertain(kind,
+                    RunFiveRoleWorkflowUseCaseDiagnosticCodes.STAGE_RECONCILIATION_UNCONFIRMED) }
                     ?: return uncertain(kind, "STAGE_RECONCILIATION_DENIED")
                 if (StageGraphPolicy.validate(authoritative.graph) != StageGateDecision.Permit ||
                     authoritative.graph.stages.singleOrNull {
@@ -396,10 +408,10 @@ class RunFiveRoleWorkflowUseCase(
                 val confirmed = try { host.snapshot() }
                 catch (cancelled: CancellationException) { throw cancelled }
                 catch (_: Exception) {
-                    return uncertain(next, "STAGE_RECONCILIATION_UNCONFIRMED")
+                    return uncertain(next, RunFiveRoleWorkflowUseCaseDiagnosticCodes.STAGE_RECONCILIATION_UNCONFIRMED)
                 }
                 if (confirmed != authoritative)
-                    return uncertain(next, "STAGE_RECONCILIATION_UNCONFIRMED")
+                    return uncertain(next, RunFiveRoleWorkflowUseCaseDiagnosticCodes.STAGE_RECONCILIATION_UNCONFIRMED)
             }
         }
         val reviewerId = authoritative.graph.stages.single {
@@ -408,7 +420,8 @@ class RunFiveRoleWorkflowUseCase(
         // The final host CAS must attest reviewer provenance and physical bytes.
         val completed = try { host.finishSuccess(authoritative, reviewerId) }
         catch (cancelled: CancellationException) { throw cancelled }
-        catch (_: Exception) { return uncertain(StageKind.REVIEW, "GRAPH_FINISH_UNCONFIRMED") }
+        catch (_: Exception) { return uncertain(StageKind.REVIEW,
+            RunFiveRoleWorkflowUseCaseDiagnosticCodes.GRAPH_FINISH_UNCONFIRMED) }
             ?: return uncertain(StageKind.REVIEW, "GRAPH_FINISH_DENIED")
         if (completed.state != StageGraphState.SUCCEEDED ||
             completed.copy(state = authoritative.graph.state) != authoritative.graph ||
@@ -416,10 +429,22 @@ class RunFiveRoleWorkflowUseCase(
             return uncertain(StageKind.REVIEW, "INVALID_FINISHED_GRAPH")
         val committed = try { host.snapshot() }
         catch (cancelled: CancellationException) { throw cancelled }
-        catch (_: Exception) { return uncertain(StageKind.REVIEW, "GRAPH_FINISH_UNCONFIRMED") }
+        catch (_: Exception) { return uncertain(StageKind.REVIEW,
+            RunFiveRoleWorkflowUseCaseDiagnosticCodes.GRAPH_FINISH_UNCONFIRMED) }
         if (committed.graph != completed ||
             committed.acceptedIds != authoritative.acceptedIds)
-            return uncertain(StageKind.REVIEW, "GRAPH_FINISH_UNCONFIRMED")
+            return uncertain(StageKind.REVIEW, RunFiveRoleWorkflowUseCaseDiagnosticCodes.GRAPH_FINISH_UNCONFIRMED)
         return FiveRoleWorkflowOutcome.Completed(completed)
     }
+}
+
+/** Diagnostic codes emitted by RunFiveRoleWorkflowUseCase; not shared protocol vocabulary. */
+internal object RunFiveRoleWorkflowUseCaseDiagnosticCodes {
+    const val HOST_SNAPSHOT_UNAVAILABLE = "HOST_SNAPSHOT_UNAVAILABLE"
+    const val GRAPH_TOKEN_BUDGET_EXHAUSTED = "GRAPH_TOKEN_BUDGET_EXHAUSTED"
+    const val WORKFLOW_OUTPUT_MISMATCH = "WORKFLOW_OUTPUT_MISMATCH"
+    const val MISSING_COMMITTED_GRAPH = "MISSING_COMMITTED_GRAPH"
+    const val MISSING_HOST_ACCEPTANCE = "MISSING_HOST_ACCEPTANCE"
+    const val STAGE_RECONCILIATION_UNCONFIRMED = "STAGE_RECONCILIATION_UNCONFIRMED"
+    const val GRAPH_FINISH_UNCONFIRMED = "GRAPH_FINISH_UNCONFIRMED"
 }

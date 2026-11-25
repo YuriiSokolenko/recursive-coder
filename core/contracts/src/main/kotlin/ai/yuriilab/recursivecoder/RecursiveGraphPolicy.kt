@@ -3,6 +3,8 @@ package ai.yuriilab.recursivecoder
 import java.time.Instant
 import java.security.MessageDigest
 
+private const val STAGE_DURATION_LIMIT = "STAGE_DURATION_LIMIT"
+
 /**
  * Host-only recursive work contracts (NOT Session Protocol v1). A proposal is never an
  * authorization, and a graph ID is never a workspace or model-tool capability.
@@ -125,19 +127,19 @@ object RecursiveGraphPolicy {
             return denied("INVALID_RECURSIVE_LIMITS")
         val nodes = snapshot.nodes
         if (nodes.isEmpty() || nodes.count { it.parentGraphId == null } != 1)
-            return denied("INVALID_ROOT")
+            return denied(RecursiveGraphPolicyDiagnosticCodes.INVALID_ROOT)
         val byId = nodes.associateBy { it.graphId }
         if (byId.size != nodes.size ||
             nodes.map { it.stageRunId }.toSet().size != nodes.size)
             return denied("DUPLICATE_GRAPH_ID")
         if (nodes.size - 1 > limits.maxTotalChildren)
-            return denied("GLOBAL_CHILD_LIMIT")
+            return denied(RecursiveGraphPolicyDiagnosticCodes.GLOBAL_CHILD_LIMIT)
         val root = nodes.single { it.parentGraphId == null }
         if (root.depth != 0 || root.parentStageRunId != null || root.requestId != null ||
             root.dependencies.isNotEmpty() || root.granted.tokens > graphBudget.maxTokens ||
             root.granted.toolCalls > limits.maxToolCalls ||
             root.deadline.isAfter(limits.deadline))
-            return denied("INVALID_ROOT")
+            return denied(RecursiveGraphPolicyDiagnosticCodes.INVALID_ROOT)
         for (node in nodes) {
             if (!validId(node.taskId) || node.requestId?.let { !validId(it) } == true ||
                 node.depth !in 0..graphBudget.maxDepth || !within(node.granted, node.spent,
@@ -156,7 +158,7 @@ object RecursiveGraphPolicy {
                     node.allowedReadTools.any { it !in parent.allowedReadTools } ||
                     node.frozenPaths != parent.frozenPaths ||
                     node.deadline.isAfter(parent.deadline))
-                    return denied("CHILD_AUTHORITY_ESCALATION")
+                    return denied(RecursiveGraphPolicyDiagnosticCodes.CHILD_AUTHORITY_ESCALATION)
                 if (parent.state in setOf(RecursiveNodeState.SUCCEEDED,
                         RecursiveNodeState.FAILED, RecursiveNodeState.CANCELLED,
                         RecursiveNodeState.TIMED_OUT) &&
@@ -165,7 +167,7 @@ object RecursiveGraphPolicy {
                 if (node.dependencies.any {
                         val sibling = byId[it]
                         sibling == null || sibling.parentGraphId != node.parentGraphId
-                    }) return denied("INVALID_CHILD_DEPENDENCY")
+                    }) return denied(RecursiveGraphPolicyDiagnosticCodes.INVALID_CHILD_DEPENDENCY)
             }
         }
         // All graph parent and dependency edges must be acyclic (Kahn, no stack growth).
@@ -175,7 +177,7 @@ object RecursiveGraphPolicy {
                 it.graphId !in complete &&
                     (it.parentGraphId == null || it.parentGraphId in complete) &&
                     it.dependencies.all { dependency -> dependency in complete }
-            } ?: return denied("CYCLIC_RECURSIVE_GRAPH")
+            } ?: return denied(RecursiveGraphPolicyDiagnosticCodes.CYCLIC_RECURSIVE_GRAPH)
             complete += next.graphId
         }
         for (parent in nodes) {
@@ -186,14 +188,14 @@ object RecursiveGraphPolicy {
             for (child in children) {
                 if (child.granted.tokens > parent.granted.tokens - reservedTokens ||
                     child.granted.toolCalls > parent.granted.toolCalls - reservedTools)
-                    return denied("INVALID_CHILD_RESERVATION")
+                    return denied(RecursiveGraphPolicyDiagnosticCodes.INVALID_CHILD_RESERVATION)
                 reservedTokens += child.granted.tokens
                 reservedTools += child.granted.toolCalls
             }
             if (children.size > graphBudget.maxChildren ||
                 parent.delegated.tokens != reservedTokens ||
                 parent.delegated.toolCalls != reservedTools)
-                return denied("INVALID_CHILD_RESERVATION")
+                return denied(RecursiveGraphPolicyDiagnosticCodes.INVALID_CHILD_RESERVATION)
             if (children.map { it.requestId }.toSet().size != children.size ||
                 children.map { it.taskId }.toSet().size != children.size)
                 return denied("REPEATED_CHILD_WORK")
@@ -209,10 +211,10 @@ object RecursiveGraphPolicy {
               limits: RecursiveLimits, budget: StageBudget, now: Instant): RecursiveDecision {
         val validation = validate(snapshot, limits, budget)
         if (validation is RecursiveDecision.Denied) return validation
-        val parent = snapshot.node(parentId) ?: return denied("UNKNOWN_PARENT")
-        if (parent.state != RecursiveNodeState.RUNNING) return denied("PARENT_NOT_RUNNING")
-        if (!now.isBefore(limits.deadline)) return denied("GLOBAL_DEADLINE")
-        if (!now.isBefore(parent.deadline)) return denied("STAGE_DEADLINE")
+        val parent = snapshot.node(parentId) ?: return denied(RecursiveDenialCodes.UNKNOWN_PARENT)
+        if (parent.state != RecursiveNodeState.RUNNING) return denied(RecursiveDenialCodes.PARENT_NOT_RUNNING)
+        if (!now.isBefore(limits.deadline)) return denied(RecursiveDenialCodes.GLOBAL_DEADLINE)
+        if (!now.isBefore(parent.deadline)) return denied(RecursiveDenialCodes.STAGE_DEADLINE)
         if (!validId(request.requestId) || !validId(request.taskId))
             return denied("INVALID_CHILD_IDENTITY")
         if (request.parentGraphId != parent.graphId ||
@@ -220,50 +222,51 @@ object RecursiveGraphPolicy {
             return denied("PARENT_ORIGIN_MISMATCH")
         if (snapshot.nodes.any { it.parentGraphId == parent.graphId &&
                 it.requestId == request.requestId })
-            return denied("REPEATED_REQUEST")
+            return denied(RecursiveDenialCodes.REPEATED_REQUEST)
         if (snapshot.nodes.any { it.parentGraphId == parent.graphId &&
                 it.taskId == request.taskId })
-            return denied("NO_PROGRESS_LOOP")
+            return denied(RecursiveGraphPolicyDiagnosticCodes.NO_PROGRESS_LOOP)
         var ancestor: RecursiveNode? = parent
         while (ancestor != null) {
-            if (ancestor.taskId == request.taskId) return denied("NO_PROGRESS_LOOP")
+            if (ancestor.taskId == request.taskId) return denied(RecursiveGraphPolicyDiagnosticCodes.NO_PROGRESS_LOOP)
             ancestor = ancestor.parentGraphId?.let(snapshot::node)
         }
         if (parent.depth >= budget.maxDepth) return denied("DEPTH_LIMIT")
-        if (snapshot.nodes.size - 1 >= limits.maxTotalChildren) return denied("GLOBAL_CHILD_LIMIT")
+        if (snapshot.nodes.size - 1 >= limits.maxTotalChildren) return denied(
+            RecursiveGraphPolicyDiagnosticCodes.GLOBAL_CHILD_LIMIT)
         if (snapshot.nodes.count { it.parentGraphId == parent.graphId } >= budget.maxChildren)
             return denied("CHILD_COUNT_LIMIT")
         if (request.maxTokens <= 0 || request.maxToolCalls < 0)
             return denied("INVALID_CHILD_BUDGET")
         if (request.maxTokens > parent.granted.tokens - parent.spent.tokens -
                 parent.delegated.tokens)
-            return denied("TOKEN_BUDGET_EXHAUSTED")
+            return denied(RecursiveDenialCodes.TOKEN_BUDGET_EXHAUSTED)
         if (request.maxToolCalls > parent.granted.toolCalls - parent.spent.toolCalls -
                 parent.delegated.toolCalls)
-            return denied("TOOL_BUDGET_EXHAUSTED")
+            return denied(RecursiveDenialCodes.TOOL_BUDGET_EXHAUSTED)
         if (request.maxDurationMillis <= 0 ||
             request.maxDurationMillis > limits.maxStageDurationMillis ||
             request.maxDurationMillis > budget.maxDurationMillis)
-            return denied("STAGE_DURATION_LIMIT")
+            return denied(STAGE_DURATION_LIMIT)
         val childDeadline = try { now.plusMillis(request.maxDurationMillis) }
-            catch (_: Exception) { return denied("STAGE_DURATION_LIMIT") }
+            catch (_: Exception) { return denied(STAGE_DURATION_LIMIT) }
         if (childDeadline.isAfter(parent.deadline) || childDeadline.isAfter(limits.deadline))
-            return denied("STAGE_DURATION_LIMIT")
+            return denied(STAGE_DURATION_LIMIT)
         if (request.writablePaths.any { it !in parent.writablePaths ||
                 it in parent.frozenPaths } ||
             !roleScope(parent.origin.role, request.writablePaths) ||
             request.allowedReadTools.any { it !in parent.allowedReadTools } ||
             !validReadTools(request.allowedReadTools))
-            return denied("CHILD_AUTHORITY_ESCALATION")
+            return denied(RecursiveGraphPolicyDiagnosticCodes.CHILD_AUTHORITY_ESCALATION)
         val childGraphId = childId(parent.graphId, parent.stageRunId, request.requestId)
         if (childGraphId in request.dependsOn || childGraphId == parent.graphId)
-            return denied("CYCLIC_RECURSIVE_GRAPH")
-        if (snapshot.node(childGraphId) != null) return denied("REPEATED_REQUEST")
+            return denied(RecursiveGraphPolicyDiagnosticCodes.CYCLIC_RECURSIVE_GRAPH)
+        if (snapshot.node(childGraphId) != null) return denied(RecursiveDenialCodes.REPEATED_REQUEST)
         if (request.dependsOn.any {
                 val sibling = snapshot.node(it)
                 sibling == null || sibling.parentGraphId != parent.graphId
             })
-            return denied("INVALID_CHILD_DEPENDENCY")
+            return denied(RecursiveGraphPolicyDiagnosticCodes.INVALID_CHILD_DEPENDENCY)
         return RecursiveDecision.Allowed(RecursiveNode(
             graphId = childGraphId, stageRunId = childStageId(childGraphId),
             parentGraphId = parent.graphId, parentStageRunId = parent.stageRunId,
@@ -280,12 +283,23 @@ object RecursiveGraphPolicy {
         if (node.state != RecursiveNodeState.RUNNING) return denied("STAGE_NOT_RUNNING")
         if (!validUsage(usage)) return denied("INVALID_USAGE")
         if (usage.tokens > node.granted.tokens - node.spent.tokens - node.delegated.tokens)
-            return denied("TOKEN_BUDGET_EXHAUSTED")
+            return denied(RecursiveDenialCodes.TOKEN_BUDGET_EXHAUSTED)
         if (usage.toolCalls > node.granted.toolCalls - node.spent.toolCalls -
                 node.delegated.toolCalls)
-            return denied("TOOL_BUDGET_EXHAUSTED")
+            return denied(RecursiveDenialCodes.TOOL_BUDGET_EXHAUSTED)
         return RecursiveDecision.Allowed(node.copy(spent = RecursiveUsage(
             node.spent.tokens + usage.tokens, node.spent.toolCalls + usage.toolCalls
         )))
     }
+}
+
+/** Diagnostic codes emitted by RecursiveGraphPolicy; not shared protocol vocabulary. */
+internal object RecursiveGraphPolicyDiagnosticCodes {
+    const val INVALID_ROOT = "INVALID_ROOT"
+    const val GLOBAL_CHILD_LIMIT = "GLOBAL_CHILD_LIMIT"
+    const val CHILD_AUTHORITY_ESCALATION = "CHILD_AUTHORITY_ESCALATION"
+    const val INVALID_CHILD_DEPENDENCY = "INVALID_CHILD_DEPENDENCY"
+    const val CYCLIC_RECURSIVE_GRAPH = "CYCLIC_RECURSIVE_GRAPH"
+    const val INVALID_CHILD_RESERVATION = "INVALID_CHILD_RESERVATION"
+    const val NO_PROGRESS_LOOP = "NO_PROGRESS_LOOP"
 }

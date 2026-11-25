@@ -20,6 +20,14 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 
+private const val UNSAFE_STAGE_FILE = "UNSAFE_STAGE_FILE"
+private const val UNSAFE_STAGE_PATH = "UNSAFE_STAGE_PATH"
+private const val STAGE_BASELINE_CHANGED = "STAGE_BASELINE_CHANGED"
+private const val FOREIGN_WORKTREE_EDIT = "FOREIGN_WORKTREE_EDIT"
+private const val INVALID_FAILED_WRITE_EVIDENCE = "INVALID_FAILED_WRITE_EVIDENCE"
+private const val MAX_FAILED_WRITE_FILES = 8
+private const val MAX_STAGE_FILE_BYTES = 4 * 1024 * 1024
+
 /**
  * Host-only Git handoff. The caller MUST separately authenticate the stage's
  * write/check receipts and host-approved artifact manifests before invoking it.
@@ -49,6 +57,9 @@ data class StageGitUnacceptedFile(
  * The caller must establish the terminal, non-accepted graph/CAS generation
  * before submitting this in-memory evidence. Not a model-facing authority.
  * These before-images are deliberately not serialized or restart durable.
+ * The caller owns the collections and arrays and must keep them stable during
+ * capture by recoverFailedDeveloper (including iteration order and byte contents).
+ * Copying is not synchronization; use exclusive ownership or external fencing.
  */
 data class StageGitFailedWriteRequest(
     val expectedHead: String,
@@ -88,7 +99,8 @@ sealed interface StageGitReconciliationResult {
  * These are never reachable from model inputs, serialized requests, or the CLI.
  */
 internal enum class StageGitTestCheckpoint {
-    BEFORE_REF_UPDATE, AFTER_REF_UPDATE, BEFORE_BASELINE_FINAL_READ
+    BEFORE_REF_UPDATE, AFTER_REF_UPDATE, BEFORE_BASELINE_FINAL_READ,
+    AFTER_FAILED_WRITE_EVIDENCE_VALIDATION, BEFORE_FAILED_WRITE_RESTORE
 }
 internal fun interface StageGitTestObserver {
     fun at(checkpoint: StageGitTestCheckpoint)
@@ -148,17 +160,17 @@ class LinuxStageGitBaselineReconciler internal constructor(
     private fun remainingNanos(deadlineNanos: Long?): Long {
         if (deadlineNanos == null) return TimeUnit.SECONDS.toNanos(15)
         val remaining = deadlineNanos - System.nanoTime()
-        if (remaining <= 0L) throw Reject("GIT_BASELINE_TIMEOUT")
+        if (remaining <= 0L) throw Reject(LinuxStageGitBaselineReconcilerDiagnosticCodes.GIT_BASELINE_TIMEOUT)
         return remaining
     }
 
     private fun canonicalRoot(): Path {
         check(System.getProperty("os.name").lowercase().contains("linux"), "LINUX_REQUIRED")
-        check(root.isAbsolute && !Files.isSymbolicLink(root), "INVALID_WORKSPACE")
+        check(root.isAbsolute && !Files.isSymbolicLink(root), WorkspaceDenialCodes.INVALID_WORKSPACE)
         val real = root.toRealPath()
-        check(real == root.normalize() && Files.isDirectory(real), "INVALID_WORKSPACE")
+        check(real == root.normalize() && Files.isDirectory(real), WorkspaceDenialCodes.INVALID_WORKSPACE)
         check(Files.isDirectory(real.resolve(".git"), LinkOption.NOFOLLOW_LINKS) &&
-            !Files.isSymbolicLink(real.resolve(".git")), "UNSUPPORTED_WORKSPACE")
+            !Files.isSymbolicLink(real.resolve(".git")), WorkspaceDenialCodes.UNSUPPORTED_WORKSPACE)
         return real
     }
 
@@ -166,11 +178,14 @@ class LinuxStageGitBaselineReconciler internal constructor(
      * Descriptor-relative no-follow reads like TrustedWriteRuntime. Path-based
      * isRegularFile/readAllBytes would be vulnerable to a symlink swap between
      * the check and read, even under the trusted-writer coordination lock.
+     * Both reconciliation paths validate their private evidence before reaching
+     * this helper; retain the syntax guard as defense in depth.
      */
     private fun read(
         root: Path, path: String, requireCanonicalMode: Boolean = false
     ): OpenedFile {
-        check(ToolAuthorizationPolicy.validDeclaredPath(path), "INVALID_STAGE_PATH")
+        check(ToolAuthorizationPolicy.validDeclaredPath(path),
+            LinuxStageGitBaselineReconcilerDiagnosticCodes.INVALID_STAGE_PATH)
         val key = Files.readAttributes(root, BasicFileAttributes::class.java,
             LinkOption.NOFOLLOW_LINKS).fileKey()
         check(key != null, WorkspaceDenialCodes.SANDBOX_UNAVAILABLE)
@@ -178,37 +193,38 @@ class LinuxStageGitBaselineReconciler internal constructor(
             val first = openedRoot as? SecureDirectoryStream<Path>
                 ?: throw Reject(WorkspaceDenialCodes.SANDBOX_UNAVAILABLE)
             check(first.getFileAttributeView(BasicFileAttributeView::class.java)
-                .readAttributes().fileKey() == key, "WORKSPACE_REPLACED")
+                .readAttributes().fileKey() == key, WorkspaceDenialCodes.WORKSPACE_REPLACED)
             var cursor = first
             val opened = mutableListOf<SecureDirectoryStream<Path>>()
             try {
                 val parts = path.split('/')
                 for (component in parts.dropLast(1)) {
                     check(cursor.any { it.fileName.toString() == component },
-                        "UNSAFE_STAGE_PATH")
+                        UNSAFE_STAGE_PATH)
                     val next = try {
                         cursor.newDirectoryStream(Path.of(component), LinkOption.NOFOLLOW_LINKS)
                     } catch (_: Exception) {
-                        throw Reject("UNSAFE_STAGE_PATH")
+                        throw Reject(UNSAFE_STAGE_PATH)
                     }
                     opened += next
                     cursor = next
                 }
                 val name = Path.of(parts.last())
                 check(cursor.any { it.fileName.toString() == name.toString() },
-                    "UNSAFE_STAGE_FILE")
+                    UNSAFE_STAGE_FILE)
                 val attributes = try {
                     cursor.getFileAttributeView(name, BasicFileAttributeView::class.java,
                         LinkOption.NOFOLLOW_LINKS).readAttributes()
                 } catch (_: Exception) {
-                    throw Reject("UNSAFE_STAGE_FILE")
+                    throw Reject(UNSAFE_STAGE_FILE)
                 }
-                check(attributes.isRegularFile && attributes.size() <= 4 * 1024 * 1024L,
-                    "UNSAFE_STAGE_FILE")
+                check(attributes.isRegularFile && attributes.size() <= MAX_STAGE_FILE_BYTES,
+                    UNSAFE_STAGE_FILE)
                 val perms = try {
                     cursor.getFileAttributeView(name, PosixFileAttributeView::class.java,
                         LinkOption.NOFOLLOW_LINKS).readAttributes().permissions()
-                } catch (_: Exception) { throw Reject("UNSAFE_STAGE_FILE_MODE") }
+                } catch (_: Exception) { throw Reject(
+                    LinuxStageGitBaselineReconcilerDiagnosticCodes.UNSAFE_STAGE_FILE_MODE) }
                 // Git stores regular files as 100644 or 100755: umask-adjusted
                 // read/write bits (0600, 0644, 0664) do not change Git mode.
                 // TrustedWriteRuntime uses CREATE_NEW and respects process umask,
@@ -223,14 +239,14 @@ class LinuxStageGitBaselineReconciler internal constructor(
                     check(ownerExecutable || (
                         PosixFilePermission.GROUP_EXECUTE !in perms &&
                         PosixFilePermission.OTHERS_EXECUTE !in perms),
-                        "UNSAFE_STAGE_FILE_MODE")
+                        LinuxStageGitBaselineReconcilerDiagnosticCodes.UNSAFE_STAGE_FILE_MODE)
                     // Accepted writes must be owner-readable/writable and must
                     // not be world-writable. Immutable inputs only need a safe
                     // descriptor read, accepted digest and clean Git status.
                     check(PosixFilePermission.OWNER_READ in perms &&
                         PosixFilePermission.OWNER_WRITE in perms &&
                         PosixFilePermission.OTHERS_WRITE !in perms,
-                        "UNSAFE_STAGE_FILE_MODE")
+                        LinuxStageGitBaselineReconcilerDiagnosticCodes.UNSAFE_STAGE_FILE_MODE)
                 }
                 return try {
                     cursor.newByteChannel(name, setOf<OpenOption>(StandardOpenOption.READ,
@@ -244,15 +260,15 @@ class LinuxStageGitBaselineReconciler internal constructor(
                             buffer.flip()
                             result.write(buffer.array(), 0, n)
                             buffer.clear()
-                            check(result.size() <= 4 * 1024 * 1024,
-                                "STAGE_FILE_TOO_LARGE")
+                            check(result.size() <= MAX_STAGE_FILE_BYTES,
+                                StageDenialCodes.STAGE_FILE_TOO_LARGE)
                         }
                         OpenedFile(result.toByteArray(), mode)
                     }
                 } catch (e: Reject) {
                     throw e
                 } catch (_: Exception) {
-                    throw Reject("UNSAFE_STAGE_FILE")
+                    throw Reject(UNSAFE_STAGE_FILE)
                 }
             } finally {
                 opened.asReversed().forEach { it.close() }
@@ -269,7 +285,8 @@ class LinuxStageGitBaselineReconciler internal constructor(
         // whether a very fast Git child finishes before Future.get().
         if (Thread.currentThread().isInterrupted)
             throw Reject(if (deadlineNanos == null)
-                "GIT_COMMAND_INTERRUPTED" else "GIT_BASELINE_INTERRUPTED")
+                LinuxStageGitBaselineReconcilerDiagnosticCodes.GIT_COMMAND_INTERRUPTED else
+                    LinuxStageGitBaselineReconcilerDiagnosticCodes.GIT_BASELINE_INTERRUPTED)
         val process = ProcessBuilder(listOf(gitExecutable.toString(),
             "--no-optional-locks", "-C", root.toString(),
             "-c", "core.fsmonitor=false", "-c", "diff.external=",
@@ -316,26 +333,29 @@ class LinuxStageGitBaselineReconciler internal constructor(
             check(process.waitFor(
                 minOf(TimeUnit.SECONDS.toNanos(1), remainingNanos(deadlineNanos)),
                 TimeUnit.NANOSECONDS
-            ), if (deadlineNanos == null) "GIT_TIMEOUT" else "GIT_BASELINE_TIMEOUT")
+            ), if (deadlineNanos == null) WorkspaceGitDenialCodes.GIT_TIMEOUT else
+                LinuxStageGitBaselineReconcilerDiagnosticCodes.GIT_BASELINE_TIMEOUT)
             check(process.exitValue() == 0, "GIT_COMMAND_DENIED")
             return StandardCharsets.UTF_8.newDecoder().decode(
                 java.nio.ByteBuffer.wrap(output)).toString().trimEnd('\n')
         } catch (e: Reject) {
             throw e
         } catch (_: TimeoutException) {
-            throw Reject(if (deadlineNanos == null) "GIT_TIMEOUT" else "GIT_BASELINE_TIMEOUT")
+            throw Reject(if (deadlineNanos == null) WorkspaceGitDenialCodes.GIT_TIMEOUT else
+                LinuxStageGitBaselineReconcilerDiagnosticCodes.GIT_BASELINE_TIMEOUT)
         } catch (e: ExecutionException) {
             val cause = e.cause
             if (cause is Reject) throw cause
-            throw Reject("GIT_COMMAND_UNAVAILABLE")
+            throw Reject(LinuxStageGitBaselineReconcilerDiagnosticCodes.GIT_COMMAND_UNAVAILABLE)
         } catch (_: InterruptedException) {
             // Future.get / waitFor can be interrupted while Git is running.
             // Preserve the caller's cancellation signal and fail closed.
             Thread.currentThread().interrupt()
             throw Reject(if (deadlineNanos == null)
-                "GIT_COMMAND_INTERRUPTED" else "GIT_BASELINE_INTERRUPTED")
+                LinuxStageGitBaselineReconcilerDiagnosticCodes.GIT_COMMAND_INTERRUPTED else
+                    LinuxStageGitBaselineReconcilerDiagnosticCodes.GIT_BASELINE_INTERRUPTED)
         } catch (_: Exception) {
-            throw Reject("GIT_COMMAND_UNAVAILABLE")
+            throw Reject(LinuxStageGitBaselineReconcilerDiagnosticCodes.GIT_COMMAND_UNAVAILABLE)
         } finally {
             if (process.isAlive) process.destroyForcibly()
             future.cancel(true)
@@ -351,13 +371,13 @@ class LinuxStageGitBaselineReconciler internal constructor(
         // copies are denied because no allowed status has an index-side change.
         val paths = linkedMapOf<String, String>()
         for (record in raw.split('\u0000').filter(String::isNotEmpty)) {
-            check(record.length >= 4 && record[2] == ' ', "GIT_STATUS_INVALID")
+            check(record.length >= 4 && record[2] == ' ', WorkspaceGitDenialCodes.GIT_STATUS_INVALID)
             val state = record.substring(0, 2)
             val path = record.substring(3)
             check(state == "??" || state == " M" || state == "!!",
-                "UNEXPECTED_GIT_CHANGE")
+                LinuxStageGitBaselineReconcilerDiagnosticCodes.UNEXPECTED_GIT_CHANGE)
             check(ToolAuthorizationPolicy.validDeclaredPath(path) &&
-                paths.put(path, state) == null, "GIT_STATUS_INVALID")
+                paths.put(path, state) == null, WorkspaceGitDenialCodes.GIT_STATUS_INVALID)
         }
         return paths
     }
@@ -365,12 +385,13 @@ class LinuxStageGitBaselineReconciler internal constructor(
     private fun verifyFacts(root: Path, request: StageGitReconciliationRequest,
         expectedStatuses: Map<String, String>): Map<String, OpenedFile> {
         check(git(root, listOf("rev-parse", "HEAD")) == request.expectedHead,
-            "STAGE_BASELINE_CHANGED")
+            STAGE_BASELINE_CHANGED)
         check(git(root, listOf("symbolic-ref", "-q", "HEAD")) ==
-            "refs/heads/" + request.branch, "STAGE_BRANCH_CHANGED")
-        check(status(root) == expectedStatuses, "STAGE_WORKSPACE_CHANGED")
+            "refs/heads/" + request.branch, LinuxStageGitBaselineReconcilerDiagnosticCodes.STAGE_BRANCH_CHANGED)
+        check(status(root) == expectedStatuses, LinuxStageGitBaselineReconcilerDiagnosticCodes.STAGE_WORKSPACE_CHANGED)
         for ((path, hash) in request.frozenArtifacts) {
-            check(digest(read(root, path).bytes) == hash, "FROZEN_ARTIFACT_CHANGED")
+            check(digest(read(root, path).bytes) == hash,
+                LinuxStageGitBaselineReconcilerDiagnosticCodes.FROZEN_ARTIFACT_CHANGED)
         }
         return request.acceptedFiles.associate { change ->
             val bytes = read(root, change.path, requireCanonicalMode = true)
@@ -407,17 +428,17 @@ class LinuxStageGitBaselineReconciler internal constructor(
             }
         }
         check(safeConfig && config.lines().any { it == "core.filemode=true" },
-            "UNSAFE_GIT_CONFIGURATION")
+            WorkspaceDenialCodes.UNSAFE_GIT_CONFIGURATION)
         val flags = git(root, listOf("ls-files", "-v", "-z"),
             deadlineNanos = deadlineNanos)
         check(flags.split('\u0000').filter(String::isNotEmpty).all {
             it.startsWith("H ")
-        }, "UNSAFE_GIT_INDEX")
+        }, WorkspaceWriteDenialCodes.UNSAFE_GIT_INDEX)
         val staged = git(root, listOf("ls-files", "--stage", "-z"),
             deadlineNanos = deadlineNanos)
         check(staged.split('\u0000').filter(String::isNotEmpty).all {
             it.startsWith("100644 ") || it.startsWith("100755 ")
-        }, "UNSAFE_GIT_INDEX")
+        }, WorkspaceWriteDenialCodes.UNSAFE_GIT_INDEX)
     }
 
     /**
@@ -432,19 +453,21 @@ class LinuxStageGitBaselineReconciler internal constructor(
         check(gitObjectId.matches(expectedHead) && gitRef.matches(branch) &&
             !branch.contains("..") && !branch.contains("//") &&
             !branch.endsWith("/") && !branch.endsWith(".lock") &&
-            branch.split('/').none { it.startsWith(".") }, "INVALID_GIT_BASELINE")
+            branch.split('/').none { it.startsWith(".") },
+                LinuxStageGitBaselineReconcilerDiagnosticCodes.INVALID_GIT_BASELINE)
         val real = canonicalRoot()
         check(git(real, listOf("rev-parse", "--show-toplevel"),
             deadlineNanos = deadline) == real.toString() &&
             Path.of(git(real, listOf("rev-parse", "--absolute-git-dir"),
                 deadlineNanos = deadline)).toRealPath() ==
-                real.resolve(".git").toRealPath(), "UNSUPPORTED_WORKSPACE")
+                real.resolve(".git").toRealPath(), WorkspaceDenialCodes.UNSUPPORTED_WORKSPACE)
         check(git(real, listOf("rev-parse", "HEAD"), deadlineNanos = deadline) ==
-            expectedHead, "STAGE_BASELINE_CHANGED")
+            expectedHead, STAGE_BASELINE_CHANGED)
         check(git(real, listOf("symbolic-ref", "-q", "HEAD"),
-            deadlineNanos = deadline) == "refs/heads/" + branch, "STAGE_BRANCH_CHANGED")
+            deadlineNanos = deadline) == "refs/heads/" + branch,
+                LinuxStageGitBaselineReconcilerDiagnosticCodes.STAGE_BRANCH_CHANGED)
         verifyRepositoryConfiguration(real, deadline)
-        check(status(real, deadline).isEmpty(), "STAGE_WORKSPACE_CHANGED")
+        check(status(real, deadline).isEmpty(), LinuxStageGitBaselineReconcilerDiagnosticCodes.STAGE_WORKSPACE_CHANGED)
         // Test-only deterministic ref-drift/total-budget seam. Not available to
         // models, CLI or the public production constructor.
         testObserver?.at(StageGitTestCheckpoint.BEFORE_BASELINE_FINAL_READ)
@@ -452,13 +475,13 @@ class LinuxStageGitBaselineReconciler internal constructor(
         check(git(real, listOf("rev-parse", "HEAD"), deadlineNanos = deadline) ==
             expectedHead && git(real, listOf("symbolic-ref", "-q", "HEAD"),
                 deadlineNanos = deadline) == "refs/heads/" + branch,
-            "STAGE_BASELINE_CHANGED")
+            STAGE_BASELINE_CHANGED)
         StageGitBaselineResult.Clean
     } catch (failure: Reject) {
         StageGitBaselineResult.Denied(failure.code)
     } catch (_: InterruptedException) {
         Thread.currentThread().interrupt()
-        StageGitBaselineResult.Denied("GIT_BASELINE_INTERRUPTED")
+        StageGitBaselineResult.Denied(LinuxStageGitBaselineReconcilerDiagnosticCodes.GIT_BASELINE_INTERRUPTED)
     } catch (_: Exception) {
         StageGitBaselineResult.Denied("GIT_BASELINE_UNAVAILABLE")
     }
@@ -474,12 +497,13 @@ class LinuxStageGitBaselineReconciler internal constructor(
             !request.branch.contains("//") && !request.branch.endsWith("/") &&
             !request.branch.endsWith(".lock") &&
             !request.branch.split('/').any { it.startsWith(".") },
-            "INVALID_GIT_BASELINE")
+            LinuxStageGitBaselineReconcilerDiagnosticCodes.INVALID_GIT_BASELINE)
         check(request.acceptedFiles.isNotEmpty() &&
-            request.acceptedFiles.size <= 8, "INVALID_STAGE_CHANGESET")
+            request.acceptedFiles.size <= 8, LinuxStageGitBaselineReconcilerDiagnosticCodes.INVALID_STAGE_CHANGESET)
         val names = request.acceptedFiles.map { it.path }
         check(names.toSet().size == names.size &&
-            request.frozenArtifacts.keys.none { it in names }, "INVALID_STAGE_CHANGESET")
+            request.frozenArtifacts.keys.none { it in names },
+                LinuxStageGitBaselineReconcilerDiagnosticCodes.INVALID_STAGE_CHANGESET)
         check(request.acceptedFiles.all {
             sha256.matches(it.sha256) &&
                 ToolAuthorizationPolicy.authorizeWrite(WriteAuthorizationFacts(
@@ -487,26 +511,26 @@ class LinuxStageGitBaselineReconciler internal constructor(
                 )) == ToolAuthorizationDecision.Permit
         } && request.frozenArtifacts.all { (path, hash) ->
             ToolAuthorizationPolicy.validDeclaredPath(path) && sha256.matches(hash)
-        }, "INVALID_STAGE_CHANGESET")
+        }, LinuxStageGitBaselineReconcilerDiagnosticCodes.INVALID_STAGE_CHANGESET)
         check(git(root, listOf("rev-parse", "--show-toplevel")) == root.toString() &&
             Path.of(git(root, listOf("rev-parse", "--absolute-git-dir"))).toRealPath() ==
-            root.resolve(".git").toRealPath(), "UNSUPPORTED_WORKSPACE")
+            root.resolve(".git").toRealPath(), WorkspaceDenialCodes.UNSUPPORTED_WORKSPACE)
         // Check authoritative ref identity before inspecting index/worktree state.
         // After an interrupted post-CAS handoff the index may be stale, but
         // a caller retrying with an old baseline must receive the precise
         // STAGE_BASELINE_CHANGED denial instead of an unrelated status code.
         check(git(root, listOf("rev-parse", "HEAD")) == request.expectedHead,
-            "STAGE_BASELINE_CHANGED")
+            STAGE_BASELINE_CHANGED)
         check(git(root, listOf("symbolic-ref", "-q", "HEAD")) ==
-            "refs/heads/" + request.branch, "STAGE_BRANCH_CHANGED")
+            "refs/heads/" + request.branch, LinuxStageGitBaselineReconcilerDiagnosticCodes.STAGE_BRANCH_CHANGED)
         verifyRepositoryConfiguration(root)
         val changed = status(root)
         // The read-only baseline status parser accepts '!!' to produce a
         // useful dirty-check denial, but an ignored file is NEVER an
         // acceptable mutable stage change, even if the path is on the
         // authenticated accepted-file list.
-        check(changed.values.none { it == "!!" }, "UNEXPECTED_GIT_CHANGE")
-        check(changed.keys == names.toSet(), "UNEXPECTED_GIT_CHANGE")
+        check(changed.values.none { it == "!!" }, LinuxStageGitBaselineReconcilerDiagnosticCodes.UNEXPECTED_GIT_CHANGE)
+        check(changed.keys == names.toSet(), LinuxStageGitBaselineReconcilerDiagnosticCodes.UNEXPECTED_GIT_CHANGE)
         val bytes = verifyFacts(root, request, changed)
         // Commit-tree records file modes. Mode-only changes are not part of
         // trusted writes and must be rejected BEFORE the ref CAS.
@@ -515,11 +539,11 @@ class LinuxStageGitBaselineReconciler internal constructor(
             val trackedMode = if (status == "??") null else {
                 val line = git(root, listOf("ls-tree", "HEAD", "--", item.path))
                 line.substringBefore(' ').takeIf { it in setOf("100644", "100755") }
-                    ?: throw Reject("UNSAFE_GIT_ENTRY")
+                    ?: throw Reject(LinuxStageGitBaselineReconcilerDiagnosticCodes.UNSAFE_GIT_ENTRY)
             }
             val expectedMode = trackedMode ?: "100644"
             check(bytes.getValue(item.path).gitMode == expectedMode,
-                "UNSAFE_STAGE_FILE_MODE")
+                LinuxStageGitBaselineReconcilerDiagnosticCodes.UNSAFE_STAGE_FILE_MODE)
             val decision = ToolAuthorizationPolicy.authorizeWrite(WriteAuthorizationFacts(
                 request.actorRole,
                 if (trackedMode == null) WriteOperationKind.CREATE else WriteOperationKind.EDIT,
@@ -534,30 +558,40 @@ class LinuxStageGitBaselineReconciler internal constructor(
     /**
      * On success returns a clean new HEAD. The caller MUST persist the new
      * baseline in its fenced host snapshot before admitting another stage.
+     * The caller must keep both request collections stable while they are copied
+     * at entry (including their iteration order). Copying is not synchronization;
+     * the caller must arrange exclusive ownership or external synchronization
+     * during capture. Later caller mutations cannot affect this invocation.
      */
     fun reconcile(request: StageGitReconciliationRequest): StageGitReconciliationResult {
         var updatedRef = false
         var index: Path? = null
         try {
+            // Accepted entries and map keys/values contain only immutable values.
+            // Preserve the supplied iteration order; never consult caller collections again.
+            val snapshot = request.copy(
+                acceptedFiles = request.acceptedFiles.toList(),
+                frozenArtifacts = request.frozenArtifacts.toMap()
+            )
             val real = canonicalRoot()
             check(lockDirectory.isAbsolute && !Files.isSymbolicLink(lockDirectory),
-                "WORKSPACE_LOCK_UNAVAILABLE")
+                WorkspaceDenialCodes.WORKSPACE_LOCK_UNAVAILABLE)
             Files.createDirectories(lockDirectory)
             val locks = lockDirectory.toRealPath()
             check(!locks.startsWith(real) && !real.startsWith(locks),
-                "WORKSPACE_LOCK_UNAVAILABLE")
+                WorkspaceDenialCodes.WORKSPACE_LOCK_UNAVAILABLE)
             val key = digest(real.toString().toByteArray())
             val lockPath = locks.resolve("$key.lock")
             FileChannel.open(lockPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE,
                 LinkOption.NOFOLLOW_LINKS).use { channel ->
                 val lease = try { channel.tryLock() } catch (_: Exception) { null }
-                check(lease != null, "WORKSPACE_LOCKED")
+                check(lease != null, WorkspaceDenialCodes.WORKSPACE_LOCKED)
                 requireNotNull(lease).use {
-                    val (before, contents) = preflight(real, request)
+                    val (before, contents) = preflight(real, snapshot)
                     index = Files.createTempFile(locks, "stage-git-index-", ".tmp")
                     Files.delete(requireNotNull(index))
-                    git(real, listOf("read-tree", request.expectedHead), index = index)
-                    for (item in request.acceptedFiles.sortedBy { it.path }) {
+                    git(real, listOf("read-tree", snapshot.expectedHead), index = index)
+                    for (item in snapshot.acceptedFiles.sortedBy { it.path }) {
                         val oid = git(real, listOf("hash-object", "-w", "--stdin"),
                             contents.getValue(item.path).bytes)
                         check(gitObjectId.matches(oid), "INVALID_GIT_OBJECT")
@@ -565,7 +599,7 @@ class LinuxStageGitBaselineReconciler internal constructor(
                             val entry = git(real, listOf("ls-tree", "HEAD", "--", item.path))
                             val trackedMode = entry.substringBefore(' ')
                             check(trackedMode == "100644" || trackedMode == "100755",
-                                "UNSAFE_GIT_ENTRY")
+                                LinuxStageGitBaselineReconcilerDiagnosticCodes.UNSAFE_GIT_ENTRY)
                             trackedMode
                         }
                         git(real, listOf("update-index", "--add", "--cacheinfo",
@@ -574,18 +608,18 @@ class LinuxStageGitBaselineReconciler internal constructor(
                     val tree = git(real, listOf("write-tree"), index = index)
                     check(gitObjectId.matches(tree), "INVALID_GIT_TREE")
                     val commit = git(real, listOf("commit-tree", tree,
-                        "-p", request.expectedHead, "-m",
-                        "Recursive Coder accepted " + request.actorRole.name.lowercase() + " stage"))
+                        "-p", snapshot.expectedHead, "-m",
+                        "Recursive Coder accepted " + snapshot.actorRole.name.lowercase() + " stage"))
                     check(gitObjectId.matches(commit), "INVALID_GIT_COMMIT")
-                    verifyFacts(real, request, before)
+                    verifyFacts(real, snapshot, before)
                     // The test-only observer can simulate an external actor
                     // moving the ref before our compare-and-swap. That observer
                     // does not grant any capability to the model or CLI.
                     testObserver?.at(StageGitTestCheckpoint.BEFORE_REF_UPDATE)
                     // From here the ref may have moved, even if Git reports failure.
                     updatedRef = true
-                    git(real, listOf("update-ref", "refs/heads/" + request.branch,
-                        commit, request.expectedHead))
+                    git(real, listOf("update-ref", "refs/heads/" + snapshot.branch,
+                        commit, snapshot.expectedHead))
                     // Simulate the critical crash window: HEAD moved but the
                     // real index has not yet been aligned with the new commit.
                     testObserver?.at(StageGitTestCheckpoint.AFTER_REF_UPDATE)
@@ -593,15 +627,16 @@ class LinuxStageGitBaselineReconciler internal constructor(
                     // the exact accepted bytes and must never be reset by the host.
                     git(real, listOf("read-tree", "--reset", commit))
                     check(git(real, listOf("rev-parse", "HEAD")) == commit &&
-                        status(real).isEmpty(), "UNCERTAIN_GIT_HANDOFF")
-                    for ((path, hash) in request.frozenArtifacts)
-                        check(digest(read(real, path).bytes) == hash, "UNCERTAIN_GIT_HANDOFF")
-                    for (item in request.acceptedFiles)
+                        status(real).isEmpty(), LinuxStageGitBaselineReconcilerDiagnosticCodes.UNCERTAIN_GIT_HANDOFF)
+                    for ((path, hash) in snapshot.frozenArtifacts)
+                        check(digest(read(real, path).bytes) == hash,
+                            LinuxStageGitBaselineReconcilerDiagnosticCodes.UNCERTAIN_GIT_HANDOFF)
+                    for (item in snapshot.acceptedFiles)
                         check(digest(read(real, item.path,
                             requireCanonicalMode = true).bytes) == item.sha256,
-                            "UNCERTAIN_GIT_HANDOFF")
+                            LinuxStageGitBaselineReconcilerDiagnosticCodes.UNCERTAIN_GIT_HANDOFF)
                     return StageGitReconciliationResult.Committed(
-                        request.expectedHead, commit)
+                        snapshot.expectedHead, commit)
                 }
             }
         } catch (error: Reject) {
@@ -627,6 +662,8 @@ class LinuxStageGitBaselineReconciler internal constructor(
      * The workspace and Git index must also be isolated from foreign writers;
      * the shared advisory lease cannot protect against a hostile same-UID process.
      * A crash loses the in-memory proof and must go to #10/human recovery.
+     * The caller must keep both collections and every before-image stable during
+     * capture. After capture this invocation never consults caller-owned evidence.
      */
     fun recoverFailedDeveloper(request: StageGitFailedWriteRequest):
         StageGitFailedWriteResult {
@@ -638,48 +675,64 @@ class LinuxStageGitBaselineReconciler internal constructor(
                 !request.branch.endsWith("/") && !request.branch.endsWith(".lock") &&
                 request.branch.split('/').none { it.startsWith(".") } &&
                 ToolAuthorizationPolicy.validHostIdentifier(request.leaseGeneration),
-                "INVALID_GIT_BASELINE")
-            val changes = request.files
-            check(changes.isNotEmpty() && changes.size <= 8 &&
-                changes.map { it.path.lowercase() }.toSet().size == changes.size &&
+                LinuxStageGitBaselineReconcilerDiagnosticCodes.INVALID_GIT_BASELINE)
+            // Keep immutable baseline syntax first, as before. Bound the list
+            // and arrays before allocating copies; these are size gates, not
+            // evidence authorization. All subsequent facts come from the snapshot.
+            check(request.files.size in 1..MAX_FAILED_WRITE_FILES,
+                INVALID_FAILED_WRITE_EVIDENCE)
+            val capturedFiles = request.files.toList()
+            check(capturedFiles.size in 1..MAX_FAILED_WRITE_FILES,
+                INVALID_FAILED_WRITE_EVIDENCE)
+            val snapshot = request.copy(
+                files = capturedFiles.map { item ->
+                    val before = item.beforeBytes
+                    check(before == null || before.size <= MAX_STAGE_FILE_BYTES,
+                        INVALID_FAILED_WRITE_EVIDENCE)
+                    item.copy(beforeBytes = before?.copyOf())
+                },
+                frozenArtifacts = request.frozenArtifacts.toMap()
+            )
+            val changes = snapshot.files
+            check(changes.map { it.path.lowercase() }.toSet().size == changes.size &&
                 changes.all { item ->
                     val kind = if (item.beforeBytes == null) WriteOperationKind.CREATE
                         else WriteOperationKind.EDIT
                     ToolAuthorizationPolicy.authorizeWrite(WriteAuthorizationFacts(
                         EngineeringRole.DEVELOPER, kind, item.path,
-                        immutableArtifactPaths = request.frozenArtifacts.keys
+                        immutableArtifactPaths = snapshot.frozenArtifacts.keys
                     )) == ToolAuthorizationDecision.Permit &&
-                        sha256.matches(item.attemptedSha256) &&
-                        (item.beforeBytes == null || item.beforeBytes.size <= 4 * 1024 * 1024)
-                } && request.frozenArtifacts.all { (path, hash) ->
+                        sha256.matches(item.attemptedSha256)
+                } && snapshot.frozenArtifacts.all { (path, hash) ->
                     ToolAuthorizationPolicy.validDeclaredPath(path) && sha256.matches(hash)
-                }, "INVALID_FAILED_WRITE_EVIDENCE")
+                }, INVALID_FAILED_WRITE_EVIDENCE)
+            testObserver?.at(StageGitTestCheckpoint.AFTER_FAILED_WRITE_EVIDENCE_VALIDATION)
             val real = canonicalRoot()
             check(lockDirectory.isAbsolute && !Files.isSymbolicLink(lockDirectory),
-                "WORKSPACE_LOCK_UNAVAILABLE")
+                WorkspaceDenialCodes.WORKSPACE_LOCK_UNAVAILABLE)
             Files.createDirectories(lockDirectory)
             val locks = lockDirectory.toRealPath()
             check(!locks.startsWith(real) && !real.startsWith(locks),
-                "WORKSPACE_LOCK_UNAVAILABLE")
+                WorkspaceDenialCodes.WORKSPACE_LOCK_UNAVAILABLE)
             val key = digest(real.toString().toByteArray())
             FileChannel.open(locks.resolve("$key.lock"), StandardOpenOption.CREATE,
                 StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS).use { channel ->
                 val lease = try { channel.tryLock() } catch (_: Exception) { null }
-                check(lease != null, "WORKSPACE_LOCKED")
+                check(lease != null, WorkspaceDenialCodes.WORKSPACE_LOCKED)
                 requireNotNull(lease).use {
                     check(git(real, listOf("rev-parse", "--show-toplevel")) ==
                         real.toString() &&
                         Path.of(git(real, listOf("rev-parse", "--absolute-git-dir")))
                             .toRealPath() == real.resolve(".git").toRealPath(),
-                        "UNSUPPORTED_WORKSPACE")
-                    check(git(real, listOf("rev-parse", "HEAD")) == request.expectedHead &&
+                        WorkspaceDenialCodes.UNSUPPORTED_WORKSPACE)
+                    check(git(real, listOf("rev-parse", "HEAD")) == snapshot.expectedHead &&
                         git(real, listOf("symbolic-ref", "-q", "HEAD")) ==
-                            "refs/heads/" + request.branch, "STAGE_BASELINE_CHANGED")
+                            "refs/heads/" + snapshot.branch, STAGE_BASELINE_CHANGED)
                     verifyRepositoryConfiguration(real)
                     val pinnedIndex = git(real, listOf("ls-files", "--stage", "-z"))
-                    for ((path, hash) in request.frozenArtifacts)
+                    for ((path, hash) in snapshot.frozenArtifacts)
                         check(digest(read(real, path).bytes) == hash,
-                            "FROZEN_ARTIFACT_CHANGED")
+                            LinuxStageGitBaselineReconcilerDiagnosticCodes.FROZEN_ARTIFACT_CHANGED)
                     val expectedStatus = linkedMapOf<String, String>()
                     val restore = mutableListOf<StageGitUnacceptedFile>()
                     for (item in changes.sortedBy { it.path }) {
@@ -699,7 +752,7 @@ class LinuxStageGitBaselineReconciler internal constructor(
                         val currentHash = current?.let { digest(it.bytes) }
                         check(currentHash == original ||
                             (current != null &&
-                                currentHash == item.attemptedSha256), "FOREIGN_WORKTREE_EDIT")
+                                currentHash == item.attemptedSha256), FOREIGN_WORKTREE_EDIT)
                         if (currentHash != original) {
                             val present = current ?: throw Reject("FAILED_WRITE_DISAPPEARED")
                             val expectedMode = if (before == null) "100644"
@@ -711,12 +764,16 @@ class LinuxStageGitBaselineReconciler internal constructor(
                     }
                     check(status(real) == expectedStatus &&
                         git(real, listOf("ls-files", "--stage", "-z")) == pinnedIndex,
-                        "FOREIGN_GIT_OR_INDEX_EDIT")
+                        LinuxStageGitBaselineReconcilerDiagnosticCodes.FOREIGN_GIT_OR_INDEX_EDIT)
+                    // All Git blob and postimage checks above used private bytes.
+                    // The internal observer may mutate only the caller's evidence
+                    // in deterministic regression tests; it receives no snapshot.
+                    testObserver?.at(StageGitTestCheckpoint.BEFORE_FAILED_WRITE_RESTORE)
                     for (item in restore) {
                         // A preflight-to-mutation external edit must not be overwritten.
                         check(git(real, listOf("ls-files", "--stage", "-z")) == pinnedIndex &&
-                            git(real, listOf("rev-parse", "HEAD")) == request.expectedHead,
-                            "FOREIGN_GIT_OR_INDEX_EDIT")
+                            git(real, listOf("rev-parse", "HEAD")) == snapshot.expectedHead,
+                            LinuxStageGitBaselineReconcilerDiagnosticCodes.FOREIGN_GIT_OR_INDEX_EDIT)
                         mutationStarted = true
                         failedWriteRestoreExact(real, item)
                     }
@@ -726,21 +783,22 @@ class LinuxStageGitBaselineReconciler internal constructor(
                         val actual = failedWriteReadOptional(real, item.path)
                         val original = item.beforeBytes
                         if (original == null)
-                            check(actual == null, "POST_RESTORE_IMAGE_UNCONFIRMED")
+                            check(actual == null,
+                                LinuxStageGitBaselineReconcilerDiagnosticCodes.POST_RESTORE_IMAGE_UNCONFIRMED)
                         else
                             check(actual != null &&
                                 digest(actual.bytes) == digest(original),
-                                "POST_RESTORE_IMAGE_UNCONFIRMED")
+                                LinuxStageGitBaselineReconcilerDiagnosticCodes.POST_RESTORE_IMAGE_UNCONFIRMED)
                     }
                     check(git(real, listOf("ls-files", "--stage", "-z")) == pinnedIndex &&
-                        inspectCleanBaseline(request.expectedHead, request.branch) ==
+                        inspectCleanBaseline(snapshot.expectedHead, snapshot.branch) ==
                             StageGitBaselineResult.Clean, "POST_RESTORE_BASELINE_UNCONFIRMED")
-                    for ((path, hash) in request.frozenArtifacts)
+                    for ((path, hash) in snapshot.frozenArtifacts)
                         check(digest(read(real, path).bytes) == hash,
                             "POST_RESTORE_FROZEN_CHANGED")
                     val audit = digest(("recursive-coder/developer-failed-write-recovery/v1\u0000" +
-                        request.stageRunId.value + "\u0000" +
-                        request.leaseGeneration + "\u0000" + request.expectedHead +
+                        snapshot.stageRunId.value + "\u0000" +
+                        snapshot.leaseGeneration + "\u0000" + snapshot.expectedHead +
                         "\u0000" + changes.sortedBy { it.path }.joinToString("\u0000") {
                             it.path + ":" + (it.beforeBytes?.let(::digest) ?: "CREATE") +
                                 ":" + it.attemptedSha256
@@ -754,34 +812,37 @@ class LinuxStageGitBaselineReconciler internal constructor(
             else StageGitFailedWriteResult.NeedsHuman(failure.code)
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
-            return StageGitFailedWriteResult.ReconciliationRequired("RECOVERY_INTERRUPTED")
+            return StageGitFailedWriteResult.ReconciliationRequired(StageDenialCodes.RECOVERY_INTERRUPTED)
         } catch (_: Exception) {
             return if (mutationStarted)
-                StageGitFailedWriteResult.ReconciliationRequired("RECOVERY_UNCONFIRMED")
+                StageGitFailedWriteResult.ReconciliationRequired(StageDenialCodes.RECOVERY_UNCONFIRMED)
             else StageGitFailedWriteResult.NeedsHuman("RECOVERY_UNAVAILABLE")
         }
     }
 
     private fun <T> withFailedWriteParent(root: Path, path: String,
         action: (SecureDirectoryStream<Path>, Path) -> T): T {
-        check(ToolAuthorizationPolicy.validDeclaredPath(path), "INVALID_STAGE_PATH")
+        // Recovery authorizes the private change set before traversal. Keep the
+        // independent syntax guard for future callers of this helper.
+        check(ToolAuthorizationPolicy.validDeclaredPath(path),
+            LinuxStageGitBaselineReconcilerDiagnosticCodes.INVALID_STAGE_PATH)
         val rootKey = Files.readAttributes(root, BasicFileAttributes::class.java,
             LinkOption.NOFOLLOW_LINKS).fileKey()
         Files.newDirectoryStream(root).use { opened ->
             val stream = opened as? SecureDirectoryStream<Path>
                 ?: throw Reject(WorkspaceDenialCodes.SANDBOX_UNAVAILABLE)
             check(stream.getFileAttributeView(BasicFileAttributeView::class.java)
-                .readAttributes().fileKey() == rootKey, "WORKSPACE_REPLACED")
+                .readAttributes().fileKey() == rootKey, WorkspaceDenialCodes.WORKSPACE_REPLACED)
             var current = stream
             val handles = mutableListOf<SecureDirectoryStream<Path>>()
             try {
                 val parts = path.split('/')
                 for (part in parts.dropLast(1)) {
                     check(current.any { it.fileName.toString() == part },
-                        "UNSAFE_STAGE_PATH")
+                        UNSAFE_STAGE_PATH)
                     val next = try {
                         current.newDirectoryStream(Path.of(part), LinkOption.NOFOLLOW_LINKS)
-                    } catch (_: Exception) { throw Reject("UNSAFE_STAGE_PATH") }
+                    } catch (_: Exception) { throw Reject(UNSAFE_STAGE_PATH) }
                     handles += next
                     current = next
                 }
@@ -789,7 +850,7 @@ class LinuxStageGitBaselineReconciler internal constructor(
                 check(current.none {
                     it.fileName.toString() != leaf &&
                         it.fileName.toString().equals(leaf, ignoreCase = true)
-                }, "UNSAFE_STAGE_PATH")
+                }, UNSAFE_STAGE_PATH)
                 return action(current, Path.of(leaf))
             } finally {
                 handles.asReversed().forEach { it.close() }
@@ -803,10 +864,10 @@ class LinuxStageGitBaselineReconciler internal constructor(
                 dir.getFileAttributeView(name, BasicFileAttributeView::class.java,
                     LinkOption.NOFOLLOW_LINKS).readAttributes()
             } catch (_: java.nio.file.NoSuchFileException) { null }
-            catch (_: Exception) { throw Reject("UNSAFE_STAGE_FILE") }
+            catch (_: Exception) { throw Reject(UNSAFE_STAGE_FILE) }
             if (attributes == null) null else {
-                check(attributes.isRegularFile && attributes.size() <= 4 * 1024 * 1024,
-                    "UNSAFE_STAGE_FILE")
+                check(attributes.isRegularFile && attributes.size() <= MAX_STAGE_FILE_BYTES,
+                    UNSAFE_STAGE_FILE)
                 read(root, path, requireCanonicalMode = true)
             }
         }
@@ -816,16 +877,16 @@ class LinuxStageGitBaselineReconciler internal constructor(
             val attrs = try {
                 dir.getFileAttributeView(name, BasicFileAttributeView::class.java,
                     LinkOption.NOFOLLOW_LINKS).readAttributes()
-            } catch (_: Exception) { throw Reject("UNSAFE_STAGE_FILE") }
-            check(attrs.isRegularFile && attrs.size() <= 4 * 1024 * 1024,
-                "UNSAFE_STAGE_FILE")
+            } catch (_: Exception) { throw Reject(UNSAFE_STAGE_FILE) }
+            check(attrs.isRegularFile && attrs.size() <= MAX_STAGE_FILE_BYTES,
+                UNSAFE_STAGE_FILE)
             if (item.beforeBytes == null) {
                 // Delete only the exact known CREATE postimage; never a foreign file.
                 check(digest(read(root, item.path, true).bytes) == item.attemptedSha256,
-                    "FOREIGN_WORKTREE_EDIT")
+                    FOREIGN_WORKTREE_EDIT)
                 val now = dir.getFileAttributeView(name, BasicFileAttributeView::class.java,
                     LinkOption.NOFOLLOW_LINKS).readAttributes()
-                check(now.fileKey() == attrs.fileKey(), "FOREIGN_WORKTREE_EDIT")
+                check(now.fileKey() == attrs.fileKey(), FOREIGN_WORKTREE_EDIT)
                 dir.deleteFile(name)
             } else {
                 // Read and validate via the SAME nofollow descriptor we overwrite.
@@ -840,10 +901,10 @@ class LinuxStageGitBaselineReconciler internal constructor(
                         buf.flip()
                         current.write(buf.array(), 0, count)
                         buf.clear()
-                        check(current.size() <= 4 * 1024 * 1024, "STAGE_FILE_TOO_LARGE")
+                        check(current.size() <= MAX_STAGE_FILE_BYTES, StageDenialCodes.STAGE_FILE_TOO_LARGE)
                     }
                     check(digest(current.toByteArray()) == item.attemptedSha256,
-                        "FOREIGN_WORKTREE_EDIT")
+                        FOREIGN_WORKTREE_EDIT)
                     channel.position(0)
                     channel.truncate(0)
                     val old = ByteBuffer.wrap(item.beforeBytes)
@@ -863,4 +924,24 @@ class LinuxStageGitBaselineReconciler internal constructor(
                 ?: Path.of("/usr/bin/git")
         }
     }
+}
+
+/** Diagnostic codes emitted by LinuxStageGitBaselineReconciler; not shared protocol vocabulary. */
+internal object LinuxStageGitBaselineReconcilerDiagnosticCodes {
+    const val GIT_BASELINE_TIMEOUT = "GIT_BASELINE_TIMEOUT"
+    const val INVALID_STAGE_PATH = "INVALID_STAGE_PATH"
+    const val UNSAFE_STAGE_FILE_MODE = "UNSAFE_STAGE_FILE_MODE"
+    const val GIT_COMMAND_INTERRUPTED = "GIT_COMMAND_INTERRUPTED"
+    const val GIT_BASELINE_INTERRUPTED = "GIT_BASELINE_INTERRUPTED"
+    const val GIT_COMMAND_UNAVAILABLE = "GIT_COMMAND_UNAVAILABLE"
+    const val UNEXPECTED_GIT_CHANGE = "UNEXPECTED_GIT_CHANGE"
+    const val STAGE_BRANCH_CHANGED = "STAGE_BRANCH_CHANGED"
+    const val STAGE_WORKSPACE_CHANGED = "STAGE_WORKSPACE_CHANGED"
+    const val FROZEN_ARTIFACT_CHANGED = "FROZEN_ARTIFACT_CHANGED"
+    const val INVALID_GIT_BASELINE = "INVALID_GIT_BASELINE"
+    const val INVALID_STAGE_CHANGESET = "INVALID_STAGE_CHANGESET"
+    const val UNSAFE_GIT_ENTRY = "UNSAFE_GIT_ENTRY"
+    const val UNCERTAIN_GIT_HANDOFF = "UNCERTAIN_GIT_HANDOFF"
+    const val FOREIGN_GIT_OR_INDEX_EDIT = "FOREIGN_GIT_OR_INDEX_EDIT"
+    const val POST_RESTORE_IMAGE_UNCONFIRMED = "POST_RESTORE_IMAGE_UNCONFIRMED"
 }

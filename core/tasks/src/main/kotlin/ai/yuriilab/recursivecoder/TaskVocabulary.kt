@@ -26,3 +26,17 @@ object TaskTransitionWireFields {
     const val TO = "to"
     const val AT = "at"
 }
+
+/** A stored task may be unclaimed; this is not a valid protocol invocation attempt. */
+internal const val UNCLAIMED_TASK_ATTEMPT = 0
+
+/** Shared scheduler/CLI concurrency contract, independent of model or stage concurrency. */
+object TaskSchedulerConcurrency {
+    const val MIN = 1
+    const val MAX = 32
+    const val DEFAULT = 1
+}
+
+internal fun requireTaskPriority(priority: Int) {
+    require(priority in TaskPriority.MIN..TaskPriority.MAX) { "Priority must be ${TaskPriority.MIN}..${TaskPriority.MAX}" }
+}

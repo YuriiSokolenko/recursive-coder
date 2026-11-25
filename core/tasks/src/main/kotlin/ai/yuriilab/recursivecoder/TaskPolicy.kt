@@ -35,7 +35,7 @@ data class Task(
     val dependencies: List<String>,
     val priority: Int,
     val state: TaskState = TaskState.CREATED,
-    val attempt: Int = 0,
+    val attempt: Int = UNCLAIMED_TASK_ATTEMPT,
     val sessionId: String? = null,
     val lastResultStatus: SessionOutcome? = null,
     val reason: String? = null,
@@ -62,7 +62,7 @@ internal data class TaskUpdate(val task: Task, val nextOrder: Long)
 /** Validation entrypoint for persistence adapters decoding TaskQueue snapshots. */
 fun validateStoredTasks(tasks: List<Task>) {
     require(tasks.all { safeTaskId.matches(it.id) && it.priority in TaskPriority.MIN..TaskPriority.MAX &&
-        it.attempt >= 0 && it.waitTurns >= 0 && it.queueOrder >= 0 &&
+        it.attempt >= UNCLAIMED_TASK_ATTEMPT && it.waitTurns >= 0 && it.queueOrder >= 0 &&
         it.prunedTransitions >= 0 })
     validateGraph(tasks)
 }
@@ -109,6 +109,9 @@ internal fun validateGraph(tasks: List<Task>): List<String> {
  */
 internal object TaskPolicy {
     private const val ATTEMPT_EXHAUSTED = "attempt counter exhausted"
+    // Persisted reason discriminator, used for both producing and interpreting dependency attention.
+    private const val DEPENDENCY_REASON_PREFIX = "dependency:"
+    private val cancellationTerminalStates = setOf(TaskState.SUCCEEDED, TaskState.FAILED, TaskState.CANCELLED)
     private const val MAX_TRANSITIONS = 128
     private const val MAX_WAIT_TURNS = 1000L
     private const val OLDEST_TASK_INTERVAL = 8L
@@ -171,14 +174,14 @@ internal object TaskPolicy {
         priority: Int, dependencies: List<String>, at: String
     ): TaskQueue {
         require(safeTaskId.matches(id)) { "Unsafe task ID" }
-        require(priority in TaskPriority.MIN..TaskPriority.MAX) { "Priority must be 0..100" }
+        requireTaskPriority(priority)
         require(queue.tasks.none { it.id == id }) { "Task already exists" }
         require(dependencies.distinct().size == dependencies.size) { "Duplicate dependency" }
         require(dependencies.all { dep -> queue.tasks.any { it.id == dep } }) { "Unknown dependency" }
         val initial = Task(
             id = id, requestTemplate = requestTemplate, dependencies = dependencies.toList(),
             priority = priority, queueOrder = queue.nextOrder + 1,
-            transitions = listOf(TaskTransition(null, TaskState.CREATED, at, 0, null, "enqueued"))
+            transitions = listOf(TaskTransition(null, TaskState.CREATED, at, UNCLAIMED_TASK_ATTEMPT, null, "enqueued"))
         )
         val next = queue.copy(nextOrder = queue.nextOrder + 1, tasks = queue.tasks + initial)
         validateGraph(next.tasks)
@@ -187,7 +190,7 @@ internal object TaskPolicy {
 
     fun replaceDependencies(queue: TaskQueue, id: String, dependencies: List<String>, at: String): TaskQueue {
         val index = queue.index(id)
-        require(queue.tasks[index].attempt == 0) { "Cannot edit dependencies after execution" }
+        require(queue.tasks[index].attempt == UNCLAIMED_TASK_ATTEMPT) { "Cannot edit dependencies after execution" }
         val next = queue.replace(index, queue.tasks[index].copy(dependencies = dependencies.toList()))
         validateGraph(next.tasks)
         return reconcile(next, at)
@@ -198,7 +201,7 @@ internal object TaskPolicy {
 
     fun cancel(queue: TaskQueue, id: String, at: String): TaskQueue {
         val index = queue.index(id)
-        if (queue.tasks[index].state in setOf(TaskState.SUCCEEDED, TaskState.FAILED, TaskState.CANCELLED))
+        if (queue.tasks[index].state in cancellationTerminalStates)
             return queue
         val update = transition(queue.tasks[index], TaskState.CANCELLED,
             "cancelled by user", queue.nextOrder, at)
@@ -207,7 +210,7 @@ internal object TaskPolicy {
 
     fun cancelAll(queue: TaskQueue, at: String): TaskQueue {
         val tasks = queue.tasks.map { task ->
-            if (task.state in setOf(TaskState.SUCCEEDED, TaskState.FAILED, TaskState.CANCELLED)) task
+            if (task.state in cancellationTerminalStates) task
             else transition(task, TaskState.CANCELLED, "global cancellation", queue.nextOrder, at).task
         }
         return reconcile(queue.copy(paused = true, tasks = tasks), at)
@@ -220,7 +223,7 @@ internal object TaskPolicy {
             TaskState.NEEDS_ATTENTION)) { "Only terminal/attention tasks can be retried" }
         require(current.attempt < Int.MAX_VALUE) { ATTEMPT_EXHAUSTED }
         require(current.state != TaskState.NEEDS_ATTENTION ||
-            current.reason?.startsWith("dependency:") != true) {
+            current.reason?.startsWith(DEPENDENCY_REASON_PREFIX) != true) {
             "Retry the failed prerequisite first; this task is blocked by a dependency"
         }
         // The old session is historical; the next claim creates a different owner ID.
@@ -310,7 +313,7 @@ internal object TaskPolicy {
             if (task.state in setOf(TaskState.RUNNING, TaskState.SUCCEEDED,
                     TaskState.FAILED, TaskState.CANCELLED)) continue
             if (task.state == TaskState.NEEDS_ATTENTION &&
-                task.reason?.startsWith("dependency:") != true) continue
+                task.reason?.startsWith(DEPENDENCY_REASON_PREFIX) != true) continue
             // Exhaustion is permanent for this task identity. Resolve it before
             // dependencies or pause can make an exhausted task ready again.
             if (task.attempt == Int.MAX_VALUE) {
@@ -328,7 +331,7 @@ internal object TaskPolicy {
                 prerequisites.all { it.state == TaskState.SUCCEEDED } -> TaskState.READY
                 else -> TaskState.BLOCKED
             }
-            val reason = if (missing == null) null else "dependency:" + missing.id + ":" + missing.state.wire
+            val reason = if (missing == null) null else DEPENDENCY_REASON_PREFIX + missing.id + ":" + missing.state.wire
             val updated = transition(task, next, reason, nextOrder, at)
             tasks[index] = updated.task
             nextOrder = updated.nextOrder

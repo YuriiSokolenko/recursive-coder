@@ -72,26 +72,26 @@ class WorkspaceManager private constructor(
                     request.policy[ToolPolicyFields.WRITABLE_PATHS]!!.jsonArray.isNotEmpty(),
                     (request.policy[ToolPolicyFields.IMMUTABLE_INPUTS] as? JsonArray)?.isNotEmpty() == true
                 )).deniedCode != null)
-                throw Refused(ToolDenialCodes.UNSUPPORTED_TOOL_POLICY, "policy", "Unsupported workspace tool policy")
+                throw Refused(ToolDenialCodes.UNSUPPORTED_TOOL_POLICY, SessionDiagnosticCategories.POLICY, "Unsupported workspace tool policy")
             val root = try {
                 if (Files.isSymbolicLink(request.rootPath)) throw IllegalArgumentException()
                 request.rootPath.toRealPath()
             } catch (_: Exception) {
-                throw Refused(WorkspaceDenialCodes.INVALID_WORKSPACE, "policy", "Workspace root cannot be resolved")
+                throw Refused(WorkspaceDenialCodes.INVALID_WORKSPACE, SessionDiagnosticCategories.POLICY, "Workspace root cannot be resolved")
             }
             if (!Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS) ||
                 !Files.isDirectory(root.resolve(".git"), LinkOption.NOFOLLOW_LINKS) ||
                 Files.isSymbolicLink(root.resolve(".git")))
-                throw Refused(WorkspaceDenialCodes.UNSUPPORTED_WORKSPACE, "policy", "Only regular local Git working trees are supported")
+                throw Refused(WorkspaceDenialCodes.UNSUPPORTED_WORKSPACE, SessionDiagnosticCategories.POLICY, "Only regular local Git working trees are supported")
             if (!gitExecutable.isAbsolute || !Files.isRegularFile(gitExecutable) || !Files.isExecutable(gitExecutable))
-                throw Refused(WorkspaceDenialCodes.GIT_UNAVAILABLE, "policy", "Configured Git binary is unavailable")
+                throw Refused(WorkspaceDenialCodes.GIT_UNAVAILABLE, SessionDiagnosticCategories.POLICY, "Configured Git binary is unavailable")
             // Do not depend on a model-provided PATH, HOME, Git config, hooks or environment.
             val git = RestrictedGit(root, gitExecutable)
             val checkedRoot = git.text(4096, "rev-parse", "--show-toplevel")
             val checkedGitDir = git.text(4096, "rev-parse", "--absolute-git-dir")
             if (Path.of(checkedRoot).toRealPath() != root ||
                 Path.of(checkedGitDir).toRealPath() != root.resolve(".git").toRealPath())
-                throw Refused(WorkspaceDenialCodes.UNSUPPORTED_WORKSPACE, "policy", "Nested, bare or linked worktrees are not supported")
+                throw Refused(WorkspaceDenialCodes.UNSUPPORTED_WORKSPACE, SessionDiagnosticCategories.POLICY, "Nested, bare or linked worktrees are not supported")
             // Git read-only commands can otherwise invoke repository-defined clean/process filters.
             // Treat any local command-capable Git configuration as unsupported for this milestone.
             val localConfig = git.text(256 * 1024, "config", "--local", "--list")
@@ -102,24 +102,24 @@ class WorkspaceManager private constructor(
                         key.matches(Regex("diff\\..*\\.command")) ||
                         key.matches(Regex("diff\\..*\\.textconv"))
                 })
-                throw Refused(WorkspaceDenialCodes.UNSAFE_GIT_CONFIGURATION, "policy",
+                throw Refused(WorkspaceDenialCodes.UNSAFE_GIT_CONFIGURATION, SessionDiagnosticCategories.POLICY,
                     "Repository Git configuration may execute external commands")
             val head = git.text(4096, "rev-parse", "HEAD")
             val currentBranch = git.text(4096, "branch", "--show-current")
             if (head != request.workspace[WorkspaceFields.BASELINE_SHA]!!.jsonPrimitive.content ||
                 head != request.workspace[WorkspaceFields.HEAD_SHA]!!.jsonPrimitive.content)
-                throw Refused(WorkspaceDenialCodes.WORKSPACE_BASELINE_MISMATCH, "policy", "Workspace HEAD changed")
+                throw Refused(WorkspaceDenialCodes.WORKSPACE_BASELINE_MISMATCH, SessionDiagnosticCategories.POLICY, "Workspace HEAD changed")
             if (currentBranch.isBlank() ||
                 currentBranch != request.workspace[WorkspaceFields.BRANCH]?.jsonPrimitive?.content)
-                throw Refused("WORKSPACE_BRANCH_MISMATCH", "policy", "Workspace branch is unavailable or changed")
+                throw Refused("WORKSPACE_BRANCH_MISMATCH", SessionDiagnosticCategories.POLICY, "Workspace branch is unavailable or changed")
             val rootKey = Files.readAttributes(root, BasicFileAttributes::class.java).fileKey()
             val gitKey = Files.readAttributes(root.resolve(".git"), BasicFileAttributes::class.java).fileKey()
             if (rootKey == null || gitKey == null)
-                throw Refused(WorkspaceDenialCodes.SANDBOX_UNAVAILABLE, "policy", "Filesystem identity is unavailable")
+                throw Refused(WorkspaceDenialCodes.SANDBOX_UNAVAILABLE, SessionDiagnosticCategories.POLICY, "Filesystem identity is unavailable")
             // Test descriptor-based traversal support before admitting a session.
             Files.newDirectoryStream(root).use {
                 if (it !is SecureDirectoryStream<*>)
-                    throw Refused(WorkspaceDenialCodes.SANDBOX_UNAVAILABLE, "policy", "Race-safe directory access is unavailable")
+                    throw Refused(WorkspaceDenialCodes.SANDBOX_UNAVAILABLE, SessionDiagnosticCategories.POLICY, "Race-safe directory access is unavailable")
             }
             val patterns = try {
                 request.policy[ToolPolicyFields.PROTECTED_PATHS]!!.jsonArray.map {
@@ -129,19 +129,19 @@ class WorkspaceManager private constructor(
                     root.fileSystem.getPathMatcher("glob:$pattern")
                 }
             } catch (_: Exception) {
-                throw Refused("INVALID_TOOL_POLICY", "policy", "Invalid protected path pattern")
+                throw Refused("INVALID_TOOL_POLICY", SessionDiagnosticCategories.POLICY, "Invalid protected path pattern")
             }
             val tree = git.text(4 * 1024 * 1024, "ls-tree", "-r", "-z", "--full-tree", "HEAD")
                 .split('\u0000').asSequence().filter { it.isNotEmpty() }.associate { entry ->
                     val tab = entry.indexOf('\t')
                     val metadata = if (tab < 0) emptyList() else entry.substring(0, tab).split(' ')
                     if (metadata.size != 3 || metadata[0] !in setOf("100644", "100755", "120000", "160000"))
-                        throw Refused(WorkspaceDenialCodes.UNSUPPORTED_GIT_TREE, "policy", "Unexpected Git tree entry")
+                        throw Refused(WorkspaceDenialCodes.UNSUPPORTED_GIT_TREE, SessionDiagnosticCategories.POLICY, "Unexpected Git tree entry")
                     val path = entry.substring(tab + 1)
-                    if (!validRelative(path)) throw Refused(WorkspaceDenialCodes.UNSUPPORTED_GIT_TREE, "policy", "Unsafe Git tree path")
+                    if (!validRelative(path)) throw Refused(WorkspaceDenialCodes.UNSUPPORTED_GIT_TREE, SessionDiagnosticCategories.POLICY, "Unsafe Git tree path")
                     path to metadata[0]
                 }
-            if (tree.size > 50000) throw Refused("WORKSPACE_TOO_LARGE", "policy", "Git tree exceeds the supported limit")
+            if (tree.size > 50000) throw Refused("WORKSPACE_TOO_LARGE", SessionDiagnosticCategories.POLICY, "Git tree exceeds the supported limit")
             val policyWithoutClaim = JsonObject(request.policy.filterKeys { it != ToolPolicyFields.POLICY_SHA256 })
             val policyHash = sha256(canonicalJson(policyWithoutClaim).toByteArray(StandardCharsets.UTF_8))
             val locks = try {
@@ -151,21 +151,21 @@ class WorkspaceManager private constructor(
                 if (Files.isSymbolicLink(lockDirectory)) throw IllegalArgumentException()
                 lockDirectory.toRealPath()
             } catch (_: Exception) {
-                throw Refused(WorkspaceDenialCodes.WORKSPACE_LOCK_UNAVAILABLE, "policy", "Trusted lock directory is unavailable")
+                throw Refused(WorkspaceDenialCodes.WORKSPACE_LOCK_UNAVAILABLE, SessionDiagnosticCategories.POLICY, "Trusted lock directory is unavailable")
             }
             if (locks.startsWith(root))
-                throw Refused(WorkspaceDenialCodes.WORKSPACE_LOCK_UNAVAILABLE, "policy", "Lock directory must be outside workspace")
+                throw Refused(WorkspaceDenialCodes.WORKSPACE_LOCK_UNAVAILABLE, SessionDiagnosticCategories.POLICY, "Lock directory must be outside workspace")
             val lockName = sha256(root.toString().toByteArray(StandardCharsets.UTF_8)) + ".lock"
             val channel = try {
                 FileChannel.open(locks.resolve(lockName),
                     setOf<OpenOption>(StandardOpenOption.CREATE, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS))
             } catch (_: Exception) {
-                throw Refused(WorkspaceDenialCodes.WORKSPACE_LOCK_UNAVAILABLE, "policy", "Cannot open workspace lease")
+                throw Refused(WorkspaceDenialCodes.WORKSPACE_LOCK_UNAVAILABLE, SessionDiagnosticCategories.POLICY, "Cannot open workspace lease")
             }
             val lease = try { channel.tryLock() } catch (_: Exception) { null }
             if (lease == null) {
                 channel.close()
-                throw Refused(WorkspaceDenialCodes.WORKSPACE_LOCKED, "policy", "Workspace already has an active session")
+                throw Refused(WorkspaceDenialCodes.WORKSPACE_LOCKED, SessionDiagnosticCategories.POLICY, "Workspace already has an active session")
             }
             try {
                 val manager = WorkspaceManager(root, request.workspace[WorkspaceFields.WORKSPACE_ID]!!.jsonPrimitive.content,
@@ -207,7 +207,7 @@ class WorkspaceManager private constructor(
             val search = System.getenv("PATH").orEmpty().split(java.io.File.pathSeparatorChar)
             return search.asSequence().filter { it.isNotEmpty() }.map { Path.of(it).resolve("git") }
                 .firstOrNull { it.isAbsolute && Files.isRegularFile(it) && Files.isExecutable(it) }
-                ?: throw Refused(WorkspaceDenialCodes.GIT_UNAVAILABLE, "policy", "Git binary was not found on host PATH")
+                ?: throw Refused(WorkspaceDenialCodes.GIT_UNAVAILABLE, SessionDiagnosticCategories.POLICY, "Git binary was not found on host PATH")
         }
 
         private fun sha256(bytes: ByteArray): String =
@@ -228,7 +228,7 @@ class WorkspaceManager private constructor(
     }
 
     private fun deny(code: String): Nothing =
-        throw Refused(code, "policy", "Workspace operation denied: $code")
+        throw Refused(code, SessionDiagnosticCategories.POLICY, "Workspace operation denied: $code")
 
     private fun relative(path: String, allowRoot: Boolean = false): String {
         if (allowRoot && path.isEmpty()) return ""
@@ -307,7 +307,7 @@ class WorkspaceManager private constructor(
                             buffer.flip()
                             output.write(buffer.array(), 0, n)
                             buffer.clear()
-                            if (output.size() > maxReadBytes) deny("READ_LIMIT_EXCEEDED")
+                            if (output.size() > maxReadBytes) deny(WorkspaceManagerDiagnosticCodes.READ_LIMIT_EXCEEDED)
                         }
                         output.toByteArray()
                     }
@@ -333,12 +333,12 @@ class WorkspaceManager private constructor(
      * or the canonical root. Never resolve an in-workspace symlink before descriptor traversal.
      */
     override fun taskRelativePath(path: Path): String {
-        if (!path.isAbsolute) deny("INVALID_TASK_PATH")
+        if (!path.isAbsolute) deny(WorkspaceManagerDiagnosticCodes.INVALID_TASK_PATH)
         val normalized = path.normalize()
         val ancestor = when {
             normalized.startsWith(declaredRoot) -> declaredRoot
             normalized.startsWith(root) -> root
-            else -> deny("INVALID_TASK_PATH")
+            else -> deny(WorkspaceManagerDiagnosticCodes.INVALID_TASK_PATH)
         }
         val suffix = ancestor.relativize(normalized).toString().replace('\\', '/')
         return relative(suffix)
@@ -382,7 +382,7 @@ class WorkspaceManager private constructor(
                     val paths = tree.keys.asSequence().filter {
                         it.startsWith(prefix) && permittedPath(it)
                     }.take(101).toList()
-                    if (paths.size > 100) deny("RESULT_LIMIT_EXCEEDED")
+                    if (paths.size > 100) deny(WorkspaceManagerDiagnosticCodes.RESULT_LIMIT_EXCEEDED)
                     ToolData.Paths(paths.sorted())
                 }
                 is WorkspaceTool.Find -> {
@@ -392,7 +392,7 @@ class WorkspaceManager private constructor(
                     val paths = tree.keys.asSequence().filter {
                         permittedPath(it) && it.substringAfterLast('/').contains(fragment, ignoreCase = true)
                     }.take(101).toList()
-                    if (paths.size > 100) deny("RESULT_LIMIT_EXCEEDED")
+                    if (paths.size > 100) deny(WorkspaceManagerDiagnosticCodes.RESULT_LIMIT_EXCEEDED)
                     ToolData.Paths(paths.sorted())
                 }
                 is WorkspaceTool.Search -> {
@@ -406,7 +406,7 @@ class WorkspaceManager private constructor(
                     var examined = 0
                     var truncated = false
                     val skippable = setOf(WorkspaceDenialCodes.UNSAFE_FILE, WorkspaceDenialCodes.UNSAFE_PATH_COMPONENT,
-                        "READ_LIMIT_EXCEEDED", WorkspaceDenialCodes.BINARY_FILE_DENIED)
+                        WorkspaceManagerDiagnosticCodes.READ_LIMIT_EXCEEDED, WorkspaceDenialCodes.BINARY_FILE_DENIED)
                     scan@ for (path in candidates) {
                         if (examined >= 256 || scanned >= 1024 * 1024) {
                             truncated = true
@@ -448,13 +448,13 @@ class WorkspaceManager private constructor(
                     while (i < tokens.size) {
                         val record = tokens[i++]
                         if (record.isEmpty()) continue
-                        if (record.length < 4) deny("GIT_OUTPUT_INVALID")
+                        if (record.length < 4) deny(WorkspaceManagerDiagnosticCodes.GIT_OUTPUT_INVALID)
                         val path = record.substring(3)
                         val renamed = record.take(2).any { it == 'R' || it == 'C' }
                         if (renamed && i < tokens.size) i++ // Ignore the second path of a rename.
                         if (!permittedPath(path)) continue
                         entries += ToolData.StatusEntry(path, record[0], record[1])
-                        if (entries.size > 100) deny("RESULT_LIMIT_EXCEEDED")
+                        if (entries.size > 100) deny(WorkspaceManagerDiagnosticCodes.RESULT_LIMIT_EXCEEDED)
                     }
                     ToolData.Status(entries)
                 }
@@ -507,7 +507,8 @@ internal class RestrictedGit(private val root: Path, private val executable: Pat
     fun text(maxBytes: Int, vararg arguments: String): String {
         val (exitCode, output) = inspect(maxBytes, *arguments)
         if (exitCode != 0)
-            throw Refused("GIT_INSPECTION_DENIED", "policy", "Git inspection failed")
+            throw Refused(WorkspaceManagerDiagnosticCodes.GIT_INSPECTION_DENIED, SessionDiagnosticCategories.POLICY,
+                "Git inspection failed")
         return output
     }
 
@@ -538,7 +539,7 @@ internal class RestrictedGit(private val root: Path, private val executable: Pat
                     val read = stream.read(buffer)
                     if (read < 0) break
                     if (output.size() + read > maxBytes)
-                        throw Refused("GIT_OUTPUT_LIMIT_EXCEEDED", "policy", "Git output exceeds maximum size")
+                        throw Refused("GIT_OUTPUT_LIMIT_EXCEEDED", SessionDiagnosticCategories.POLICY, "Git output exceeds maximum size")
                     output.write(buffer, 0, read)
                 }
                 output.toByteArray()
@@ -547,25 +548,36 @@ internal class RestrictedGit(private val root: Path, private val executable: Pat
         try {
             val data = future.get(3, TimeUnit.SECONDS)
             if (!process.waitFor(1, TimeUnit.SECONDS))
-                throw Refused("GIT_TIMEOUT", "policy", "Git inspection exceeded its deadline")
+                throw Refused(WorkspaceGitDenialCodes.GIT_TIMEOUT, SessionDiagnosticCategories.POLICY, "Git inspection exceeded its deadline")
             return try {
                 process.exitValue() to StandardCharsets.UTF_8.newDecoder()
                     .onMalformedInput(CodingErrorAction.REPORT)
                     .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(data))
                     .toString().trimEnd('\n')
             } catch (_: Exception) {
-                throw Refused("GIT_OUTPUT_INVALID", "policy", "Git output is not valid UTF-8")
+                throw Refused(WorkspaceManagerDiagnosticCodes.GIT_OUTPUT_INVALID,
+                    SessionDiagnosticCategories.POLICY, "Git output is not valid UTF-8")
             }
         } catch (_: java.util.concurrent.TimeoutException) {
-            throw Refused("GIT_TIMEOUT", "policy", "Git inspection exceeded its deadline")
+            throw Refused(WorkspaceGitDenialCodes.GIT_TIMEOUT, SessionDiagnosticCategories.POLICY, "Git inspection exceeded its deadline")
         } catch (e: java.util.concurrent.ExecutionException) {
             val cause = e.cause
             if (cause is Refused) throw cause
-            throw Refused("GIT_INSPECTION_DENIED", "policy", "Git inspection failed")
+            throw Refused(WorkspaceManagerDiagnosticCodes.GIT_INSPECTION_DENIED, SessionDiagnosticCategories.POLICY,
+                "Git inspection failed")
         } finally {
             if (process.isAlive) process.destroyForcibly()
             future.cancel(true)
             reader.shutdownNow()
         }
     }
+}
+
+/** Diagnostic codes emitted by WorkspaceManager; not shared protocol vocabulary. */
+internal object WorkspaceManagerDiagnosticCodes {
+    const val READ_LIMIT_EXCEEDED = "READ_LIMIT_EXCEEDED"
+    const val INVALID_TASK_PATH = "INVALID_TASK_PATH"
+    const val RESULT_LIMIT_EXCEEDED = "RESULT_LIMIT_EXCEEDED"
+    const val GIT_OUTPUT_INVALID = "GIT_OUTPUT_INVALID"
+    const val GIT_INSPECTION_DENIED = "GIT_INSPECTION_DENIED"
 }

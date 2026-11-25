@@ -45,18 +45,18 @@ class LinuxStageToolSessionOpener(
             catch (_: Exception) { null }
             ?: return StageToolOpenResult.Denied(StageDenialCodes.STAGE_AUTHORITY_UNAVAILABLE)
         if (!ToolAuthorizationPolicy.validHostIdentifier(snapshot.requestId))
-            return StageToolOpenResult.Denied("INVALID_REQUEST_ID")
+            return StageToolOpenResult.Denied(StageDenialCodes.INVALID_REQUEST_ID)
         val graph = snapshot.graph
         val stage = graph.stages.firstOrNull {
             it.correlation.stageRunId == snapshot.stageRunId
-        } ?: return StageToolOpenResult.Denied("UNKNOWN_STAGE")
+        } ?: return StageToolOpenResult.Denied(StageDenialCodes.UNKNOWN_STAGE)
         if (stage.correlation.requestId != snapshot.requestId)
-            return StageToolOpenResult.Denied("REQUEST_CORRELATION_MISMATCH")
+            return StageToolOpenResult.Denied(StageDenialCodes.REQUEST_CORRELATION_MISMATCH)
         if (stage.kind.role == EngineeringRole.REVIEWER)
             return StageToolOpenResult.Denied(ToolDenialCodes.ROLE_NOT_AUTHORIZED)
         if (stage.state != StageState.READY && stage.state != StageState.RUNNING)
             return StageToolOpenResult.Denied(StageDenialCodes.STAGE_NOT_READY)
-        val actor = stage.agentId ?: return StageToolOpenResult.Denied("MISSING_STAGE_ACTOR")
+        val actor = stage.agentId ?: return StageToolOpenResult.Denied(StageDenialCodes.MISSING_STAGE_ACTOR)
 
         // A RUNNING stage has already crossed the READY -> RUNNING boundary.
         // Recheck the same prerequisites as an admission; do not transition it.
@@ -81,7 +81,7 @@ class LinuxStageToolSessionOpener(
         val revision = snapshot.revisionAuthorization
         val reviewed = if (revision == null) null else {
             val artifact = manifests[revision.artifactId]
-                ?: return StageToolOpenResult.Denied("UNKNOWN_ARTIFACT")
+                ?: return StageToolOpenResult.Denied(StageDenialCodes.UNKNOWN_ARTIFACT)
             if (artifact.freeze != ArtifactFreeze.FROZEN)
                 return StageToolOpenResult.Denied("INVALID_REVISION_AUTHORIZATION")
             val decision = StageGraphPolicy.authorizeArtifactRevision(
@@ -115,7 +115,7 @@ class LinuxStageToolSessionOpener(
         } catch (error: Refused) {
             return StageToolOpenResult.Denied(error.code)
         } catch (_: Exception) {
-            return StageToolOpenResult.Denied("STAGE_TOOL_UNAVAILABLE")
+            return StageToolOpenResult.Denied(StageDenialCodes.STAGE_TOOL_UNAVAILABLE)
         }
         // The host may revoke authority while a filesystem lease is being opened.
         // Do not return a live session without validating it a second time.
@@ -145,7 +145,7 @@ private class LinuxStageToolSession(
     private var closed = false
 
     private fun currentDenial(): String? {
-        if (closed) return "WRITE_SESSION_INVALID"
+        if (closed) return WorkspaceWriteDenialCodes.WRITE_SESSION_INVALID
         if (revoked) return StageDenialCodes.STALE_STAGE_AUTHORITY
         if (finished) return "STAGE_TOOL_FINISHED"
         val now = try { authority.current()?.frozen() } catch (_: Exception) { null }
@@ -192,7 +192,7 @@ private class LinuxStageToolSession(
             StageCheckEvidence(checkId, result.toolId, receipt.baselineHead,
                 receipt.policyHash, receipt.manifestHash)
         else StageCheckEvidence(checkId, result.toolId, deniedCode =
-            result.deniedCode ?: "CHECK_UNAVAILABLE")
+            result.deniedCode ?: WorkspaceWriteDenialCodes.CHECK_UNAVAILABLE)
         attempted[checkId] = evidence
         if (receipt != null && evidence.passed) passed[checkId] = receipt to evidence
         return evidence

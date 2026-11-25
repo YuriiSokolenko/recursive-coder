@@ -27,6 +27,22 @@ guard boundaries. This is not a proof that every literal in every test is unique
 | `tests/test_architecture_gradle.py` | Configuration-cache regression strings, task names, paths and compiler diagnostics are independent Gradle fixture inputs and expectations. Do not share them with the plugin or change fixture semantics; generic local strings and filesystem helpers need no new constants. |
 | `tests/test_contract_v1.py`, `tests/test_cli_runtime_v1.py`, `tests/test_cli_writable_workflow.py`, `contracts/v1/session-v1.test.mjs` | Keep wire field names, fixture mutations, unknown values, CLI arguments, output names and expected installed CLI path literal as compatibility oracles. Ajv and Python continue to read the canonical schema independently of Kotlin. |
 
+## Updated dev baseline
+
+The initial audit was refreshed against dev at
+`2eb9d2d05905a0c443a65a0bfc26edc0c55803ad`. The recursive Git tree lists
+all Python, JavaScript, Gradle Kotlin DSL, TOML, YAML and properties files;
+the new review tools and root Gradle properties are classified below. The
+existing inventory link and archive-name assertion are applied on top of
+this dev revision without replacing its diagnostic inventory or review tests.
+
+| Reviewed files | Ownership and disposition |
+| --- | --- |
+| `gradle.properties` | Gradle and Kotlin configuration keys, cache toggle, JVM memory and encoding are external configuration, not shared domain vocabulary. |
+| `.claude/skills/c3-pin-check/scripts/check_c3_pins.py`, `.claude/skills/diagnostic-vocabulary-audit/scripts/scan_literals.py` | Keep each trusted-base helper standalone. Their graph path and pin regular expressions are independently owned verifier inputs, not shared with the architecture implementation or each other. |
+| `.claude/skills/strict-pr-review/scripts/check_policy_checkout.py` | Discovery names, root policy names, file modes and Git blob format belong to the checkout guard. Preserve its independent policy expectations and fail-closed behavior. |
+| `tests/test_review_skill_scripts.py`, `.github/workflows/ci.yml`, `tests/test_ci_bootstrap.py` | Preserve literal fixture paths, pin counts, provider discovery names, trusted helper paths and CI evidence expectations independently of the helpers. The new review-evidence step and its security regressions remain unchanged. |
+
 ## Verification
 
 No schema, wire format, product Kotlin code, module dependency, CI YAML, C3 pin

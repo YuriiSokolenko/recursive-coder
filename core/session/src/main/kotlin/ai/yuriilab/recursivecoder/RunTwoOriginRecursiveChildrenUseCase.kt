@@ -69,14 +69,16 @@ class RunTwoOriginRecursiveChildrenUseCase(
             }
         }
         if (stages.any { it == null }) {
-            return TwoOriginRecursiveOutcome.Stopped(null, "INVALID_ORIGIN_PAIR")
+            return TwoOriginRecursiveOutcome.Stopped(null,
+                RunTwoOriginRecursiveChildrenUseCaseDiagnosticCodes.INVALID_ORIGIN_PAIR)
         }
         val kinds = stages.map { requireNotNull(it).kind }
         if (kinds.toSet().size != 2 || StageKind.REVIEW in kinds ||
             sources.map { it.root.graph.correlation.graphId }.toSet().size != 2 ||
             sources.map { it.root.stageRunId }.toSet().size != 2 ||
             sources.map { it.root.graph.correlation.sessionId }.toSet().size != 1) {
-            return TwoOriginRecursiveOutcome.Stopped(null, "INVALID_ORIGIN_PAIR")
+            return TwoOriginRecursiveOutcome.Stopped(null,
+                RunTwoOriginRecursiveChildrenUseCaseDiagnosticCodes.INVALID_ORIGIN_PAIR)
         }
 
         val ordered = sources.zip(kinds).sortedBy { (_, kind) ->
@@ -100,7 +102,7 @@ class RunTwoOriginRecursiveChildrenUseCase(
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
-                return TwoOriginRecursiveOutcome.Stopped(kind, "ORIGIN_EXECUTION_UNCONFIRMED")
+                return TwoOriginRecursiveOutcome.Stopped(kind, RecursiveDenialCodes.ORIGIN_EXECUTION_UNCONFIRMED)
             }
             if (scheduler.eventDeliveryFailed) {
                 return TwoOriginRecursiveOutcome.Stopped(kind, "EVENT_DELIVERY_FAILED")
@@ -112,12 +114,12 @@ class RunTwoOriginRecursiveChildrenUseCase(
                 is RecursiveExecutionOutcome.Failed ->
                     return TwoOriginRecursiveOutcome.Stopped(kind, outcome.code)
                 RecursiveExecutionOutcome.Cancelled ->
-                    return TwoOriginRecursiveOutcome.Stopped(kind, "ORIGIN_CANCELLED")
+                    return TwoOriginRecursiveOutcome.Stopped(kind, RecursiveDenialCodes.ORIGIN_CANCELLED)
                 RecursiveExecutionOutcome.TimedOut ->
                     return TwoOriginRecursiveOutcome.Stopped(kind, "ORIGIN_TIMED_OUT")
             }
             val results = scheduler.integratedResults(scheduler.rootGraphId)
-                ?: return TwoOriginRecursiveOutcome.Stopped(kind, "CHILD_RESULTS_NOT_INTEGRATED")
+                ?: return TwoOriginRecursiveOutcome.Stopped(kind, RecursiveDenialCodes.CHILD_RESULTS_NOT_INTEGRATED)
             if (results.childOrder.isEmpty() || results.artifacts.isEmpty()) {
                 return TwoOriginRecursiveOutcome.Stopped(kind, "CHILD_RESULTS_MISSING")
             }
@@ -158,4 +160,9 @@ class RunTwoOriginRecursiveChildrenUseCase(
         }
         return TwoOriginRecursiveOutcome.Completed(integrated.toMap(), snapshots.toMap())
     }
+}
+
+/** Diagnostic codes emitted by RunTwoOriginRecursiveChildrenUseCase; not shared protocol vocabulary. */
+internal object RunTwoOriginRecursiveChildrenUseCaseDiagnosticCodes {
+    const val INVALID_ORIGIN_PAIR = "INVALID_ORIGIN_PAIR"
 }

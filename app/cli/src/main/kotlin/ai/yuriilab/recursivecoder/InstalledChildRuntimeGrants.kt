@@ -38,16 +38,16 @@ internal class InstalledChildRuntimeMeter(
 
     @Synchronized
     fun deadlineDenial(): String? =
-        if (!Instant.now(clock).isBefore(admitted.deadline)) "STAGE_DEADLINE" else null
+        if (!Instant.now(clock).isBefore(admitted.deadline)) RecursiveDenialCodes.STAGE_DEADLINE else null
 
     /** Poisoned usage cannot authorize more work, regardless of remaining grant. */
     @Synchronized
     fun executionDenial(): String? = deadlineDenial()
-        ?: if (usageUncertain) "CHILD_USAGE_UNCONFIRMED" else null
+        ?: if (usageUncertain) InstalledChildDenialCodes.CHILD_USAGE_UNCONFIRMED else null
 
     @Synchronized
     fun beforeModel(): String? = executionDenial()
-        ?: if (tokens >= admitted.granted.tokens) "TOKEN_BUDGET_EXHAUSTED" else null
+        ?: if (tokens >= admitted.granted.tokens) RecursiveDenialCodes.TOKEN_BUDGET_EXHAUSTED else null
 
     @Synchronized
     fun remainingTokens(): Long = (admitted.granted.tokens - tokens).coerceAtLeast(0L)
@@ -86,7 +86,7 @@ internal class InstalledChildRuntimeMeter(
             usage.modelRequests == 0 && (input != null && input != 0L ||
                 output != null && output != 0L)) {
             usageUncertain = true
-            return "CHILD_USAGE_INVALID"
+            return InstalledChildRuntimeGrantsDiagnosticCodes.CHILD_USAGE_INVALID
         }
         // This method is called only AFTER delegate.execute ran; even a
         // non-proposed result without complete counters is not proof of zero.
@@ -96,8 +96,8 @@ internal class InstalledChildRuntimeMeter(
             usageUncertain = true
             return "CHILD_USAGE_UNAVAILABLE"
         }
-        if (tokens > admitted.granted.tokens) return "TOKEN_BUDGET_EXHAUSTED"
-        if (usageUncertain) return "CHILD_USAGE_INVALID"
+        if (tokens > admitted.granted.tokens) return RecursiveDenialCodes.TOKEN_BUDGET_EXHAUSTED
+        if (usageUncertain) return InstalledChildRuntimeGrantsDiagnosticCodes.CHILD_USAGE_INVALID
         return deadlineDenial()
     }
 
@@ -105,7 +105,7 @@ internal class InstalledChildRuntimeMeter(
     @Synchronized
     fun authorizeToolCall(): String? {
         executionDenial()?.let { return it }
-        if (tools >= admitted.granted.toolCalls) return "TOOL_BUDGET_EXHAUSTED"
+        if (tools >= admitted.granted.toolCalls) return RecursiveDenialCodes.TOOL_BUDGET_EXHAUSTED
         tools++
         return null
     }
@@ -199,4 +199,9 @@ internal class MeteredChildTools(
             override fun close() = session.close()
         })
     }
+}
+
+/** Diagnostic codes emitted by InstalledChildRuntimeGrants; not shared protocol vocabulary. */
+internal object InstalledChildRuntimeGrantsDiagnosticCodes {
+    const val CHILD_USAGE_INVALID = "CHILD_USAGE_INVALID"
 }

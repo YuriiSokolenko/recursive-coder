@@ -313,7 +313,13 @@ here authorizes actual effects, general runtime resume or #105 recovery.
 `LinuxStageGitBaselineReconcilerTest` cases separately exercise the new typed
 baseline API: malformed heads/branches, Git ref drift (including during final
 inspection), unsafe local config/index flags, ignored files and total deadline
-expiry. This validates the shared read-only and mutable preflight contract at
+expiry. Accepted-stage snapshot regressions (#220) cover exceptions during
+capture of either collection before lock creation, exact denial precedence
+in both accepted-file and frozen-artifact orders, caller collection drift
+before and after CAS, final readback rejecting an unsafe accepted-file mode
+despite cleared caller facts, and malformed-path preflight denials. The
+valid-path unsafe traversal and competing-CAS/fault cases remain separate.
+This validates the shared read-only and mutable preflight contract at
 its owning module rather than only through CLI integration. The new `LinuxFiveRoleWorkflowHostTest` (`:app:cli`, `@Tag("integration")`) exercises the real Linux TrustedWriteRuntime session, host HMAC/typed evidence, a complete five-role run through Git CAS and independent Reviewer `finishSuccess`, tampered Developer usage/write ID/changed-file digests, forged acceptance, quarantine, unsafe Git configuration, ignored files, FIFO reads, and an external approval callback without holding the host monitor. The installed writable CLI with two distinct nested stage origins is still outstanding under #79. See [five-role orchestration](FIVE_ROLE_ORCHESTRATION.md).
 
 ## Portable task-store lock and atomic replacement regressions (issue #52)
@@ -472,12 +478,14 @@ publication.
 ./gradlew test installDist
 python -m unittest discover -s tests -p 'test_cli_runtime_v1.py' -v
 python -m unittest discover -s tests -p 'test_contract*.py' -v
+python3 -I -m unittest discover -s tests -p 'test_ci_bootstrap.py' -v
+python3 -I -m unittest discover -s tests -p 'test_review_skill_scripts.py' -v
 node --test contracts/v1/session-v1.test.mjs
 ~~~
 
 `test` **still runs all existing tests** regardless of their tags; `./gradlew test installDist` is backward-compatible. An untagged future test is therefore still included in the full JVM CI, not silently dropped. New tests **must** have an effective tier tag or `checkTestTiers` fails, even though they still execute under `test`. Do not classify a test as pure just because it has fake model/workspace interfaces if its fixture writes files or launches a process.
 
-CI has six independent jobs with explicit dependencies: architecture/tier-validation/pure-unit with cold/reused Gradle 9.8.2 configuration-cache checks; production-only `installDist` compilation and artifact upload; a **separate clean checkout and isolated Python verifier** that checks compiled outputs and standard Gradle launchers and publishes the approved artifact; full JVM `test`, `integrationTest`, `e2eTest`, mandatory sandbox JUnit XML/no-skip assertion and published JUnit results (blocked until the verifier passes); **separately isolated installed CLI E2E** on a fresh VM (only after verification, with no preceding Gradle/Kotlin test execution, SHA-256 verification and `python3 -I`); and protocol conformance with the English-only documentation guard. Since merged [PR #71](https://github.com/YuriiSokolenko/recursive-coder/pull/71), these jobs use GitHub-hosted `ubuntu-24.04` VMs with JDK 21, Gradle 9.8.2 where needed, Python 3.12 and Node.js 22 as required. Bubblewrap and the restricted `bwrap-userns-restrict` AppArmor profile are installed independently in both the JVM job and the isolated CLI E2E job before their real isolation probes, without disabling system-wide AppArmor or sharing the host network. Fork PRs run on disposable GitHub VMs, not N150. Tests need neither live inference nor credentials. The [CI migration run](https://github.com/YuriiSokolenko/recursive-coder/actions/runs/43120760211) passed the three original jobs on 2026-11-11, including mandatory sandbox E2E (0 skips). Sandbox E2E may be skipped on unsupported local hosts, but **must run and pass on Linux CI**.
+CI has six independent jobs with explicit dependencies: architecture/tier-validation/pure-unit with cold/reused Gradle 9.8.2 configuration-cache checks; production-only `installDist` compilation and artifact upload; a **separate clean checkout and isolated Python verifier** that checks compiled outputs and standard Gradle launchers and publishes the approved artifact; full JVM `test`, `integrationTest`, `e2eTest`, mandatory sandbox JUnit XML/no-skip assertion and published JUnit results (blocked until the verifier passes); **separately isolated installed CLI E2E** on a fresh VM (only after verification, with no preceding Gradle/Kotlin test execution, SHA-256 verification and `python3 -I`); and protocol conformance with the English-only guard over every tracked Markdown file, pull-request review evidence from the PR base's review helpers (C3 pins and diagnostic vocabulary; failures fail the job, a base without the helpers is reported as missing evidence) and the offline `test_review_skill_scripts.py` helper regressions. Since merged [PR #71](https://github.com/YuriiSokolenko/recursive-coder/pull/71), these jobs use GitHub-hosted `ubuntu-24.04` VMs with JDK 21, Gradle 9.8.2 where needed, Python 3.12 and Node.js 22 as required. Bubblewrap and the restricted `bwrap-userns-restrict` AppArmor profile are installed independently in both the JVM job and the isolated CLI E2E job before their real isolation probes, without disabling system-wide AppArmor or sharing the host network. Fork PRs run on disposable GitHub VMs, not N150. Tests need neither live inference nor credentials. The [CI migration run](https://github.com/YuriiSokolenko/recursive-coder/actions/runs/43120760211) passed the three original jobs on 2026-11-11, including mandatory sandbox E2E (0 skips). Sandbox E2E may be skipped on unsupported local hosts, but **must run and pass on Linux CI**.
 
 ## Mandatory preparation host conformance (#119)
 

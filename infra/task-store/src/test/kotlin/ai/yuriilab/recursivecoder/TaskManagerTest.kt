@@ -211,6 +211,24 @@ class TaskManagerTest {
         } finally { pool.shutdownNow() }
     }
 
+    @Test fun schedulerConcurrencyRejectsOutsideBoundsAndAcceptsBothEndpoints() {
+        val service = service()
+        val scheduler = TaskScheduler(service, TaskRunner { _, _ -> fail("Empty queue must not run tasks") })
+        // Hold the lease to demonstrate invalid arguments are rejected before attempting
+        // scheduler acquisition or recovery, not accidentally rejected by the executor.
+        service.store.withSchedulerLock {
+            for (invalid in listOf(0, 33)) {
+                val error = assertFailsWith<IllegalArgumentException> {
+                    scheduler.runUntilIdle(concurrency = invalid)
+                }
+                assertEquals("Concurrency must be 1..32", error.message)
+            }
+        }
+        for (valid in listOf(1, 32)) {
+            assertEquals(SchedulerReport(0, 0, false), scheduler.runUntilIdle(concurrency = valid))
+        }
+    }
+
     @Test fun concurrencyBoundHoldsWhenMoreTasksAreReady() {
         val service = service()
         repeat(4) { service.enqueue(request("item" + it)) }
