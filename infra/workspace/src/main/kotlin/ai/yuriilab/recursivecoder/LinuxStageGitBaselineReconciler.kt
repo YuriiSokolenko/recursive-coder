@@ -24,6 +24,9 @@ private const val UNSAFE_STAGE_FILE = "UNSAFE_STAGE_FILE"
 private const val UNSAFE_STAGE_PATH = "UNSAFE_STAGE_PATH"
 private const val STAGE_BASELINE_CHANGED = "STAGE_BASELINE_CHANGED"
 private const val FOREIGN_WORKTREE_EDIT = "FOREIGN_WORKTREE_EDIT"
+private const val INVALID_FAILED_WRITE_EVIDENCE = "INVALID_FAILED_WRITE_EVIDENCE"
+private const val MAX_FAILED_WRITE_FILES = 8
+private const val MAX_STAGE_FILE_BYTES = 4 * 1024 * 1024
 
 /**
  * Host-only Git handoff. The caller MUST separately authenticate the stage's
@@ -54,6 +57,9 @@ data class StageGitUnacceptedFile(
  * The caller must establish the terminal, non-accepted graph/CAS generation
  * before submitting this in-memory evidence. Not a model-facing authority.
  * These before-images are deliberately not serialized or restart durable.
+ * The caller owns the collections and arrays and must keep them stable during
+ * capture by recoverFailedDeveloper (including iteration order and byte contents).
+ * Copying is not synchronization; use exclusive ownership or external fencing.
  */
 data class StageGitFailedWriteRequest(
     val expectedHead: String,
@@ -93,7 +99,8 @@ sealed interface StageGitReconciliationResult {
  * These are never reachable from model inputs, serialized requests, or the CLI.
  */
 internal enum class StageGitTestCheckpoint {
-    BEFORE_REF_UPDATE, AFTER_REF_UPDATE, BEFORE_BASELINE_FINAL_READ
+    BEFORE_REF_UPDATE, AFTER_REF_UPDATE, BEFORE_BASELINE_FINAL_READ,
+    AFTER_FAILED_WRITE_EVIDENCE_VALIDATION, BEFORE_FAILED_WRITE_RESTORE
 }
 internal fun interface StageGitTestObserver {
     fun at(checkpoint: StageGitTestCheckpoint)
@@ -171,6 +178,8 @@ class LinuxStageGitBaselineReconciler internal constructor(
      * Descriptor-relative no-follow reads like TrustedWriteRuntime. Path-based
      * isRegularFile/readAllBytes would be vulnerable to a symlink swap between
      * the check and read, even under the trusted-writer coordination lock.
+     * Both reconciliation paths validate their private evidence before reaching
+     * this helper; retain the syntax guard as defense in depth.
      */
     private fun read(
         root: Path, path: String, requireCanonicalMode: Boolean = false
@@ -209,7 +218,7 @@ class LinuxStageGitBaselineReconciler internal constructor(
                 } catch (_: Exception) {
                     throw Reject(UNSAFE_STAGE_FILE)
                 }
-                check(attributes.isRegularFile && attributes.size() <= 4 * 1024 * 1024L,
+                check(attributes.isRegularFile && attributes.size() <= MAX_STAGE_FILE_BYTES,
                     UNSAFE_STAGE_FILE)
                 val perms = try {
                     cursor.getFileAttributeView(name, PosixFileAttributeView::class.java,
@@ -251,7 +260,7 @@ class LinuxStageGitBaselineReconciler internal constructor(
                             buffer.flip()
                             result.write(buffer.array(), 0, n)
                             buffer.clear()
-                            check(result.size() <= 4 * 1024 * 1024,
+                            check(result.size() <= MAX_STAGE_FILE_BYTES,
                                 StageDenialCodes.STAGE_FILE_TOO_LARGE)
                         }
                         OpenedFile(result.toByteArray(), mode)
@@ -653,6 +662,8 @@ class LinuxStageGitBaselineReconciler internal constructor(
      * The workspace and Git index must also be isolated from foreign writers;
      * the shared advisory lease cannot protect against a hostile same-UID process.
      * A crash loses the in-memory proof and must go to #10/human recovery.
+     * The caller must keep both collections and every before-image stable during
+     * capture. After capture this invocation never consults caller-owned evidence.
      */
     fun recoverFailedDeveloper(request: StageGitFailedWriteRequest):
         StageGitFailedWriteResult {
@@ -665,21 +676,37 @@ class LinuxStageGitBaselineReconciler internal constructor(
                 request.branch.split('/').none { it.startsWith(".") } &&
                 ToolAuthorizationPolicy.validHostIdentifier(request.leaseGeneration),
                 LinuxStageGitBaselineReconcilerDiagnosticCodes.INVALID_GIT_BASELINE)
-            val changes = request.files
-            check(changes.isNotEmpty() && changes.size <= 8 &&
-                changes.map { it.path.lowercase() }.toSet().size == changes.size &&
+            // Keep immutable baseline syntax first, as before. Bound the list
+            // and arrays before allocating copies; these are size gates, not
+            // evidence authorization. All subsequent facts come from the snapshot.
+            check(request.files.size in 1..MAX_FAILED_WRITE_FILES,
+                INVALID_FAILED_WRITE_EVIDENCE)
+            val capturedFiles = request.files.toList()
+            check(capturedFiles.size in 1..MAX_FAILED_WRITE_FILES,
+                INVALID_FAILED_WRITE_EVIDENCE)
+            val snapshot = request.copy(
+                files = capturedFiles.map { item ->
+                    val before = item.beforeBytes
+                    check(before == null || before.size <= MAX_STAGE_FILE_BYTES,
+                        INVALID_FAILED_WRITE_EVIDENCE)
+                    item.copy(beforeBytes = before?.copyOf())
+                },
+                frozenArtifacts = request.frozenArtifacts.toMap()
+            )
+            val changes = snapshot.files
+            check(changes.map { it.path.lowercase() }.toSet().size == changes.size &&
                 changes.all { item ->
                     val kind = if (item.beforeBytes == null) WriteOperationKind.CREATE
                         else WriteOperationKind.EDIT
                     ToolAuthorizationPolicy.authorizeWrite(WriteAuthorizationFacts(
                         EngineeringRole.DEVELOPER, kind, item.path,
-                        immutableArtifactPaths = request.frozenArtifacts.keys
+                        immutableArtifactPaths = snapshot.frozenArtifacts.keys
                     )) == ToolAuthorizationDecision.Permit &&
-                        sha256.matches(item.attemptedSha256) &&
-                        (item.beforeBytes == null || item.beforeBytes.size <= 4 * 1024 * 1024)
-                } && request.frozenArtifacts.all { (path, hash) ->
+                        sha256.matches(item.attemptedSha256)
+                } && snapshot.frozenArtifacts.all { (path, hash) ->
                     ToolAuthorizationPolicy.validDeclaredPath(path) && sha256.matches(hash)
-                }, "INVALID_FAILED_WRITE_EVIDENCE")
+                }, INVALID_FAILED_WRITE_EVIDENCE)
+            testObserver?.at(StageGitTestCheckpoint.AFTER_FAILED_WRITE_EVIDENCE_VALIDATION)
             val real = canonicalRoot()
             check(lockDirectory.isAbsolute && !Files.isSymbolicLink(lockDirectory),
                 WorkspaceDenialCodes.WORKSPACE_LOCK_UNAVAILABLE)
@@ -698,12 +725,12 @@ class LinuxStageGitBaselineReconciler internal constructor(
                         Path.of(git(real, listOf("rev-parse", "--absolute-git-dir")))
                             .toRealPath() == real.resolve(".git").toRealPath(),
                         WorkspaceDenialCodes.UNSUPPORTED_WORKSPACE)
-                    check(git(real, listOf("rev-parse", "HEAD")) == request.expectedHead &&
+                    check(git(real, listOf("rev-parse", "HEAD")) == snapshot.expectedHead &&
                         git(real, listOf("symbolic-ref", "-q", "HEAD")) ==
-                            "refs/heads/" + request.branch, STAGE_BASELINE_CHANGED)
+                            "refs/heads/" + snapshot.branch, STAGE_BASELINE_CHANGED)
                     verifyRepositoryConfiguration(real)
                     val pinnedIndex = git(real, listOf("ls-files", "--stage", "-z"))
-                    for ((path, hash) in request.frozenArtifacts)
+                    for ((path, hash) in snapshot.frozenArtifacts)
                         check(digest(read(real, path).bytes) == hash,
                             LinuxStageGitBaselineReconcilerDiagnosticCodes.FROZEN_ARTIFACT_CHANGED)
                     val expectedStatus = linkedMapOf<String, String>()
@@ -738,10 +765,14 @@ class LinuxStageGitBaselineReconciler internal constructor(
                     check(status(real) == expectedStatus &&
                         git(real, listOf("ls-files", "--stage", "-z")) == pinnedIndex,
                         LinuxStageGitBaselineReconcilerDiagnosticCodes.FOREIGN_GIT_OR_INDEX_EDIT)
+                    // All Git blob and postimage checks above used private bytes.
+                    // The internal observer may mutate only the caller's evidence
+                    // in deterministic regression tests; it receives no snapshot.
+                    testObserver?.at(StageGitTestCheckpoint.BEFORE_FAILED_WRITE_RESTORE)
                     for (item in restore) {
                         // A preflight-to-mutation external edit must not be overwritten.
                         check(git(real, listOf("ls-files", "--stage", "-z")) == pinnedIndex &&
-                            git(real, listOf("rev-parse", "HEAD")) == request.expectedHead,
+                            git(real, listOf("rev-parse", "HEAD")) == snapshot.expectedHead,
                             LinuxStageGitBaselineReconcilerDiagnosticCodes.FOREIGN_GIT_OR_INDEX_EDIT)
                         mutationStarted = true
                         failedWriteRestoreExact(real, item)
@@ -760,14 +791,14 @@ class LinuxStageGitBaselineReconciler internal constructor(
                                 LinuxStageGitBaselineReconcilerDiagnosticCodes.POST_RESTORE_IMAGE_UNCONFIRMED)
                     }
                     check(git(real, listOf("ls-files", "--stage", "-z")) == pinnedIndex &&
-                        inspectCleanBaseline(request.expectedHead, request.branch) ==
+                        inspectCleanBaseline(snapshot.expectedHead, snapshot.branch) ==
                             StageGitBaselineResult.Clean, "POST_RESTORE_BASELINE_UNCONFIRMED")
-                    for ((path, hash) in request.frozenArtifacts)
+                    for ((path, hash) in snapshot.frozenArtifacts)
                         check(digest(read(real, path).bytes) == hash,
                             "POST_RESTORE_FROZEN_CHANGED")
                     val audit = digest(("recursive-coder/developer-failed-write-recovery/v1\u0000" +
-                        request.stageRunId.value + "\u0000" +
-                        request.leaseGeneration + "\u0000" + request.expectedHead +
+                        snapshot.stageRunId.value + "\u0000" +
+                        snapshot.leaseGeneration + "\u0000" + snapshot.expectedHead +
                         "\u0000" + changes.sortedBy { it.path }.joinToString("\u0000") {
                             it.path + ":" + (it.beforeBytes?.let(::digest) ?: "CREATE") +
                                 ":" + it.attemptedSha256
@@ -791,6 +822,8 @@ class LinuxStageGitBaselineReconciler internal constructor(
 
     private fun <T> withFailedWriteParent(root: Path, path: String,
         action: (SecureDirectoryStream<Path>, Path) -> T): T {
+        // Recovery authorizes the private change set before traversal. Keep the
+        // independent syntax guard for future callers of this helper.
         check(ToolAuthorizationPolicy.validDeclaredPath(path),
             LinuxStageGitBaselineReconcilerDiagnosticCodes.INVALID_STAGE_PATH)
         val rootKey = Files.readAttributes(root, BasicFileAttributes::class.java,
@@ -833,7 +866,7 @@ class LinuxStageGitBaselineReconciler internal constructor(
             } catch (_: java.nio.file.NoSuchFileException) { null }
             catch (_: Exception) { throw Reject(UNSAFE_STAGE_FILE) }
             if (attributes == null) null else {
-                check(attributes.isRegularFile && attributes.size() <= 4 * 1024 * 1024,
+                check(attributes.isRegularFile && attributes.size() <= MAX_STAGE_FILE_BYTES,
                     UNSAFE_STAGE_FILE)
                 read(root, path, requireCanonicalMode = true)
             }
@@ -845,7 +878,7 @@ class LinuxStageGitBaselineReconciler internal constructor(
                 dir.getFileAttributeView(name, BasicFileAttributeView::class.java,
                     LinkOption.NOFOLLOW_LINKS).readAttributes()
             } catch (_: Exception) { throw Reject(UNSAFE_STAGE_FILE) }
-            check(attrs.isRegularFile && attrs.size() <= 4 * 1024 * 1024,
+            check(attrs.isRegularFile && attrs.size() <= MAX_STAGE_FILE_BYTES,
                 UNSAFE_STAGE_FILE)
             if (item.beforeBytes == null) {
                 // Delete only the exact known CREATE postimage; never a foreign file.
@@ -868,7 +901,7 @@ class LinuxStageGitBaselineReconciler internal constructor(
                         buf.flip()
                         current.write(buf.array(), 0, count)
                         buf.clear()
-                        check(current.size() <= 4 * 1024 * 1024, StageDenialCodes.STAGE_FILE_TOO_LARGE)
+                        check(current.size() <= MAX_STAGE_FILE_BYTES, StageDenialCodes.STAGE_FILE_TOO_LARGE)
                     }
                     check(digest(current.toByteArray()) == item.attemptedSha256,
                         FOREIGN_WORKTREE_EDIT)
