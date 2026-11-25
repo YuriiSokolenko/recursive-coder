@@ -70,9 +70,21 @@ review. At a minimum:
   planned behavior is clearly separated from implemented behavior. New docs
   under `docs/architecture/` are linked from the README, `ARCHITECTURE.md` or
   `MODULES.md`.
-- Branch from `dev`, PR into `dev`. Commit titles follow the
-  `type(#issue): summary` convention. Review-fix commits must be folded into
-  the commits they fix, or the PR must be squash-merged.
+- Branch from `dev`, PR into `dev`. For PRs into `dev`, the title is exactly
+  `#<issue> <issue title>`, matching the primary issue linked with
+  `Closes #<issue>` in the PR description. Verify the issue and title through
+  GitHub as required by the strict review skill; missing evidence is a finding.
+  Intentional release PRs from `dev` into `main` are exempt from the issue,
+  title and `dev` merge-method conventions, not other review checks.
+  A PR is a finding unless it targets `dev` or is an intentional release
+  from `dev` into `main`. A PR into `main` from any other source branch is
+  a finding.
+  Integration into `dev` uses squash or merge commits, not rebase merges.
+  The resulting subject is the PR title followed by GitHub's ` (#<pr>)`
+  suffix. Verify pre-merge settings and the tracked enforcement gap as
+  specified in the skill; the merger verifies the subject before and after
+  merge. Review-fix commits must be folded into the commits they fix, or the
+  PR must be squash-merged.
 
 ## Environment limits
 

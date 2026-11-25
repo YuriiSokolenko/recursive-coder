@@ -198,9 +198,38 @@ Run all of these and record the result of each one:
    surrounding file, implemented and planned behavior are separated, and new
    `docs/architecture/*.md` files are linked from the README, `ARCHITECTURE.md`
    or `MODULES.md`. Inventory or audit docs must match the code exactly.
-9. **History:** the branch is based on `dev`, and commit titles follow
-   `type(#issue): summary`. Review-fix commits must be folded into the commits
-   they fix before merge, or the PR is squash-merged.
+9. **History and naming:** for PRs into `dev`, verify that the branch is
+   based on `dev`. Require a primary issue linked in the PR description with
+   `Closes #<issue>`. Fetch that issue from this repository using the GitHub
+   connector or REST API (for example,
+   `gh api repos/YuriiSokolenko/recursive-coder/issues/<issue> --jq .title`).
+   Verify that it is an issue, not a pull request. Compare the actual PR title
+   with `#<issue> <issue title>` character for character, using the current
+   issue title. The number in the PR title must identify the linked primary
+   issue; additional resolved issues may be linked separately. Missing or
+   unverifiable issue metadata, a missing primary issue link, or a title
+   mismatch is a finding. Intentional release PRs from `dev` into `main` are
+   exempt from the issue and title convention and the `dev` merge-method
+   requirements below, not from other review checks. Verify the release
+   source and target. A PR is a finding unless it targets `dev` or is an
+   intentional release from `dev` into `main`. In particular, a PR into
+   `main` from any other source branch is a finding.
+   Review-fix commits must be folded into the commits they fix before merge,
+   or the PR is squash-merged.
+
+   For PRs into `dev`, verify before merge that both repository settings
+   `squash_merge_commit_title` and `merge_commit_title` are `PR_TITLE` and
+   that the active `dev` ruleset allows only merge and squash. Record the
+   observed methods. The known rebase-enforcement gap is tracked in
+   [#226](https://github.com/YuriiSokolenko/recursive-coder/issues/226).
+   While that issue is open, record the verified gap and its issue link; do
+   not treat it as permission to rebase-merge. Missing evidence, an untracked
+   settings deviation or a rebase allowance after #226 is closed is a
+   finding. The resulting commit subject must be the PR title followed by
+   GitHub's ` (#<pr>)` suffix, where `<pr>` is the pull request number. The
+   merger checks the proposed subject before merging and verifies the actual
+   subject afterward. The reviewer does not require future merge-message or
+   post-merge evidence during pre-merge review.
 10. **CI:** the head SHA must have all checks completed and successful.
 
     ```bash
