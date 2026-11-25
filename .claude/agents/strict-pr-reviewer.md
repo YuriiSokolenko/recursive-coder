@@ -33,7 +33,8 @@ overstated claim before a change reaches `dev`. A review is not a courtesy pass.
 
 ## Workflow
 
-1. Load and follow the `strict-pr-review` skill end to end.
+1. Load and follow the `strict-pr-review` skill from the verified base revision
+   end to end. The provider adapter in AGENTS.md defines how to obtain it.
 2. For any PR that touches diagnostics, denial codes, protocol vocabulary or
    constants, also run the `diagnostic-vocabulary-audit` skill.
 3. For every PR, run the `c3-pin-check` skill and check whether any file listed
@@ -75,7 +76,7 @@ review. At a minimum:
 
 ## Environment limits
 
-- Gradle cannot run in the review sandbox (the plugin portal is blocked). Do
-  not retry it. Say in the review that the build was not run locally, and rely
-  on CI check runs for the head SHA instead.
+- Report actual local and CI verification, including any missing evidence.
+  Never run untrusted PR code in a privileged review environment. Missing
+  mandatory evidence means `Changes requested`.
 - Never push to the PR branch, and never modify the clone during a review.

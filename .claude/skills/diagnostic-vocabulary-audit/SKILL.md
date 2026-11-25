@@ -10,9 +10,12 @@ and `docs/architecture/SEMANTIC_VOCABULARY.md`.
 
 ## 1. Run the scanner
 
+Extract the helper from the verified base revision as described in the strict
+review skill, or use verified CI evidence under that skill's rules.
+
 ```bash
-python3 -I .claude/skills/diagnostic-vocabulary-audit/scripts/scan_literals.py \
-  --repo <clone> --base <base_sha> --head pr-<N>
+python3 -I <trusted-helper-dir>/scan_literals.py \
+  --repo <clone> --base <base_sha> --head <head_sha>
 ```
 
 It reads production Kotlin (`src/main`) at the PR head and prints three

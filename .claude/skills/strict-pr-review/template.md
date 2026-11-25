@@ -1,7 +1,15 @@
 ## Review of PR #<N> (issue #<M>): <title>
 
 **Scope reviewed:** <commit count> commits (<short SHAs>), base `dev` @ `<base>`, head `<head>`, <files> files (+<add>/−<del>).
-**Build:** not run locally (the Gradle plugin portal is blocked in the review sandbox). CI on `<head>`: <state of every check>.
+**Policy revision:** `<base>` (trusted base helpers).
+Checkout check: <`check_policy_checkout.py` result>.
+Discovery configuration: <verified default discovery or separately verified
+sources/settings, including external or ancestor instructions; report
+unavailable evidence explicitly>.
+Bootstrap: <owner authorization comment URL, or "not needed: AGENTS.md exists
+at base">.
+**Verification:** <local commands/results, CI on head, helper evidence and any gaps>.
+**Reviewer:** AI-generated review; not independent human approval.
 
 **Verdict: <Changes requested | Approved>.** Every item below is required before merge.
 
