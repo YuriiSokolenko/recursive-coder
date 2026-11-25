@@ -7,7 +7,15 @@ Usage:
 Without --base/--head, only the working-tree pins are checked.
 With both, the pins are checked at HEAD's content (read via git), and every
 CODEOWNERS-protected path changed in base...head is listed.
-Exit code 1 means a pin mismatch or a missing pinned file.
+Base and head CODEOWNERS rules and pin inventories are combined, renames are
+reported as a deletion plus an addition, and paths are read NUL-separated.
+
+Exit codes:
+    0  every pin matches.
+    1  a pin mismatch, a missing pinned file, a pin inventory that does not
+       hold exactly six distinct paths, or (with --base/--head) a base
+       revision without ArchitectureGraph.kt.
+    2  invalid arguments, including --base or --head given alone.
 """
 import argparse
 import fnmatch
@@ -65,6 +73,8 @@ def main():
     ap.add_argument("--base")
     ap.add_argument("--head")
     a = ap.parse_args()
+    if bool(a.base) != bool(a.head):
+        ap.error('--base and --head must be provided together')
     rev = a.head
 
     graph = read(a.repo, rev, GRAPH)
@@ -72,9 +82,11 @@ def main():
         print(f"FAIL: {GRAPH} not found")
         return 1
     pins = PIN_RE.findall(graph.decode())
-    if len(pins) != 6:
-        print(f"WARN: expected 6 C3 pins, found {len(pins)}; the pin inventory itself changed")
-    failed = False
+    if len(pins) != 6 or len({path for path, _ in pins}) != 6:
+        print(f"FAIL: expected 6 distinct C3 pins, found {len(pins)} entries")
+        failed = True
+    else:
+        failed = False
     for path, expected in pins:
         data = read(a.repo, rev, path)
         if data is None:
@@ -87,10 +99,18 @@ def main():
         print(f"{status} {path}" + ("" if actual == expected else f"\n     expected {expected}\n     actual   {actual}"))
 
     if a.base and a.head:
-        changed = git(a.repo, "diff", "--name-only", f"{a.base}...{a.head}").decode().split()
-        patterns = codeowners_patterns(a.repo, a.head)
+        changed = git(a.repo, "diff", "--no-renames", "--name-only", "-z",
+                      f"{a.base}...{a.head}").decode().split("\0")
+        changed = [path for path in changed if path]
+        patterns = set(codeowners_patterns(a.repo, a.base)) | set(codeowners_patterns(a.repo, a.head))
         protected = sorted({p for p in changed for pat in patterns if matches(p, pat)})
-        pinned_changed = sorted({p for p in changed for p_, _ in pins if p == p_})
+        base_graph = read(a.repo, a.base, GRAPH)
+        if base_graph is None:
+            print(f"FAIL: base {GRAPH} not found")
+            failed = True
+        base_pins = PIN_RE.findall(base_graph.decode()) if base_graph is not None else []
+        pinned_paths = {p for p, _ in pins + base_pins}
+        pinned_changed = sorted(set(changed) & pinned_paths)
         graph_changed = GRAPH in changed
         print(f"\nChanged files: {len(changed)}; CODEOWNERS-protected among them: {len(protected)}")
         for p in protected:
