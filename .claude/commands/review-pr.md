@@ -4,7 +4,9 @@ argument-hint: <PR number or URL>
 ---
 
 Review pull request $ARGUMENTS in YuriiSokolenko/recursive-coder using the
-`strict-pr-reviewer` agent.
+`strict-pr-reviewer` agent from the verified base revision, following
+AGENTS.md. If the loaded agent is not from that revision, follow the trusted
+policy directly.
 
 Requirements:
 - Follow the `strict-pr-review` skill end to end. Run `c3-pin-check` on every

@@ -12,22 +12,26 @@ verifies them without Gradle.
 
 ## Run
 
+Extract the helper from the verified base revision as described in the strict
+review skill, or use verified CI evidence under that skill's rules.
+
 ```bash
-python3 -I .claude/skills/c3-pin-check/scripts/check_c3_pins.py \
-  --repo <clone> --base <base_sha> --head pr-<N>
+python3 -I <trusted-helper-dir>/check_c3_pins.py \
+  --repo <clone> --base <base_sha> --head <head_sha>
 ```
 
-- A `FAIL` line, or a non-zero exit code, means a pinned source changed while
-  its pin did not. That is an Important finding unless the PR is an explicit
-  C3 change.
+- A `FAIL` line or non-zero exit code means pin verification failed. A
+  mismatch, missing file, or invalid pin inventory is an Important finding.
+  Even explicit C3 changes must have valid, matching pins before approval.
 - `C3 CHANGE` means pinned sources or the pin inventory changed. Require:
   - the review record described in
     `docs/architecture/TRUSTED_C3_REVIEW.md`, updated in the same PR;
   - updated pins that match the new bytes;
   - independent behavioral oracles for the changed behavior;
   - owner review (see `.github/CODEOWNERS`).
-- The `protected` list shows the CODEOWNERS paths the PR touches. Changes under
-  `.github/`, `build-logic/`, `gradle/`, `*.gradle.kts`, `tools/` and the
+- The `protected` list conservatively includes paths protected at either the
+  base or head revision; removed rules cannot hide an affected file. Changes
+  under `.github/`, `build-logic/`, `gradle/`, `*.gradle.kts`, `tools/` and the
   architecture tests are supply-chain changes: review them line by line, and
   call out any widened permission, new dependency, new network access or
   weakened check.

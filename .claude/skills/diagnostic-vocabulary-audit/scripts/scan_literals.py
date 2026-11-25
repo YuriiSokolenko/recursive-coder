@@ -43,9 +43,12 @@ def main():
     ap.add_argument("--min", type=int, default=2)
     a = ap.parse_args()
 
-    files = [f for f in git(a.repo, "ls-tree", "-r", "--name-only", a.head).split()
+    # NUL-separated paths keep names with spaces intact. Rename detection only
+    # hides the old path, which no longer exists at HEAD, so it cannot change
+    # the result and is left at git's default.
+    files = [f for f in git(a.repo, "ls-tree", "-r", "-z", "--name-only", a.head).split("\0")
              if "/src/main/" in f and f.endswith(".kt")]
-    touched = set(git(a.repo, "diff", "--name-only", f"{a.base}...{a.head}").split())
+    touched = {f for f in git(a.repo, "diff", "--name-only", "-z", f"{a.base}...{a.head}").split("\0") if f}
     pinned = set(PIN_RE.findall(git(a.repo, "show", f"{a.head}:{GRAPH}")))
 
     text = {f: git(a.repo, "show", f"{a.head}:{f}") for f in files}
