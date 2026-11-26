@@ -26,6 +26,8 @@ ROOT = Path(__file__).resolve().parents[1]
 NS = {"g": "https://schema.gradle.org/dependency-verification"}
 SCHEMA = NS["g"]
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+# Gradle renders SHA-1 cache directory names without leading zero padding.
+MODULE_SHA1_DIRECTORY = re.compile(r"[0-9a-f]{1,40}\Z")
 MANIFESTS = (
     ROOT / "gradle/verification-metadata.xml",
     ROOT / "build-logic/gradle/verification-metadata.xml",
@@ -137,7 +139,7 @@ def copy_pinned_module_files(
             info = item.lstat()
             if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
                     or len(relative.parts) != 5
-                    or not re.fullmatch(r"[0-9a-f]{40}", relative.parts[3])):
+                    or not MODULE_SHA1_DIRECTORY.fullmatch(relative.parts[3])):
                 raise AssertionError(f"Unsafe module cache entry: {relative}")
             with item.open("rb") as stream:
                 digest = hashlib.file_digest(stream, "sha256").hexdigest()

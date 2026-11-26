@@ -341,6 +341,49 @@ class ModuleFilesCacheTest(unittest.TestCase):
                 dependency.copy_pinned_module_files(staged, root / "rejected", allowed)
             self.assertFalse((root / "rejected").exists())
 
+    def test_gradle_sha1_directory_accepts_omitted_leading_zeroes(self):
+        # The cache path is a layout check, not the SHA-256 trust authority.
+        for name in ("0", "a", "9fdaf45aaba0a282247d79f8be67b0b4ac40127",
+                     "a" * 39, "a" * 40):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                source = root / "source"
+                relative = Path("g/m/1") / name / "m.jar"
+                jar = source / relative
+                jar.parent.mkdir(parents=True)
+                jar.write_bytes(b"pinned")
+                allowed = {hashlib.sha256(jar.read_bytes()).hexdigest()}
+                stage = root / "stage"
+                self.assertEqual(
+                    dependency.copy_pinned_module_files(source, stage, allowed, staging=True), 1,
+                )
+                restored = root / "restore"
+                self.assertEqual(
+                    dependency.copy_pinned_module_files(stage, restored, allowed), 1,
+                )
+                self.assertEqual((restored / relative).read_bytes(), b"pinned")
+                (stage / relative).write_bytes(b"tampered")
+                with self.assertRaisesRegex(AssertionError, "Unpinned restored module bytes"):
+                    dependency.copy_pinned_module_files(stage, root / "rejected", allowed)
+                self.assertFalse((root / "rejected").exists())
+
+    def test_gradle_sha1_directory_rejects_malformed_names(self):
+        for name in ("a" * 41, "A" * 40, "g", "0x01", "-1", "1.2"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                source = root / "source"
+                jar = source / "g" / "m" / "1" / name / "m.jar"
+                jar.parent.mkdir(parents=True)
+                jar.write_bytes(b"pinned")
+                allowed = {hashlib.sha256(jar.read_bytes()).hexdigest()}
+                for staging in (False, True):
+                    with self.subTest(staging=staging):
+                        with self.assertRaisesRegex(AssertionError, "Unsafe module cache entry"):
+                            dependency.copy_pinned_module_files(
+                                source, root / "rejected", allowed, staging=staging,
+                            )
+                        self.assertFalse((root / "rejected").exists())
+
     def test_symlink_hardlink_and_unexpected_layout_rejected(self):
         for kind in ("symlink", "hardlink", "layout"):
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as raw:
