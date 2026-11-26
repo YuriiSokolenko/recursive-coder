@@ -55,8 +55,6 @@ jobs:
             "$RUNNER_TEMP/recursive-gradle-module-cache" \
             "$GRADLE_USER_HOME/caches/modules-2"
           rm -rf "$RUNNER_TEMP/recursive-gradle-module-cache"
-      - name: Resolve Gradle plugins with bounded registry retry
-        run: python3 -I tools/run_ci_gradle.py --retry-resolution --label plugin-resolution -- ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache help
       - name: Verify public-runner toolchain
         run: |
           java -version
@@ -68,7 +66,7 @@ jobs:
       - name: Verify architecture, root check and pure unit tests
         # checkTestTiers is a dependency of the single root check; -x test
         # preserves the separate full unfiltered JVM/sandbox job.
-        run: python3 -I tools/run_ci_gradle.py --label architecture-check -- ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache checkArchitecture check unitTest -x test --stacktrace
+        run: ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache --offline checkArchitecture check unitTest -x test --stacktrace
       - name: Assert root check schedules test-tier verification exactly once
         run: |
           ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache --offline --console=plain check --dry-run > "$RUNNER_TEMP/check-task-plan.log"
@@ -98,9 +96,9 @@ jobs:
           print("Verified root check schedules one guard and the guard alone schedules all testClasses")
           PY
       - name: Prove trusted running host opt-in at the Kotlin compiler boundary
-        run: python3 -I tools/run_ci_gradle.py --label running-host-opt-in -- ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache :infra:journal:verifyRunningHostOptIn --stacktrace
+        run: ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache --offline :infra:journal:verifyRunningHostOptIn --stacktrace
       - name: Test independent architecture graph verifier
-        run: python3 -I tools/run_ci_gradle.py --label standalone-build-logic-test -- ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache -p build-logic test --stacktrace
+        run: ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache --offline -p build-logic test --stacktrace
       - name: Prove fresh and reused Gradle configuration cache
         run: |
           rm -rf .gradle/configuration-cache
@@ -111,7 +109,7 @@ jobs:
       - name: Reject illegal edges, cycles and stale configuration-cache snapshots
         run: python3 -m unittest discover -s tests -p 'test_architecture_gradle.py' -v
       - name: Validate actual Kotlin-generated test tier fixtures
-        run: python3 -I tools/run_ci_gradle.py --label kotlin-tier-fixtures -- ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache :core:contracts:checkKotlinTierFixtures --stacktrace
+        run: ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache --offline :core:contracts:checkKotlinTierFixtures --stacktrace
       - name: Validate test tier guard against negative bytecode fixtures
         run: |
           python3 - <<'PY'
@@ -180,7 +178,7 @@ jobs:
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ runner.temp }}/recursive-gradle-module-cache
-          key: gradle-module-cache-v2-${{ runner.os }}-${{ runner.arch }}-9.8.2-${{ hashFiles('gradle/verification-metadata.xml', 'build-logic/gradle/verification-metadata.xml', 'build-logic/gradle/libs.versions.toml', '**/settings.gradle.kts', '**/build.gradle.kts', 'gradle.properties', 'tools/check_dependency_verification.py', 'tools/resolve_ci_test_runtime.init.gradle', '.github/workflows/ci.yml') }}
+          key: gradle-module-cache-v3-${{ runner.os }}-${{ runner.arch }}-9.8.2-${{ hashFiles('gradle/verification-metadata.xml', 'build-logic/gradle/verification-metadata.xml', 'build-logic/gradle/libs.versions.toml', '**/*.gradle.kts', 'gradle.properties', 'tools/check_dependency_verification.py', 'tools/resolve_ci_dependencies.init.gradle', '.github/workflows/ci.yml') }}
       - name: Verify restored module cache before Gradle resolution
         env:
           CACHE_HIT: ${{ steps.gradle-cache.outputs.cache-hit }}
@@ -197,6 +195,10 @@ jobs:
         run: python3 -I tools/check_dependency_verification.py --negative-fixtures
       - name: Resolve Gradle plugins with bounded registry retry
         run: python3 -I tools/run_ci_gradle.py --retry-resolution --label plugin-resolution -- ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache help
+      - name: Resolve all CI build and test dependencies with bounded registry retry
+        run: |
+          python3 -I tools/run_ci_gradle.py --retry-resolution --label dependency-resolution -- ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache --no-configuration-cache --init-script "$GITHUB_WORKSPACE/tools/resolve_ci_dependencies.init.gradle" :resolveCiDependencies
+          python3 -I tools/run_ci_gradle.py --retry-resolution --label build-logic-dependency-resolution -- ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache --no-configuration-cache --init-script "$GITHUB_WORKSPACE/tools/resolve_ci_dependencies.init.gradle" -p build-logic :resolveCiDependencies
       - name: Preflight bytecode guard and fixtures
         run: |
           python3 -I -m py_compile tools/check_production_bytecode.py tools/check_test_tiers.py
@@ -204,30 +206,21 @@ jobs:
       - name: Compile and install production artifacts without test execution
         env:
           CI: 'true'
-        run: python3 -I tools/run_ci_gradle.py --label production-build -- ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache clean installDist :app:cli:writeRuntimeClasspathManifest --stacktrace
-      - name: Populate test compile dependencies on cache miss
-        if: ${{ steps.gradle-cache.outputs.cache-hit != 'true' }}
-        run: |
-          python3 -I tools/run_ci_gradle.py --label seed-test-classes -- ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache testClasses
-          python3 -I tools/run_ci_gradle.py --label seed-build-logic -- ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache -p build-logic testClasses
-      - name: Resolve all JVM test runtime dependencies
-        run: |
-          python3 -I tools/run_ci_gradle.py --label seed-test-runtime -- ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache --no-configuration-cache --init-script "$GITHUB_WORKSPACE/tools/resolve_ci_test_runtime.init.gradle" :resolveCiTestRuntime
-          python3 -I tools/run_ci_gradle.py --label seed-build-logic-runtime -- ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache --no-configuration-cache --init-script "$GITHUB_WORKSPACE/tools/resolve_ci_test_runtime.init.gradle" -p build-logic :resolveCiTestRuntime
+        run: ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache --offline clean installDist :app:cli:writeRuntimeClasspathManifest --stacktrace
       - name: Stage pinned module files and resolution metadata
         run: |
           python3 -I tools/check_dependency_verification.py --stage-module-cache \
             "$GRADLE_USER_HOME/caches/modules-2" \
             "$RUNNER_TEMP/recursive-gradle-module-cache"
-      - name: Prove staged runtime dependencies resolve offline
+      - name: Prove staged dependencies resolve offline in a fresh Gradle home
         run: |
-          probe_home="$(mktemp -d "$RUNNER_TEMP/recursive-gradle-runtime-proof.XXXXXX")"
+          probe_home="$(mktemp -d "$RUNNER_TEMP/recursive-gradle-offline-proof.XXXXXX")"
           trap 'rm -rf "$probe_home"' EXIT
           python3 -I tools/check_dependency_verification.py --restore-module-cache \
             "$RUNNER_TEMP/recursive-gradle-module-cache" "$probe_home/caches/modules-2"
           export GRADLE_USER_HOME="$probe_home"
-          python3 -I tools/run_ci_gradle.py --label prove-test-runtime -- ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache --offline --no-configuration-cache --init-script "$GITHUB_WORKSPACE/tools/resolve_ci_test_runtime.init.gradle" :resolveCiTestRuntime
-          python3 -I tools/run_ci_gradle.py --label prove-build-logic-runtime -- ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache --offline --no-configuration-cache --init-script "$GITHUB_WORKSPACE/tools/resolve_ci_test_runtime.init.gradle" -p build-logic :resolveCiTestRuntime
+          ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache --offline --warning-mode=fail --no-configuration-cache --init-script "$GITHUB_WORKSPACE/tools/resolve_ci_dependencies.init.gradle" :resolveCiDependencies
+          ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache --offline --warning-mode=fail --no-configuration-cache --init-script "$GITHUB_WORKSPACE/tools/resolve_ci_dependencies.init.gradle" -p build-logic :resolveCiDependencies
       - name: Publish current-run Gradle module cache
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
@@ -405,8 +398,6 @@ jobs:
             "$RUNNER_TEMP/recursive-gradle-module-cache" \
             "$GRADLE_USER_HOME/caches/modules-2"
           rm -rf "$RUNNER_TEMP/recursive-gradle-module-cache"
-      - name: Resolve Gradle plugins with bounded registry retry
-        run: python3 -I tools/run_ci_gradle.py --retry-resolution --label plugin-resolution -- ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache help
       - name: Set up Python 3.12
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
@@ -440,7 +431,7 @@ jobs:
       - name: Run full JVM and sandbox tests only after the bytecode gate
         env:
           CI: 'true'
-        run: python3 -I tools/run_ci_gradle.py --label kotlin-build -- ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache test integrationTest e2eTest checkPreparationHostConformance --stacktrace
+        run: ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache --offline test integrationTest e2eTest checkPreparationHostConformance --stacktrace
       - name: Assert per-module JUnit execution evidence
         run: python3 -I tools/check_junit_evidence.py --root .
       - name: Confirm sandbox integration test was not skipped

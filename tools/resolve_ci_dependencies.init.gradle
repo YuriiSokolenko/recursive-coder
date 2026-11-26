@@ -1,0 +1,70 @@
+// CI-only dependency population and offline proof; never compiles or executes tests.
+// Resolve external artifacts of every configuration the CI build compiles and
+// tests with, so that every later Gradle invocation can run --offline. Each JVM
+// project resolves only its own configurations in its own task. Gradle strict
+// verification still applies to every artifact.
+import org.gradle.api.artifacts.component.ModuleComponentIdentifier
+import org.gradle.api.tasks.SourceSetContainer
+
+// Kotlin Gradle plugin tool classpaths shared by all compilations of a project.
+def kotlinToolConfigurations = ["kotlinCompilerClasspath", "kotlinBuildToolsApiClasspath"]
+
+gradle.projectsEvaluated {
+    def buildRoot = gradle.rootProject
+    def javaProjects = buildRoot.allprojects.findAll {
+        it.plugins.hasPlugin("java")
+    }.sort { it.path }
+    if (javaProjects.isEmpty()) {
+        throw new GradleException("No JVM projects for CI dependency resolution")
+    }
+    def projectTasks = javaProjects.collect { project ->
+        def sourceSets = project.extensions.getByType(SourceSetContainer)
+        def testRuntime = sourceSets.getByName("test").runtimeClasspathConfigurationName
+        def names = new TreeSet<String>(kotlinToolConfigurations)
+        sourceSets.each { sourceSet ->
+            def suffix = sourceSet.name.substring(0, 1).toUpperCase() + sourceSet.name.substring(1)
+            names.addAll([
+                sourceSet.compileClasspathConfigurationName,
+                sourceSet.runtimeClasspathConfigurationName,
+                sourceSet.annotationProcessorConfigurationName,
+                "kotlinCompilerPluginClasspath" + suffix,
+            ])
+        }
+        def views = new TreeMap<String, FileCollection>()
+        names.each { name ->
+            def configuration = project.configurations.findByName(name)
+            if (configuration != null && configuration.canBeResolved) {
+                views[name] = configuration.incoming.artifactView { view ->
+                    view.componentFilter { id -> id instanceof ModuleComponentIdentifier }
+                }.files
+            }
+        }
+        if (!views.containsKey(testRuntime)) {
+            throw new GradleException("Missing resolvable test runtime: ${project.path}")
+        }
+        def projectPath = project.path
+        project.tasks.register("resolveCiProjectDependencies") { task ->
+            task.group = "verification"
+            task.description = "Resolve external artifacts of this project's CI build and test configurations."
+            task.doLast {
+                views.each { name, files ->
+                    def resolved = files.files
+                    if (name == testRuntime && resolved.isEmpty()) {
+                        throw new GradleException("Empty test runtime: ${projectPath}")
+                    }
+                    task.logger.lifecycle("CI dependencies ${projectPath}:${name}: " +
+                        "${resolved.size()} external artifacts")
+                }
+            }
+        }
+    }
+    def projectCount = javaProjects.size()
+    buildRoot.tasks.register("resolveCiDependencies") { task ->
+        task.group = "verification"
+        task.description = "Resolve external artifacts of every JVM project's CI configurations."
+        task.dependsOn(projectTasks)
+        task.doLast {
+            task.logger.lifecycle("CI dependency resolution coverage: ${projectCount} JVM projects")
+        }
+    }
+}

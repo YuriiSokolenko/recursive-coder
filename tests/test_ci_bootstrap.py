@@ -32,6 +32,8 @@ class CiBootstrapTrustTest(unittest.TestCase):
         command = ["git", "ls-files", "--stage", "--", "gradlew"]
         for mode in ("100644", "100755"):
             with self.subTest(tracked_mode=mode), mock.patch.object(
+                bootstrap, "tracked_files", return_value=["settings.gradle.kts"],
+            ), mock.patch.object(
                 bootstrap.subprocess, "run",
                 return_value=subprocess.CompletedProcess(
                     args=command, returncode=0,
@@ -184,16 +186,16 @@ class CiBootstrapTrustTest(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "Changed dependency cache policy"):
             bootstrap.audit_workflow(mutated)
 
-    def test_cache_runtime_seed_and_offline_proof_are_mandatory(self):
-        for step in (bootstrap.CACHE_RUNTIME_STEP, bootstrap.CACHE_RUNTIME_PROOF_STEP):
+    def test_cache_resolution_and_offline_proof_are_mandatory(self):
+        for step in (bootstrap.CACHE_RESOLVE_STEP, bootstrap.CACHE_PROOF_STEP):
             with self.subTest(step=step.splitlines()[0]):
                 self.assertIn(step, self.workflow)
                 mutated = self.workflow.replace(step, "", 1)
                 with self.assertRaisesRegex(AssertionError, "Changed dependency cache policy"):
                     bootstrap.audit_workflow(mutated)
 
-    def test_cache_runtime_seed_cannot_be_skipped_on_hit(self):
-        original = bootstrap.CACHE_RUNTIME_STEP
+    def test_cache_resolution_cannot_be_skipped_on_hit(self):
+        original = bootstrap.CACHE_RESOLVE_STEP
         guarded = original.replace("        run: |",
                                    "        if: false\n        run: |", 1)
         mutated = self.workflow.replace(original, guarded, 1)
@@ -201,20 +203,111 @@ class CiBootstrapTrustTest(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "Changed dependency cache policy"):
             bootstrap.audit_workflow(mutated)
 
-    def test_cache_runtime_proof_cannot_access_registries(self):
-        original = bootstrap.CACHE_RUNTIME_PROOF_STEP
-        mutated = self.workflow.replace(original, original.replace("--offline ", ""), 1)
-        self.assertNotEqual(mutated, self.workflow)
-        with self.assertRaisesRegex(AssertionError, "Changed dependency cache policy"):
-            bootstrap.audit_workflow(mutated)
+    def test_cache_proof_cannot_access_registries_or_tolerate_deprecations(self):
+        original = bootstrap.CACHE_PROOF_STEP
+        for flag in ("--offline ", "--warning-mode=fail "):
+            with self.subTest(flag=flag):
+                mutated = self.workflow.replace(original, original.replace(flag, ""), 1)
+                self.assertNotEqual(mutated, self.workflow)
+                with self.assertRaisesRegex(AssertionError, "Changed dependency cache policy"):
+                    bootstrap.audit_workflow(mutated)
 
-    def test_cache_runtime_proof_cannot_be_moved_after_publication(self):
-        proof = bootstrap.CACHE_RUNTIME_PROOF_STEP
+    def test_cache_proof_cannot_be_moved_after_publication(self):
+        proof = bootstrap.CACHE_PROOF_STEP
         publish = bootstrap.CACHE_PUBLISH_STEP
         mutated = self.workflow.replace(proof + publish, publish + proof, 1)
         self.assertNotEqual(mutated, self.workflow)
         with self.assertRaisesRegex(AssertionError, "Changed dependency cache policy"):
             bootstrap.audit_workflow(mutated)
+
+    def test_build_and_test_gradle_invocations_must_be_offline(self):
+        offline_lines = [
+            line for line in self.workflow.splitlines()
+            if "./gradlew " in line and "--offline" in line.split()
+            and "--warning-mode=fail" not in line
+        ]
+        self.assertGreaterEqual(len(offline_lines), 10)
+        for line in offline_lines:
+            with self.subTest(line=line.strip()[:90]):
+                mutated = self.workflow.replace(line, line.replace(" --offline", "", 1), 1)
+                self.assertNotEqual(mutated, self.workflow)
+                with self.assertRaisesRegex(AssertionError, "reach registries"):
+                    bootstrap.audit_workflow(mutated)
+
+    def test_consumers_cannot_resolve_from_registries(self):
+        for job in bootstrap.CONSUMER_JOBS:
+            with self.subTest(job=job):
+                section = self.workflow.split(f"\n  {job}:\n", 1)[1]
+                anchor = bootstrap.CACHE_VERIFY_DOWNLOAD_STEP
+                self.assertIn(anchor, section)
+                mutated = self.workflow.replace(
+                    f"\n  {job}:\n" + section.split(anchor, 1)[0] + anchor,
+                    f"\n  {job}:\n" + section.split(anchor, 1)[0] + anchor
+                    + bootstrap.CACHE_PLUGIN_STEP, 1,
+                )
+                self.assertNotEqual(mutated, self.workflow)
+                with self.assertRaisesRegex(AssertionError, "Changed dependency cache policy"):
+                    bootstrap.audit_workflow(mutated)
+
+    def test_production_compilation_cannot_precede_dependency_resolution(self):
+        compile_name = "      - name: Compile and install production artifacts without test execution\n"
+        start = self.workflow.index(compile_name)
+        compile_step = self.workflow[start:self.workflow.index("\n      - ", start + 1) + 1]
+        mutated = self.workflow.replace(compile_step, "", 1).replace(
+            bootstrap.CACHE_RESOLVE_STEP, compile_step + bootstrap.CACHE_RESOLVE_STEP, 1,
+        )
+        self.assertNotEqual(mutated, self.workflow)
+        with self.assertRaisesRegex(AssertionError, "precedes dependency resolution"):
+            bootstrap.audit_workflow(mutated)
+
+    def test_workflow_gradle_opts_are_fixed(self):
+        for replacement in (
+            "env:\n  GRADLE_OPTS: -Dorg.gradle.caching=true\n",
+            "env:\n  GRADLE_OPTS: -Dorg.gradle.caching=false -Dhttps.proxyHost=evil\n",
+            "",
+        ):
+            with self.subTest(replacement=replacement):
+                mutated = self.workflow.replace(bootstrap.GRADLE_OPTS_BLOCK, replacement, 1)
+                self.assertNotEqual(mutated, self.workflow)
+                with self.assertRaisesRegex(AssertionError, "GRADLE_OPTS"):
+                    bootstrap.audit_workflow(mutated)
+        mutated = self.workflow.replace(
+            "      - name: Install SHA-256-verified Gradle 9.8.2\n",
+            "      - name: Install SHA-256-verified Gradle 9.8.2\n"
+            "        env:\n          GRADLE_OPTS: -Dorg.gradle.caching=true\n", 1,
+        )
+        with self.assertRaisesRegex(AssertionError, "GRADLE_OPTS"):
+            bootstrap.audit_workflow(mutated)
+
+    def test_cache_key_covers_every_dependency_input(self):
+        tracked = [
+            "settings.gradle.kts", "app/cli/build.gradle.kts",
+            "build-logic/src/main/kotlin/recursivecoder.jvm.gradle.kts",
+            "build-logic/gradle/libs.versions.toml", "gradle/verification-metadata.xml",
+            "build-logic/gradle/verification-metadata.xml", "gradle.properties",
+            "tools/resolve_ci_dependencies.init.gradle", "README.md",
+        ]
+        bootstrap.audit_cache_key_coverage(tracked)
+        # The previous key hashed only build.gradle.kts files and missed the
+        # convention plugin that declares the JUnit runtime dependencies.
+        legacy = bootstrap.CACHE_KEY.replace("'**/*.gradle.kts'",
+                                             "'**/settings.gradle.kts', '**/build.gradle.kts'")
+        self.assertNotEqual(legacy, bootstrap.CACHE_KEY)
+        with self.assertRaisesRegex(AssertionError, "recursivecoder.jvm.gradle.kts"):
+            bootstrap.audit_cache_key_coverage(tracked, legacy)
+        for path in ("gradle/libs.versions.toml", "tools/extra.init.gradle",
+                     "sub/gradle.properties"):
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(AssertionError, "missing from the cache key"):
+                    bootstrap.audit_cache_key_coverage([*tracked, path])
+
+    def test_cache_key_glob_translation(self):
+        pattern = bootstrap.glob_regex("**/*.gradle.kts")
+        for path in ("settings.gradle.kts", "a/b/c.gradle.kts"):
+            self.assertIsNotNone(pattern.match(path), path)
+        for path in ("a/b.gradle.kts.bak", "a/b.gradle"):
+            self.assertIsNone(pattern.match(path), path)
+        self.assertIsNone(bootstrap.glob_regex("tools/*.py").match("tools/a/b.py"))
 
     def test_cache_action_pin_change_rejected(self):
         mutated = self.workflow.replace(
@@ -348,8 +441,12 @@ class CiBootstrapTrustTest(unittest.TestCase):
 
 
 
+def pin_for(path: Path, coordinate: tuple[str, str, str]) -> dict:
+    return {(*coordinate, path.name): hashlib.sha256(path.read_bytes()).hexdigest()}
+
+
 class ModuleFilesCacheTest(unittest.TestCase):
-    def test_pinned_bytes_only_and_corruption_rejected(self):
+    def test_coordinate_pinned_bytes_only_and_corruption_rejected(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             source = root / "source"
@@ -359,19 +456,45 @@ class ModuleFilesCacheTest(unittest.TestCase):
             jar.write_bytes(b"pinned artifact")
             unknown = directory / "unknown.jar"
             unknown.write_bytes(b"unapproved")
-            allowed = {hashlib.sha256(jar.read_bytes()).hexdigest()}
+            pins = pin_for(jar, ("org.example", "module", "1.0"))
             staged = root / "stage"
-            self.assertEqual(
-                dependency.copy_pinned_module_files(source, staged, allowed, staging=True), 1,
-            )
+            with mock.patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(root / "summary.md")}):
+                self.assertEqual(
+                    dependency.copy_pinned_module_files(source, staged, pins, staging=True), 1,
+                )
             self.assertEqual(list(staged.rglob("*.jar")), [staged / jar.relative_to(source)])
+            self.assertIn("`org.example:module:1.0/unknown.jar`",
+                          (root / "summary.md").read_text(encoding="utf-8"))
             self.assertEqual(
-                dependency.copy_pinned_module_files(staged, root / "restore", allowed), 1,
+                dependency.copy_pinned_module_files(staged, root / "restore", pins), 1,
             )
             (staged / jar.relative_to(source)).write_bytes(b"corrupt artifact")
-            with self.assertRaisesRegex(AssertionError, "Unpinned restored module bytes"):
-                dependency.copy_pinned_module_files(staged, root / "rejected", allowed)
-            self.assertFalse((root / "rejected").exists())
+            for staging in (False, True):
+                with self.subTest(staging=staging):
+                    with self.assertRaisesRegex(AssertionError, "differ from their SHA-256 pin"):
+                        dependency.copy_pinned_module_files(
+                            staged, root / "rejected", pins, staging=staging,
+                        )
+                    self.assertFalse((root / "rejected").exists())
+
+    def test_pinned_bytes_under_another_coordinate_are_not_transported(self):
+        # A digest pinned for one coordinate does not authorize another path.
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / "source"
+            pinned = source / "org.example/module/1.0" / ("a" * 40) / "module-1.0.jar"
+            moved = source / "org.example/other/9.9" / ("a" * 40) / "other-9.9.jar"
+            for path in (pinned, moved):
+                path.parent.mkdir(parents=True)
+                path.write_bytes(b"same bytes")
+            pins = pin_for(pinned, ("org.example", "module", "1.0"))
+            with self.assertRaisesRegex(AssertionError, "Unpinned restored module coordinate"):
+                dependency.copy_pinned_module_files(source, root / "restore", pins)
+            stage = root / "stage"
+            self.assertEqual(
+                dependency.copy_pinned_module_files(source, stage, pins, staging=True), 1,
+            )
+            self.assertFalse((stage / moved.relative_to(source)).exists())
 
     def test_gradle_sha1_directory_accepts_omitted_leading_zeroes(self):
         # The cache path is a layout check, not the SHA-256 trust authority.
@@ -384,19 +507,19 @@ class ModuleFilesCacheTest(unittest.TestCase):
                 jar = source / relative
                 jar.parent.mkdir(parents=True)
                 jar.write_bytes(b"pinned")
-                allowed = {hashlib.sha256(jar.read_bytes()).hexdigest()}
+                pins = pin_for(jar, ("g", "m", "1"))
                 stage = root / "stage"
                 self.assertEqual(
-                    dependency.copy_pinned_module_files(source, stage, allowed, staging=True), 1,
+                    dependency.copy_pinned_module_files(source, stage, pins, staging=True), 1,
                 )
                 restored = root / "restore"
                 self.assertEqual(
-                    dependency.copy_pinned_module_files(stage, restored, allowed), 1,
+                    dependency.copy_pinned_module_files(stage, restored, pins), 1,
                 )
                 self.assertEqual((restored / relative).read_bytes(), b"pinned")
                 (stage / relative).write_bytes(b"tampered")
-                with self.assertRaisesRegex(AssertionError, "Unpinned restored module bytes"):
-                    dependency.copy_pinned_module_files(stage, root / "rejected", allowed)
+                with self.assertRaisesRegex(AssertionError, "differ from their SHA-256 pin"):
+                    dependency.copy_pinned_module_files(stage, root / "rejected", pins)
                 self.assertFalse((root / "rejected").exists())
 
     def test_gradle_sha1_directory_rejects_malformed_names(self):
@@ -407,12 +530,12 @@ class ModuleFilesCacheTest(unittest.TestCase):
                 jar = source / "g" / "m" / "1" / name / "m.jar"
                 jar.parent.mkdir(parents=True)
                 jar.write_bytes(b"pinned")
-                allowed = {hashlib.sha256(jar.read_bytes()).hexdigest()}
+                pins = pin_for(jar, ("g", "m", "1"))
                 for staging in (False, True):
                     with self.subTest(staging=staging):
                         with self.assertRaisesRegex(AssertionError, "Unsafe module cache entry"):
                             dependency.copy_pinned_module_files(
-                                source, root / "rejected", allowed, staging=staging,
+                                source, root / "rejected", pins, staging=staging,
                             )
                         self.assertFalse((root / "rejected").exists())
 
@@ -432,10 +555,15 @@ class ModuleFilesCacheTest(unittest.TestCase):
                     os.link(original, entry)
                 else:
                     (source / "metadata.bin").write_bytes(original.read_bytes())
-                allowed = {hashlib.sha256(original.read_bytes()).hexdigest()}
+                pins = {("g", "m", "1", "m.jar"): hashlib.sha256(b"pinned").hexdigest()}
                 with self.assertRaisesRegex(AssertionError, "Unsafe module cache entry"):
-                    dependency.copy_pinned_module_files(source, root / "restore", allowed)
+                    dependency.copy_pinned_module_files(source, root / "restore", pins)
 
+    def test_module_cache_pins_come_from_both_manifests(self):
+        pins = dependency.module_cache_pins()
+        for path in dependency.MANIFESTS:
+            for key, digest in dependency.manifest_pins(path).items():
+                self.assertEqual(pins[key], digest)
 
     def test_module_cache_roundtrip_excludes_locks_and_keeps_metadata(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -450,14 +578,14 @@ class ModuleFilesCacheTest(unittest.TestCase):
             (metadata / "module-metadata.bin.lock").write_bytes(b"lock")
             (source / "modules-2.lock").write_bytes(b"lock")
             (source / "gc.properties").write_bytes(b"gc")
-            allowed = {hashlib.sha256(entry.read_bytes()).hexdigest()}
+            pins = pin_for(entry, ("g", "m", "1"))
             stage = root / "stage"
-            dependency.copy_module_cache(source, stage, allowed, staging=True)
+            dependency.copy_module_cache(source, stage, pins, staging=True)
             self.assertEqual({p.name for p in stage.iterdir()}, {"files-2.1", "metadata-2.107"})
             self.assertEqual(list((stage / "metadata-2.107").iterdir()),
                              [stage / "metadata-2.107/module-metadata.bin"])
             restored = root / "restored"
-            dependency.copy_module_cache(stage, restored, allowed)
+            dependency.copy_module_cache(stage, restored, pins)
             self.assertEqual((restored / "metadata-2.107/module-metadata.bin").read_bytes(),
                              b"producer state")
             for unexpected in ("gc.properties", "init.gradle", "metadata-2.999"):
@@ -465,14 +593,14 @@ class ModuleFilesCacheTest(unittest.TestCase):
                     invalid = stage / unexpected
                     invalid.write_bytes(b"unexpected")
                     with self.assertRaisesRegex(AssertionError, "Unexpected modules-2 entry"):
-                        dependency.copy_module_cache(stage, root / "refused", allowed)
+                        dependency.copy_module_cache(stage, root / "refused", pins)
                     self.assertFalse((root / "refused").exists())
                     invalid.unlink()
             metadata_entry = stage / "metadata-2.107/module-metadata.bin"
             metadata_entry.unlink()
             metadata_entry.symlink_to(entry)
             with self.assertRaisesRegex(AssertionError, "Unsafe module metadata file"):
-                dependency.copy_module_cache(stage, root / "refused", allowed)
+                dependency.copy_module_cache(stage, root / "refused", pins)
 
 
 class GradleResolutionRetryTest(unittest.TestCase):
@@ -495,6 +623,47 @@ class GradleResolutionRetryTest(unittest.TestCase):
                     ), 1)
                 run.assert_called_once()
                 sleep.assert_not_called()
+
+    def test_only_online_resolution_tasks_may_be_measured(self):
+        base = ["./gradlew", "--dependency-verification", "strict", "--no-build-cache"]
+        for task in ("help", ":resolveCiDependencies"):
+            ci_gradle.validate([*base, task])
+        for command in ([*base, "test"], [*base, "installDist"],
+                        [*base, "--offline", "help"],
+                        ["./gradlew", "--no-build-cache", "help"],
+                        ["./gradlew", "--dependency-verification", "strict", "help"]):
+            with self.subTest(command=command):
+                with self.assertRaises(ValueError):
+                    ci_gradle.validate(command)
+
+    def test_debug_continuations_follow_their_event_visibility(self):
+        lines = [
+            "Starting a Gradle Daemon\n",
+            "2026-11-26T11:02:18.009+0000 [ERROR] [org.gradle.Reporter] * What went wrong:\n",
+            "Execution failed for task ':app:cli:compileKotlin'.\n",
+            "\tat org.example.Frame.run(Frame.kt:1)\n",
+            "2026-11-26T11:02:18.010+0000 [DEBUG] [org.gradle.Http] Request headers:\n",
+            "Authorization: Bearer secret-token\n",
+            "2026-11-26T11:02:18.011+0000 [INFO] [org.gradle.Info] details\n",
+            "more details\n",
+            "2026-11-26T11:02:18.012+0000 [LIFECYCLE] [org.gradle.Result] BUILD FAILED\n",
+        ]
+        visible = [line for line, shown in ci_gradle.visible_lines(lines) if shown]
+        self.assertEqual(visible, [lines[0], lines[1], lines[2], lines[3], lines[8]])
+
+    def test_transient_status_in_failure_continuation_triggers_retry(self):
+        output = (
+            "2026-11-26T11:02:18.009+0000 [ERROR] [org.gradle.Reporter] * What went wrong:\n"
+            "> Could not GET 'https://repo.maven.apache.org/maven2/a.pom'. "
+            "Received status code 429 from server: Too Many Requests\n"
+        )
+        fake = mock.MagicMock()
+        fake.__enter__.return_value = fake
+        fake.stdout = iter(output.splitlines(keepends=True))
+        fake.wait.return_value = 1
+        with mock.patch.object(ci_gradle.subprocess, "Popen", return_value=fake):
+            with mock.patch("builtins.print"):
+                self.assertEqual(ci_gradle.run_once(self.COMMAND), (1, 0, True, False))
 
     def test_registry_http_operation_and_status_patterns(self):
         self.assertIsNotNone(ci_gradle.HTTP_OPERATION.search(

@@ -45,60 +45,99 @@ Every checkout must set `persist-credentials: false`, enforced by an offline neg
 
 Gradle distributions still use the fresh authenticated ZIP bootstrap above.
 The producer (`bytecode-build`) alone restores an exact-key persistent cache
-into a fresh isolated Gradle user home. The key includes OS, architecture,
-Gradle version, both verification manifests, the actual build-logic version
-catalog, settings and build scripts, root Gradle properties, cache transfer
-policy, runtime-resolution init script and workflow. Save reuses the
-restore-time primary key. There are no restore-keys; only successful
+into a fresh isolated Gradle user home. The key covers OS, architecture,
+Gradle version, both verification manifests, the build-logic version catalog,
+every `*.gradle.kts` script (settings, build scripts and the precompiled
+convention plugins that declare dependencies), root Gradle properties, the
+cache transfer policy, the dependency-resolution init script and the workflow.
+The audit refuses a key that misses any tracked dependency input. Save reuses
+the restore-time primary key. There are no restore-keys; only successful
 producer execution on a push to `dev` or `main` may publish a persistent
 entry. PR and dispatch runs never save one.
 
-The producer also exports a run-local artifact after strict resolution,
-including production, test-compile and test-runtime dependencies.
-Architecture and full JVM jobs restore that artifact from the **same workflow
-run**, even on a cold PR; they do not publish persistent entries. The
-independent production distribution verifier and installed CLI verifier never
-consume the module cache.
-The artifact is overwritten on producer reruns and retained for three days;
-failed-job-only reruns after expiry require rerunning the producer.
+### Resolution happens once, before compilation
 
-The transport is limited to `modules-2/files-2.1` and `metadata-2.107`,
-as described in the [Gradle dependency cache documentation](https://docs.gradle.org/current/userguide/dependency_caching.html).
+Only two producer steps may contact registries: plugin resolution (`help`)
+and `:resolveCiDependencies` from
+[`tools/resolve_ci_dependencies.init.gradle`](../../tools/resolve_ci_dependencies.init.gradle),
+run in the root and standalone build-logic builds. In each JVM project, a
+project-local task resolves the external artifacts of every source set's
+compile, runtime and annotation-processor classpath and of the Kotlin
+compiler, compiler-plugin and build-tools classpaths. It never compiles or
+executes tests. Both steps retry at most twice on observed HTTP 429/5xx, with
+5 and 15 second delays; verification failures are never retried.
+[`tools/run_ci_gradle.py`](../../tools/run_ci_gradle.py) measures observed
+Gradle HTTP GET/HEAD operations with `--debug` for these resolution-only
+tasks alone. It hides debug and info events together with their continuation
+lines, and shows every visible event in full.
+
+Every other Gradle invocation in the producer, architecture and full JVM jobs,
+including production compilation and all tests, runs with `--offline`. Gradle
+itself then guarantees that these steps make no registry operations, so any
+artifact missing from the cache fails deterministically instead of being
+downloaded. The audit rejects an online Gradle command outside the two
+resolution steps and production compilation before resolution.
+
+After staging, the producer restores the staged cache into a separate fresh
+Gradle home and repeats both resolutions with `--offline` and
+`--warning-mode=fail` before either publication. Architecture and full JVM jobs
+restore the run-local artifact from the **same workflow run**, even on a cold
+PR; they do not publish persistent entries. The independent production
+distribution verifier and installed CLI verifier never consume the module
+cache. The artifact is overwritten on producer reruns and retained for three
+days; failed-job-only reruns after expiry require rerunning the producer.
+
+### What is transported
+
+The transport is limited to `modules-2/files-2.1` and `metadata-2.107`, as
+described in the [Gradle dependency cache documentation](https://docs.gradle.org/current/userguide/dependency_caching.html).
 No lock files, garbage-collection markers, transforms, compiled scripts,
 configuration cache, project state, distributions or build outputs are
-transported. Only regular pinned raw files and regular binary resolution
-metadata are copied into the fresh home. Unknown layouts and links refuse.
-Unpinned raw bytes are discarded at staging and rejected at restore.
-Gradle continues strict coordinate-specific artifact and metadata verification.
+transported, and unknown layouts and links refuse. A raw file is transported
+only if its exact group, module, version and file name have a manifest pin
+and its SHA-256 equals that pin; the same bytes under another coordinate are
+not authorized. Pinned coordinates with other bytes refuse in both
+directions. While staging, files whose coordinate has no pin are discarded and
+listed by coordinate in the job log and step summary, so that changes in what
+Gradle downloads stay visible. On restore they refuse. Gradle continues strict
+coordinate-specific artifact and metadata verification. The workflow-wide
+`GRADLE_OPTS=-Dorg.gradle.caching=false` default also covers Gradle builds
+started by Python test suites; the audit pins its exact value. Explicit
+`--no-build-cache` remains required on every workflow Gradle command.
 
-**Important trust distinction:** binary resolution metadata is not itself
-authenticated by the XML manifests; it is trusted for resolution state only
-because it originates in the protected-branch cache service or the producer
-in the same workflow run and trust domain. The XML manifests remain the
-sole artifact checksum authority. GitHub cache ref isolation prevents fork
-PR merge-ref caches from reaching protected branches; arbitrary PR code can
-still affect its own run. The cache service and metadata producer are now
-part of the resolution-state trust boundary. This is not protection against
-a compromised trusted cache service or producer, nor a proof that arbitrary
-serialized metadata preserves the dependency graph. Independent security
-review must explicitly accept this boundary before merge.
+### Resolution-state trust boundary
 
-A cold PR cannot seed a persistent shared cache. The producer resolves external
-artifacts of each JVM test and test-fixture runtime classpath in the root and
-standalone build-logic builds without executing tests, on both cache hits and
-misses. After staging, it restores into a separate fresh Gradle home and repeats
-that resolution with strict verification and `--offline` before either cache
-publication. This proves these classpaths are present after filtering, not that
-all arbitrary future Gradle tasks can execute offline. Initial plugin
-resolution retries at most twice on observed HTTP 429/5xx, with 5 and 15
-second delays; verification failures are not retried. Keep strict
-verification and `--no-build-cache` enabled. The workflow also sets
-`GRADLE_OPTS=-Dorg.gradle.caching=false` globally as a default; explicit
-`--no-build-cache` remains required for the wrapped Gradle invocations.
-The major direct Gradle invocations report observed Gradle HTTP GET/HEAD
-operations, not exact wire counts (redirects and unwrapped fixtures excluded).
-The hermetic fixture requires fewer warm requests than cold, proves offline
-resolution from a fresh restored home, and repeats negative checksum cases.
-Run-specific measurements belong in the PR or issue, not this design note.
-Full cold/warm six-job CI and comparable registry metrics remain mandatory
-acceptance evidence.
+#215 asks that the cache stay a transport optimization, never a trust input.
+For artifact bytes this holds: the XML manifests remain the sole checksum
+authority, the preflight and Gradle both enforce them, and no restored or
+transported byte is accepted without its exact pin. Gradle's binary resolution
+metadata (`metadata-2.107`) is the deliberate exception. The manifests do not
+authenticate it. Without it, Gradle re-contacts registries for every module
+even when all pinned files are present, so a raw-files-only cache does not
+survive rate limiting.
+
+Its provenance is restricted instead. A persistent entry can only be created by
+a successful producer on a push to `dev` or `main`; GitHub cache ref isolation
+prevents fork and PR merge-ref caches from reaching protected branches, and
+run-local metadata never leaves its workflow run. Arbitrary PR code can still
+affect its own run. A party able to write a protected-branch cache entry could
+alter recorded resolution state. Strict verification still refuses any
+artifact or metadata file without a pin, so such a change is limited to
+already-pinned artifacts: for example, omitting a transitive dependency or
+selecting another pinned version. The independent production verifier compares
+the distribution against the producer's runtime classpath manifest; it does
+not re-derive the dependency graph, so it would not detect such a change. This
+is not protection against a compromised cache service or protected-branch
+producer.
+
+Adopting this boundary changes the #215 acceptance wording for resolution
+state. It requires explicit owner acceptance and independent security review
+before merge. A future way to remove this exception is committed dependency
+locking, which would let the repository, not the cache, define the resolved
+graph.
+
+The hermetic fixture requires fewer restored than cold loopback requests,
+proves offline resolution from a fresh restored home, and repeats the negative
+checksum cases. Run-specific measurements belong in the PR or issue, not in
+this design note. Full cold/warm six-job CI and comparable registry metrics
+remain mandatory acceptance evidence.

@@ -15,21 +15,26 @@ cached JAR and an unapproved new Maven artifact before Java compilation.
 ## CI module-cache transport (#215)
 
 CI transfers raw module files and version-matched Gradle binary resolution
-metadata into a fresh Gradle user home. The producer alone restores and
-saves persistent cache entries; saving requires a successful push to
-`dev` or `main`. PRs and dispatch runs never save persistent entries.
-Dependent build jobs receive a separate current-run artifact; the independent
-production verifier never consumes it.
+metadata into a fresh Gradle user home. The producer alone restores and saves
+persistent cache entries; saving requires a successful push to `dev` or
+`main`. PRs and dispatch runs never save persistent entries. Dependent build
+jobs receive a separate current-run artifact; the independent production
+verifier never consumes it.
 
-The restore preflight rejects unpinned raw bytes and unsafe filesystem
-entries; Gradle still enforces strict verification for resolved artifacts.
+A raw file is transported only when its exact group, module, version and file
+name have a pin in these manifests and its SHA-256 equals that pin. The
+restore preflight refuses unpinned coordinates, other bytes for a pinned
+coordinate and unsafe filesystem entries; staging lists every discarded file by
+coordinate. Gradle still enforces strict verification for resolved artifacts.
 Binary resolution state is not authenticated by the manifests. It relies on
 protected-ref cache provenance or same-run producer provenance, as described
-in the [CI bootstrap trust boundary](architecture/CI_BOOTSTRAP_TRUST.md#downloaded-module-cache-215).
-No other Gradle state or build outputs are transported. The producer resolves
-all JVM test and test-fixture runtime artifacts and repeats the same resolution
-in a fresh restored Gradle home offline before publication; root and standalone
-build-logic are both checked.
+in the [CI bootstrap trust boundary](architecture/CI_BOOTSTRAP_TRUST.md#resolution-state-trust-boundary).
+No other Gradle state or build outputs are transported.
+
+Registry access is confined to plugin resolution and one dependency-resolution
+step per build. All compilation and tests run with `--offline`. Before
+publication, the producer repeats both resolutions offline in a fresh restored
+Gradle home for the root and standalone build-logic builds.
 
 The hermetic fixtures exercise fresh cold, restored online and restored
 offline Gradle homes, assert reduced loopback HTTP requests, and reject

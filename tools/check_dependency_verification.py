@@ -117,16 +117,50 @@ def audit_repository() -> None:
         print(f"Verified {count} SHA-256-pinned artifacts in {path.relative_to(ROOT)}")
 
 
+Pins = dict[tuple[str, str, str, str], str]
+
+
+def module_cache_pins() -> Pins:
+    """Coordinate-exact SHA-256 pins; the root manifest includes build-logic."""
+    pins: Pins = {}
+    for path in MANIFESTS:
+        for key, digest in manifest_pins(path).items():
+            if pins.setdefault(key, digest) != digest:
+                raise AssertionError(f"Conflicting SHA-256 pins for {key}")
+    return pins
+
+
+def report_discarded(discarded: list[str]) -> None:
+    """Make every file excluded from the transport visible for review."""
+    if not discarded:
+        return
+    print(f"Discarded {len(discarded)} cached files without an exact coordinate pin:")
+    for entry in discarded:
+        print(f"  discarded: {entry}")
+    if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
+        with Path(summary).open("a", encoding="utf-8") as stream:
+            stream.write(f"<details><summary>{len(discarded)} cached files without an "
+                         "exact coordinate pin were not transported</summary>\n\n")
+            stream.writelines(f"- `{entry}`\n" for entry in discarded)
+            stream.write("\n</details>\n\n")
+
+
 def copy_pinned_module_files(
-    source: Path, destination: Path, allowed: set[str], *, staging: bool = False,
+    source: Path, destination: Path, pins: Pins, *, staging: bool = False,
 ) -> int:
-    """Transfer only pinned raw Gradle module files, never binary metadata."""
+    """Transfer only raw Gradle module files whose exact coordinate is pinned.
+
+    A file is selected only when its group, module, version and file name have a
+    manifest pin and its SHA-256 equals that pin. Pinned coordinates with other
+    bytes are refused in both directions. Files whose coordinate has no pin are
+    reported and discarded while staging, and refused on restore.
+    """
     if not source.is_dir() or source.is_symlink():
         raise AssertionError("Missing or unsafe module files directory")
     if destination.exists() or destination.is_symlink():
         raise AssertionError("Module files destination must be fresh")
     selected = []
-    discarded = 0
+    discarded = []
     for directory, dirs, names in os.walk(source, followlinks=False):
         parent = Path(directory)
         for name in dirs:
@@ -141,13 +175,17 @@ def copy_pinned_module_files(
                     or len(relative.parts) != 5
                     or not MODULE_SHA1_DIRECTORY.fullmatch(relative.parts[3])):
                 raise AssertionError(f"Unsafe module cache entry: {relative}")
+            group, module, version, _, filename = relative.parts
+            pin = pins.get((group, module, version, filename))
+            if pin is None:
+                if not staging:
+                    raise AssertionError(f"Unpinned restored module coordinate: {relative}")
+                discarded.append(f"{group}:{module}:{version}/{filename}")
+                continue
             with item.open("rb") as stream:
                 digest = hashlib.file_digest(stream, "sha256").hexdigest()
-            if digest not in allowed:
-                if not staging:
-                    raise AssertionError(f"Unpinned restored module bytes: {relative}")
-                discarded += 1
-                continue
+            if digest != pin:
+                raise AssertionError(f"Module bytes differ from their SHA-256 pin: {relative}")
             selected.append((item, relative))
     if not selected:
         raise AssertionError("No pinned module files to transfer")
@@ -156,8 +194,10 @@ def copy_pinned_module_files(
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(item, target)
-    print(f"Verified and copied {len(selected)} pinned module files; "
-          f"discarded {discarded} unpinned files")
+    discarded.sort()
+    report_discarded(discarded)
+    print(f"Verified and copied {len(selected)} coordinate-pinned module files; "
+          f"discarded {len(discarded)} unpinned files")
     return len(selected)
 
 
@@ -192,12 +232,13 @@ def metadata_files(source: Path, *, staging: bool) -> list[Path]:
 
 
 def copy_module_cache(
-    source: Path, destination: Path, allowed: set[str], *, staging: bool = False,
+    source: Path, destination: Path, pins: Pins, *, staging: bool = False,
 ) -> None:
-    """Copy raw pins and producer-owned, version-matched resolution state.
+    """Copy coordinate-pinned raw files and producer-owned resolution state.
 
     Binary metadata is not authenticated by the XML. Its provenance is the
-    protected-ref cache or current-run producer; never use it across trust domains.
+    protected-ref cache or current-run producer; never use it across trust
+    domains. See docs/architecture/CI_BOOTSTRAP_TRUST.md for the residual risk.
     """
     if not source.is_dir() or source.is_symlink():
         raise AssertionError("Missing or unsafe modules-2 directory")
@@ -212,7 +253,7 @@ def copy_module_cache(
             raise AssertionError(f"Unexpected modules-2 entry: {entry.name}")
     metadata = metadata_files(source / MODULE_METADATA, staging=staging)
     copy_pinned_module_files(source / MODULE_FILES, destination / MODULE_FILES,
-                             allowed, staging=staging)
+                             pins, staging=staging)
     for relative in metadata:
         target = destination / MODULE_METADATA / relative
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -340,11 +381,12 @@ def negative_fixtures() -> None:
             cold_requests = len(requests)
             module_cache = Path("caches/modules-2")
             module_files = module_cache / MODULE_FILES
-            allowed = {checksum(pom), checksum(jar)}
+            pins = {("org.example.fixture", "verified", "1.0", path.name): checksum(path)
+                    for path in (pom, jar)}
             stage = tmp / "staged-module-cache"
             restored_home = tmp / "restored-gradle-home"
-            copy_module_cache(home / module_cache, stage, allowed, staging=True)
-            copy_module_cache(stage, restored_home / module_cache, allowed)
+            copy_module_cache(home / module_cache, stage, pins, staging=True)
+            copy_module_cache(stage, restored_home / module_cache, pins)
             require_result(
                 compile_fixture(project, restored_home),
                 success=True, label="pinned original from restored module cache",
@@ -354,7 +396,7 @@ def negative_fixtures() -> None:
             if cold_requests <= 0 or warm_requests >= cold_requests:
                 raise AssertionError("Restored metadata did not reduce fixture HTTP requests")
             offline_home = tmp / "offline-restored-home"
-            copy_module_cache(stage, offline_home / module_cache, allowed)
+            copy_module_cache(stage, offline_home / module_cache, pins)
             require_result(
                 compile_fixture(project, offline_home, offline=True),
                 success=True, label="fresh restored cache resolves offline",
@@ -368,9 +410,9 @@ def negative_fixtures() -> None:
             stage_jar = next((stage / MODULE_FILES).rglob(jar.name))
             stage_jar.write_bytes(stage_jar.read_bytes() + b"UNPINNED-STAGED-MUTATION")
             try:
-                copy_module_cache(stage, tmp / "rejected-restore", allowed)
+                copy_module_cache(stage, tmp / "rejected-restore", pins)
             except AssertionError as exc:
-                if "Unpinned restored module bytes" not in str(exc):
+                if "differ from their SHA-256 pin" not in str(exc):
                     raise
                 print("PASS: corrupted restored archive rejected before Gradle")
             else:
@@ -400,7 +442,7 @@ def negative_fixtures() -> None:
                 success=False, label="new dependency without a SHA-256 pin",
             )
             unapproved_home = tmp / "unapproved-restored-home"
-            copy_module_cache(stage, unapproved_home / module_cache, allowed)
+            copy_module_cache(stage, unapproved_home / module_cache, pins)
             require_result(
                 compile_fixture(project, unapproved_home),
                 success=False, label="new dependency with restored cache and no SHA-256 pin",
@@ -422,8 +464,7 @@ if __name__ == "__main__":
     if options.negative_fixtures:
         negative_fixtures()
     elif options.stage_module_cache or options.restore_module_cache:
-        allowed = {digest for path in MANIFESTS for digest in manifest_pins(path).values()}
         copy_module_cache(
-            *(options.stage_module_cache or options.restore_module_cache), allowed,
+            *(options.stage_module_cache or options.restore_module_cache), module_cache_pins(),
             staging=options.stage_module_cache is not None,
         )

@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Measure Gradle HTTP operations and retry only initial transient resolution."""
+"""Measure registry operations of CI dependency resolution and retry transient failures.
+
+Only resolution-only Gradle invocations may use this wrapper. Compilation and
+tests run directly with --offline, so they need no --debug instrumentation and
+cannot reach a registry at all.
+"""
 from __future__ import annotations
 
 import argparse
@@ -15,8 +20,23 @@ HTTP_OPERATION = re.compile(
 )
 TRANSIENT = re.compile(r"(?:Received status code|HTTP status code) (?:429|5[0-9]{2})\b", re.I)
 VERIFICATION_FAILURE = re.compile(r"dependency verification failed|checksum verification failed", re.I)
-VISIBLE = re.compile(r"\[(?:LIFECYCLE|QUIET|WARN|ERROR)\]")
+# Gradle --debug prefixes the first line of every log event with a timestamp
+# and level. Later lines of a multi-line event (cause chains, stack frames,
+# failure details) carry no prefix and inherit the visibility of that event.
+EVENT = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{4} \[([A-Z]+)\] ")
+VISIBLE_LEVELS = frozenset({"LIFECYCLE", "QUIET", "WARN", "ERROR"})
+RESOLUTION_TASKS = frozenset({"help", ":resolveCiDependencies"})
 RETRY_DELAYS = (5, 15)
+
+
+def visible_lines(lines):
+    """Yield (line, visible): debug and info events stay hidden with their continuations."""
+    visible = True  # Output before the first event is launcher text.
+    for line in lines:
+        event = EVENT.match(line)
+        if event:
+            visible = event.group(1) in VISIBLE_LEVELS
+        yield line, visible
 
 
 def run_once(command: list[str]) -> tuple[int, int, bool, bool]:
@@ -29,23 +49,29 @@ def run_once(command: list[str]) -> tuple[int, int, bool, bool]:
         errors="replace",
     ) as process:
         assert process.stdout is not None
-        for line in process.stdout:
+        for line, visible in visible_lines(process.stdout):
             requests += bool(HTTP_OPERATION.search(line))
-            if VISIBLE.search(line):
+            if visible:
                 transient |= bool(TRANSIENT.search(line))
                 verification_failed |= bool(VERIFICATION_FAILURE.search(line))
                 print(line, end="", flush=True)
         return process.wait(), requests, transient, verification_failed
 
 
-def run(command: list[str], label: str, *, retry_resolution: bool) -> int:
-    if retry_resolution and command[-1] != "help":
-        raise ValueError("Retry is restricted to the initial Gradle help task")
+def validate(command: list[str]) -> None:
+    if not command or command[-1] not in RESOLUTION_TASKS:
+        raise ValueError("Only resolution-only Gradle tasks may run under --debug measurement")
+    if "--offline" in command:
+        raise ValueError("Offline Gradle invocations run directly, not through the wrapper")
     if "--no-build-cache" not in command or not any(
         command[i:i + 2] == ["--dependency-verification", "strict"]
         for i in range(len(command))
     ):
         raise ValueError("CI Gradle requires strict verification and no build cache")
+
+
+def run(command: list[str], label: str, *, retry_resolution: bool) -> int:
+    validate(command)
     total = 0
     delays = RETRY_DELAYS if retry_resolution else ()
     for attempt, delay in enumerate((*delays, None), 1):
