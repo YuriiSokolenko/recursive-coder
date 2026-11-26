@@ -158,8 +158,12 @@ class CiBootstrapTrustTest(unittest.TestCase):
                         bootstrap.audit_repository()
 
     def test_trusted_review_suite_is_explicit_in_contracts_job(self):
-        self.assertEqual(self.workflow.count(
-            "python3 -I -m unittest discover -s tests -p 'test_trusted_review.py' -v"), 1)
+        command = "python3 -I -m unittest discover -s tests -p 'test_trusted_review.py' -v"
+        contracts = re.search(r"^  contracts:\n.*?(?=^  \S|\Z)", self.workflow, re.MULTILINE | re.DOTALL)
+        self.assertIsNotNone(contracts)
+        self.assertIn(f"      - name: Test independent trusted review evidence\n        run: {command}\n",
+                      contracts.group())
+        self.assertEqual(self.workflow.count(command), 1)
 
     def test_reviewed_official_gradle_checksum(self):
         self.assertEqual(bootstrap.VERSION, "9.8.2")

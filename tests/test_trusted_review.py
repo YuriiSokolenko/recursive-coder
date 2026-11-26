@@ -17,7 +17,7 @@ import run_trusted_review as trusted_review
 
 class TrustedReviewEvidenceTest(unittest.TestCase):
     def test_exact_revision_and_pr_metadata(self):
-        for invalid in ("dev", "a" * 39, "A" * 40, "a" * 40 + "\n"):
+        for invalid in (None, 123, b"a" * 40, "dev", "a" * 39, "A" * 40, "a" * 40 + "\n"):
             with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "Expected full lowercase commit SHA"):
                 trusted_review.sha(invalid)
         base, head = "a" * 40, "b" * 40
@@ -75,6 +75,24 @@ class TrustedReviewEvidenceTest(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "Trusted branch is not protected"):
                         trusted_review.collect(base, head, "0", base)
 
+    def test_release_requires_both_branches_protected(self):
+        base, head = "a" * 40, "b" * 40
+        pr = {"state": "open", "base": {"ref": "main", "sha": base,
+              "repo": {"full_name": "YuriiSokolenko/recursive-coder"}},
+              "head": {"ref": "dev", "sha": head,
+                       "repo": {"full_name": "YuriiSokolenko/recursive-coder"}}}
+        for branch in ("dev", "main"):
+            responses = {"/pulls/1": pr, "/branches/dev": {"protected": True},
+                         "/branches/main": {"protected": True}}
+            responses[f"/branches/{branch}"] = {"protected": False}
+            with self.subTest(branch=branch), \
+                    mock.patch.object(trusted_review, "api", side_effect=responses.__getitem__), \
+                    contextlib.redirect_stdout(io.StringIO()), \
+                    mock.patch.object(trusted_review.subprocess, "run") as run:
+                with self.assertRaisesRegex(ValueError, "Trusted branch is not protected"):
+                    trusted_review.collect(base, head, "1", head)
+                run.assert_not_called()
+
     def exercise(self, *, missing=False, wrong_head=False, helper_failure=False,
                  candidate=False, stale=False, fault=None):
         with tempfile.TemporaryDirectory() as tmp:
@@ -104,7 +122,7 @@ class TrustedReviewEvidenceTest(unittest.TestCase):
             git("add", ".")
             git("commit", "-m", "trusted base")
             base = git("rev-parse", "HEAD")
-            git("checkout", "-b", "candidate")
+            git("checkout", "--orphan" if fault == "unrelated_pr" else "-b", "candidate")
             path = source / trusted_review.HELPERS[0][1]
             path.write_text("raise RuntimeError('candidate helper must not execute')\n")
             git("add", ".")
@@ -181,15 +199,16 @@ class TrustedReviewEvidenceTest(unittest.TestCase):
                 if expected:
                     with self.assertRaisesRegex(ValueError, expected):
                         trusted_review.collect(*args)
-                elif fault in ("workflow_off_dev", "base_off_target", "non_descendant"):
+                elif fault in ("workflow_off_dev", "base_off_target", "non_descendant", "unrelated_pr"):
                     with self.assertRaises(subprocess.CalledProcessError) as caught:
                         trusted_review.collect(*args)
                     ancestry = {"workflow_off_dev": (workflow, "refs/remotes/origin/dev"),
                                 "base_off_target": (requested_base, "refs/remotes/origin/dev"),
                                 "non_descendant": (base, head)}
+                    command = ["merge-base", "--is-ancestor", *ancestry[fault]] if fault in ancestry else [
+                        "merge-base", base, head]
                     self.assertEqual(caught.exception.returncode, 1)
-                    self.assertEqual(caught.exception.cmd[-4:],
-                                     ["merge-base", "--is-ancestor", *ancestry[fault]])
+                    self.assertEqual(caught.exception.cmd[-len(command):], command)
                 else:
                     trusted_review.collect(*args)
             return [json.loads(line) for line in output.getvalue().splitlines()]
@@ -234,6 +253,11 @@ class TrustedReviewEvidenceTest(unittest.TestCase):
                 self.assertFalse(any("helper" in row or row.get("result") == "complete"
                                      for row in rows))
 
+    def test_pr_without_common_history_is_rejected(self):
+        rows = self.exercise(fault="unrelated_pr")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["mode"], "pr")
+
     def test_each_workflow_startup_gate(self):
         valid = {"GITHUB_EVENT_NAME": "workflow_dispatch",
                  "GITHUB_REPOSITORY": "YuriiSokolenko/recursive-coder",
@@ -254,23 +278,27 @@ class TrustedReviewEvidenceTest(unittest.TestCase):
                     trusted_review.main()
                 collect.assert_not_called()
 
-    def test_null_api_response_emits_failed_json(self):
+    def test_null_api_data_emits_failed_json(self):
         env = {"GITHUB_EVENT_NAME": "workflow_dispatch",
                "GITHUB_REPOSITORY": "YuriiSokolenko/recursive-coder",
                "GITHUB_REF": "refs/heads/dev", "GITHUB_SHA": "a" * 40,
                "GITHUB_WORKFLOW_SHA": "a" * 40, "REVIEW_BASE": "b" * 40,
                "REVIEW_HEAD": "c" * 40, "REVIEW_PR": "1",
                "REVIEW_TOKEN": "fixture"}
-        response = mock.MagicMock()
-        response.__enter__.return_value = io.BytesIO(b"null")
-        output = io.StringIO()
-        with mock.patch.dict(os.environ, env, clear=True), \
-                mock.patch("urllib.request.urlopen", return_value=response), \
-                contextlib.redirect_stdout(output):
-            with self.assertRaises(SystemExit) as caught:
-                runpy.run_path(trusted_review.__file__, run_name="__main__")
-        self.assertEqual(caught.exception.code, 1)
-        rows = [json.loads(line) for line in output.getvalue().splitlines()]
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["result"], "failed")
-        self.assertIn("NoneType", rows[0]["error"])
+        deleted_fork = {"state": "open", "base": {"ref": "main", "sha": "b" * 40,
+                        "repo": {"full_name": "YuriiSokolenko/recursive-coder"}},
+                        "head": {"ref": "dev", "sha": "c" * 40, "repo": None}}
+        for payload in (None, deleted_fork):
+            response = mock.MagicMock()
+            response.__enter__.return_value = io.BytesIO(json.dumps(payload).encode())
+            output = io.StringIO()
+            with self.subTest(payload=payload), mock.patch.dict(os.environ, env, clear=True), \
+                    mock.patch("urllib.request.urlopen", return_value=response), \
+                    contextlib.redirect_stdout(output):
+                with self.assertRaises(SystemExit) as caught:
+                    runpy.run_path(trusted_review.__file__, run_name="__main__")
+                self.assertEqual(caught.exception.code, 1)
+                rows = [json.loads(line) for line in output.getvalue().splitlines()]
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0]["result"], "failed")
+                self.assertIn("NoneType", rows[0]["error"])

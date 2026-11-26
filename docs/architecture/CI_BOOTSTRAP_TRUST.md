@@ -47,6 +47,8 @@ Removing `setup-gradle` also removes its dependency caching. CI intentionally us
 
 The proposed manual `trusted-review.yml` workflow is separate from the six required production CI jobs. It is intended for GitHub-hosted execution from the owner-reviewed version on protected `dev`, not from a PR branch. The workflow and its runner are independently pinned by the CI drift audit; changes require owner review and independent verification. The audit is not an adversarial trust boundary.
 
+The contracts job runs `test_trusted_review.py` in the **Test independent trusted review evidence** step. The preceding bootstrap regression step runs `test_ci_bootstrap.py` separately.
+
 After initial independent verification and activation on `dev`, open Actions > Independent trusted review evidence > Run workflow, select `dev`, and supply the exact base SHA, head SHA and open PR number. Use PR number `0` for a pre-push candidate that GitHub can serve by SHA; it must descend from the supplied base on `dev`. Candidate mode does not verify a PR's metadata and is not a substitute for reviewing the final PR pair. If GitHub refuses an unattached commit fetch, do not treat the run as evidence.
 
 The workflow uses read-only API permissions and a fresh hosted VM. Only the workflow revision and a clean detached trusted-base worktree are checked out. The candidate is read as Git objects. Helpers are extracted from the base, their Git blob IDs checked, and their SHA-256, exit status, stdout and stderr emitted as JSON log records. Git and helpers run without the API token, inherited Git configuration or hooks. Temporary data is removed on exit; the hosted VM is disposable. No build, Gradle tasks, candidate hooks or agent discovery run in this job.
