@@ -1,5 +1,6 @@
 package ai.yuriilab.recursivecoder
 
+import java.nio.file.Path
 import java.time.Clock
 import java.time.Instant
 import java.time.ZoneOffset
@@ -53,11 +54,42 @@ class ModelGatewayVocabularyUnitTest {
     fun unknownProviderIsNotSilentlyRoutedToAWorkingGateway() {
         for (provider in listOf("unknown-provider", "FAKE", "fake-v1")) {
             val gateway = ModelGateways.create(provider)
-            val denial = assertFailsWith<Refused> {
+            val negotiation = assertFailsWith<Refused> {
                 gateway.negotiate(config, cancellation, deadline)
+            }
+            assertEquals("UNSUPPORTED_MODEL", negotiation.code)
+            assertEquals("provider", negotiation.category)
+
+            val turn = assertFailsWith<Refused> {
+                gateway.next(config, Path.of("/task.md"), null,
+                    cancellation, deadline, false)
+            }
+            assertEquals("UNSUPPORTED_MODEL", turn.code)
+            assertEquals("provider", turn.category)
+        }
+    }
+
+    @Test
+    fun openAICompatibleNegotiationRejectsUnsupportedSelectionBeforeHttp() {
+        val gateway = OpenAICompatibleGateway {
+            error("Invalid model selection must not reach credential lookup or HTTP")
+        }
+        val remote = config.copy(
+            provider = "openai-compatible", modelId = "remote-model",
+            baseUrl = "https://example.invalid/v1",
+            features = setOf("tool_calls", "usage_metadata")
+        )
+        for (invalid in listOf(
+            remote.copy(provider = "fake"),
+            remote.copy(features = setOf("usage_metadata")),
+            remote.copy(features = setOf("tool_calls", "vendor_feature"))
+        )) {
+            val denial = assertFailsWith<Refused> {
+                gateway.negotiate(invalid, cancellation, deadline)
             }
             assertEquals("UNSUPPORTED_MODEL", denial.code)
             assertEquals("provider", denial.category)
+            assertEquals("Unsupported model feature selection", denial.explanation)
         }
     }
 }

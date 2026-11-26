@@ -24,11 +24,12 @@ or any child complete solely because this branch exists.
 
 Reviewed the current dev versions of `ModelContracts.kt` (including
 `ModelConfig`), `SessionCapabilityIds.kt`, `SessionRequest.kt`,
+`SessionRuntime.kt` (including C3-pinned `admissionFacts()`),
 `SessionPolicy.kt` (including `SessionAdmissionPolicy`),
 `ModelGateway.kt` (factory, fake and OpenAI-compatible gateways),
 `FailClosedProviderUsageGateway.kt`, `Main.kt`,
 `InstalledRecursiveWorkflow.kt`, `WritableWorkflowCli.kt` and
-`KoogStageRoleExecutor.kt`. Also inspected `SessionRuntime.kt`,
+`KoogStageRoleExecutor.kt`. Also inspected
 `RunSessionUseCase.kt`, `TaskRequestMapper.kt`, `CompositionRoot.kt`,
 `InstalledChildRuntimeGrants.kt`, `LinuxFiveRoleWorkflowHost.kt` and
 `TaskCli.kt` for additional consumers.
@@ -50,15 +51,24 @@ Reviewed the current dev versions of `ModelContracts.kt` (including
   Koog-local model identifiers and independent fixture literals remain
   separate. The v1 schema deliberately permits opaque identifiers; reserved
   or unknown values are not evidence of runtime support.
-- `ModelConfig.from` preserves opaque provider, model and feature values
-  without normalizing them or taking over admission. Literal JSON round-trip
-  coverage pins that mapping. Literal gateway tests pin provider dispatch,
-  fake identity and exact feature selection, including unknown values.
-  Existing literal admission tests pin unknown capability/provider denial,
-  fake restrictions, usage requirements and denial precedence. Existing
-  HTTP gateway tests pin unknown remote feature rejection and response
-  behavior; provider-usage and Koog tests retain their separate restrictions.
-  The existing literal identifier drift test and schema/examples are intact.
+- Two independent model extraction paths use `ModelConfigFields`:
+  C3-pinned `SessionRuntime.admissionFacts()` reads provider, model ID and
+  features directly from the raw request for `SessionAdmissionPolicy`;
+  it also reads required capabilities through `SessionRequestFields`.
+  `ModelConfig.from` decodes gateway configuration and preserves opaque
+  identifiers without normalization. Literal JSON-to-`ModelConfig`
+  mapping tests cover the latter path. Round-trip coverage is not
+  applicable: `ModelConfig` is decode-only and has no production encoder.
+- Literal unit tests pin provider dispatch, fake identity and exact feature
+  selection, both fallback gateway refusal methods, and pre-HTTP rejection
+  of wrong providers, missing tool support and unknown remote features.
+  The remote refusal test uses a failing credential lookup to guard against
+  reaching HTTP request construction. Existing literal admission tests pin
+  unknown capability/provider denial, fake restrictions, usage requirements
+  and denial precedence. Existing HTTP integration tests pin remote feature
+  rejection and response behavior; provider-usage and Koog tests retain
+  their separate restrictions. The literal identifier drift test and
+  schema/examples are intact.
 
 No schema, wire, durable format, authorization, production code or dependency
 changes are needed for this completion slice. Full CI is required before
