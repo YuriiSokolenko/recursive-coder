@@ -159,6 +159,65 @@ def copy_pinned_module_files(
     return len(selected)
 
 
+MODULE_FILES = "files-2.1"
+# Gradle 8.11+ uses this format; the CI executable is pinned to Gradle 9.8.2.
+MODULE_METADATA = "metadata-2.107"
+
+
+def metadata_files(source: Path, *, staging: bool) -> list[Path]:
+    """Select regular binary resolution state, not locks or arbitrary paths."""
+    if not source.is_dir() or source.is_symlink():
+        raise AssertionError("Missing or unsafe module metadata directory")
+    files = []
+    for directory, dirs, names in os.walk(source, followlinks=False):
+        parent = Path(directory)
+        for name in dirs:
+            if not stat.S_ISDIR((parent / name).lstat().st_mode):
+                raise AssertionError("Unsafe module metadata directory entry")
+        for name in names:
+            path = parent / name
+            info = path.lstat()
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise AssertionError("Unsafe module metadata file")
+            if staging and (name.endswith(".lock") or name == "gc.properties"):
+                continue
+            if path.suffix != ".bin":
+                raise AssertionError(f"Unexpected module metadata file: {path.relative_to(source)}")
+            files.append(path.relative_to(source))
+    if not files:
+        raise AssertionError("No Gradle binary resolution metadata")
+    return files
+
+
+def copy_module_cache(
+    source: Path, destination: Path, allowed: set[str], *, staging: bool = False,
+) -> None:
+    """Copy raw pins and producer-owned, version-matched resolution state.
+
+    Binary metadata is not authenticated by the XML. Its provenance is the
+    protected-ref cache or current-run producer; never use it across trust domains.
+    """
+    if not source.is_dir() or source.is_symlink():
+        raise AssertionError("Missing or unsafe modules-2 directory")
+    if destination.exists() or destination.is_symlink():
+        raise AssertionError("Module cache destination must be fresh")
+    for entry in source.iterdir():
+        if entry.name in (MODULE_FILES, MODULE_METADATA):
+            if not stat.S_ISDIR(entry.lstat().st_mode):
+                raise AssertionError("Unsafe module cache root directory")
+        elif not (staging and entry.name in ("modules-2.lock", "gc.properties")
+                  and stat.S_ISREG(entry.lstat().st_mode) and entry.stat().st_nlink == 1):
+            raise AssertionError(f"Unexpected modules-2 entry: {entry.name}")
+    metadata = metadata_files(source / MODULE_METADATA, staging=staging)
+    copy_pinned_module_files(source / MODULE_FILES, destination / MODULE_FILES,
+                             allowed, staging=staging)
+    for relative in metadata:
+        target = destination / MODULE_METADATA / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source / MODULE_METADATA / relative, target)
+    print(f"Copied {len(metadata)} producer-owned binary resolution metadata files")
+
+
 def make_module(repo: Path, module: str) -> tuple[Path, Path]:
     directory = repo / "org/example/fixture" / module / "1.0"
     directory.mkdir(parents=True)
@@ -277,28 +336,37 @@ def negative_fixtures() -> None:
             home = tmp / "gradle-home"
             require_result(compile_fixture(project, home), success=True, label="pinned original")
             cold_requests = len(requests)
-            module_files = Path("caches/modules-2/files-2.1")
+            module_cache = Path("caches/modules-2")
+            module_files = module_cache / MODULE_FILES
             allowed = {checksum(pom), checksum(jar)}
-            stage = tmp / "staged-module-files"
+            stage = tmp / "staged-module-cache"
             restored_home = tmp / "restored-gradle-home"
-            copy_pinned_module_files(home / module_files, stage, allowed, staging=True)
-            copy_pinned_module_files(stage, restored_home / module_files, allowed)
+            copy_module_cache(home / module_cache, stage, allowed, staging=True)
+            copy_module_cache(stage, restored_home / module_cache, allowed)
             require_result(
                 compile_fixture(project, restored_home),
-                success=True, label="pinned original from restored module files",
+                success=True, label="pinned original from restored module cache",
             )
-            print(f"Loopback fixture HTTP requests: cold={cold_requests}, "
-                  f"restored={len(requests) - cold_requests}")
+            warm_requests = len(requests) - cold_requests
+            print(f"Loopback fixture HTTP requests: cold={cold_requests}, restored={warm_requests}")
+            if cold_requests <= 0 or warm_requests >= cold_requests:
+                raise AssertionError("Restored metadata did not reduce fixture HTTP requests")
+            offline_home = tmp / "offline-restored-home"
+            copy_module_cache(stage, offline_home / module_cache, allowed)
+            require_result(
+                compile_fixture(project, offline_home, offline=True),
+                success=True, label="fresh restored cache resolves offline",
+            )
             restored_jar = next((restored_home / module_files).rglob(jar.name))
             restored_jar.write_bytes(restored_jar.read_bytes() + b"RESTORED-CACHE-MUTATION")
             require_result(
                 compile_fixture(project, restored_home, offline=True),
                 success=False, label="tampered restored cached JAR before compilation",
             )
-            stage_jar = next(stage.rglob(jar.name))
+            stage_jar = next((stage / MODULE_FILES).rglob(jar.name))
             stage_jar.write_bytes(stage_jar.read_bytes() + b"UNPINNED-STAGED-MUTATION")
             try:
-                copy_pinned_module_files(stage, tmp / "rejected-restore", allowed)
+                copy_module_cache(stage, tmp / "rejected-restore", allowed)
             except AssertionError as exc:
                 if "Unpinned restored module bytes" not in str(exc):
                     raise
@@ -307,6 +375,7 @@ def negative_fixtures() -> None:
                 raise AssertionError("Corrupted restored module files were accepted")
             # Restore the fixture to valid bytes for the warm unapproved-artifact case.
             shutil.copyfile(jar, restored_jar)
+            shutil.copyfile(jar, stage_jar)
             cached = list(
                 (home / "caches/modules-2/files-2.1/org.example.fixture/verified/1.0")
                 .rglob(jar.name)
@@ -328,8 +397,10 @@ def negative_fixtures() -> None:
                 compile_fixture(project, tmp / "second-gradle-home"),
                 success=False, label="new dependency without a SHA-256 pin",
             )
+            unapproved_home = tmp / "unapproved-restored-home"
+            copy_module_cache(stage, unapproved_home / module_cache, allowed)
             require_result(
-                compile_fixture(project, restored_home),
+                compile_fixture(project, unapproved_home),
                 success=False, label="new dependency with restored cache and no SHA-256 pin",
             )
         finally:
@@ -342,15 +413,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--negative-fixtures", action="store_true")
-    group.add_argument("--stage-module-files", nargs=2, type=Path, metavar=("SOURCE", "DEST"))
-    group.add_argument("--restore-module-files", nargs=2, type=Path, metavar=("SOURCE", "DEST"))
+    group.add_argument("--stage-module-cache", nargs=2, type=Path, metavar=("SOURCE", "DEST"))
+    group.add_argument("--restore-module-cache", nargs=2, type=Path, metavar=("SOURCE", "DEST"))
     options = parser.parse_args()
     audit_repository()
     if options.negative_fixtures:
         negative_fixtures()
-    elif options.stage_module_files or options.restore_module_files:
+    elif options.stage_module_cache or options.restore_module_cache:
         allowed = {digest for path in MANIFESTS for digest in manifest_pins(path).values()}
-        copy_pinned_module_files(
-            *(options.stage_module_files or options.restore_module_files), allowed,
-            staging=options.stage_module_files is not None,
+        copy_module_cache(
+            *(options.stage_module_cache or options.restore_module_cache), allowed,
+            staging=options.stage_module_cache is not None,
         )

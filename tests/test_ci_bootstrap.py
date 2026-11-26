@@ -139,12 +139,12 @@ class CiBootstrapTrustTest(unittest.TestCase):
 
     def test_cache_save_without_protected_push_guard_rejected(self):
         mutated = self.workflow.replace(
-            "      - name: Save downloaded Gradle module files\n"
+            "      - name: Save protected-branch Gradle module cache\n"
             f"        if: {bootstrap.CACHE_SAVE_IF}\n",
-            "      - name: Save downloaded Gradle module files\n", 1,
+            "      - name: Save protected-branch Gradle module cache\n", 1,
         )
         self.assertNotEqual(mutated, self.workflow)
-        with self.assertRaisesRegex(AssertionError, "dependency cache save policy"):
+        with self.assertRaisesRegex(AssertionError, "Changed dependency cache policy"):
             bootstrap.audit_workflow(mutated)
 
     def test_cache_restore_broader_path_or_fallback_rejected(self):
@@ -156,13 +156,13 @@ class CiBootstrapTrustTest(unittest.TestCase):
                 mutated = self.workflow.replace(
                     f"          path: {bootstrap.CACHE_PATH}", replacement, 1,
                 )
-                with self.assertRaisesRegex(AssertionError, "dependency cache restore policy"):
+                with self.assertRaisesRegex(AssertionError, "Changed dependency cache policy"):
                     bootstrap.audit_workflow(mutated)
 
     def test_cache_preflight_bypass_rejected(self):
-        mutated = self.workflow.replace("--restore-module-files", "--stage-module-files", 1)
+        mutated = self.workflow.replace("--restore-module-cache", "--stage-module-cache", 1)
         self.assertNotEqual(mutated, self.workflow)
-        with self.assertRaisesRegex(AssertionError, "Changed module cache preflight"):
+        with self.assertRaisesRegex(AssertionError, "Changed dependency cache policy"):
             bootstrap.audit_workflow(mutated)
 
     def test_cache_save_recomputed_key_rejected(self):
@@ -171,7 +171,17 @@ class CiBootstrapTrustTest(unittest.TestCase):
             f"          key: {bootstrap.CACHE_KEY}", 1,
         )
         self.assertNotEqual(mutated, self.workflow)
-        with self.assertRaisesRegex(AssertionError, "dependency cache save policy"):
+        with self.assertRaisesRegex(AssertionError, "Changed dependency cache policy"):
+            bootstrap.audit_workflow(mutated)
+
+    def test_current_run_cache_cannot_enter_independent_verifier(self):
+        original = bootstrap.CACHE_DOWNLOAD_STEP
+        mutated = self.workflow.replace(original, "", 1).replace(
+            "      - name: Generate trusted Gradle 9.8.2 launcher templates",
+            original + "      - name: Generate trusted Gradle 9.8.2 launcher templates", 1,
+        )
+        self.assertNotEqual(mutated, self.workflow)
+        with self.assertRaisesRegex(AssertionError, "Changed dependency cache policy"):
             bootstrap.audit_workflow(mutated)
 
     def test_cache_action_pin_change_rejected(self):
@@ -350,6 +360,44 @@ class ModuleFilesCacheTest(unittest.TestCase):
                 allowed = {hashlib.sha256(original.read_bytes()).hexdigest()}
                 with self.assertRaisesRegex(AssertionError, "Unsafe module cache entry"):
                     dependency.copy_pinned_module_files(source, root / "restore", allowed)
+
+
+    def test_module_cache_roundtrip_excludes_locks_and_keeps_metadata(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / "source"
+            entry = source / "files-2.1/g/m/1" / ("a" * 40) / "m.jar"
+            entry.parent.mkdir(parents=True)
+            entry.write_bytes(b"pinned")
+            metadata = source / "metadata-2.107"
+            metadata.mkdir()
+            (metadata / "module-metadata.bin").write_bytes(b"producer state")
+            (metadata / "module-metadata.bin.lock").write_bytes(b"lock")
+            (source / "modules-2.lock").write_bytes(b"lock")
+            (source / "gc.properties").write_bytes(b"gc")
+            allowed = {hashlib.sha256(entry.read_bytes()).hexdigest()}
+            stage = root / "stage"
+            dependency.copy_module_cache(source, stage, allowed, staging=True)
+            self.assertEqual({p.name for p in stage.iterdir()}, {"files-2.1", "metadata-2.107"})
+            self.assertEqual(list((stage / "metadata-2.107").iterdir()),
+                             [stage / "metadata-2.107/module-metadata.bin"])
+            restored = root / "restored"
+            dependency.copy_module_cache(stage, restored, allowed)
+            self.assertEqual((restored / "metadata-2.107/module-metadata.bin").read_bytes(),
+                             b"producer state")
+            for unexpected in ("gc.properties", "init.gradle", "metadata-2.999"):
+                with self.subTest(unexpected=unexpected):
+                    invalid = stage / unexpected
+                    invalid.write_bytes(b"unexpected")
+                    with self.assertRaisesRegex(AssertionError, "Unexpected modules-2 entry"):
+                        dependency.copy_module_cache(stage, root / "refused", allowed)
+                    self.assertFalse((root / "refused").exists())
+                    invalid.unlink()
+            metadata_entry = stage / "metadata-2.107/module-metadata.bin"
+            metadata_entry.unlink()
+            metadata_entry.symlink_to(entry)
+            with self.assertRaisesRegex(AssertionError, "Unsafe module metadata file"):
+                dependency.copy_module_cache(stage, root / "refused", allowed)
 
 
 class GradleResolutionRetryTest(unittest.TestCase):

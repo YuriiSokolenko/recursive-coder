@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   architecture:
-    needs: [bytecode-verifier]
+    needs: [bytecode-verifier, bytecode-build]
     name: Architecture boundaries and pure unit tests
     # Public repository: use a fresh GitHub-hosted VM, including for fork PRs.
     runs-on: ubuntu-24.04
@@ -44,24 +44,17 @@ jobs:
         run: |
           mkdir "$RUNNER_TEMP/recursive-gradle-home"
           echo "GRADLE_USER_HOME=$RUNNER_TEMP/recursive-gradle-home" >> "$GITHUB_ENV"
-      - name: Restore downloaded Gradle module files
-        id: gradle-cache
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+      - name: Download current-run Gradle module cache
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
-          path: ${{ runner.temp }}/recursive-gradle-module-files
-          key: gradle-module-files-v1-${{ runner.os }}-${{ runner.arch }}-9.8.2-${{ hashFiles('gradle/verification-metadata.xml', 'build-logic/gradle/verification-metadata.xml', 'build-logic/gradle/libs.versions.toml', '**/settings.gradle.kts', '**/build.gradle.kts', 'gradle.properties') }}
-      - name: Verify restored module files before Gradle resolution
-        env:
-          CACHE_HIT: ${{ steps.gradle-cache.outputs.cache-hit }}
+          name: gradle-module-cache
+          path: ${{ runner.temp }}/recursive-gradle-module-cache
+      - name: Verify current-run module cache before Gradle resolution
         run: |
-          if [ "$CACHE_HIT" = true ]; then
-            python3 -I tools/check_dependency_verification.py --restore-module-files \
-              "$RUNNER_TEMP/recursive-gradle-module-files" \
-              "$GRADLE_USER_HOME/caches/modules-2/files-2.1"
-          else
-            rm -rf "$RUNNER_TEMP/recursive-gradle-module-files"
-            echo "No exact dependency cache hit; resolve from official repositories"
-          fi
+          python3 -I tools/check_dependency_verification.py --restore-module-cache \
+            "$RUNNER_TEMP/recursive-gradle-module-cache" \
+            "$GRADLE_USER_HOME/caches/modules-2"
+          rm -rf "$RUNNER_TEMP/recursive-gradle-module-cache"
       - name: Resolve Gradle plugins with bounded registry retry
         run: python3 -I tools/run_ci_gradle.py --retry-resolution --label plugin-resolution -- ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache help
       - name: Verify public-runner toolchain
@@ -182,24 +175,24 @@ jobs:
         run: |
           mkdir "$RUNNER_TEMP/recursive-gradle-home"
           echo "GRADLE_USER_HOME=$RUNNER_TEMP/recursive-gradle-home" >> "$GITHUB_ENV"
-      - name: Restore downloaded Gradle module files
+      - name: Restore protected-branch Gradle module cache
         id: gradle-cache
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
-          path: ${{ runner.temp }}/recursive-gradle-module-files
-          key: gradle-module-files-v1-${{ runner.os }}-${{ runner.arch }}-9.8.2-${{ hashFiles('gradle/verification-metadata.xml', 'build-logic/gradle/verification-metadata.xml', 'build-logic/gradle/libs.versions.toml', '**/settings.gradle.kts', '**/build.gradle.kts', 'gradle.properties') }}
-      - name: Verify restored module files before Gradle resolution
+          path: ${{ runner.temp }}/recursive-gradle-module-cache
+          key: gradle-module-cache-v2-${{ runner.os }}-${{ runner.arch }}-9.8.2-${{ hashFiles('gradle/verification-metadata.xml', 'build-logic/gradle/verification-metadata.xml', 'build-logic/gradle/libs.versions.toml', '**/settings.gradle.kts', '**/build.gradle.kts', 'gradle.properties', 'tools/check_dependency_verification.py', '.github/workflows/ci.yml') }}
+      - name: Verify restored module cache before Gradle resolution
         env:
           CACHE_HIT: ${{ steps.gradle-cache.outputs.cache-hit }}
         run: |
           if [ "$CACHE_HIT" = true ]; then
-            python3 -I tools/check_dependency_verification.py --restore-module-files \
-              "$RUNNER_TEMP/recursive-gradle-module-files" \
-              "$GRADLE_USER_HOME/caches/modules-2/files-2.1"
+            python3 -I tools/check_dependency_verification.py --restore-module-cache \
+              "$RUNNER_TEMP/recursive-gradle-module-cache" \
+              "$GRADLE_USER_HOME/caches/modules-2"
           else
-            rm -rf "$RUNNER_TEMP/recursive-gradle-module-files"
             echo "No exact dependency cache hit; resolve from official repositories"
           fi
+          rm -rf "$RUNNER_TEMP/recursive-gradle-module-cache"
       - name: Enforce SHA-256 dependency trust and test negative cache fixtures
         run: python3 -I tools/check_dependency_verification.py --negative-fixtures
       - name: Resolve Gradle plugins with bounded registry retry
@@ -212,22 +205,29 @@ jobs:
         env:
           CI: 'true'
         run: python3 -I tools/run_ci_gradle.py --label production-build -- ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache clean installDist :app:cli:writeRuntimeClasspathManifest --stacktrace
-      - name: Populate test compile dependencies on trusted cache miss
-        if: ${{ success() && github.event_name == 'push' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && steps.gradle-cache.outputs.cache-hit != 'true' }}
+      - name: Populate test compile dependencies on cache miss
+        if: ${{ steps.gradle-cache.outputs.cache-hit != 'true' }}
         run: |
           python3 -I tools/run_ci_gradle.py --label seed-test-classes -- ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache testClasses
           python3 -I tools/run_ci_gradle.py --label seed-build-logic -- ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache -p build-logic testClasses
-      - name: Stage only SHA-256-pinned module files
-        if: ${{ success() && github.event_name == 'push' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && steps.gradle-cache.outputs.cache-hit != 'true' }}
+      - name: Stage pinned module files and resolution metadata
         run: |
-          python3 -I tools/check_dependency_verification.py --stage-module-files \
-            "$GRADLE_USER_HOME/caches/modules-2/files-2.1" \
-            "$RUNNER_TEMP/recursive-gradle-module-files"
-      - name: Save downloaded Gradle module files
+          python3 -I tools/check_dependency_verification.py --stage-module-cache \
+            "$GRADLE_USER_HOME/caches/modules-2" \
+            "$RUNNER_TEMP/recursive-gradle-module-cache"
+      - name: Publish current-run Gradle module cache
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: gradle-module-cache
+          path: ${{ runner.temp }}/recursive-gradle-module-cache
+          if-no-files-found: error
+          retention-days: 3
+          overwrite: true
+      - name: Save protected-branch Gradle module cache
         if: ${{ success() && github.event_name == 'push' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && steps.gradle-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
-          path: ${{ runner.temp }}/recursive-gradle-module-files
+          path: ${{ runner.temp }}/recursive-gradle-module-cache
           key: ${{ steps.gradle-cache.outputs.cache-primary-key }}
       - name: Bundle compiled production inputs
         run: |
@@ -360,7 +360,7 @@ jobs:
           retention-days: 3
 
   kotlin:
-    needs: [bytecode-verifier]
+    needs: [bytecode-verifier, bytecode-build]
     name: Full JVM integration and sandbox E2E
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -381,24 +381,17 @@ jobs:
         run: |
           mkdir "$RUNNER_TEMP/recursive-gradle-home"
           echo "GRADLE_USER_HOME=$RUNNER_TEMP/recursive-gradle-home" >> "$GITHUB_ENV"
-      - name: Restore downloaded Gradle module files
-        id: gradle-cache
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+      - name: Download current-run Gradle module cache
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
-          path: ${{ runner.temp }}/recursive-gradle-module-files
-          key: gradle-module-files-v1-${{ runner.os }}-${{ runner.arch }}-9.8.2-${{ hashFiles('gradle/verification-metadata.xml', 'build-logic/gradle/verification-metadata.xml', 'build-logic/gradle/libs.versions.toml', '**/settings.gradle.kts', '**/build.gradle.kts', 'gradle.properties') }}
-      - name: Verify restored module files before Gradle resolution
-        env:
-          CACHE_HIT: ${{ steps.gradle-cache.outputs.cache-hit }}
+          name: gradle-module-cache
+          path: ${{ runner.temp }}/recursive-gradle-module-cache
+      - name: Verify current-run module cache before Gradle resolution
         run: |
-          if [ "$CACHE_HIT" = true ]; then
-            python3 -I tools/check_dependency_verification.py --restore-module-files \
-              "$RUNNER_TEMP/recursive-gradle-module-files" \
-              "$GRADLE_USER_HOME/caches/modules-2/files-2.1"
-          else
-            rm -rf "$RUNNER_TEMP/recursive-gradle-module-files"
-            echo "No exact dependency cache hit; resolve from official repositories"
-          fi
+          python3 -I tools/check_dependency_verification.py --restore-module-cache \
+            "$RUNNER_TEMP/recursive-gradle-module-cache" \
+            "$GRADLE_USER_HOME/caches/modules-2"
+          rm -rf "$RUNNER_TEMP/recursive-gradle-module-cache"
       - name: Resolve Gradle plugins with bounded registry retry
         run: python3 -I tools/run_ci_gradle.py --retry-resolution --label plugin-resolution -- ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache help
       - name: Set up Python 3.12
