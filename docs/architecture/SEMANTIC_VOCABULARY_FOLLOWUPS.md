@@ -60,8 +60,12 @@ Reviewed the current dev versions of `ModelContracts.kt` (including
   mapping tests cover the latter path. Round-trip coverage is not
   applicable: `ModelConfig` is decode-only and has no production encoder.
 - Literal unit tests pin provider dispatch, fake identity and exact feature
-  selection, both fallback gateway refusal methods, and pre-HTTP rejection
+  selection, fallback gateway negotiation refusal, and pre-HTTP rejection
   of wrong providers, missing tool support and unknown remote features.
+  A separate integration-tier test pins fallback gateway `next()` refusal
+  without prior negotiation. It constructs a `Path` as required by the
+  gateway API; the tier guard forbids explicit `Path` references in unit
+  fixtures even without real filesystem access.
   The remote refusal test uses a failing credential lookup to guard against
   reaching HTTP request construction. Existing literal admission tests pin
   unknown capability/provider denial, fake restrictions, usage requirements

@@ -1,6 +1,5 @@
 package ai.yuriilab.recursivecoder
 
-import java.nio.file.Path
 import java.time.Clock
 import java.time.Instant
 import java.time.ZoneOffset
@@ -59,13 +58,6 @@ class ModelGatewayVocabularyUnitTest {
             }
             assertEquals("UNSUPPORTED_MODEL", negotiation.code)
             assertEquals("provider", negotiation.category)
-
-            val turn = assertFailsWith<Refused> {
-                gateway.next(config, Path.of("/task.md"), null,
-                    cancellation, deadline, false)
-            }
-            assertEquals("UNSUPPORTED_MODEL", turn.code)
-            assertEquals("provider", turn.category)
         }
     }
 
