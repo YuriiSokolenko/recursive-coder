@@ -14,6 +14,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 import check_ci_bootstrap as bootstrap
+from test_trusted_review import TrustedReviewEvidenceTest
 
 
 class CiBootstrapTrustTest(unittest.TestCase):
@@ -134,6 +135,14 @@ class CiBootstrapTrustTest(unittest.TestCase):
         self.assertNotEqual(mutated, self.workflow)
         with self.assertRaisesRegex(AssertionError, "authenticated Gradle"):
             bootstrap.audit_workflow(mutated)
+
+    def test_independent_review_workflow_and_runner_drift_rejected(self):
+        workflow = (ROOT / ".github/workflows/trusted-review.yml").read_bytes()
+        runner = (ROOT / "tools/run_trusted_review.py").read_bytes()
+        bootstrap.audit_trusted_review(workflow, runner)
+        for pair in ((workflow + b"\n", runner), (workflow, runner + b"\n")):
+            with self.assertRaisesRegex(AssertionError, "Changed independent trusted-review"):
+                bootstrap.audit_trusted_review(*pair)
 
     def test_reviewed_official_gradle_checksum(self):
         self.assertEqual(bootstrap.VERSION, "9.8.2")

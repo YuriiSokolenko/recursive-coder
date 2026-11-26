@@ -1,0 +1,43 @@
+name: Independent trusted review evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_sha:
+        description: Exact trusted base commit SHA
+        required: true
+        type: string
+      head_sha:
+        description: Exact PR or pre-push candidate commit SHA
+        required: true
+        type: string
+      pr_number:
+        description: Open PR number, or 0 for pre-push candidate evidence
+        required: true
+        default: '0'
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  evidence:
+    if: github.repository == 'YuriiSokolenko/recursive-coder' && github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: false
+          lfs: false
+      - name: Collect independent exact-pair evidence
+        env:
+          REVIEW_BASE: ${{ inputs.base_sha }}
+          REVIEW_HEAD: ${{ inputs.head_sha }}
+          REVIEW_PR: ${{ inputs.pr_number }}
+          REVIEW_TOKEN: ${{ github.token }}
+        run: python3 -I tools/run_trusted_review.py

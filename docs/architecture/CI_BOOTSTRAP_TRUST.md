@@ -42,3 +42,50 @@ As checked on 2026-11-22, [the active `dev` ruleset](https://github.com/YuriiSok
 Every checkout must set `persist-credentials: false`, enforced by an offline negative-tested drift check. The audit deliberately rejects alternative/flow-style `uses:` references: reviewers must inspect any new action shape or reusable workflow before adapting the checker. Major-version action comments are human-readable hints, not authority; updating an action pin requires verifying the target GitHub commit, changing the workflow SHA and version comment, updating `APPROVED_ACTIONS` and exercising the negative tests. The audit accepts `# v7` or `# v7.0.1`-style comments but compares them against the explicitly reviewed value in its allowlist, so dependency bots cannot silently authorize a new version.
 
 Removing `setup-gradle` also removes its dependency caching. CI intentionally uses a fresh Gradle download and dependency state in each hosted job; that increases network traffic and run time in exchange for a smaller bootstrap/cache trust surface. Keep dependency-verification checks enabled. Any Gradle version upgrade requires an independently reviewed new distribution checksum and a clean six-job run.
+
+
+## Independent review evidence (issue #231)
+
+The proposed manual `trusted-review.yml` workflow is separate from the six
+required production CI jobs. It is intended for GitHub-hosted execution
+from the owner-reviewed version on protected `dev`, not from a PR branch.
+The workflow and its runner are independently pinned by the CI drift audit;
+changes require owner review and independent verification. The audit is not
+an adversarial trust boundary.
+
+After initial independent verification and activation on `dev`, open
+Actions > Independent trusted review evidence > Run workflow, select
+`dev`, and supply the exact base SHA, head SHA and open PR number. Use
+PR number `0` for a pre-push candidate that GitHub can serve by SHA; it
+must descend from the supplied base on `dev`. Candidate mode does not
+verify a PR's metadata and is not a substitute for reviewing the final
+PR pair. If GitHub refuses an unattached commit fetch, do not treat the
+run as evidence.
+
+The workflow uses read-only API permissions and a fresh hosted VM.
+Only the workflow revision and a clean detached trusted-base worktree
+are checked out. The candidate is read as Git objects. Helpers are
+extracted from the base, their Git blob IDs checked, and their SHA-256,
+exit status, stdout and stderr emitted as JSON log records. Git and
+helpers run without the API token, inherited Git configuration or hooks.
+Temporary data is removed on exit; the hosted VM is disposable. No
+build, Gradle tasks, candidate hooks or agent discovery run in this job.
+
+Reviewers must independently obtain the current PR pair via GitHub, read
+the actual run metadata and full job log, verify the workflow event is
+manual dispatch on `dev`, verify the workflow SHA is an independently
+reviewed revision of the trusted execution chain, confirm all three helper
+hashes against the exact base, inspect the complete output and exit codes,
+and require the final complete record for the exact pair. A skipped job,
+missing record, failed helper, moved PR, or candidate-controlled workflow
+is not evidence. The vocabulary scanner's zero exit does not imply no
+findings. The checkout checker does not attest an AI provider's external
+discovery configuration. The human or AI reviewer must still apply the
+entire strict review policy and check all six normal CI statuses.
+
+This workflow cannot independently approve its own introduction or a
+change to its execution chain. Bootstrap requires the existing independent
+trusted-base route and explicit owner review before activation. Until that
+is established, this is a candidate mechanism, not an accepted substitute
+for missing evidence. Demonstration against #229 remains an acceptance
+gate for #231. No policy exception or private runner is authorized.

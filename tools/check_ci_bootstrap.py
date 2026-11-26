@@ -110,13 +110,27 @@ def audit_gradlew_executable_mode() -> None:
         )
 
 
+def audit_trusted_review(workflow: bytes, runner: bytes) -> None:
+    """Pin the separately reviewed, manual-only evidence execution chain."""
+    expected = (
+        "1ebe21cfcbef05d18ffaadfa3b3a748d8da4b9ccd43bb9e295a3ee8ed02abb1a",
+        "0ca2ba5acf10bced134c7486687e63b1af07260769c7b91e0bcfbc8421898cfa",
+    )
+    if tuple(hashlib.sha256(data).hexdigest() for data in (workflow, runner)) != expected:
+        raise AssertionError("Changed independent trusted-review workflow or runner")
+
+
 def audit_repository() -> None:
     workflows = sorted((ROOT / ".github/workflows").glob("*.yml"))
     workflows += sorted((ROOT / ".github/workflows").glob("*.yaml"))
-    if len(workflows) != 1 or workflows[0].name != "ci.yml":
+    if sorted(path.name for path in workflows) != ["ci.yml", "trusted-review.yml"]:
         raise AssertionError("Unexpected additional/reusable workflow; review and pin before accepting")
+    audit_trusted_review(
+        (ROOT / ".github/workflows/trusted-review.yml").read_bytes(),
+        (ROOT / "tools/run_trusted_review.py").read_bytes(),
+    )
     audit_gradlew_executable_mode()
-    audit_workflow(workflows[0].read_text(encoding="utf-8"))
+    audit_workflow((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
     print("PASS: six hosted CI jobs and 21 immutable reviewed action references")
 
 
