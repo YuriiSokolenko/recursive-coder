@@ -65,7 +65,9 @@ project-local task resolves the external artifacts of every source set's
 compile, runtime and annotation-processor classpath and of the Kotlin
 compiler, compiler-plugin and build-tools classpaths. It never compiles or
 executes tests. Both steps retry at most twice on observed HTTP 429/5xx, with
-5 and 15 second delays; verification failures are never retried.
+60 and 180 second delays: Maven Central's initial rate-limit blocks expire on
+their own, and [Sonatype advises](https://central.sonatype.org/faq/429-error/)
+against retrying harder. Verification failures are never retried.
 [`tools/run_ci_gradle.py`](../../tools/run_ci_gradle.py) measures observed
 Gradle HTTP GET/HEAD operations with `--debug` for these resolution-only
 tasks alone. It hides debug and info events together with their continuation

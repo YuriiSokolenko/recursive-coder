@@ -26,7 +26,9 @@ VERIFICATION_FAILURE = re.compile(r"dependency verification failed|checksum veri
 EVENT = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{4} \[([A-Z]+)\] ")
 VISIBLE_LEVELS = frozenset({"LIFECYCLE", "QUIET", "WARN", "ERROR"})
 RESOLUTION_TASKS = frozenset({"help", ":resolveCiDependencies"})
-RETRY_DELAYS = (5, 15)
+# Maven Central's initial 429 blocks are short and expire on their own; Sonatype
+# advises against retrying harder, so wait long and retry only twice.
+RETRY_DELAYS = (60, 180)
 
 
 def visible_lines(lines):

@@ -635,7 +635,7 @@ class GradleResolutionRetryTest(unittest.TestCase):
             with mock.patch.object(ci_gradle.time, "sleep") as sleep:
                 self.assertEqual(ci_gradle.run(self.COMMAND, "fixture", retry_resolution=True), 1)
             self.assertEqual(run.call_count, 3)
-            self.assertEqual(sleep.call_args_list, [mock.call(5), mock.call(15)])
+            self.assertEqual(sleep.call_args_list, [mock.call(60), mock.call(180)])
 
     def test_verification_failure_or_nontransient_failure_never_retries(self):
         for transient, verification in ((True, True), (False, False)):
