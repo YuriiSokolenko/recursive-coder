@@ -56,6 +56,27 @@ class ExpectedTargetsTest(unittest.TestCase):
         })
         self.assertEqual(self.classifier.parse_class.call_count, 4)
 
+    def test_independent_tier_to_target_mapping(self):
+        cases = (
+            ({"unit"}, {"test"}),
+            ({"integration"}, {"test", "integrationTest"}),
+            ({"e2e"}, {"test", "e2eTest"}),
+            ({"integration", "e2e"}, {"test", "e2eTest"}),
+        )
+        self.classifier.test_source_modules.return_value = set()
+        with patch.object(guard, "MODULES", tuple(f"case{i}" for i in range(len(cases)))):
+            for i, (tags, _) in enumerate(cases):
+                self.fixture(f"case{i}", "Suite", tags, [set()])
+            self.assertEqual(guard.expected_targets(self.root), {
+                f"case{i}": targets for i, (_, targets) in enumerate(cases)
+            })
+
+    def test_unknown_effective_tier_rejected(self):
+        self.populate()
+        self.fixture("mixed", "Unknown", {"unknown-tier"}, [set()])
+        with self.assertRaisesRegex(ValueError, "invalid test tiers"):
+            guard.expected_targets(self.root)
+
     def test_missing_compiled_module_fails_closed(self):
         self.populate()
         next((self.root / "unit").rglob("*.class")).unlink()

@@ -24,6 +24,11 @@ INTEGRATION_TIER = "integration"
 E2E_TIER = "e2e"
 TIERS = {UNIT_TIER, INTEGRATION_TIER, E2E_TIER}
 
+# JVM annotation identities owned by this classifier, not the Gradle tag configuration.
+JUNIT_TAG = "org/junit/jupiter/api/Tag"
+JUNIT_TAGS = "org/junit/jupiter/api/Tags"
+JUNIT_NESTED = "org/junit/jupiter/api/Nested"
+
 
 class ClassFormatError(ValueError):
     pass
@@ -244,12 +249,12 @@ def expanded(annotations, classes, visited=frozenset()):
 def tier_tags(annotations, classes):
     found = set()
     for item in expanded(annotations, classes):
-        if item.name == "org/junit/jupiter/api/Tag":
+        if item.name == JUNIT_TAG:
             if isinstance(item.values.get("value"), str):
                 found.add(item.values["value"])
-        elif item.name == "org/junit/jupiter/api/Tags":
+        elif item.name == JUNIT_TAGS:
             for tag in item.values.get("value", []):
-                if isinstance(tag, Annotation) and tag.name == "org/junit/jupiter/api/Tag":
+                if isinstance(tag, Annotation) and tag.name == JUNIT_TAG:
                     found.add(tag.values.get("value"))
     return found & TIERS
 
@@ -281,7 +286,7 @@ def class_tiers(info, classes):
     for item in ancestors(info, classes):
         tags |= tier_tags(item.annotations, classes)
     if "$" in info.name and any(
-        a.name == "org/junit/jupiter/api/Nested" for a in expanded(info.annotations, classes)
+        a.name == JUNIT_NESTED for a in expanded(info.annotations, classes)
     ):
         outer = classes.get(info.name.rsplit("$", 1)[0])
         if outer:
@@ -308,7 +313,7 @@ def pure_unit_related_classes(info, classes, descendants):
     owners = [info]
     current = info
     while "$" in current.name and any(
-        a.name == "org/junit/jupiter/api/Nested" for a in expanded(current.annotations, classes)
+        a.name == JUNIT_NESTED for a in expanded(current.annotations, classes)
     ):
         outer = classes.get(current.name.rsplit("$", 1)[0])
         if outer is None:

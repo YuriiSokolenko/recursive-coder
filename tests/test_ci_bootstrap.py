@@ -167,6 +167,9 @@ class CiBootstrapTrustTest(unittest.TestCase):
             def fake_download(argv, **kwargs):
                 self.assertEqual(argv[0], "curl")
                 archive = Path(argv[argv.index("--output") + 1])
+                self.assertEqual(archive.name, "gradle-9.8.2-bin.zip")
+                self.assertEqual(argv[-1],
+                                 "https://services.gradle.org/distributions/gradle-9.8.2-bin.zip")
                 archive.write_bytes(b"malicious Gradle ZIP")
                 return subprocess.CompletedProcess(argv, 0)
 

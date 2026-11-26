@@ -18,6 +18,9 @@ from zipfile import BadZipFile, ZipFile
 sys.path.append(str(Path(__file__).resolve().parent))
 from check_test_tiers import ClassFormatError, parse_class
 
+# Independent verifier expectation; never read the Gradle application name here.
+INSTALL_DISTRIBUTION = Path("build/install/recursive-coder")
+
 # Fail closed for unreviewed JDK packages and dynamic invocation services.
 ALLOWED_JDK_PACKAGES = (
     "java/io/", "java/lang/", "java/math/", "java/net/", "java/nio/",
@@ -309,7 +312,7 @@ def validate_launch_scripts(root: Path, jar_names: set[str],
     Only the literal, fully validated CLASSPATH assignment is normalized
     to allow Gradle's dependency ordering to differ.
     """
-    directory = root / "build" / "install" / "recursive-coder" / "bin"
+    directory = root / INSTALL_DISTRIBUTION / "bin"
     problems = []
     for name, windows in (("recursive-coder", False), ("recursive-coder.bat", True)):
         script = directory / name
@@ -370,7 +373,7 @@ def validate_launch_scripts(root: Path, jar_names: set[str],
 def validate_install_distribution(root: Path, project_jars: list[Path], home: Path,
                                   trusted_launchers: Path | None = None,
                                   runtime_manifest: Path | None = None):
-    library = root / "build" / "install" / "recursive-coder" / "lib"
+    library = root / INSTALL_DISTRIBUTION / "lib"
     if not library.is_dir():
         return [f"{library}: installed CLI runtime libraries are missing"]
     # Reject extras, symlinks and nested payloads throughout the install tree.
