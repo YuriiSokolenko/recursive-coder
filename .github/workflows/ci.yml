@@ -646,6 +646,8 @@ jobs:
           node-version: '22'
       - name: Reject altered action refs and Gradle checksum inputs
         run: python3 -I -m unittest discover -s tests -p 'test_ci_bootstrap.py' -v
+      - name: Test independent trusted review evidence
+        run: python3 -I -m unittest discover -s tests -p 'test_trusted_review.py' -v
       - name: Test JUnit evidence and import-order guards
         run: python3 -I -m unittest discover -s tests -p 'test_junit_evidence.py' -v
       - name: Check import order in issue 36 test classes

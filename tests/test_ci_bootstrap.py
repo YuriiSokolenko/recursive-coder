@@ -14,7 +14,6 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 import check_ci_bootstrap as bootstrap
-from test_trusted_review import TrustedReviewEvidenceTest
 
 
 class CiBootstrapTrustTest(unittest.TestCase):
@@ -143,6 +142,24 @@ class CiBootstrapTrustTest(unittest.TestCase):
         for pair in ((workflow + b"\n", runner), (workflow, runner + b"\n")):
             with self.assertRaisesRegex(AssertionError, "Changed independent trusted-review"):
                 bootstrap.audit_trusted_review(*pair)
+
+    def test_exact_workflow_inventory_rejects_missing_and_extra_entries(self):
+        for names in (("ci.yml",), ("trusted-review.yml",),
+                      ("ci.yml", "trusted-review.yml", "extra.yml"),
+                      ("ci.yml", "trusted-review.yml", "extra.yaml")):
+            with self.subTest(names=names), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                workflows = root / ".github/workflows"
+                workflows.mkdir(parents=True)
+                for name in names:
+                    (workflows / name).touch()
+                with mock.patch.object(bootstrap, "ROOT", root):
+                    with self.assertRaisesRegex(AssertionError, "Unexpected additional/reusable workflow"):
+                        bootstrap.audit_repository()
+
+    def test_trusted_review_suite_is_explicit_in_contracts_job(self):
+        self.assertEqual(self.workflow.count(
+            "python3 -I -m unittest discover -s tests -p 'test_trusted_review.py' -v"), 1)
 
     def test_reviewed_official_gradle_checksum(self):
         self.assertEqual(bootstrap.VERSION, "9.8.2")

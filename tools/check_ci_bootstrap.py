@@ -114,7 +114,7 @@ def audit_trusted_review(workflow: bytes, runner: bytes) -> None:
     """Pin the separately reviewed, manual-only evidence execution chain."""
     expected = (
         "1ebe21cfcbef05d18ffaadfa3b3a748d8da4b9ccd43bb9e295a3ee8ed02abb1a",
-        "0ca2ba5acf10bced134c7486687e63b1af07260769c7b91e0bcfbc8421898cfa",
+        "5c0e65c528b12d35ca4ca499e363bf0fcd70f18da8f8ef3cb00569ec5655808a",
     )
     if tuple(hashlib.sha256(data).hexdigest() for data in (workflow, runner)) != expected:
         raise AssertionError("Changed independent trusted-review workflow or runner")
@@ -131,7 +131,7 @@ def audit_repository() -> None:
     )
     audit_gradlew_executable_mode()
     audit_workflow((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
-    print("PASS: six hosted CI jobs and 21 immutable reviewed action references")
+    print("PASS: six hosted CI jobs, 21 immutable reviewed action references, and pinned independent trusted-review workflow and runner")
 
 
 def sha256_file(path: Path) -> str:

@@ -136,6 +136,6 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (ValueError, KeyError, OSError, subprocess.CalledProcessError) as error:
+    except (ValueError, TypeError, KeyError, OSError, subprocess.CalledProcessError) as error:
         emit(result="failed", error=str(error))
         raise SystemExit(1)
