@@ -24,8 +24,9 @@ verifier never consumes it.
 A raw file is transported only when its exact group, module, version and file
 name have a pin in these manifests and its SHA-256 equals that pin. The
 restore preflight refuses unpinned coordinates, other bytes for a pinned
-coordinate and unsafe filesystem entries; staging lists every discarded file by
-coordinate. Gradle still enforces strict verification for resolved artifacts.
+coordinate and unsafe filesystem entries. Staging discards only POMs whose
+coordinate pins a Gradle Module Metadata (`.module`) file instead, lists them
+by coordinate and fails on any other unpinned file. Gradle still enforces strict verification for resolved artifacts.
 Binary resolution state is not authenticated by the manifests. It relies on
 protected-ref cache provenance or same-run producer provenance, as described
 in the [CI bootstrap trust boundary](architecture/CI_BOOTSTRAP_TRUST.md#resolution-state-trust-boundary).

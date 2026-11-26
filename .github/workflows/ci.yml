@@ -214,13 +214,19 @@ jobs:
             "$RUNNER_TEMP/recursive-gradle-module-cache"
       - name: Prove staged dependencies resolve offline in a fresh Gradle home
         run: |
+          set -o pipefail
           probe_home="$(mktemp -d "$RUNNER_TEMP/recursive-gradle-offline-proof.XXXXXX")"
           trap 'rm -rf "$probe_home"' EXIT
           python3 -I tools/check_dependency_verification.py --restore-module-cache \
             "$RUNNER_TEMP/recursive-gradle-module-cache" "$probe_home/caches/modules-2"
           export GRADLE_USER_HOME="$probe_home"
-          ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache --offline --warning-mode=fail --no-configuration-cache --init-script "$GITHUB_WORKSPACE/tools/resolve_ci_dependencies.init.gradle" :resolveCiDependencies
-          ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache --offline --warning-mode=fail --no-configuration-cache --init-script "$GITHUB_WORKSPACE/tools/resolve_ci_dependencies.init.gradle" -p build-logic :resolveCiDependencies
+          ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache --offline --warning-mode=all --no-configuration-cache --init-script "$GITHUB_WORKSPACE/tools/resolve_ci_dependencies.init.gradle" :resolveCiDependencies | tee "$probe_home/proof.log"
+          ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache --offline --warning-mode=all --no-configuration-cache --init-script "$GITHUB_WORKSPACE/tools/resolve_ci_dependencies.init.gradle" -p build-logic :resolveCiDependencies | tee -a "$probe_home/proof.log"
+          # Project-local resolution tasks must not trigger Gradle's cross-project
+          # resolution deprecation; other build deprecations are reported, not fatal.
+          if grep -F "context different than the project context" "$probe_home/proof.log"; then
+            exit 1
+          fi
       - name: Publish current-run Gradle module cache
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:

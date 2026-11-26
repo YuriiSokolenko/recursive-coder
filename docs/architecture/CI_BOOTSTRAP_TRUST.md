@@ -79,8 +79,10 @@ downloaded. The audit rejects an online Gradle command outside the two
 resolution steps and production compilation before resolution.
 
 After staging, the producer restores the staged cache into a separate fresh
-Gradle home and repeats both resolutions with `--offline` and
-`--warning-mode=fail` before either publication. Architecture and full JVM jobs
+Gradle home and repeats both resolutions with `--offline` before either
+publication. That proof also fails if Gradle reports resolution from a context
+other than the owning project. It does not fail on unrelated deprecations: the
+settings repository guard still reads the deprecated `artifactUrls` property. Architecture and full JVM jobs
 restore the run-local artifact from the **same workflow run**, even on a cold
 PR; they do not publish persistent entries. The independent production
 distribution verifier and installed CLI verifier never consume the module
@@ -97,9 +99,12 @@ transported, and unknown layouts and links refuse. A raw file is transported
 only if its exact group, module, version and file name have a manifest pin
 and its SHA-256 equals that pin; the same bytes under another coordinate are
 not authorized. Pinned coordinates with other bytes refuse in both
-directions. While staging, files whose coordinate has no pin are discarded and
-listed by coordinate in the job log and step summary, so that changes in what
-Gradle downloads stay visible. On restore they refuse. Gradle continues strict
+directions. Gradle also downloads the POM of a module that publishes Gradle
+Module Metadata to find its marker, then verifies and uses only the `.module`
+file, so only that file is pinned. Those superseded POMs are the single
+category of unpinned files that staging discards; they are listed by
+coordinate in the job log and step summary. Any other unpinned file fails
+staging, and every unpinned file refuses on restore. Gradle continues strict
 coordinate-specific artifact and metadata verification. The workflow-wide
 `GRADLE_OPTS=-Dorg.gradle.caching=false` default also covers Gradle builds
 started by Python test suites; the audit pins its exact value. Explicit

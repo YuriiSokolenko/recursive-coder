@@ -205,7 +205,8 @@ class CiBootstrapTrustTest(unittest.TestCase):
 
     def test_cache_proof_cannot_access_registries_or_tolerate_deprecations(self):
         original = bootstrap.CACHE_PROOF_STEP
-        for flag in ("--offline ", "--warning-mode=fail "):
+        for flag in ("--offline ", "set -o pipefail\n",
+                     'if grep -F "context different than the project context"'):
             with self.subTest(flag=flag):
                 mutated = self.workflow.replace(original, original.replace(flag, ""), 1)
                 self.assertNotEqual(mutated, self.workflow)
@@ -224,7 +225,7 @@ class CiBootstrapTrustTest(unittest.TestCase):
         offline_lines = [
             line for line in self.workflow.splitlines()
             if "./gradlew " in line and "--offline" in line.split()
-            and "--warning-mode=fail" not in line
+            and "--warning-mode=all" not in line
         ]
         self.assertGreaterEqual(len(offline_lines), 10)
         for line in offline_lines:
@@ -454,19 +455,24 @@ class ModuleFilesCacheTest(unittest.TestCase):
             directory.mkdir(parents=True)
             jar = directory / "module-1.0.jar"
             jar.write_bytes(b"pinned artifact")
-            unknown = directory / "unknown.jar"
-            unknown.write_bytes(b"unapproved")
-            pins = pin_for(jar, ("org.example", "module", "1.0"))
+            metadata = directory / "module-1.0.module"
+            metadata.write_bytes(b"pinned gradle module metadata")
+            pom = source / "org.example" / "module" / "1.0" / ("b" * 40) / "module-1.0.pom"
+            pom.parent.mkdir()
+            pom.write_bytes(b"superseded pom")
+            pins = {**pin_for(jar, ("org.example", "module", "1.0")),
+                    **pin_for(metadata, ("org.example", "module", "1.0"))}
             staged = root / "stage"
             with mock.patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(root / "summary.md")}):
                 self.assertEqual(
-                    dependency.copy_pinned_module_files(source, staged, pins, staging=True), 1,
+                    dependency.copy_pinned_module_files(source, staged, pins, staging=True), 2,
                 )
-            self.assertEqual(list(staged.rglob("*.jar")), [staged / jar.relative_to(source)])
-            self.assertIn("`org.example:module:1.0/unknown.jar`",
+            self.assertEqual(sorted(p.name for p in staged.rglob("*") if p.is_file()),
+                             ["module-1.0.jar", "module-1.0.module"])
+            self.assertIn("`org.example:module:1.0/module-1.0.pom`",
                           (root / "summary.md").read_text(encoding="utf-8"))
             self.assertEqual(
-                dependency.copy_pinned_module_files(staged, root / "restore", pins), 1,
+                dependency.copy_pinned_module_files(staged, root / "restore", pins), 2,
             )
             (staged / jar.relative_to(source)).write_bytes(b"corrupt artifact")
             for staging in (False, True):
@@ -476,6 +482,27 @@ class ModuleFilesCacheTest(unittest.TestCase):
                             staged, root / "rejected", pins, staging=staging,
                         )
                     self.assertFalse((root / "rejected").exists())
+
+    def test_only_poms_superseded_by_pinned_module_metadata_may_be_discarded(self):
+        coordinate = ("org.example", "module", "1.0")
+        pinned_module = {(*coordinate, "module-1.0.module"): "0" * 64}
+        for name, pins in (
+            ("module-1.0.jar", pinned_module),     # unpinned binary
+            ("module-1.0.pom", {}),                # POM without pinned .module
+            ("other-1.0.pom", pinned_module),      # foreign POM file name
+            ("module-1.0-sources.jar", pinned_module),
+        ):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                source = root / "source"
+                entry = source.joinpath(*coordinate, "c" * 40, name)
+                entry.parent.mkdir(parents=True)
+                entry.write_bytes(b"unpinned")
+                with self.assertRaisesRegex(AssertionError, "Unexpected unpinned cached file"):
+                    dependency.copy_pinned_module_files(source, root / "stage", pins, staging=True)
+                self.assertFalse((root / "stage").exists())
+                with self.assertRaisesRegex(AssertionError, "Unpinned restored module coordinate"):
+                    dependency.copy_pinned_module_files(source, root / "restore", pins)
 
     def test_pinned_bytes_under_another_coordinate_are_not_transported(self):
         # A digest pinned for one coordinate does not authorize another path.
@@ -490,11 +517,8 @@ class ModuleFilesCacheTest(unittest.TestCase):
             pins = pin_for(pinned, ("org.example", "module", "1.0"))
             with self.assertRaisesRegex(AssertionError, "Unpinned restored module coordinate"):
                 dependency.copy_pinned_module_files(source, root / "restore", pins)
-            stage = root / "stage"
-            self.assertEqual(
-                dependency.copy_pinned_module_files(source, stage, pins, staging=True), 1,
-            )
-            self.assertFalse((stage / moved.relative_to(source)).exists())
+            with self.assertRaisesRegex(AssertionError, "Unexpected unpinned cached file"):
+                dependency.copy_pinned_module_files(source, root / "stage", pins, staging=True)
 
     def test_gradle_sha1_directory_accepts_omitted_leading_zeroes(self):
         # The cache path is a layout check, not the SHA-256 trust authority.

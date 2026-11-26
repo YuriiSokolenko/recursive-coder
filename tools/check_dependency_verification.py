@@ -130,11 +130,18 @@ def module_cache_pins() -> Pins:
     return pins
 
 
+def superseded_pom(pins: Pins, group: str, module: str, version: str, filename: str) -> bool:
+    """Gradle downloads the POM of a module that publishes Gradle Module Metadata
+    to find its marker, then verifies and uses only the pinned .module file."""
+    return (filename == f"{module}-{version}.pom"
+            and (group, module, version, f"{module}-{version}.module") in pins)
+
+
 def report_discarded(discarded: list[str]) -> None:
     """Make every file excluded from the transport visible for review."""
     if not discarded:
         return
-    print(f"Discarded {len(discarded)} cached files without an exact coordinate pin:")
+    print(f"Discarded {len(discarded)} POMs superseded by pinned Gradle Module Metadata:")
     for entry in discarded:
         print(f"  discarded: {entry}")
     if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
@@ -152,8 +159,10 @@ def copy_pinned_module_files(
 
     A file is selected only when its group, module, version and file name have a
     manifest pin and its SHA-256 equals that pin. Pinned coordinates with other
-    bytes are refused in both directions. Files whose coordinate has no pin are
-    reported and discarded while staging, and refused on restore.
+    bytes are refused in both directions. While staging, the only unpinned
+    files accepted are POMs superseded by a pinned Gradle Module Metadata file
+    of the same coordinate; they are reported and discarded. Any other unpinned
+    file refuses staging, and every unpinned file refuses restore.
     """
     if not source.is_dir() or source.is_symlink():
         raise AssertionError("Missing or unsafe module files directory")
@@ -180,6 +189,8 @@ def copy_pinned_module_files(
             if pin is None:
                 if not staging:
                     raise AssertionError(f"Unpinned restored module coordinate: {relative}")
+                if not superseded_pom(pins, group, module, version, filename):
+                    raise AssertionError(f"Unexpected unpinned cached file: {relative}")
                 discarded.append(f"{group}:{module}:{version}/{filename}")
                 continue
             with item.open("rb") as stream:
@@ -197,7 +208,7 @@ def copy_pinned_module_files(
     discarded.sort()
     report_discarded(discarded)
     print(f"Verified and copied {len(selected)} coordinate-pinned module files; "
-          f"discarded {len(discarded)} unpinned files")
+          f"discarded {len(discarded)} superseded POMs")
     return len(selected)
 
 
