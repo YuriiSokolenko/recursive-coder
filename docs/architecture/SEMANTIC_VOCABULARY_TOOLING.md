@@ -3,10 +3,11 @@
 Parent: #194. This is a follow-up to the initial changes already in dev, not a
 change to the test-tier, bytecode, dependency or CI security policy.
 
-Initial audit baseline: dev at
-`5a31bae85341a2083f0cf982eb4b1f83db2d67cb`. The inventory below records files
-found via repository code search and inspected for repeated literal candidates,
-with targeted source inspection of the affected paths and guard boundaries. This is not a proof that every literal in every test is unique.
+Initial audit baseline: dev at `5a31bae85341a2083f0cf982eb4b1f83db2d67cb`. The
+inventory below records files found via repository code search and inspected for
+repeated literal candidates, with targeted source inspection of the affected
+paths and guard boundaries. This is not a proof that every literal in every test
+is unique.
 
 ## Ownership and disposition
 
