@@ -48,15 +48,17 @@ The producer (`bytecode-build`) alone restores an exact-key persistent cache
 into a fresh isolated Gradle user home. The key includes OS, architecture,
 Gradle version, both verification manifests, the actual build-logic version
 catalog, settings and build scripts, root Gradle properties, cache transfer
-policy, runtime-resolution init script and workflow. Save reuses the restore-time primary key. There are no
-restore-keys; only successful producer execution on a push to `dev` or
-`main` may publish a persistent entry. PR and dispatch runs never save one.
+policy, runtime-resolution init script and workflow. Save reuses the
+restore-time primary key. There are no restore-keys; only successful
+producer execution on a push to `dev` or `main` may publish a persistent
+entry. PR and dispatch runs never save one.
 
 The producer also exports a run-local artifact after strict resolution,
-including production, test-compile and test-runtime dependencies. Architecture and full JVM
-jobs restore that artifact from the **same workflow run**, even on a cold PR;
-they do not publish persistent entries. The independent production distribution
-verifier and installed CLI verifier never consume the module cache.
+including production, test-compile and test-runtime dependencies.
+Architecture and full JVM jobs restore that artifact from the **same workflow
+run**, even on a cold PR; they do not publish persistent entries. The
+independent production distribution verifier and installed CLI verifier never
+consume the module cache.
 The artifact is overwritten on producer reruns and retained for three days;
 failed-job-only reruns after expiry require rerunning the producer.
 
@@ -87,14 +89,16 @@ standalone build-logic builds without executing tests, on both cache hits and
 misses. After staging, it restores into a separate fresh Gradle home and repeats
 that resolution with strict verification and `--offline` before either cache
 publication. This proves these classpaths are present after filtering, not that
-all arbitrary future Gradle tasks can execute offline. Initial plugin resolution retries at most twice on
-observed HTTP 429/5xx, with 5 and 15 second delays; verification failures are
-not retried. Keep strict verification and `--no-build-cache` enabled.
+all arbitrary future Gradle tasks can execute offline. Initial plugin
+resolution retries at most twice on observed HTTP 429/5xx, with 5 and 15
+second delays; verification failures are not retried. Keep strict
+verification and `--no-build-cache` enabled. The workflow also sets
+`GRADLE_OPTS=-Dorg.gradle.caching=false` globally as a default; explicit
+`--no-build-cache` remains required for the wrapped Gradle invocations.
 The major direct Gradle invocations report observed Gradle HTTP GET/HEAD
 operations, not exact wire counts (redirects and unwrapped fixtures excluded).
-The first raw-files-only experiment (run 45800753820) measured 2 cold and 6
-restored loopback requests and failed all three resolution attempts on 429.
-The new fixture requires fewer warm requests than cold, proves offline
+The hermetic fixture requires fewer warm requests than cold, proves offline
 resolution from a fresh restored home, and repeats negative checksum cases.
+Run-specific measurements belong in the PR or issue, not this design note.
 Full cold/warm six-job CI and comparable registry metrics remain mandatory
 acceptance evidence.
