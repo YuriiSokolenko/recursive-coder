@@ -184,6 +184,38 @@ class CiBootstrapTrustTest(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "Changed dependency cache policy"):
             bootstrap.audit_workflow(mutated)
 
+    def test_cache_runtime_seed_and_offline_proof_are_mandatory(self):
+        for step in (bootstrap.CACHE_RUNTIME_STEP, bootstrap.CACHE_RUNTIME_PROOF_STEP):
+            with self.subTest(step=step.splitlines()[0]):
+                self.assertIn(step, self.workflow)
+                mutated = self.workflow.replace(step, "", 1)
+                with self.assertRaisesRegex(AssertionError, "Changed dependency cache policy"):
+                    bootstrap.audit_workflow(mutated)
+
+    def test_cache_runtime_seed_cannot_be_skipped_on_hit(self):
+        original = bootstrap.CACHE_RUNTIME_STEP
+        guarded = original.replace("        run: |",
+                                   "        if: false\n        run: |", 1)
+        mutated = self.workflow.replace(original, guarded, 1)
+        self.assertNotEqual(mutated, self.workflow)
+        with self.assertRaisesRegex(AssertionError, "Changed dependency cache policy"):
+            bootstrap.audit_workflow(mutated)
+
+    def test_cache_runtime_proof_cannot_access_registries(self):
+        original = bootstrap.CACHE_RUNTIME_PROOF_STEP
+        mutated = self.workflow.replace(original, original.replace("--offline ", ""), 1)
+        self.assertNotEqual(mutated, self.workflow)
+        with self.assertRaisesRegex(AssertionError, "Changed dependency cache policy"):
+            bootstrap.audit_workflow(mutated)
+
+    def test_cache_runtime_proof_cannot_be_moved_after_publication(self):
+        proof = bootstrap.CACHE_RUNTIME_PROOF_STEP
+        publish = bootstrap.CACHE_PUBLISH_STEP
+        mutated = self.workflow.replace(proof + publish, publish + proof, 1)
+        self.assertNotEqual(mutated, self.workflow)
+        with self.assertRaisesRegex(AssertionError, "Changed dependency cache policy"):
+            bootstrap.audit_workflow(mutated)
+
     def test_cache_action_pin_change_rejected(self):
         mutated = self.workflow.replace(
             "actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25",

@@ -42,18 +42,22 @@ INSTALL = "run: python3 -I tools/check_ci_bootstrap.py --install-gradle"
 
 
 CACHE_PATH = "${{ runner.temp }}/recursive-gradle-module-cache"
-CACHE_KEY = "gradle-module-cache-v2-${{ runner.os }}-${{ runner.arch }}-9.8.2-${{ hashFiles('gradle/verification-metadata.xml', 'build-logic/gradle/verification-metadata.xml', 'build-logic/gradle/libs.versions.toml', '**/settings.gradle.kts', '**/build.gradle.kts', 'gradle.properties', 'tools/check_dependency_verification.py', '.github/workflows/ci.yml') }}"
+CACHE_KEY = "gradle-module-cache-v2-${{ runner.os }}-${{ runner.arch }}-9.8.2-${{ hashFiles('gradle/verification-metadata.xml', 'build-logic/gradle/verification-metadata.xml', 'build-logic/gradle/libs.versions.toml', '**/settings.gradle.kts', '**/build.gradle.kts', 'gradle.properties', 'tools/check_dependency_verification.py', 'tools/resolve_ci_test_runtime.init.gradle', '.github/workflows/ci.yml') }}"
 CACHE_SAVE_IF = "${{ success() && github.event_name == 'push' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && steps.gradle-cache.outputs.cache-hit != 'true' }}"
 
 CACHE_PREPARE_STEP = "      - name: Prepare fresh Gradle user home\n        run: |\n          mkdir \"$RUNNER_TEMP/recursive-gradle-home\"\n          echo \"GRADLE_USER_HOME=$RUNNER_TEMP/recursive-gradle-home\" >> \"$GITHUB_ENV\"\n"
 
-CACHE_RESTORE_STEP = "      - name: Restore protected-branch Gradle module cache\n        id: gradle-cache\n        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5\n        with:\n          path: ${{ runner.temp }}/recursive-gradle-module-cache\n          key: gradle-module-cache-v2-${{ runner.os }}-${{ runner.arch }}-9.8.2-${{ hashFiles('gradle/verification-metadata.xml', 'build-logic/gradle/verification-metadata.xml', 'build-logic/gradle/libs.versions.toml', '**/settings.gradle.kts', '**/build.gradle.kts', 'gradle.properties', 'tools/check_dependency_verification.py', '.github/workflows/ci.yml') }}\n"
+CACHE_RESTORE_STEP = "      - name: Restore protected-branch Gradle module cache\n        id: gradle-cache\n        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5\n        with:\n          path: ${{ runner.temp }}/recursive-gradle-module-cache\n          key: gradle-module-cache-v2-${{ runner.os }}-${{ runner.arch }}-9.8.2-${{ hashFiles('gradle/verification-metadata.xml', 'build-logic/gradle/verification-metadata.xml', 'build-logic/gradle/libs.versions.toml', '**/settings.gradle.kts', '**/build.gradle.kts', 'gradle.properties', 'tools/check_dependency_verification.py', 'tools/resolve_ci_test_runtime.init.gradle', '.github/workflows/ci.yml') }}\n"
 
 CACHE_VERIFY_STEP = "      - name: Verify restored module cache before Gradle resolution\n        env:\n          CACHE_HIT: ${{ steps.gradle-cache.outputs.cache-hit }}\n        run: |\n          if [ \"$CACHE_HIT\" = true ]; then\n            python3 -I tools/check_dependency_verification.py --restore-module-cache \\\n              \"$RUNNER_TEMP/recursive-gradle-module-cache\" \\\n              \"$GRADLE_USER_HOME/caches/modules-2\"\n          else\n            echo \"No exact dependency cache hit; resolve from official repositories\"\n          fi\n          rm -rf \"$RUNNER_TEMP/recursive-gradle-module-cache\"\n"
 
 CACHE_DOWNLOAD_STEP = "      - name: Download current-run Gradle module cache\n        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8\n        with:\n          name: gradle-module-cache\n          path: ${{ runner.temp }}/recursive-gradle-module-cache\n"
 
 CACHE_VERIFY_DOWNLOAD_STEP = "      - name: Verify current-run module cache before Gradle resolution\n        run: |\n          python3 -I tools/check_dependency_verification.py --restore-module-cache \\\n            \"$RUNNER_TEMP/recursive-gradle-module-cache\" \\\n            \"$GRADLE_USER_HOME/caches/modules-2\"\n          rm -rf \"$RUNNER_TEMP/recursive-gradle-module-cache\"\n"
+
+CACHE_RUNTIME_STEP = "      - name: Resolve all JVM test runtime dependencies\n        run: |\n          python3 -I tools/run_ci_gradle.py --label seed-test-runtime -- ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache --no-configuration-cache --init-script \"$GITHUB_WORKSPACE/tools/resolve_ci_test_runtime.init.gradle\" :resolveCiTestRuntime\n          python3 -I tools/run_ci_gradle.py --label seed-build-logic-runtime -- ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache --no-configuration-cache --init-script \"$GITHUB_WORKSPACE/tools/resolve_ci_test_runtime.init.gradle\" -p build-logic :resolveCiTestRuntime\n"
+
+CACHE_RUNTIME_PROOF_STEP = "      - name: Prove staged runtime dependencies resolve offline\n        run: |\n          probe_home=\"$(mktemp -d \"$RUNNER_TEMP/recursive-gradle-runtime-proof.XXXXXX\")\"\n          trap 'rm -rf \"$probe_home\"' EXIT\n          python3 -I tools/check_dependency_verification.py --restore-module-cache \\\n            \"$RUNNER_TEMP/recursive-gradle-module-cache\" \"$probe_home/caches/modules-2\"\n          export GRADLE_USER_HOME=\"$probe_home\"\n          python3 -I tools/run_ci_gradle.py --label prove-test-runtime -- ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache --offline --no-configuration-cache --init-script \"$GITHUB_WORKSPACE/tools/resolve_ci_test_runtime.init.gradle\" :resolveCiTestRuntime\n          python3 -I tools/run_ci_gradle.py --label prove-build-logic-runtime -- ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache --offline --no-configuration-cache --init-script \"$GITHUB_WORKSPACE/tools/resolve_ci_test_runtime.init.gradle\" -p build-logic :resolveCiTestRuntime\n"
 
 CACHE_STAGE_STEP = "      - name: Stage pinned module files and resolution metadata\n        run: |\n          python3 -I tools/check_dependency_verification.py --stage-module-cache \\\n            \"$GRADLE_USER_HOME/caches/modules-2\" \\\n            \"$RUNNER_TEMP/recursive-gradle-module-cache\"\n"
 
@@ -75,7 +79,8 @@ def audit_cache_policy(source: str) -> None:
         flags=re.MULTILINE,
     )
     producer = (CACHE_PREPARE_STEP, CACHE_RESTORE_STEP, CACHE_VERIFY_STEP,
-                CACHE_STAGE_STEP, CACHE_PUBLISH_STEP, CACHE_SAVE_STEP)
+                CACHE_RUNTIME_STEP, CACHE_STAGE_STEP, CACHE_RUNTIME_PROOF_STEP,
+                CACHE_PUBLISH_STEP, CACHE_SAVE_STEP)
     consumer = (CACHE_PREPARE_STEP, CACHE_DOWNLOAD_STEP, CACHE_VERIFY_DOWNLOAD_STEP)
     for section in sections:
         match = JOB_LINE.match(section)
@@ -90,7 +95,8 @@ def audit_cache_policy(source: str) -> None:
             for step in re.split(r"(?=^      - )", section, flags=re.MULTILINE)
             if ("recursive-gradle-module-cache" in step
                 or "recursive-gradle-home" in step
-                or "actions/cache/" in step)
+                or "actions/cache/" in step
+                or "resolveCiTestRuntime" in step)
         ]
         if tuple(steps) != expected:
             raise AssertionError(f"Changed dependency cache policy in {job}")

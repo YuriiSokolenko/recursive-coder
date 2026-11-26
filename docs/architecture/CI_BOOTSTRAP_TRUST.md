@@ -48,12 +48,12 @@ The producer (`bytecode-build`) alone restores an exact-key persistent cache
 into a fresh isolated Gradle user home. The key includes OS, architecture,
 Gradle version, both verification manifests, the actual build-logic version
 catalog, settings and build scripts, root Gradle properties, cache transfer
-policy and workflow. Save reuses the restore-time primary key. There are no
+policy, runtime-resolution init script and workflow. Save reuses the restore-time primary key. There are no
 restore-keys; only successful producer execution on a push to `dev` or
 `main` may publish a persistent entry. PR and dispatch runs never save one.
 
 The producer also exports a run-local artifact after strict resolution,
-including production and test-compile dependencies. Architecture and full JVM
+including production, test-compile and test-runtime dependencies. Architecture and full JVM
 jobs restore that artifact from the **same workflow run**, even on a cold PR;
 they do not publish persistent entries. The independent production distribution
 verifier and installed CLI verifier never consume the module cache.
@@ -81,8 +81,13 @@ a compromised trusted cache service or producer, nor a proof that arbitrary
 serialized metadata preserves the dependency graph. Independent security
 review must explicitly accept this boundary before merge.
 
-A cold PR cannot seed a persistent shared cache. Missing runtime dependencies
-are resolved normally. Initial plugin resolution retries at most twice on
+A cold PR cannot seed a persistent shared cache. The producer resolves external
+artifacts of each JVM test and test-fixture runtime classpath in the root and
+standalone build-logic builds without executing tests, on both cache hits and
+misses. After staging, it restores into a separate fresh Gradle home and repeats
+that resolution with strict verification and `--offline` before either cache
+publication. This proves these classpaths are present after filtering, not that
+all arbitrary future Gradle tasks can execute offline. Initial plugin resolution retries at most twice on
 observed HTTP 429/5xx, with 5 and 15 second delays; verification failures are
 not retried. Keep strict verification and `--no-build-cache` enabled.
 The major direct Gradle invocations report observed Gradle HTTP GET/HEAD

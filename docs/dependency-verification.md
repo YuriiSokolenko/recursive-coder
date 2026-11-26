@@ -26,7 +26,10 @@ entries; Gradle still enforces strict verification for resolved artifacts.
 Binary resolution state is not authenticated by the manifests. It relies on
 protected-ref cache provenance or same-run producer provenance, as described
 in the [CI bootstrap trust boundary](architecture/CI_BOOTSTRAP_TRUST.md#downloaded-module-cache-215).
-No other Gradle state or build outputs are transported.
+No other Gradle state or build outputs are transported. The producer resolves
+all JVM test and test-fixture runtime artifacts and repeats the same resolution
+in a fresh restored Gradle home offline before publication; root and standalone
+build-logic are both checked.
 
 The hermetic fixtures exercise fresh cold, restored online and restored
 offline Gradle homes, assert reduced loopback HTTP requests, and reject
