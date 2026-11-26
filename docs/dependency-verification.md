@@ -12,6 +12,21 @@ never run `--write-verification-metadata` or auto-accept missing checksums.
 weakened manifests; `--negative-fixtures` separately tests a corrupted
 cached JAR and an unapproved new Maven artifact before Java compilation.
 
+## CI module-file transport (#215)
+
+CI may restore only raw, SHA-256-pinned files into a fresh Gradle user home.
+The cache key includes both manifests and dependency configuration. The
+restore preflight rejects unpinned bytes and unsafe filesystem entries;
+Gradle still verifies the resolved coordinates in strict mode. No serialized
+resolution metadata, Gradle distributions, transforms or build outputs are
+restored. Only successful protected-branch push runs publish cache entries;
+PR and dispatch runs restore only. The independent production verifier
+remains isolated from this cache. See the [CI bootstrap trust boundary](architecture/CI_BOOTSTRAP_TRUST.md#downloaded-module-files-cache-215).
+
+The hermetic negative fixtures also exercise staging and restoring raw files
+into a fresh Gradle home, corruption rejection before resolution and by Gradle
+itself, and rejection of an unapproved dependency with a restored cache.
+
 ## Initial baseline: independent official-repository comparison
 
 A one-shot GitHub-hosted, credential-free verifier compared all **671 unique

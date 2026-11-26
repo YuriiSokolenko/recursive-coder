@@ -41,4 +41,46 @@ As checked on 2026-11-22, [the active `dev` ruleset](https://github.com/YuriiSok
 
 Every checkout must set `persist-credentials: false`, enforced by an offline negative-tested drift check. The audit deliberately rejects alternative/flow-style `uses:` references: reviewers must inspect any new action shape or reusable workflow before adapting the checker. Major-version action comments are human-readable hints, not authority; updating an action pin requires verifying the target GitHub commit, changing the workflow SHA and version comment, updating `APPROVED_ACTIONS` and exercising the negative tests. The audit accepts `# v7` or `# v7.0.1`-style comments but compares them against the explicitly reviewed value in its allowlist, so dependency bots cannot silently authorize a new version.
 
-Removing `setup-gradle` also removes its dependency caching. CI intentionally uses a fresh Gradle download and dependency state in each hosted job; that increases network traffic and run time in exchange for a smaller bootstrap/cache trust surface. Keep dependency-verification checks enabled. Any Gradle version upgrade requires an independently reviewed new distribution checksum and a clean six-job run.
+## Downloaded module files cache (#215)
+
+Gradle distributions still use the fresh authenticated ZIP bootstrap above.
+Three jobs restore only a staged copy of
+`caches/modules-2/files-2.1`, in fresh isolated Gradle user homes.
+The independent production distribution verifier does not restore it.
+The pinned `actions/cache/restore` and `actions/cache/save` entry points use
+the exact same key: OS, architecture, Gradle version, both verification
+manifests, the actual build-logic version catalog, settings and build scripts,
+and root Gradle properties. Save uses the primary key computed at restore time,
+not a hash recomputed after compilation. No restore-keys or partial hits are
+consumed.
+
+The raw downloaded files are checked against the union of the reviewed SHA-256
+pins before copying them into the fresh Gradle user home. Unpinned restored
+bytes, links and unexpected file layout fail closed. Gradle independently
+enforces strict coordinate-specific verification during normal resolution.
+The staging filter discards unpinned files on export. Serialized resolution
+metadata (`metadata-*`), transforms, compiled scripts, configuration cache,
+project state, executable distributions and build outputs are not transported.
+In particular, serialized metadata is not itself authenticated by the XML pins;
+it is deliberately rebuilt from the official repositories. This choice may
+still require network metadata and checksum requests on warm runs.
+
+Only the successful producer job on a `push` to `dev` or `main` can save
+a cache, on an exact-key miss, after the production build and additional
+test compilation dependency population. PRs and manual dispatch restore only.
+A fork can change its own workflow, but GitHub's cache ref isolation prevents
+its PR merge-ref cache from becoming a protected-branch cache. Cold PRs cannot
+seed a shared cache. Later jobs can restore a producer's saved entry; any
+missing test-runtime dependencies are resolved normally. A cache is not a
+dependency authority or a guarantee of offline availability.
+
+Initial Gradle plugin resolution retries at most twice after observed HTTP
+429/5xx responses, with 5 and 15 second delays; verification failures are
+not retried. The major direct Gradle invocations report observed Gradle
+HTTP GET/HEAD operations; this is not a packet-level count and excludes
+unwrapped fixture subprocesses and transport-level redirects. Cold and warm
+evidence, including the loopback corruption and unapproved-artifact fixtures,
+must be recorded before claiming the issue's performance acceptance criteria.
+Keep strict verification and `--no-build-cache` enabled. Any Gradle version
+upgrade requires an independently reviewed new distribution checksum and a
+clean six-job run.

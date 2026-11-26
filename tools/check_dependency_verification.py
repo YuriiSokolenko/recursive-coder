@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 from xml.etree import ElementTree as ET
@@ -114,6 +115,50 @@ def audit_repository() -> None:
         print(f"Verified {count} SHA-256-pinned artifacts in {path.relative_to(ROOT)}")
 
 
+def copy_pinned_module_files(
+    source: Path, destination: Path, allowed: set[str], *, staging: bool = False,
+) -> int:
+    """Transfer only pinned raw Gradle module files, never binary metadata."""
+    if not source.is_dir() or source.is_symlink():
+        raise AssertionError("Missing or unsafe module files directory")
+    if destination.exists() or destination.is_symlink():
+        raise AssertionError("Module files destination must be fresh")
+    selected = []
+    discarded = 0
+    for directory, dirs, names in os.walk(source, followlinks=False):
+        parent = Path(directory)
+        for name in dirs:
+            item = parent / name
+            if not stat.S_ISDIR(item.lstat().st_mode):
+                raise AssertionError(f"Unsafe module cache directory: {item}")
+        for name in names:
+            item = parent / name
+            relative = item.relative_to(source)
+            info = item.lstat()
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                    or len(relative.parts) != 5
+                    or not re.fullmatch(r"[0-9a-f]{40}", relative.parts[3])):
+                raise AssertionError(f"Unsafe module cache entry: {relative}")
+            with item.open("rb") as stream:
+                digest = hashlib.file_digest(stream, "sha256").hexdigest()
+            if digest not in allowed:
+                if not staging:
+                    raise AssertionError(f"Unpinned restored module bytes: {relative}")
+                discarded += 1
+                continue
+            selected.append((item, relative))
+    if not selected:
+        raise AssertionError("No pinned module files to transfer")
+    destination.mkdir(parents=True)
+    for item, relative in selected:
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(item, target)
+    print(f"Verified and copied {len(selected)} pinned module files; "
+          f"discarded {discarded} unpinned files")
+    return len(selected)
+
+
 def make_module(repo: Path, module: str) -> tuple[Path, Path]:
     directory = repo / "org/example/fixture" / module / "1.0"
     directory.mkdir(parents=True)
@@ -203,7 +248,12 @@ def negative_fixtures() -> None:
         # File-based Maven repositories can be used directly without storing
         # their artifacts in Gradle's module cache. An isolated loopback HTTP
         # repository exercises the actual checksum-verified downloaded cache.
+        requests = []
+
         class QuietHandler(SimpleHTTPRequestHandler):
+            def log_request(self, code: int | str = "-", size: int | str = "-") -> None:
+                requests.append(self.command)
+
             def log_message(self, format: str, *args: object) -> None:
                 pass
 
@@ -226,6 +276,37 @@ def negative_fixtures() -> None:
             )
             home = tmp / "gradle-home"
             require_result(compile_fixture(project, home), success=True, label="pinned original")
+            cold_requests = len(requests)
+            module_files = Path("caches/modules-2/files-2.1")
+            allowed = {checksum(pom), checksum(jar)}
+            stage = tmp / "staged-module-files"
+            restored_home = tmp / "restored-gradle-home"
+            copy_pinned_module_files(home / module_files, stage, allowed, staging=True)
+            copy_pinned_module_files(stage, restored_home / module_files, allowed)
+            require_result(
+                compile_fixture(project, restored_home),
+                success=True, label="pinned original from restored module files",
+            )
+            print(f"Loopback fixture HTTP requests: cold={cold_requests}, "
+                  f"restored={len(requests) - cold_requests}")
+            restored_jar = next((restored_home / module_files).rglob(jar.name))
+            restored_jar.write_bytes(restored_jar.read_bytes() + b"RESTORED-CACHE-MUTATION")
+            require_result(
+                compile_fixture(project, restored_home, offline=True),
+                success=False, label="tampered restored cached JAR before compilation",
+            )
+            stage_jar = next(stage.rglob(jar.name))
+            stage_jar.write_bytes(stage_jar.read_bytes() + b"UNPINNED-STAGED-MUTATION")
+            try:
+                copy_pinned_module_files(stage, tmp / "rejected-restore", allowed)
+            except AssertionError as exc:
+                if "Unpinned restored module bytes" not in str(exc):
+                    raise
+                print("PASS: corrupted restored archive rejected before Gradle")
+            else:
+                raise AssertionError("Corrupted restored module files were accepted")
+            # Restore the fixture to valid bytes for the warm unapproved-artifact case.
+            shutil.copyfile(jar, restored_jar)
             cached = list(
                 (home / "caches/modules-2/files-2.1/org.example.fixture/verified/1.0")
                 .rglob(jar.name)
@@ -247,6 +328,10 @@ def negative_fixtures() -> None:
                 compile_fixture(project, tmp / "second-gradle-home"),
                 success=False, label="new dependency without a SHA-256 pin",
             )
+            require_result(
+                compile_fixture(project, restored_home),
+                success=False, label="new dependency with restored cache and no SHA-256 pin",
+            )
         finally:
             server.shutdown()
             server.server_close()
@@ -255,8 +340,17 @@ def negative_fixtures() -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--negative-fixtures", action="store_true")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--negative-fixtures", action="store_true")
+    group.add_argument("--stage-module-files", nargs=2, type=Path, metavar=("SOURCE", "DEST"))
+    group.add_argument("--restore-module-files", nargs=2, type=Path, metavar=("SOURCE", "DEST"))
     options = parser.parse_args()
     audit_repository()
     if options.negative_fixtures:
         negative_fixtures()
+    elif options.stage_module_files or options.restore_module_files:
+        allowed = {digest for path in MANIFESTS for digest in manifest_pins(path).values()}
+        copy_pinned_module_files(
+            *(options.stage_module_files or options.restore_module_files), allowed,
+            staging=options.stage_module_files is not None,
+        )

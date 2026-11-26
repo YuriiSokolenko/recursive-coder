@@ -29,13 +29,100 @@ APPROVED_ACTIONS = {
     "actions/setup-node": ("249970729cb0ef3589644e2896645e5dc5ba9c38", "v6", 1),
     "actions/upload-artifact": ("cf430e030ddbb5b0abf93d22962f4752f3646cd9", "v7", 3),
     "actions/download-artifact": ("9000827ccba6bdab643e8b6fd33ac0654aef8333", "v8", 2),
+    # Official actions/cache refs/tags/v5 verified on 2026-11-26.
+    "actions/cache/restore": ("caa296126883cff596d87d8935842f9db880ef25", "v5", 3),
+    "actions/cache/save": ("caa296126883cff596d87d8935842f9db880ef25", "v5", 1),
 }
 GRADLE_JOBS = ("architecture", "bytecode-build", "bytecode-verifier", "kotlin")
 REQUIRED_JOBS = (*GRADLE_JOBS, "cli-e2e", "contracts")
 USE_LINE = re.compile(r"^\s*(?:-\s*)?uses\s*:\s*(.*?)\s*$")
-PINNED = re.compile(r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)@([0-9a-f]{40})\s+#\s+(v[0-9]+(?:\.[0-9]+){0,2})")
+PINNED = re.compile(r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)?)@([0-9a-f]{40})\s+#\s+(v[0-9]+(?:\.[0-9]+){0,2})")
 JOB_LINE = re.compile(r"^  ([a-z][a-z0-9-]*):\s*$", re.MULTILINE)
 INSTALL = "run: python3 -I tools/check_ci_bootstrap.py --install-gradle"
+
+
+CACHE_JOBS = ("architecture", "bytecode-build", "kotlin")
+CACHE_PATH = "${{ runner.temp }}/recursive-gradle-module-files"
+CACHE_KEY = (
+    "gradle-module-files-v1-${{ runner.os }}-${{ runner.arch }}-9.8.2-"
+    "${{ hashFiles('gradle/verification-metadata.xml', "
+    "'build-logic/gradle/verification-metadata.xml', "
+    "'build-logic/gradle/libs.versions.toml', '**/settings.gradle.kts', "
+    "'**/build.gradle.kts', 'gradle.properties') }}"
+)
+CACHE_SAVE_IF = (
+    "${{ success() && github.event_name == 'push' && "
+    "(github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && "
+    "steps.gradle-cache.outputs.cache-hit != 'true' }}"
+)
+
+
+CACHE_PREPARE_STEP = "      - name: Prepare fresh Gradle user home\n        run: |\n          mkdir \"$RUNNER_TEMP/recursive-gradle-home\"\n          echo \"GRADLE_USER_HOME=$RUNNER_TEMP/recursive-gradle-home\" >> \"$GITHUB_ENV\"\n"
+CACHE_VERIFY_STEP = "      - name: Verify restored module files before Gradle resolution\n        env:\n          CACHE_HIT: ${{ steps.gradle-cache.outputs.cache-hit }}\n        run: |\n          if [ \"$CACHE_HIT\" = true ]; then\n            python3 -I tools/check_dependency_verification.py --restore-module-files \\\n              \"$RUNNER_TEMP/recursive-gradle-module-files\" \\\n              \"$GRADLE_USER_HOME/caches/modules-2/files-2.1\"\n          else\n            rm -rf \"$RUNNER_TEMP/recursive-gradle-module-files\"\n            echo \"No exact dependency cache hit; resolve from official repositories\"\n          fi\n"
+CACHE_STAGE_STEP = "      - name: Stage only SHA-256-pinned module files\n        if: ${{ success() && github.event_name == 'push' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && steps.gradle-cache.outputs.cache-hit != 'true' }}\n        run: |\n          python3 -I tools/check_dependency_verification.py --stage-module-files \\\n            \"$GRADLE_USER_HOME/caches/modules-2/files-2.1\" \\\n            \"$RUNNER_TEMP/recursive-gradle-module-files\"\n"
+
+def audit_cache_policy(source: str) -> None:
+    """Drift guard for cache scope, exact key, consumer and publisher placement."""
+    if source.split("\npermissions:", 1)[0] != (
+        "name: Recursive Coder CI\n\non:\n"
+        "  pull_request:\n    branches: [dev, main]\n"
+        "  push:\n    branches: [dev, main]\n  workflow_dispatch:\n"
+    ):
+        raise AssertionError("Unexpected cache workflow trigger")
+    jobs = {}
+    for section in re.split(r"(?=^  [a-z][a-z0-9-]*:\s*$)", source.split("\njobs:\n", 1)[1],
+                            flags=re.MULTILINE):
+        match = JOB_LINE.match(section)
+        if match:
+            jobs[match.group(1)] = section
+    for job, section in jobs.items():
+        cache_steps = [
+            step for step in re.split(r"(?=^      - )", section, flags=re.MULTILINE)
+            if "uses: actions/cache/" in step
+        ]
+        expected = ["restore"] if job in CACHE_JOBS else []
+        if job == "bytecode-build":
+            expected.append("save")
+        if len(cache_steps) != len(expected):
+            raise AssertionError(f"Unexpected dependency cache actions in {job}")
+        for step, operation in zip(cache_steps, expected):
+            lines = step.rstrip().splitlines()
+            pin, version, _ = APPROVED_ACTIONS[f"actions/cache/{operation}"]
+            common = [
+                f"        uses: actions/cache/{operation}@{pin} # {version}",
+                "        with:",
+                f"          path: {CACHE_PATH}",
+                (f"          key: {CACHE_KEY}" if operation == "restore" else
+                 "          key: ${{ steps.gradle-cache.outputs.cache-primary-key }}"),
+            ]
+            prefix = (
+                ["      - name: Restore downloaded Gradle module files",
+                 "        id: gradle-cache"] if operation == "restore" else
+                ["      - name: Save downloaded Gradle module files",
+                 f"        if: {CACHE_SAVE_IF}"]
+            )
+            if lines != prefix + common:
+                raise AssertionError(f"Unexpected dependency cache {operation} policy in {job}")
+        if job in CACHE_JOBS:
+            if section.count(CACHE_PREPARE_STEP) != 1 or section.count(CACHE_VERIFY_STEP) != 1:
+                raise AssertionError(f"Changed module cache preflight in {job}")
+            if job == "bytecode-build":
+                if section.count(CACHE_STAGE_STEP) != 1:
+                    raise AssertionError("Changed module cache staging policy")
+                if section.index(CACHE_STAGE_STEP) > section.index("      - name: Save downloaded Gradle module files"):
+                    raise AssertionError("Module files must be staged before save")
+            required = (
+                INSTALL,
+                "      - name: Prepare fresh Gradle user home",
+                "      - name: Restore downloaded Gradle module files",
+                "      - name: Verify restored module files before Gradle resolution",
+                "      - name: Resolve Gradle plugins with bounded registry retry",
+            )
+            positions = [section.find(marker) for marker in required]
+            if -1 in positions or positions != sorted(positions):
+                raise AssertionError(f"Unsafe dependency cache restore order in {job}")
+    if "restore-keys:" in source or "pull_request_target:" in source:
+        raise AssertionError("Unsafe dependency cache fallback or trigger")
 
 
 def audit_workflow(source: str) -> None:
@@ -91,6 +178,7 @@ def audit_workflow(source: str) -> None:
         raise AssertionError("Unverified setup-gradle executable provisioning is prohibited")
     if source.count("tools/check_ci_bootstrap.py --audit") != len(REQUIRED_JOBS):
         raise AssertionError("All CI jobs must audit pinned actions and Gradle bootstrap")
+    audit_cache_policy(source)
 
 
 def audit_gradlew_executable_mode() -> None:
@@ -117,7 +205,8 @@ def audit_repository() -> None:
         raise AssertionError("Unexpected additional/reusable workflow; review and pin before accepting")
     audit_gradlew_executable_mode()
     audit_workflow(workflows[0].read_text(encoding="utf-8"))
-    print("PASS: six hosted CI jobs and 21 immutable reviewed action references")
+    count = sum(entry[2] for entry in APPROVED_ACTIONS.values())
+    print(f"PASS: six hosted CI jobs and {count} immutable reviewed action references")
 
 
 def sha256_file(path: Path) -> str:

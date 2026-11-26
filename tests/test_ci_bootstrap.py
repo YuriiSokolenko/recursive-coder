@@ -14,6 +14,8 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 import check_ci_bootstrap as bootstrap
+import check_dependency_verification as dependency
+import run_ci_gradle as ci_gradle
 
 
 class CiBootstrapTrustTest(unittest.TestCase):
@@ -133,6 +135,52 @@ class CiBootstrapTrustTest(unittest.TestCase):
         )
         self.assertNotEqual(mutated, self.workflow)
         with self.assertRaisesRegex(AssertionError, "authenticated Gradle"):
+            bootstrap.audit_workflow(mutated)
+
+    def test_cache_save_without_protected_push_guard_rejected(self):
+        mutated = self.workflow.replace(
+            "      - name: Save downloaded Gradle module files\n"
+            f"        if: {bootstrap.CACHE_SAVE_IF}\n",
+            "      - name: Save downloaded Gradle module files\n", 1,
+        )
+        self.assertNotEqual(mutated, self.workflow)
+        with self.assertRaisesRegex(AssertionError, "dependency cache save policy"):
+            bootstrap.audit_workflow(mutated)
+
+    def test_cache_restore_broader_path_or_fallback_rejected(self):
+        for replacement in (
+            "          path: ~/.gradle",
+            f"          path: {bootstrap.CACHE_PATH}\n          restore-keys: gradle-",
+        ):
+            with self.subTest(replacement=replacement):
+                mutated = self.workflow.replace(
+                    f"          path: {bootstrap.CACHE_PATH}", replacement, 1,
+                )
+                with self.assertRaisesRegex(AssertionError, "dependency cache restore policy"):
+                    bootstrap.audit_workflow(mutated)
+
+    def test_cache_preflight_bypass_rejected(self):
+        mutated = self.workflow.replace("--restore-module-files", "--stage-module-files", 1)
+        self.assertNotEqual(mutated, self.workflow)
+        with self.assertRaisesRegex(AssertionError, "Changed module cache preflight"):
+            bootstrap.audit_workflow(mutated)
+
+    def test_cache_save_recomputed_key_rejected(self):
+        mutated = self.workflow.replace(
+            "          key: ${{ steps.gradle-cache.outputs.cache-primary-key }}",
+            f"          key: {bootstrap.CACHE_KEY}", 1,
+        )
+        self.assertNotEqual(mutated, self.workflow)
+        with self.assertRaisesRegex(AssertionError, "dependency cache save policy"):
+            bootstrap.audit_workflow(mutated)
+
+    def test_cache_action_pin_change_rejected(self):
+        mutated = self.workflow.replace(
+            "actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25",
+            "actions/cache/restore@" + "0" * 40, 1,
+        )
+        self.assertNotEqual(mutated, self.workflow)
+        with self.assertRaisesRegex(AssertionError, "Changed GitHub Actions pin"):
             bootstrap.audit_workflow(mutated)
 
     def test_reviewed_official_gradle_checksum(self):
@@ -256,6 +304,85 @@ class CiBootstrapTrustTest(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 bootstrap.require_archive_sha256(Path(tmp) / "missing.zip")
 
+
+
+class ModuleFilesCacheTest(unittest.TestCase):
+    def test_pinned_bytes_only_and_corruption_rejected(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / "source"
+            directory = source / "org.example" / "module" / "1.0" / ("a" * 40)
+            directory.mkdir(parents=True)
+            jar = directory / "module-1.0.jar"
+            jar.write_bytes(b"pinned artifact")
+            unknown = directory / "unknown.jar"
+            unknown.write_bytes(b"unapproved")
+            allowed = {hashlib.sha256(jar.read_bytes()).hexdigest()}
+            staged = root / "stage"
+            self.assertEqual(
+                dependency.copy_pinned_module_files(source, staged, allowed, staging=True), 1,
+            )
+            self.assertEqual(list(staged.rglob("*.jar")), [staged / jar.relative_to(source)])
+            self.assertEqual(
+                dependency.copy_pinned_module_files(staged, root / "restore", allowed), 1,
+            )
+            (staged / jar.relative_to(source)).write_bytes(b"corrupt artifact")
+            with self.assertRaisesRegex(AssertionError, "Unpinned restored module bytes"):
+                dependency.copy_pinned_module_files(staged, root / "rejected", allowed)
+            self.assertFalse((root / "rejected").exists())
+
+    def test_symlink_hardlink_and_unexpected_layout_rejected(self):
+        for kind in ("symlink", "hardlink", "layout"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                source = root / "source"
+                source.mkdir()
+                original = root / "original"
+                original.write_bytes(b"pinned")
+                entry = source / "g" / "m" / "1" / ("b" * 40) / "m.jar"
+                entry.parent.mkdir(parents=True)
+                if kind == "symlink":
+                    entry.symlink_to(original)
+                elif kind == "hardlink":
+                    os.link(original, entry)
+                else:
+                    (source / "metadata.bin").write_bytes(original.read_bytes())
+                allowed = {hashlib.sha256(original.read_bytes()).hexdigest()}
+                with self.assertRaisesRegex(AssertionError, "Unsafe module cache entry"):
+                    dependency.copy_pinned_module_files(source, root / "restore", allowed)
+
+
+class GradleResolutionRetryTest(unittest.TestCase):
+    COMMAND = ["./gradlew", "--dependency-verification", "strict", "--no-build-cache", "help"]
+
+    def test_transient_resolution_is_bounded(self):
+        with mock.patch.object(ci_gradle, "run_once", return_value=(1, 4, True, False)) as run:
+            with mock.patch.object(ci_gradle.time, "sleep") as sleep:
+                self.assertEqual(ci_gradle.run(self.COMMAND, "fixture", retry_resolution=True), 1)
+            self.assertEqual(run.call_count, 3)
+            self.assertEqual(sleep.call_args_list, [mock.call(5), mock.call(15)])
+
+    def test_verification_failure_or_nontransient_failure_never_retries(self):
+        for transient, verification in ((True, True), (False, False)):
+            with mock.patch.object(ci_gradle, "run_once",
+                                   return_value=(1, 1, transient, verification)) as run:
+                with mock.patch.object(ci_gradle.time, "sleep") as sleep:
+                    self.assertEqual(ci_gradle.run(
+                        self.COMMAND, "fixture", retry_resolution=True,
+                    ), 1)
+                run.assert_called_once()
+                sleep.assert_not_called()
+
+    def test_registry_http_operation_and_status_patterns(self):
+        self.assertIsNotNone(ci_gradle.HTTP_OPERATION.search(
+            "Performing HTTP GET: https://repo.maven.apache.org/maven2/test.pom",
+        ))
+        self.assertIsNone(ci_gradle.HTTP_OPERATION.search(
+            "Performing HTTP GET: https://example.org/test.pom",
+        ))
+        self.assertIsNotNone(ci_gradle.TRANSIENT.search("Received status code 429 from server"))
+        self.assertIsNotNone(ci_gradle.TRANSIENT.search("Received status code 503 from server"))
+        self.assertIsNone(ci_gradle.TRANSIENT.search("Received status code 404 from server"))
 
 
 def workflow_step_script(workflow: str, name: str) -> str:
