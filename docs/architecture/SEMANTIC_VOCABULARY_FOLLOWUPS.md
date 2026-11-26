@@ -20,6 +20,50 @@ or any child complete solely because this branch exists.
 | #204 | `JournalFormatVocabulary` in journal; effect metadata and state keys reused by physical effect journal, effect envelope policy and evidence verifier. Fence/anchor/audit markers remain private to their codecs. Anchor bound reuses existing ResumeFenceStorage.MAX_FENCES. Lock names are internal to journal. | Do not merge unrelated ledger and effect record capacities, magic headers, cryptographic domains, HMAC inputs or wire versions merely because values coincide. Checkpoint task-state allowlist stays local: no journal dependency on tasks. More codec-local field candidates remain for review. |
 | #205 | Gradle JVM convention uses local source-set name and e2e tag; Python test-tier, JUnit evidence and CI bootstrap guards reuse their own local constants. | CI YAML and verification metadata, independent Python tests and standalone JavaScript schema checks remain literal or independently specified. Do not import product constants into external verifiers. |
 
+## #197 targeted completion audit
+
+Reviewed the current dev versions of `ModelContracts.kt` (including
+`ModelConfig`), `SessionCapabilityIds.kt`, `SessionRequest.kt`,
+`SessionPolicy.kt` (including `SessionAdmissionPolicy`),
+`ModelGateway.kt` (factory, fake and OpenAI-compatible gateways),
+`FailClosedProviderUsageGateway.kt`, `Main.kt`,
+`InstalledRecursiveWorkflow.kt`, `WritableWorkflowCli.kt` and
+`KoogStageRoleExecutor.kt`. Also inspected `SessionRuntime.kt`,
+`RunSessionUseCase.kt`, `TaskRequestMapper.kt`, `CompositionRoot.kt`,
+`InstalledChildRuntimeGrants.kt`, `LinuxFiveRoleWorkflowHost.kt` and
+`TaskCli.kt` for additional consumers.
+
+- PR #206 already centralized the configured provider IDs and fake model ID
+  in `ModelProviderIds`, the six configured feature IDs in
+  `ModelFeatureIds`, and the four runtime capability IDs in
+  `SessionCapabilityIds`. The reviewed production consumers use those
+  definitions; no additional production substitution is necessary.
+- The admission capability allowlist, provider-specific fake feature set,
+  remote usage requirement, gateway feature allowlist and metered gateway
+  restrictions are separate policy decisions. They remain explicit and
+  unchanged; declaring an identifier does not grant support or authority.
+- Model discovery's advertised feature names correspond to configured
+  features. Chat Completions `tool_calls` response fields, the
+  `tool_calls` finish reason and the `tool_choice` request key instead
+  belong to the HTTP adapter. They are not configuration feature constants.
+  Other HTTP fields, credential references, prompt text, diagnostic prose,
+  Koog-local model identifiers and independent fixture literals remain
+  separate. The v1 schema deliberately permits opaque identifiers; reserved
+  or unknown values are not evidence of runtime support.
+- `ModelConfig.from` preserves opaque provider, model and feature values
+  without normalizing them or taking over admission. Literal JSON round-trip
+  coverage pins that mapping. Literal gateway tests pin provider dispatch,
+  fake identity and exact feature selection, including unknown values.
+  Existing literal admission tests pin unknown capability/provider denial,
+  fake restrictions, usage requirements and denial precedence. Existing
+  HTTP gateway tests pin unknown remote feature rejection and response
+  behavior; provider-usage and Koog tests retain their separate restrictions.
+  The existing literal identifier drift test and schema/examples are intact.
+
+No schema, wire, durable format, authorization, production code or dependency
+changes are needed for this completion slice. Full CI is required before
+merge; this audit does not close #194.
+
 ## #202 targeted completion audit
 
 Reviewed `TaskPolicy.kt` (including TaskState, Task, TaskQueue and transition policy),
