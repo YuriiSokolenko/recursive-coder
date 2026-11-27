@@ -1,17 +1,25 @@
 package ai.yuriilab.recursivecoder
 
+import java.io.ByteArrayOutputStream
+import java.io.IOException
+import java.io.OutputStream
+import java.io.PrintStream
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.attribute.PosixFilePermissions
 import java.time.Duration
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
+import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertFails
+import kotlin.test.assertContentEquals
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
@@ -59,6 +67,7 @@ abstract class EffectAuthorityAdapterContract {
         timeout: Duration = Duration.ofSeconds(20)
     ): HostEffectAntiRollbackAuthority
     protected abstract fun truncatePrimary()
+    protected abstract fun truncateBoth()
     protected abstract fun corruptBoth()
     protected abstract fun removeHistories()
     protected abstract fun marker(): Path
@@ -191,7 +200,7 @@ abstract class EffectAuthorityAdapterContract {
         acknowledge(client().bootstrap(genesis), genesis)
         assertEquals(EffectAuthorityPublication.Uncertain,
             client("after-primary").compareAndSet(genesis, started()))
-        assertEquals(EffectAuthorityRead.MissingOrReset, client().read(register))
+        assertEquals(EffectAuthorityRead.Unavailable, client().read(register))
         assertFalse(EffectAuthorityPolicy.acknowledges(client().bootstrap(genesis), genesis))
         assertFalse(EffectAuthorityPolicy.acknowledges(client().compareAndSet(genesis, started()), started()))
     }
@@ -212,12 +221,12 @@ abstract class EffectAuthorityAdapterContract {
     }
 
     @Test
-    fun truncatedAuthenticatedPrefixIsNotLatestAndCannotBootstrap() {
+    fun oneSidedTruncationIsUnavailableAndCannotBootstrap() {
         provision()
         acknowledge(client().bootstrap(genesis), genesis)
         acknowledge(client().compareAndSet(genesis, started()), started())
         truncatePrimary()
-        assertEquals(EffectAuthorityRead.MissingOrReset, client().read(register))
+        assertEquals(EffectAuthorityRead.Unavailable, client().read(register))
         assertEquals(EffectAuthorityPublication.Unavailable, client().bootstrap(genesis))
     }
 
@@ -226,13 +235,47 @@ abstract class EffectAuthorityAdapterContract {
         provision()
         acknowledge(client().bootstrap(genesis), genesis)
         corruptBoth()
-        assertEquals(EffectAuthorityRead.MissingOrReset, client().read(register))
-        assertEquals(EffectAuthorityPublication.Unavailable, client().bootstrap(genesis))
+        assertEquals(EffectAuthorityRead.Unauthenticated, client().read(register))
+        assertEquals(EffectAuthorityPublication.Unauthenticated, client().bootstrap(genesis))
         removeHistories()
-        assertEquals(EffectAuthorityRead.MissingOrReset, client().read(register))
+        assertEquals(EffectAuthorityRead.Unavailable, client().read(register))
         assertEquals(EffectAuthorityPublication.Unavailable, client().bootstrap(genesis))
         // The persisted provisioning marker remains; no automatic replacement.
         assertTrue(runCatching { provision() }.isFailure)
+    }
+
+    @Test
+    fun coherentAuthorityDomainRollbackIsOutsideThreatModel() {
+        provision()
+        acknowledge(client().bootstrap(genesis), genesis)
+        acknowledge(client().compareAndSet(genesis, started()), started())
+        truncateBoth()
+        // Privileged rollback of both authority logs violates deployment assumptions.
+        latest(genesis)
+        refuse(client().bootstrap(genesis), EffectAuthorityRefusal.ALREADY_INITIALIZED)
+    }
+
+    @Test
+    fun malformedAuthenticatedRepliesAndForeignRootsNeverAuthorize() {
+        provision()
+        acknowledge(client().bootstrap(genesis), genesis)
+        val next = started()
+        for (mode in listOf("wrong-digest", "unknown-status", "unknown-refusal", "oversized")) {
+            assertEquals(EffectAuthorityPublication.Uncertain, client(mode).compareAndSet(genesis, next), mode)
+        }
+        assertEquals(EffectAuthorityPublication.Unauthenticated,
+            client("wrong-field-count").compareAndSet(genesis, next))
+        for (mode in listOf("invalid-history", "noncontiguous-history", "wrong-field-count", "unknown-status")) {
+            assertEquals(EffectAuthorityRead.Unauthenticated, client(mode).read(register), mode)
+        }
+        assertEquals(EffectAuthorityRead.Unavailable, client("oversized").read(register))
+        val foreign = register.copy(epoch = hash('9'))
+        val foreignGenesis = genesis.copy(evidence = genesis.evidence.copy(register = foreign))
+        val foreignNext = next.copy(evidence = next.evidence.copy(register = foreign))
+        assertEquals(EffectAuthorityPublication.Unauthenticated, client().bootstrap(foreignGenesis))
+        assertEquals(EffectAuthorityPublication.Unauthenticated, client().compareAndSet(foreignGenesis, next))
+        assertEquals(EffectAuthorityPublication.Unauthenticated, client().compareAndSet(genesis, foreignNext))
+        latest(genesis)
     }
 
     @Test
@@ -285,7 +328,7 @@ class SshEffectAuthorityConformanceIntegrationTest : EffectAuthorityAdapterContr
     @Test
     fun productionStorageGuardRejectsUnprotectedLogs() {
         provision()
-        assertEquals(EffectAuthorityRead.MissingOrReset,
+        assertEquals(EffectAuthorityRead.Unavailable,
             client("enforce-append-only").read(register))
         assertEquals(EffectAuthorityPublication.Unavailable,
             client("enforce-append-only").bootstrap(genesis))
@@ -296,10 +339,95 @@ class SshEffectAuthorityConformanceIntegrationTest : EffectAuthorityAdapterContr
     private fun mirror() = directory.resolve("mirror")
     private fun lock() = directory.resolve("lock")
     override fun marker() = directory.resolve("blocked")
-    override fun provision() = EffectAuthorityService(
-        register, primary(), mirror(), lock(), ByteArray(32) { 7 }, ByteArray(32) { 9 },
-        requireAppendOnly = false
-    ).provision()
+    private fun keyFile(name: String) = directory.resolve(name)
+
+    @BeforeEach
+    fun createKeys() {
+        for ((name, value) in listOf("transport" to 7, "history" to 9)) {
+            val path = keyFile(name)
+            Files.createFile(path, PosixFilePermissions.asFileAttribute(
+                PosixFilePermissions.fromString("rw-------")))
+            Files.write(path, ByteArray(32) { value.toByte() })
+        }
+    }
+
+    private fun process(main: String, args: List<String>): Process =
+        ProcessBuilder(listOf(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+            "-cp", checkNotNull(System.getProperty("recursivecoder.fork.classpath")), main) + args)
+            .redirectError(ProcessBuilder.Redirect.DISCARD).start()
+
+    private fun hostExit(mode: String): Int {
+        val child = process(EffectAuthorityHostCommand::class.java.name,
+            AuthorityProcessFixture.hostArgs(directory, mode).toList())
+        try {
+            child.outputStream.close()
+            check(child.waitFor(20, TimeUnit.SECONDS))
+            assertEquals(0, child.inputStream.readAllBytes().size)
+            return child.exitValue()
+        } finally { child.destroyForcibly() }
+    }
+
+    override fun provision() {
+        check(hostExit("provision-never-initialized") == 0)
+    }
+
+    @Test
+    fun actualHostCommandRejectsUnsupportedModeAndBrokenOutput() {
+        assertEquals(1, hostExit("unsupported"))
+        provision()
+        assertEquals(EffectAuthorityPublication.Uncertain, client("broken-output").bootstrap(genesis))
+        assertEquals(EffectAuthorityRead.Authenticated(genesis), client().read(register))
+    }
+
+    @Test
+    fun connectRequiresExplicitApprovalAndExactSshArguments() {
+        fun connect(approved: Boolean = true, destination: String = "authority@host.example",
+                    port: Int = 2222, transport: Path = keyFile("transport"),
+                    identity: Path = directory.resolve("ssh"), known: Path = directory.resolve("known"),
+                    timeout: Duration = Duration.ofSeconds(10)) =
+            SshEffectAntiRollbackAuthority.connect(register, transport, identity, known,
+                destination, port, timeout, approved)
+        val client = connect()
+        assertEquals(listOf("/usr/bin/ssh", "-F", "/dev/null", "-T",
+            "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
+            "-o", "UserKnownHostsFile=" + directory.resolve("known"),
+            "-o", "GlobalKnownHostsFile=/dev/null", "-o", "IdentitiesOnly=yes",
+            "-o", "IdentityAgent=none", "-o", "ConnectionAttempts=1", "-o", "ClearAllForwardings=yes",
+            "-o", "PreferredAuthentications=publickey", "-o", "ControlMaster=no",
+            "-i", directory.resolve("ssh").toString(), "-p", "2222", "--", "authority@host.example"),
+            client.command)
+        assertFails { connect(approved = false) }
+        assertFails { connect(destination = "-bad@host") }
+        assertFails { connect(destination = "authority@host;bad") }
+        assertFails { connect(port = 0) }
+        assertFails { connect(port = 65536) }
+        assertFails { connect(transport = Path.of("relative")) }
+        assertFails { connect(identity = Path.of("relative")) }
+        assertFails { connect(known = Path.of("relative")) }
+        assertFails { connect(timeout = Duration.ZERO) }
+    }
+
+    @Test
+    fun keyLoaderRequiresOwnedPrivateRegularFileAndExactLength() {
+        val key = keyFile("transport")
+        assertContentEquals(ByteArray(32) { 7 }, AuthorityWire.key(key))
+        val link = directory.resolve("link")
+        Files.createSymbolicLink(link, key)
+        assertFails { AuthorityWire.key(link) }
+        assertFails { AuthorityWire.key(directory) }
+        assertFails { AuthorityWire.key(directory.resolve("absent")) }
+        for (mode in listOf("rw-r-----", "rw----r--", "rwx------", "-w-------")) {
+            Files.setPosixFilePermissions(key, PosixFilePermissions.fromString(mode))
+            assertFails { AuthorityWire.key(key) }
+        }
+        Files.setPosixFilePermissions(key, PosixFilePermissions.fromString("r--------"))
+        assertContentEquals(ByteArray(32) { 7 }, AuthorityWire.key(key))
+        Files.setPosixFilePermissions(key, PosixFilePermissions.fromString("rw-------"))
+        for (size in listOf(31, 33)) {
+            Files.write(key, ByteArray(size))
+            assertFails { AuthorityWire.key(key) }
+        }
+    }
 
     override fun client(fault: String, register: EffectAuthorityRegister, wrongKey: Boolean,
                         timeout: Duration): HostEffectAntiRollbackAuthority =
@@ -311,6 +439,11 @@ class SshEffectAuthorityConformanceIntegrationTest : EffectAuthorityAdapterContr
     override fun truncatePrimary() {
         val lines = Files.readAllLines(primary())
         Files.writeString(primary(), lines.dropLast(1).joinToString("\n", postfix = "\n"))
+    }
+
+    override fun truncateBoth() {
+        truncatePrimary()
+        Files.write(mirror(), Files.readAllBytes(primary()))
     }
 
     override fun corruptBoth() {
@@ -325,32 +458,94 @@ class SshEffectAuthorityConformanceIntegrationTest : EffectAuthorityAdapterContr
     }
 }
 
-/** Same wire, validation, lock and persistence as production, no SSH or chattr in CI. */
+/** Real host command parser and persistence, with test-only transport faults. */
 object AuthorityProcessFixture {
+    fun hostArgs(directory: Path, mode: String) = arrayOf(mode,
+        directory.resolve("primary").toString(), directory.resolve("mirror").toString(),
+        directory.resolve("lock").toString(), directory.resolve("transport").toString(),
+        directory.resolve("history").toString(), "host", "session", "register", "a".repeat(64))
+
     @JvmStatic
     fun main(args: Array<String>) {
         val directory = Path.of(args[0])
         val mode = args[1]
-        val request = System.`in`.readNBytes(AuthorityWire.LIMIT + 1)
         if (mode == "unavailable") Runtime.getRuntime().halt(2)
         if (mode == "replay") {
+            System.`in`.readNBytes(AuthorityWire.LIMIT + 1)
             System.out.write(Files.readAllBytes(directory.resolve("response")))
             return
         }
-        val service = EffectAuthorityService(
-            EffectAuthorityRegister("host", "session", "register", "a".repeat(64)),
-            directory.resolve("primary"), directory.resolve("mirror"), directory.resolve("lock"),
-            ByteArray(32) { 7 }, ByteArray(32) { 9 }, requireAppendOnly = mode == "enforce-append-only"
-        ) { point ->
-            if (point == mode) Runtime.getRuntime().halt(3)
-            if (mode == "block" && point == "before-append") {
+        if (mode in setOf("wrong-digest", "unknown-status", "unknown-refusal", "oversized",
+                "wrong-field-count", "invalid-history", "noncontiguous-history")) {
+            val request = System.`in`.readNBytes(AuthorityWire.LIMIT + 1)
+            if (mode == "oversized") {
+                System.out.write(ByteArray(AuthorityWire.LIMIT + 1))
+                return
+            }
+            val hash = AuthorityWire.hash(request)
+            val key = ByteArray(32) { 7 }
+            val register = EffectAuthorityRegister("host", "session", "register", "a".repeat(64))
+            val root = EffectAuthorityRoot(1, null, EffectAuthorityEvidence(register, 1,
+                "b".repeat(64), "c".repeat(64), "d".repeat(64), 0, "e".repeat(64),
+                null, EffectAuthorityState.GENESIS))
+            val encoded = checkNotNull(AuthorityWire.encode(root))
+            val payload = when (mode) {
+                "wrong-digest" -> "$hash\nack\n" + "9".repeat(64)
+                "unknown-status" -> "$hash\nunknown\n"
+                "unknown-refusal" -> "$hash\nrefused\nUNKNOWN"
+                "wrong-field-count" -> "$hash\nack"
+                "invalid-history" -> "$hash\nhistory\ninvalid"
+                else -> "$hash\nhistory\n$encoded,$encoded"
+            }
+            System.out.write(AuthorityWire.pack(key, AuthorityWire.RESPONSE, payload))
+            return
+        }
+        val original = System.out
+        val capture = ByteArrayOutputStream()
+        if (mode == "capture") System.setOut(PrintStream(capture))
+        if (mode == "broken-output") System.setOut(PrintStream(object : OutputStream() {
+            override fun write(b: Int) { throw IOException("fixture") }
+        }))
+        if (mode == "enforce-append-only") {
+            EffectAuthorityHostCommand.main(hostArgs(directory, "serve-independent"))
+            return
+        }
+        EffectAuthorityHostCommand.run(hostArgs(directory, "serve-independent"), requireAppendOnly = false) { point ->
+            if (point.wireValue == mode) Runtime.getRuntime().halt(3)
+            if (mode == "block" && point == AuthorityFaultPoint.BEFORE_APPEND) {
                 Files.writeString(directory.resolve("blocked"), "blocked")
                 Thread.sleep(60000)
             }
         }
-        val response = service.handle(request)
-        if (mode == "capture") Files.write(directory.resolve("response"), response)
-        System.out.write(response)
-        System.out.flush()
+        if (mode == "capture") {
+            val response = capture.toByteArray()
+            Files.write(directory.resolve("response"), response)
+            original.write(response)
+            original.flush()
+        }
+    }
+}
+
+@Tag("unit")
+class AuthorityWireVocabularyUnitTest {
+    @Test
+    fun stableWireTokensAndStrictDecoding() {
+        assertEquals(listOf("read", "bootstrap", "cas"), AuthorityVerb.entries.map { it.wireValue })
+        assertEquals(listOf("ack", "refused", "missing", "history", "unauthenticated", "unavailable"),
+            AuthorityStatus.entries.map { it.wireValue })
+        assertEquals(listOf("before-append", "before-primary-force", "after-primary",
+            "before-mirror-force", "after-both"), AuthorityFaultPoint.entries.map { it.wireValue })
+        assertEquals("-", AuthorityWire.ABSENT)
+        assertEquals(null, AuthorityVerb.decode("READ"))
+        assertEquals(null, AuthorityStatus.decode("unknown"))
+    }
+
+    @Test
+    fun appendOnlyFlagParserRequiresAValidFlagField() {
+        assertTrue(AuthorityWire.appendOnlyFlags("-----a--------e------- /authority/log"))
+        assertFalse(AuthorityWire.appendOnlyFlags("--------------e------- /authority/log"))
+        assertFalse(AuthorityWire.appendOnlyFlags("a /authority/log"))
+        assertFalse(AuthorityWire.appendOnlyFlags("garbage containing a"))
+        assertFalse(AuthorityWire.appendOnlyFlags(null))
     }
 }
