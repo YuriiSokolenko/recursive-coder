@@ -135,6 +135,52 @@ class CiBootstrapTrustTest(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "authenticated Gradle"):
             bootstrap.audit_workflow(mutated)
 
+    def test_gradle_plugin_retry_drift_rejected(self):
+        original = "        run: python3 -I tools/retry_gradle_plugins.py\n"
+        for replacement in ("        run: true\n", original.replace(".py", ".py test")):
+            with self.subTest(replacement=replacement):
+                mutated = self.workflow.replace(original, replacement, 1)
+                self.assertNotEqual(mutated, self.workflow)
+                with self.assertRaisesRegex(AssertionError, "Gradle plugin retry"):
+                    bootstrap.audit_workflow(mutated)
+
+    def test_retry_command_rejects_weakened_verification_and_product_tasks(self):
+        source = (ROOT / "tools/retry_gradle_plugins.py").read_text(encoding="utf-8")
+        bootstrap.audit_retry_command(source)
+        for old, new in (('"strict"', '"off"'), ('"help"', '"test"'),
+                         ('"--no-build-cache"', '"--build-cache"')):
+            with self.subTest(new=new):
+                mutated = source.replace(old, new, 1)
+                self.assertNotEqual(mutated, source)
+                with self.assertRaisesRegex(AssertionError, "strict and help-only"):
+                    bootstrap.audit_retry_command(mutated)
+
+    def test_retry_runner_and_backoff_drift_rejected(self):
+        source = (ROOT / "tools/retry_gradle_plugins.py").read_text(encoding="utf-8")
+        for old, new, diagnostic in (
+            ("DELAYS = (60, 180)", "DELAYS = (1, 1, 1)", "backoff changed"),
+            ("args, stdout=subprocess.PIPE", "args + ['test'], stdout=subprocess.PIPE",
+             "execution body changed"),
+            ("enumerate((*DELAYS, None), 1)", "enumerate((*DELAYS, *DELAYS, None), 1)",
+             "execution body changed"),
+        ):
+            with self.subTest(new=new):
+                mutated = source.replace(old, new, 1)
+                self.assertNotEqual(mutated, source)
+                with self.assertRaisesRegex(AssertionError, diagnostic):
+                    bootstrap.audit_retry_command(mutated)
+
+    def test_dependency_cache_transport_rejected(self):
+        mutated = self.workflow.replace(
+            "      - name: Test real Gradle registry failure",
+            "      - name: Copy caches/modules-2\n"
+            "        run: echo prohibited\n"
+            "      - name: Test real Gradle registry failure", 1,
+        )
+        self.assertNotEqual(mutated, self.workflow)
+        with self.assertRaisesRegex(AssertionError, "cache transport"):
+            bootstrap.audit_workflow(mutated)
+
     def test_reviewed_official_gradle_checksum(self):
         self.assertEqual(bootstrap.VERSION, "9.8.2")
         self.assertEqual(

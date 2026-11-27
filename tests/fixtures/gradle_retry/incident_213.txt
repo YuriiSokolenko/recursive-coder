@@ -1,0 +1,20 @@
+FAILURE: Build failed with an exception.
+
+* Where:
+Build file '/home/runner/work/recursive-coder/recursive-coder/build.gradle.kts' line: 1
+
+* What went wrong:
+Error resolving plugin [id: 'recursivecoder.architecture']
+> A problem occurred configuring project ':build-logic'.
+   > Could not resolve all artifacts for configuration 'classpath'.
+      > Could not resolve org.jetbrains.kotlin:kotlin-stdlib:2.4.10.
+        Required by:
+            buildscript of project ':build-logic'
+            buildscript of project ':build-logic' > org.gradle.kotlin.kotlin-dsl:org.gradle.kotlin.kotlin-dsl.gradle.plugin:6.7.6 > org.gradle.kotlin:gradle-kotlin-dsl-plugins:6.7.6
+         > Repository Gradle Central Plugin Repository is disabled due to earlier error below:
+            > Could not resolve org.jetbrains.kotlin:kotlin-gradle-plugins-bom:2.4.10.
+               > Could not get resource 'https://plugins.gradle.org/m2/org/jetbrains/kotlin/kotlin-gradle-plugins-bom/2.4.10/kotlin-gradle-plugins-bom-2.4.10.pom'.
+                  > Could not GET 'https://repo.maven.apache.org/maven2/org/jetbrains/kotlin/kotlin-gradle-plugins-bom/2.4.10/kotlin-gradle-plugins-bom-2.4.10.pom'.
+                     > Received status code 429 from server: Too Many Requests
+> There are 4 more failures with identical causes.
+
