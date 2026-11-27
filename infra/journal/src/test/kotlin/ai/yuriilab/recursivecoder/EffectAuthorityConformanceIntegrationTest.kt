@@ -407,6 +407,130 @@ class SshEffectAuthorityConformanceIntegrationTest : EffectAuthorityAdapterContr
         assertFails { connect(timeout = Duration.ZERO) }
     }
 
+    // This fixture replaces only the transport key file while no host process
+    // is active. It is not a distributed administrative rotation procedure.
+    private fun replaceTransportKey(value: Byte) {
+        val staged = directory.resolve("staged-transport")
+        Files.createFile(staged, PosixFilePermissions.asFileAttribute(
+            PosixFilePermissions.fromString("rw-------")))
+        Files.write(staged, ByteArray(32) { value })
+        Files.move(staged, keyFile("transport"), java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+            java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+    }
+
+    private fun historyFiles() = listOf(primary(), mirror(), lock())
+
+    @Test
+    fun transportCredentialCutoverPreservesHistoryAndRejectsStaleClients() {
+        provision()
+        val old = client()
+        val fresh = client(wrongKey = true)
+        val next = started()
+        val last = terminal(next)
+        assertTrue(EffectAuthorityPolicy.acknowledges(old.bootstrap(genesis), genesis))
+        assertTrue(EffectAuthorityPolicy.acknowledges(old.compareAndSet(genesis, next), next))
+        val before = historyFiles().map { Files.readAllBytes(it) }
+
+        // New key staged on the client before server cutover must fail closed.
+        assertEquals(EffectAuthorityRead.Unauthenticated, fresh.read(register))
+        assertEquals(EffectAuthorityPublication.Unauthenticated, fresh.compareAndSet(next, last))
+        replaceTransportKey(8)
+
+        assertEquals(EffectAuthorityRead.Authenticated(next), fresh.read(register))
+        assertEquals(EffectAuthorityRead.Unauthenticated, old.read(register))
+        assertEquals(EffectAuthorityPublication.Unauthenticated, old.compareAndSet(next, last))
+        assertEquals(EffectAuthorityPublication.Refused(EffectAuthorityRefusal.ALREADY_INITIALIZED),
+            fresh.bootstrap(genesis))
+        assertEquals(EffectAuthorityPublication.Refused(EffectAuthorityRefusal.STALE_PREDECESSOR),
+            fresh.compareAndSet(genesis, next))
+        historyFiles().zip(before).forEach { (path, bytes) ->
+            assertContentEquals(bytes, Files.readAllBytes(path))
+        }
+
+        // Competing stale and current clients after cutover: the stale
+        // credential cannot publish even with the exact current predecessor.
+        val executor = Executors.newFixedThreadPool(2)
+        val start = CountDownLatch(1)
+        try {
+            val stale = executor.submit<EffectAuthorityPublication> {
+                start.await()
+                old.compareAndSet(next, last)
+            }
+            val current = executor.submit<EffectAuthorityPublication> {
+                start.await()
+                fresh.compareAndSet(next, last)
+            }
+            start.countDown()
+            assertEquals(EffectAuthorityPublication.Unauthenticated, stale.get(30, TimeUnit.SECONDS))
+            assertTrue(EffectAuthorityPolicy.acknowledges(current.get(30, TimeUnit.SECONDS), last))
+        } finally {
+            executor.shutdownNow()
+        }
+        assertEquals(EffectAuthorityRead.Authenticated(last), fresh.read(register))
+        assertContentEquals(before.last(), Files.readAllBytes(lock()))
+        for ((index, path) in historyFiles().take(2).withIndex()) {
+            val bytes = Files.readAllBytes(path)
+            assertTrue(bytes.size > before[index].size)
+            assertContentEquals(before[index], bytes.copyOf(before[index].size))
+        }
+        assertContentEquals(Files.readAllBytes(primary()), Files.readAllBytes(mirror()))
+    }
+
+    @Test
+    fun transportCutoverDoesNotRepairDivergenceOrAcknowledgeLostPublication() {
+        provision()
+        assertTrue(EffectAuthorityPolicy.acknowledges(client().bootstrap(genesis), genesis))
+        val next = started()
+        val result = client("after-primary").compareAndSet(genesis, next)
+        assertEquals(EffectAuthorityPublication.Uncertain, result)
+        val before = historyFiles().map { Files.readAllBytes(it) }
+        replaceTransportKey(8)
+        val fresh = client(wrongKey = true)
+        assertEquals(EffectAuthorityRead.Unavailable, fresh.read(register))
+        assertEquals(EffectAuthorityPublication.Unavailable, fresh.bootstrap(genesis))
+        assertEquals(EffectAuthorityPublication.Unavailable, fresh.compareAndSet(genesis, next))
+        assertEquals(EffectAuthorityPublicationDisposition.QUARANTINED,
+            EffectAuthorityPolicy.disposition(result, next))
+        historyFiles().zip(before).forEach { (path, bytes) ->
+            assertContentEquals(bytes, Files.readAllBytes(path))
+        }
+    }
+
+    @Test
+    fun rotatedTransportReadbackDoesNotAcknowledgePreviousInvocation() {
+        provision()
+        assertTrue(EffectAuthorityPolicy.acknowledges(client().bootstrap(genesis), genesis))
+        val next = started()
+        val result = client("after-both").compareAndSet(genesis, next)
+        assertEquals(EffectAuthorityPublication.Uncertain, result)
+        val before = historyFiles().map { Files.readAllBytes(it) }
+        replaceTransportKey(8)
+        assertEquals(EffectAuthorityRead.Authenticated(next), client(wrongKey = true).read(register))
+        assertEquals(EffectAuthorityPublicationDisposition.QUARANTINED,
+            EffectAuthorityPolicy.disposition(result, next))
+        historyFiles().zip(before).forEach { (path, bytes) ->
+            assertContentEquals(bytes, Files.readAllBytes(path))
+        }
+    }
+
+    @Test
+    fun historyKeyReplacementRemainsUnsupportedAndDoesNotMutateHistory() {
+        provision()
+        assertTrue(EffectAuthorityPolicy.acknowledges(client().bootstrap(genesis), genesis))
+        val next = started()
+        assertTrue(EffectAuthorityPolicy.acknowledges(client().compareAndSet(genesis, next), next))
+        val before = historyFiles().map { Files.readAllBytes(it) }
+        Files.write(keyFile("history"), ByteArray(32) { 10 })
+        assertEquals(EffectAuthorityRead.Unauthenticated, client().read(register))
+        assertEquals(EffectAuthorityPublication.Unauthenticated, client().bootstrap(genesis))
+        assertEquals(EffectAuthorityPublication.Unauthenticated, client().compareAndSet(next, terminal(next)))
+        replaceTransportKey(8)
+        assertEquals(EffectAuthorityRead.Unauthenticated, client(wrongKey = true).read(register))
+        historyFiles().zip(before).forEach { (path, bytes) ->
+            assertContentEquals(bytes, Files.readAllBytes(path))
+        }
+    }
+
     @Test
     fun keyLoaderRequiresOwnedPrivateRegularFileAndExactLength() {
         val key = keyFile("transport")
