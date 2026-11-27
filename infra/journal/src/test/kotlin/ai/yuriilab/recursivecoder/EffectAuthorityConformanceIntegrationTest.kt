@@ -172,6 +172,20 @@ abstract class EffectAuthorityAdapterContract {
     }
 
     @Test
+    fun crashBeforeSecondForceDoesNotProduceAcknowledgement() {
+        provision()
+        acknowledge(client().bootstrap(genesis), genesis)
+        val next = started()
+        val result = client("before-mirror-force").compareAndSet(genesis, next)
+        assertEquals(EffectAuthorityPublication.Uncertain, result)
+        // Process death alone leaves the page cache intact. Fresh read forces
+        // the equal histories, but cannot retroactively acknowledge the CAS.
+        latest(next)
+        assertEquals(EffectAuthorityPublicationDisposition.QUARANTINED,
+            EffectAuthorityPolicy.disposition(result, next))
+    }
+
+    @Test
     fun crashBetweenDurabilityBoundariesQuarantinesWithoutRepair() {
         provision()
         acknowledge(client().bootstrap(genesis), genesis)
@@ -268,6 +282,16 @@ abstract class EffectAuthorityAdapterContract {
 @Tag("integration")
 @EffectAuthorityConformance(adapter = "ai.yuriilab.recursivecoder.SshEffectAntiRollbackAuthority")
 class SshEffectAuthorityConformanceIntegrationTest : EffectAuthorityAdapterContract() {
+    @Test
+    fun productionStorageGuardRejectsUnprotectedLogs() {
+        provision()
+        assertEquals(EffectAuthorityRead.MissingOrReset,
+            client("enforce-append-only").read(register))
+        assertEquals(EffectAuthorityPublication.Unavailable,
+            client("enforce-append-only").bootstrap(genesis))
+        assertEquals(EffectAuthorityRead.MissingOrReset, client().read(register))
+    }
+
     private fun primary() = directory.resolve("primary")
     private fun mirror() = directory.resolve("mirror")
     private fun lock() = directory.resolve("lock")
@@ -316,7 +340,7 @@ object AuthorityProcessFixture {
         val service = EffectAuthorityService(
             EffectAuthorityRegister("host", "session", "register", "a".repeat(64)),
             directory.resolve("primary"), directory.resolve("mirror"), directory.resolve("lock"),
-            ByteArray(32) { 7 }, ByteArray(32) { 9 }, requireAppendOnly = false
+            ByteArray(32) { 7 }, ByteArray(32) { 9 }, requireAppendOnly = mode == "enforce-append-only"
         ) { point ->
             if (point == mode) Runtime.getRuntime().halt(3)
             if (mode == "block" && point == "before-append") {

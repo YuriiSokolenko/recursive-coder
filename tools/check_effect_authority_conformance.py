@@ -22,6 +22,7 @@ REQUIRED_METHODS = {
     "successorGenerationCannotReuseHistoricalAnchorOrPath",
     "concurrentIndependentProcessesYieldExactlyOneDurableTransition",
     "failureBeforeAppendAndLostResponseNeverBecomeAcknowledgements",
+    "crashBeforeSecondForceDoesNotProduceAcknowledgement",
     "crashBetweenDurabilityBoundariesQuarantinesWithoutRepair",
     "wrongCredentialsForeignIdentityAndUnavailableFailClosed",
     "truncatedAuthenticatedPrefixIsNotLatestAndCannotBootstrap",

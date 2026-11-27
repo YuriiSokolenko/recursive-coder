@@ -78,7 +78,7 @@ enum class EffectAuthorityPublicationDisposition {
 }
 
 /**
- * Host-owned port; no production adapter is provided. A real adapter must
+ * Host-owned port. The standalone adapter lives in infra/journal. An adapter must
  * authenticate requests, responses and the complete immutable history, bind
  * the independently provisioned host/session/register/epoch, isolate write
  * credentials from the journal HMAC key and agent UID, and retain history

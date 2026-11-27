@@ -305,7 +305,7 @@ Host-key authorization and register-write authorization must be isolated.
 
 ### Independent authority deployment (#241)
 
-The proposed standalone deployment uses a dedicated, separately
+The standalone adapter uses a dedicated, separately
 administered Linux authority host. A trusted host client invokes a
 fixed SSH forced command; no agent UID, workspace process, journal
 HMAC key, local backup or local snapshot administrator may administer
@@ -326,7 +326,7 @@ after loss. A lost or inconsistent history is quarantined, not repaired
 by copying whichever replica is longer. A credential rotation requires
 a separately reviewed procedure; it does not reset history.
 
-The intended durability boundary is an exclusive interprocess lock,
+The implemented durability boundary is an exclusive interprocess lock,
 complete-history validation, exact CAS, append and force of both
 pre-existing logs before responding. A crash between the two forces
 may leave unequal logs; availability is sacrificed rather than
@@ -340,16 +340,72 @@ credential, coherent restore of both logs and their provisioning
 inventory, or dishonest storage durability are outside this model.
 Those events cannot be detected solely from the surviving bytes.
 
-An authenticated fresh invocation must be bound to its operation,
-register, exact predecessor and proposed canonical digest; responses
-must be bound to that invocation, and authenticated reads must validate
-the complete history. The publication client must not retry, turn
-readback into acknowledgement, or expose credentials or raw exception
-details. SSH server identity and dedicated client authorization are
-deployment prerequisites. A deployment that cannot establish these
-prerequisites must stay disabled. Physical checkpoint/fence/sidecar
-authentication and live Started publication remain separate integration
-gates; no effect execution is enabled by this standalone slice.
+The `SshEffectAntiRollbackAuthority` client invokes a fixed, pinned
+OpenSSH forced command once per request. It authenticates canonical
+request and response envelopes with a dedicated 32-byte HMAC key,
+domain-separated from a distinct authority-only history HMAC key.
+The request contains a cryptographically random nonce, exact register,
+verb and canonical predecessor/proposal. The response includes the
+SHA-256 of the complete authenticated request and, for success, the
+exact proposed root digest. Reads return the complete authenticated
+history, revalidated by the client. No raw paths, secrets or exception
+payloads are returned. Transport failure, timeout or interruption
+returns an unconfirmed publication; no automatic retry or readback
+promotion is implemented. The host must quarantine the invocation even
+if a subsequent read finds the exact proposed root.
+
+The operator deploys the JVM runtime and its dependencies on the
+authority host and configures a dedicated restricted SSH principal
+with a fixed `EffectAuthorityHostCommand` invocation. Disable shells,
+PTY, forwarding, alternate commands and other login methods for this
+principal; keep its authorized-keys configuration, JVM classpath,
+directories and server history key under independent administration.
+The client must pin the actual SSH host key, protect its private SSH
+key and transport key separately from the journal key and agent UID,
+and explicitly approve the independent deployment when connecting.
+There is no default endpoint, discovery, auto-provision or CLI wiring.
+
+The command arguments, fixed by the operator rather than the client,
+are the mode, primary log path, mirror log path, lock/marker path,
+transport-key file, history-key file, host ID, session ID, register ID
+and epoch. Generate distinct random 32-byte binary keys out of band.
+After checking the independent identity inventory, run the offline
+`provision-never-initialized` mode once, in protected pre-existing
+directories. The command creates and forces the signed marker and both
+signed headers using exclusive creation and forces the parent
+directories. Partial provisioning is quarantined, never retried.
+Set Linux append-only attributes (`chattr +a`) on all three files,
+with permissions for the dedicated service principal to read and
+append but not administer attributes or directories. The forced
+command uses only `serve-independent`; never expose provisioning over
+SSH. The service checks regular, distinct, non-symlink files and their
+append-only attributes on every invocation. The operator must ensure
+the files reside on a local Linux filesystem supporting these
+attributes, interprocess locks and honest file/directory fsync, with
+persistent media and protected parent directories. The process does
+not attest those deployment assumptions or physical hardware.
+
+Under the exclusive marker-file lock, the service compares both
+bounded logs byte-for-byte, verifies the signed provisioning marker,
+header and every signed canonical root, and validates the complete
+history. It forces the equal histories before authenticated read or
+comparison, then appends and forces each copy before acknowledging a
+successful transition. Divergent, corrupt, missing or unprotected
+files deny access; neither copy is selected for repair. The finite
+16 MiB log limit is fail closed; there is no pruning or rollover.
+A later authenticated read, including after process death before the
+second force, is not the lost invocation's acknowledgement.
+
+Offline conformance uses the same client exchange, wire codec, host
+handler, file locks and fsync path in independent JVM processes. It
+does not require SSH, privileged append-only attributes or a remote
+host in CI; the fixture relaxes only the attribute prerequisite, with
+a negative test for the production attribute guard. This is not
+evidence of a physically independent or power-loss-tested deployment.
+Until the operator establishes and independently verifies those
+prerequisites, the adapter is not approved for live use. Physical
+checkpoint/fence/sidecar authentication and live Started publication
+remain separate integration gates; no effect execution is enabled.
 
 ### Standalone authority contract (#239)
 
@@ -358,8 +414,9 @@ host-owned bootstrap, authenticated read and atomic compare-and-set port.
 `EffectAuthorityRoot` and `EffectAuthorityEvidence` contain immutable
 scalar values, an `EffectAuthorityRegister` and an optional immutable
 `EffectIdentity`. They are proposed evidence, not self-authenticating
-capabilities. No production implementation, service selection, credential
-management, execution hook or session wire-format change is included.
+capabilities. The #239 contract does not itself implement a service, credential
+management, an execution hook or a session wire-format change.
+The standalone #241 adapter is described above.
 
 The independently provisioned register binds host ID, session ID, register
 ID and an opaque 64-character lower-case hexadecimal epoch identifier.
@@ -767,9 +824,8 @@ The existing checkpoint `pendingEffects` and pre-execution fenced ledger have
 NOT been wired to these new types. The barrier field and verifier method are a
 contract only: this sidecar storage adds real record HMAC verification but does
 **not** provide a physical successor execution barrier, independently verified
-external completion, or a no-start proof. A later PR must implement and
-integrate a real independent, rollback-resistant latest-head authority using the
-#239 contract, so it survives coherent deletion of checkpoint suffixes, then
+external completion, or a no-start proof. A later PR must verify the independent #241 authority deployment,
+integrate it with the runtime so it survives coherent local rollback, then
 enforce the completed Started pin publication *before executing* any external
 effect. It must also reconstruct the complete session-event projection,
 implement actual external-state confirmation and successor-barrier no-start

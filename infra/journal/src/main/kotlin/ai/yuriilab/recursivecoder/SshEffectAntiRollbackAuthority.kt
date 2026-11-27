@@ -6,7 +6,10 @@ import java.nio.channels.FileChannel
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
-import java.nio.file.StandardOpenOption.*
+import java.nio.file.StandardOpenOption.APPEND
+import java.nio.file.StandardOpenOption.CREATE_NEW
+import java.nio.file.StandardOpenOption.READ
+import java.nio.file.StandardOpenOption.WRITE
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.time.Duration
@@ -251,7 +254,7 @@ internal class EffectAuthorityService(
     // The independent administrative inventory must also deny reissuance.
     fun provision() {
         require(listOf(primary, mirror, lock).map { it.toAbsolutePath().normalize() }.distinct().size == 3)
-        create(lock, byteArrayOf())
+        create(lock, (header() + "\n").toByteArray(Charsets.US_ASCII))
         create(primary, (header() + "\n").toByteArray(Charsets.US_ASCII))
         create(mirror, (header() + "\n").toByteArray(Charsets.US_ASCII))
     }
@@ -283,10 +286,12 @@ internal class EffectAuthorityService(
         if (files.any { !Files.isRegularFile(it, NOFOLLOW_LINKS) } ||
             Files.isSameFile(primary, mirror) || Files.isSameFile(primary, lock) ||
             Files.isSameFile(mirror, lock)) return null
-        if (requireAppendOnly && (!appendOnly(primary) || !appendOnly(mirror))) return null
+        if (requireAppendOnly && files.any { !appendOnly(it) }) return null
         fun read(path: Path): ByteArray? = Files.newInputStream(path, NOFOLLOW_LINKS).use {
             it.readNBytes(AuthorityWire.LIMIT + 1).takeIf { bytes -> bytes.size <= AuthorityWire.LIMIT }
         }
+        val marker = read(lock) ?: return null
+        if (!marker.contentEquals((header() + "\n").toByteArray(Charsets.US_ASCII))) return null
         val a = read(primary) ?: return null
         val b = read(mirror) ?: return null
         if (!a.contentEquals(b)) return null
@@ -309,6 +314,7 @@ internal class EffectAuthorityService(
         for ((index, path) in listOf(primary, mirror).withIndex()) {
             FileChannel.open(path, WRITE, APPEND, NOFOLLOW_LINKS).use {
                 write(it, line)
+                fault(if (index == 0) "before-primary-force" else "before-mirror-force")
                 it.force(true)
             }
             fault(if (index == 0) "after-primary" else "after-both")
@@ -330,9 +336,15 @@ internal class EffectAuthorityService(
         if (!Files.isRegularFile(lock, NOFOLLOW_LINKS)) return reply(
             if (verb == "read") "missing" else "unavailable"
         )
-        FileChannel.open(lock, WRITE, NOFOLLOW_LINKS).use { channel ->
+        FileChannel.open(lock, WRITE, APPEND, NOFOLLOW_LINKS).use { channel ->
             channel.lock().use {
                 val roots = snapshot() ?: return reply(if (verb == "read") "missing" else "unavailable")
+                // A prior process may have died after writing both copies but
+                // before forcing the second. A fresh authenticated snapshot is
+                // forced under the same lock; this is NOT the prior invocation's ack.
+                for (path in listOf(primary, mirror)) {
+                    FileChannel.open(path, WRITE, APPEND, NOFOLLOW_LINKS).use { it.force(true) }
+                }
                 if (verb == "read") {
                     if (fields[3] != "-" || fields[4] != "-") return reply("unauthenticated")
                     if (roots.isEmpty()) return reply("missing")
