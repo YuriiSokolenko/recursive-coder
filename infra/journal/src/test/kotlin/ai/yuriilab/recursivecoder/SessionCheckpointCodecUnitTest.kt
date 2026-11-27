@@ -38,9 +38,28 @@ class SessionCheckpointCodecUnitTest {
         lastTrustedJournalOffset = 2048
     )
 
+
+    // Independent literal field order and spellings, not the production codec.
+    private fun goldenV1(): String =
+        """{"kind":"host-checkpoint","version":1,"sequence":1,"previousSha256":null,""" +
+        """"binding":{"policySha256":"$a","workspaceIdentitySha256":"$b",""" +
+        """"gitHead":"${"f".repeat(40)}","gitBranch":"refs/heads/dev",""" +
+        """"gitBaselineSha256":"$c","graphId":"graph-root","graphGeneration":1,""" +
+        """"frozenInputsSha256":"$a"},"sessionId":"sess-one","traceId":"trace-one",""" +
+        """"phase":"running","taskId":"task-one","taskAttempt":1,"taskState":"running",""" +
+        """"children":[{"id":"child-a","parentId":"graph-root","state":"succeeded"},""" +
+        """{"id":"child-b","parentId":"child-a","state":"ready"}],""" +
+        """"acceptedArtifacts":[{"id":"artifact-one","ownerId":"child-a","sha256":"$b"}],""" +
+        """"hostAssertedUsage":[{"scopeId":"child-a","kind":"model","certainty":"known","units":42},""" +
+        """{"scopeId":"task-one","kind":"tool","certainty":"unknown","units":null}],""" +
+        """"pendingEffects":[{"id":"effect-one","correlationId":"req-one","state":"unknown"}],""" +
+        """"journalSequence":3,"journalHeadSha256":"$c","journalFileSha256":"$b",""" +
+        """"lastTrustedJournalOffset":2048}"""
+
     @Test fun canonicalRoundTripAndSortingAreDeterministic() {
         val original = snapshot()
         val canonical = SessionCheckpointCodec.encode(original)
+        assertContentEquals(goldenV1().toByteArray(StandardCharsets.UTF_8), canonical)
         assertEquals(original.copy(
             children = original.children.sortedBy { it.id },
             hostAssertedUsage = original.hostAssertedUsage.sortedWith(compareBy({ it.scopeId }, { it.kind }))),
@@ -183,5 +202,52 @@ class SessionCheckpointCodecUnitTest {
                 SessionCheckpointCodec.decode(text.replace("\"taskAttempt\":1", "\"taskAttempt\":\"1\"")
                     .toByteArray(StandardCharsets.UTF_8))
             }.code)
+    }
+
+    @Test fun checkpointVersionsAndEffectHeadFieldOrderRemainStable() {
+        val s = snapshot().copy(phase = "accepted", taskAttempt = 0,
+            pendingEffects = emptyList())
+        val v1 = goldenV1().replace("\"phase\":\"running\"", "\"phase\":\"accepted\"")
+            .replace("\"taskAttempt\":1", "\"taskAttempt\":0")
+            .replace("""[{"id":"effect-one","correlationId":"req-one","state":"unknown"}]""", "[]")
+        assertContentEquals(v1.toByteArray(StandardCharsets.UTF_8),
+            SessionCheckpointCodec.encode(s))
+        val head = CheckpointEffectJournalHead("sess-one", 1L, a, b, c, 0L, a)
+        val headJson = """{"sessionId":"sess-one","fenceGeneration":1,"admittedCheckpointSha256":"$a","toolAuthoritySha256":"$b","sidecarPathSha256":"$c","lastSequence":0,"headMacSha256":"$a"}"""
+        val v2 = v1.replace("\"version\":1", "\"version\":2").dropLast(1) +
+            ",\"effectJournalHead\":$headJson}"
+        assertContentEquals(v2.toByteArray(StandardCharsets.UTF_8),
+            SessionCheckpointCodec.encode(s.copy(effectJournalHead = head)))
+        val record = CheckpointEffectReconciliation(a, 1L, b, head, "operator-one", c)
+        val recordJson = """{"sourceCheckpointSha256":"$a","sourceFenceGeneration":1,"sourceFenceSha256":"$b","operatorId":"operator-one","hostSealMacSha256":"$c","sourceHead":$headJson}"""
+        val v3 = v1.replace("\"version\":1", "\"version\":3").dropLast(1) +
+            ",\"effectJournalHead\":null,\"effectReconciliation\":$recordJson}"
+        val encoded = SessionCheckpointCodec.encode(s.copy(effectReconciliation = record))
+        assertContentEquals(v3.toByteArray(StandardCharsets.UTF_8), encoded)
+        assertEquals(record, SessionCheckpointCodec.decode(encoded).effectReconciliation)
+        assertEquals(head, SessionCheckpointCodec.decode(
+            v2.toByteArray(StandardCharsets.UTF_8)).effectJournalHead)
+        for (version in listOf(0, 4, 99)) {
+            assertEquals("CHECKPOINT_VERSION_UNSUPPORTED",
+                assertFailsWith<CheckpointUnconfirmed> {
+                    SessionCheckpointCodec.decode(v1.replace("\"version\":1",
+                        "\"version\":$version").toByteArray(StandardCharsets.UTF_8))
+                }.code)
+        }
+    }
+
+    @Test fun checkpointEffectHeadUsesPhysicalRecordCapacity() {
+        val s = snapshot().copy(phase = "accepted", taskAttempt = 0,
+            pendingEffects = emptyList())
+        val head = CheckpointEffectJournalHead("sess-one", 1L, a, b, c, 100_000L, a)
+        assertEquals(100_000L, SessionCheckpointCodec.decode(
+            SessionCheckpointCodec.encode(s.copy(effectJournalHead = head)))
+            .effectJournalHead?.lastSequence)
+        assertEquals("CHECKPOINT_PAYLOAD_INVALID",
+            assertFailsWith<CheckpointUnconfirmed> {
+                SessionCheckpointCodec.encode(s.copy(
+                    effectJournalHead = head.copy(lastSequence = 100_001L)))
+            }.code)
+        assertEquals(100_000, DurableEffectRecordJournal.MAX_RECORDS)
     }
 }

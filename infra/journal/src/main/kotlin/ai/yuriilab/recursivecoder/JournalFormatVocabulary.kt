@@ -23,3 +23,21 @@ internal object EffectRecordStates {
 
 internal const val CHECKPOINT_LOCK_NAME = "checkpoint.lock"
 internal const val RESUME_LOCK_NAME = "resume.lock"
+
+/** Checkpoint task snapshot states, independent of session and child phases. */
+internal object CheckpointTaskStates {
+    const val CREATED = "created"
+    const val READY = "ready"
+    const val SUCCEEDED = "succeeded"
+}
+
+/** Checkpoint child readiness is not task readiness. */
+internal object CheckpointChildStates {
+    const val READY = "ready"
+}
+
+/** Host-asserted checkpoint usage certainty, not effect reconciliation state. */
+internal object CheckpointUsageCertainty {
+    const val KNOWN = "known"
+    const val UNKNOWN = "unknown"
+}

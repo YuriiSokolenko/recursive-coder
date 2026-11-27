@@ -99,7 +99,7 @@ class DurableRuntimeCreatedAcceptedHost(
         val matchesIdentity = try {
             c1.sessionId == request.sessionId &&
                 c1.traceId == request.traceId &&
-                c1.taskId == request.task.textAt("taskId")
+                c1.taskId == request.task.textAt(TaskInputFields.TASK_ID)
         } catch (_: Exception) {
             false
         }
@@ -112,7 +112,7 @@ class DurableRuntimeCreatedAcceptedHost(
             sequence = c1.journalSequence + 1,
             timestamp = clock.instant(),
             type = SessionEventKinds.SESSION_TRANSITION,
-            status = "completed",
+            status = SessionEventStatuses.COMPLETED,
             transition = SessionPhaseVocabulary.createdWire to
                 SessionPhaseVocabulary.acceptedWire,
             extra = buildJsonObject { put(StageEventMetadataFields.GRAPH_ID, c1.binding.graphId) }

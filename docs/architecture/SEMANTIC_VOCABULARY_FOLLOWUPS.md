@@ -117,6 +117,40 @@ Reviewed `TaskPolicy.kt` (including TaskState, Task, TaskQueue and transition po
 
 Verification requires the full CI matrix; this audit does not close #194.
 
+
+## #204 targeted completion audit
+
+Reviewed the journal production sources on dev at
+`313ba87454de8a9ada747ff7a9b3eb05c3ec82a4` and the related effect
+contracts. The following inventory separates physical formats, evidence
+projections and protocol events.
+
+| Reviewed files | Ownership and disposition |
+| --- | --- |
+| `DurableEffectRecordJournal`, `JournalFormatVocabulary`, `EffectJournalContracts` | The physical codec owns its JSON keys, genesis discriminator and 100,000-record limit. The checkpoint pin uses that same limit; the session ledger's equal capacity is independent. Effect kinds and records remain typed; effect state wire names are already shared with evidence projections. |
+| `SessionCheckpointStore` | The checkpoint codec owns v1/v2/v3 payload versions and grouped JSON field sets. Physical RCCHK1 framing and Session Protocol v1 are independent. The two embedded effect heads share the same head schema. Session phase values reuse the existing lifecycle vocabulary where exposed. |
+| `SessionResumeAdmission`, `DurableCreatedAcceptedHandoff` | Share checkpoint-local task readiness and usage certainty with the codec. Child readiness is distinct from task readiness. Other checkpoint task and child allowlist values remain explicit; no dependency on tasks or automatic expansion of accepted states. |
+| `DurableRuntimeCreatedAcceptedHost`, `JsonlEventSink` | C1 event emission and validation reuse Session Protocol request/envelope/event fields and statuses. JSONL remains a projection, not a physical ledger format. |
+| `CheckpointBoundHostEffectEvidenceVerifier`, `EffectEvidenceEnvelopePolicy` | Existing effect metadata keys, effect record states, typed effect kinds and session event pairs are already reused. The reserved effect prefix, diagnostic codes, exact key allowlists and event/record order remain unchanged. |
+| `ResumeFenceAnchor`, `ResumeRuntimeFilesystemPreflight`, `ResumeDenialCodes` | Fence, anchor and audit markers and storage paths remain format-local. The existing fence maximum and lock names already have shared owners. Filesystem type names, probe prefixes and refusal diagnostics are distinct from persisted record vocabulary. |
+| `EffectGenesisReconciliation`, `EffectAuthorityContracts` | Keep separate HMAC/digest domains, authority root versions, reconciliation marker and typed authority states. These are not the physical journal record states or Session Protocol versions. |
+| `DurableSessionEventLedger`, `DurableAcceptedRunningHandoff`, `DurableRuntimeAcceptedRunningHost` | C3-pinned sources stay byte-identical, including remaining protocol fields, task readiness literals, ledger phase allowlists and fault hooks. No pin refresh. |
+
+Other equal values are not automatically shared: physical file size and frame
+limits, checkpoint collection bounds, digest widths and domain-specific
+state names remain local. The checkpoint success phase spelling remains
+literal because the public phase adapter does not expose that individual
+value; a terminal outcome is not a substitute. Independent fixtures, literal
+negative inputs, authorization checks and rejection order remain intact.
+
+New tests pin checkpoint version discrimination, embedded head field order
+and the physical record capacity boundary. MAC-valid forged records with
+unknown state or effect kind must still be rejected. Existing independent
+HMAC, ledger, fence, checkpoint and projection tests are retained.
+
+No local Gradle execution is claimed. Full CI is required before merge.
+This audit does not close #194.
+
 ## Trusted C3 boundary exclusion
 
 The architecture gate rejected changes to three SHA-256-pinned sources:
