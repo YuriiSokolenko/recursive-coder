@@ -1,10 +1,12 @@
 # Host-authenticated effect intent and receipt contracts (#105, first slice)
 
-**Scope:** The merged first slice is a pure `:core:contracts` state machine.
-The next isolated host-only slice supplies a physically durable, HMAC-authenticated
-effect record file under `:infra:journal`. Neither slice executes external
-tools or Git CAS, produces usable runtime resume permission, supplies an
-independent external-state verifier, or enables CLI/replay wiring.
+**Scope:** The first slice is a pure `:core:contracts` state machine.
+The isolated host-only journal supplies a physically durable,
+HMAC-authenticated effect record file under `:infra:journal`. #239 adds
+standalone independent authority contracts and pure validation policy.
+None of these slices executes external tools or Git CAS, produces usable
+runtime resume permission, supplies an independent external-state verifier,
+or enables CLI/replay wiring.
 
 ## Contract and strict publication order
 
@@ -270,15 +272,16 @@ an independently retained monotonic latest-pin/checkpoint-head guard
 that cannot be reverted with those files; this PR does NOT claim that
 a checkpoint v2 publication by itself solves whole-root rollback.
 
-### #133: independent anti-rollback root protocol (design only)
+### #133/#239: independent anti-rollback root protocol
 
 The checkpoint, RCLDG1, fence, anchor, audit and RCEFX1 files currently
 share a rollback domain. After a real, valid-MAC Intent is appended beyond
 a pinned genesis, truncating that suffix restores a byte-identical,
 MAC-valid genesis. Exact pin comparison and even the genesis-only
 operator transition can succeed again. **The absence of an Intent after
-rollback is not proof that the external effect never began.** This PR
-does NOT implement the independent root described below.
+rollback is not proof that the external effect never began.** The existing
+physical journal does NOT implement the independent root below. #239
+implements its standalone contract and pure policy only.
 
 **Required root.** Before enabling physical effects, use a separately
 administered, irreversible monotonic register outside the same filesystem,
@@ -300,6 +303,97 @@ and a state such as `START_BARRIER_COMMITTED` or
 reused operation IDs, forks, and non-successor generation transitions.
 Host-key authorization and register-write authorization must be isolated.
 
+### Standalone authority contract (#239)
+
+`HostEffectAntiRollbackAuthority` in `:core:contracts` defines the
+host-owned bootstrap, authenticated read and atomic compare-and-set port.
+`EffectAuthorityRoot` and `EffectAuthorityEvidence` contain immutable
+scalar values, an `EffectAuthorityRegister` and an optional immutable
+`EffectIdentity`. They are proposed evidence, not self-authenticating
+capabilities. No production implementation, service selection, credential
+management, execution hook or session wire-format change is included.
+
+The independently provisioned register binds host ID, session ID, register
+ID and an opaque 64-character lower-case hexadecimal epoch identifier.
+The provisioning and immutable history must enforce uniqueness for the
+host/session across reset, replacement and administration changes. Bootstrap
+is allowed only for an independently proven never-initialized register.
+A missing or reset root is not a bootstrap credential.
+
+The v1 canonical record is a fixed-order ASCII encoding, with one LF after
+every field, including the last field:
+
+1. Domain `recursive-coder/effect-authority-root/v1`.
+2. Host ID, session ID, register ID and epoch (one line each).
+3. Version, predecessor digest, issuing fence generation.
+4. Fence/anchor digest, exact checkpoint digest, normalized absolute
+   sidecar path digest, RCEFX1 sequence and head MAC.
+5. Operation ID, explicit effect-kind token, input digest and state token.
+
+Each comma-separated field in the list occupies its own line. IDs use the
+existing bounded host-identifier grammar. Digests and MACs are exactly
+64 lower-case hexadecimal characters. Counters are canonical base-10
+positive signed-64-bit values, except the nonnegative sequence. A single
+dash denotes an absent predecessor or absent operation field. Operation
+session and issuing generation must equal the corresponding root fields,
+so they are bound once. The root digest is SHA-256 of these exact bytes.
+Canonical bytes are newly allocated on each call. No secrets, raw paths,
+exception payloads or free-form result data enter the encoding.
+
+The initial version is 1, has no predecessor or operation, and binds
+a genesis-only sidecar at sequence 0. Each successor increments version
+exactly once, names the exact predecessor digest and retains the entire
+register identity. Version/sequence overflow, prior checkpoint/head reuse,
+forks and changes of the fence/anchor or sidecar identity within the
+same issuing generation are denied. With a single serialized operation,
+the start barrier advances sequence by exactly two (Intent and Started);
+terminal evidence advances it by exactly one, for the same complete
+operation identity. The state tokens are `genesis`,
+`start-barrier-committed`, `terminal-evidence-committed`, and
+`terminal-unconfirmed`. Effect-kind tokens deliberately reuse the exact
+RCEFX1 and effect-envelope vocabulary: `TRUSTED_WRITE`, `ISOLATED_CHECK`,
+`GIT_CAS`, `ACCEPTANCE_HANDOFF`, and `RESULT_PUBLICATION`. Literal byte
+and SHA-256 fixtures pin every operation kind and publication state.
+
+A subsequent operation requires a new operation ID across the complete session
+history. An unconfirmed terminal state blocks further transitions. Only an
+immediate genesis-to-genesis successor generation is structurally supported,
+with fence/anchor and sidecar path digests never used in any prior generation.
+Even that transition requires independently authenticated successor evidence; no
+numeric generation establishes lease ownership. Nonempty historical generation
+transitions remain unsupported.
+
+The adapter must perform the exact authenticated predecessor comparison,
+transition validation, historical uniqueness checks and irreversible append
+inside one linearizable transaction. The pure policy accepts a stable,
+complete authenticated history snapshot. It validates bootstrap, every
+consecutive version and predecessor digest, register identity and every
+historical transition, including uniqueness. It rejects empty, truncated,
+reordered, disconnected or structurally invalid histories; it cannot verify
+provenance or that the supplied latest root is actually current. The
+validation traverses history once, indexing already validated identities.
+The trusted host must authenticate the physical checkpoint, fence/anchor
+and complete RCEFX1 prefix before proposing these values. Syntactically
+valid hashes are not proof of the corresponding physical evidence.
+
+Reads distinguish authenticated latest state, missing/reset, unavailable
+and unauthenticated state. Publication distinguishes a durable exact-digest
+acknowledgement, a proven non-mutating refusal, unavailable/unauthenticated
+responses and uncertain acknowledgement. The disposition helper
+quarantines unavailable, unauthenticated, uncertain or mismatched
+acknowledgements. An acknowledgement refers to that invocation and its
+exact proposal; a later readback, even an exact matching root, is not
+the original acknowledgement. No result or diagnostic comparison grants
+execution, automatic retry, no-start proof, or external-state recovery.
+An uncertain invocation stays quarantined until a separately reviewed
+reconciliation protocol; an ordinary read does not clear it.
+
+The in-memory authority model exists only in unit-test sources. It
+serializes concurrent CAS and injects loss of acknowledgement before
+and after a modeled commit. It is neither authenticated nor durable and
+cannot prevent rollback of the test process. Its tests demonstrate
+contract behavior, not the security of an independent production store.
+
 **Required write order (future, separately reviewed):**
 
 1. Read and authenticate the independent root, including epoch and exact
@@ -308,8 +402,13 @@ Host-key authorization and register-write authorization must be isolated.
 2. Force Intent, then Started to RCEFX1 and publish a matching checkpoint
    head. CAS an independent root version binding the exact Started head;
    receive an unambiguous *durable* acknowledgement **before any external
-   call**. An ambiguous CAS acknowledgement must not trigger the effect,
-   a new pin, or a positive no-start inference.
+   call**. Verify the exact acknowledged proposal digest. An ambiguous CAS
+   acknowledgement must not trigger the effect, a new pin, or a positive
+   no-start inference. Stop admission/publication for that invocation and
+   quarantine on timeout, interruption, missing acknowledgement or thrown
+   failure. Follow the host-owned cancellation and retirement contract in
+   [FENCED_RESUME.md](FENCED_RESUME.md): cancelling a waiter does not prove
+   physical I/O stopped, and readback is not a durability receipt.
 3. After a confirmed outcome, force the terminal receipt, publish its
    checkpoint head and CAS a new immutable root version. A MAC-valid
    Committed record alone does not prove `ConfirmedCommitted`: external
@@ -616,14 +715,16 @@ checkpoint/fence/anchor/RCEFX1 root remains outside this adapter.
 
 ## Deferred work and acceptance
 
-The existing checkpoint `pendingEffects` and pre-execution fenced ledger
-have NOT been wired to these new types. The barrier field and
-verifier method are a contract only: this sidecar storage adds real record
-HMAC verification but does **not** provide a physical successor execution
-barrier, independently verified external completion, or a no-start proof. A later PR must add an independent, rollback-resistant latest-head
-authority root that survives coherent deletion of checkpoint suffixes,
-then enforce the completed Started pin publication *before executing*
-any external effect. It must also reconstruct the complete session-event
-projection, implement actual external-state confirmation and successor-barrier
-no-start proofs, provide production adapter conformance, and kill/timeout
-tests around every intent-effect-receipt boundary. See #105 for the remaining full P1 acceptance criteria.
+The existing checkpoint `pendingEffects` and pre-execution fenced ledger have
+NOT been wired to these new types. The barrier field and verifier method are a
+contract only: this sidecar storage adds real record HMAC verification but does
+**not** provide a physical successor execution barrier, independently verified
+external completion, or a no-start proof. A later PR must implement and
+integrate a real independent, rollback-resistant latest-head authority using the
+#239 contract, so it survives coherent deletion of checkpoint suffixes, then
+enforce the completed Started pin publication *before executing* any external
+effect. It must also reconstruct the complete session-event projection,
+implement actual external-state confirmation and successor-barrier no-start
+proofs, provide production adapter conformance, and kill/timeout tests around
+every intent-effect-receipt boundary. See #105 for the remaining full P1
+acceptance criteria.
