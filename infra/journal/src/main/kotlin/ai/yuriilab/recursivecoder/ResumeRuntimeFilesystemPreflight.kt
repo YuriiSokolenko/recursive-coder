@@ -68,7 +68,9 @@ class ResumeRuntimeFilesystemPreflight private constructor(
             fileStoreType: (Path) -> String
         ): ResumeRuntimeFilesystemPreflight = ResumeRuntimeFilesystemPreflight { request ->
             // Compare only. Never select the source paths from request data.
-            check(request.raw == expectedRequest.raw)
+            if (request.raw != expectedRequest.raw)
+                throw SessionResumeUnconfirmed(
+                    ResumeDenialCodes.RESUME_ADMISSION_UNCONFIRMED)
             SessionResumeAdmission.checkFilesystemBeforeLease(
                 directory, context, ledgerPath, fileStoreType)
         }

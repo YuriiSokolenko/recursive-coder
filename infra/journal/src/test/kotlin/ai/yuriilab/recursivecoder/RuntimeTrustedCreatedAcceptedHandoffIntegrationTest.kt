@@ -3,6 +3,8 @@ package ai.yuriilab.recursivecoder
 import java.nio.file.Files
 import java.nio.file.FileSystemException
 import java.nio.file.Path
+import java.nio.file.LinkOption
+import java.nio.file.attribute.PosixFilePermission
 import java.security.MessageDigest
 import java.time.Clock
 import java.time.Instant
@@ -129,8 +131,15 @@ class RuntimeTrustedCreatedAcceptedHandoffIntegrationTest : SessionCheckpointTes
     private var workspaceCalls = 0
     private var normalSinkCalls = 0
 
-    private fun runtime(clock: Clock = Clock.systemUTC()) = DefaultRunSessionUseCase(
-        object : ModelGateway {
+    private fun runtime(
+        clock: Clock = Clock.systemUTC(),
+        eventSinkFactory: EventSinkFactory = EventSinkFactory {
+            error("Normal runtime journal must never be opened for fenced C1/C2")
+        },
+        resumePreflight: SessionResumePreflight? = null,
+        resumePreflightRunner: ResumePreflightRunner = ResumePreflightRunner()
+    ): DefaultRunSessionUseCase {
+        val model = object : ModelGateway {
             override fun negotiate(config: ModelConfig, cancellation: Cancellation,
                                    deadline: Instant): GatewayCapabilities {
                 modelCalls++
@@ -142,17 +151,23 @@ class RuntimeTrustedCreatedAcceptedHandoffIntegrationTest : SessionCheckpointTes
                 modelCalls++
                 error("Model inference must never run before/after C2")
             }
-        },
-        WorkspaceOpener { _, _, _ ->
+        }
+        val opener = WorkspaceOpener { _, _, _ ->
             workspaceCalls++
             error("Workspace opener must never run before/after C2")
-        },
-        EventSinkFactory { _ ->
+        }
+        val sink = EventSinkFactory { path ->
             normalSinkCalls++
-            error("Normal runtime journal must never be opened for fenced C1/C2")
-        },
-        clock = clock
-    )
+            eventSinkFactory.open(path)
+        }
+        return if (resumePreflight == null)
+            DefaultRunSessionUseCase(model, opener, sink, clock = clock,
+                resumePreflightRunner = resumePreflightRunner)
+        else
+            DefaultRunSessionUseCase(model, opener, sink, clock = clock,
+                resumePreflight = resumePreflight,
+                resumePreflightRunner = resumePreflightRunner)
+    }
 
     private fun host(expected: Long = 0L) = DurableRuntimeCreatedAcceptedHost(
         store(), ledger(), { context() }, { resumeAttestation(expected = expected) }
@@ -186,16 +201,30 @@ class RuntimeTrustedCreatedAcceptedHandoffIntegrationTest : SessionCheckpointTes
         trustedResumeFilesystemBoundary(checkpointFails = true, ledgerFails = true,
             mismatchedRequest = true)
 
+    private enum class SourceFault { NONE, MISSING_LEDGER, UNSAFE_PERMISSIONS, SYMLINK }
+
+    @Test fun trustedResumeMissingLedgerIsRedactedBeforeVolumeLookup() =
+        trustedResumeFilesystemBoundary(false, false, sourceFault = SourceFault.MISSING_LEDGER)
+
+    @Test fun trustedResumeUnsafeDirectoryPermissionsAreRedactedBeforeVolumeLookup() =
+        trustedResumeFilesystemBoundary(false, false, sourceFault = SourceFault.UNSAFE_PERMISSIONS)
+
+    @Test fun trustedResumeSymlinkDirectoryIsRedactedBeforeVolumeLookup() =
+        trustedResumeFilesystemBoundary(false, false, sourceFault = SourceFault.SYMLINK)
+
     @OptIn(ResumeOperatorOnlyApi::class, LedgerTestFaultInjection::class)
     private fun trustedResumeFilesystemBoundary(
         checkpointFails: Boolean, ledgerFails: Boolean,
-        mismatchedRequest: Boolean = false
+        mismatchedRequest: Boolean = false,
+        sourceFault: SourceFault = SourceFault.NONE
     ) {
         val checkpoint = createPreExecutionCheckpoint()
-        val sourceDirectory = store()
+        val realDirectory = store()
         val sourceLedger = ledger()
         val hostContext = context()
         val attestation = resumeAttestation()
+        val sourceDirectory = if (sourceFault == SourceFault.SYMLINK)
+            temp.resolve("private-checkpoint-alias") else realDirectory
         // Rejection artifacts are distinct from the existing source ledger.
         // The runtime's CREATE_NEW journal must never overwrite resume evidence.
         val rejection = temp.resolve("rejection")
@@ -222,10 +251,26 @@ class RuntimeTrustedCreatedAcceptedHandoffIntegrationTest : SessionCheckpointTes
                 ("requestId" to JsonPrimitive("different-request"))).toString())
         else expected
 
+        // Construct the complete request first; its fixture must not
+        // accidentally restore the missing or unsafe durable source.
+        when (sourceFault) {
+            SourceFault.NONE -> Unit
+            SourceFault.MISSING_LEDGER -> Files.delete(sourceLedger)
+            SourceFault.UNSAFE_PERMISSIONS -> Files.setPosixFilePermissions(
+                realDirectory, Files.getPosixFilePermissions(realDirectory) +
+                    PosixFilePermission.GROUP_READ)
+            SourceFault.SYMLINK -> Files.createSymbolicLink(sourceDirectory, realDirectory)
+        }
         fun sourceInventory(): Map<String, String> = Files.walk(temp).use { entries ->
             entries.filter { !it.startsWith(rejection) }.toList().associate { entry ->
+                val evidence = when {
+                    Files.isSymbolicLink(entry) -> "link:" + Files.readSymbolicLink(entry)
+                    Files.isRegularFile(entry, LinkOption.NOFOLLOW_LINKS) -> sha256(entry)
+                    else -> "directory"
+                }
                 temp.relativize(entry).toString() to
-                    if (Files.isRegularFile(entry)) sha256(entry) else "directory"
+                    (evidence + ":" + Files.getPosixFilePermissions(
+                        entry, LinkOption.NOFOLLOW_LINKS).sorted())
             }
         }
         val before = sourceInventory()
@@ -276,26 +321,9 @@ class RuntimeTrustedCreatedAcceptedHandoffIntegrationTest : SessionCheckpointTes
             paths.add(path)
             lookup(path)
         }
-        val runtime = DefaultRunSessionUseCase(
-            object : ModelGateway {
-                override fun negotiate(config: ModelConfig, cancellation: Cancellation,
-                    deadline: Instant): GatewayCapabilities {
-                    modelCalls++
-                    error("Model negotiation reached after resume refusal")
-                }
-
-                override fun next(config: ModelConfig, task: Path,
-                    observed: Pair<Int, String>?, cancellation: Cancellation,
-                    deadline: Instant, allowRetry: Boolean): ModelTurn {
-                    modelCalls++
-                    error("Model execution reached after resume refusal")
-                }
-            },
-            WorkspaceOpener { _, _, _ ->
-                workspaceCalls++
-                error("Workspace reached after resume refusal")
-            },
-            EventSinkFactory { path ->
+        val runtime = runtime(
+            eventSinkFactory = EventSinkFactory { path ->
+                assertEquals(rejection.resolve("events.ledger"), path)
                 DurableSessionEventLedger.create(path, workspace())
             },
             resumePreflight = gate,
@@ -305,19 +333,26 @@ class RuntimeTrustedCreatedAcceptedHandoffIntegrationTest : SessionCheckpointTes
         assertEquals(SessionOutcome.REJECTED, result.outcome)
         val protocolError = result.protocol["error"]!!.jsonObject
         val expectedCode = when {
-            mismatchedRequest -> "RESUME_ADMISSION_UNCONFIRMED"
+            mismatchedRequest || sourceFault != SourceFault.NONE ->
+                "RESUME_ADMISSION_UNCONFIRMED"
             checkpointFails || ledgerFails -> "RESUME_FILESYSTEM_UNSUPPORTED"
             else -> "UNSUPPORTED_RESUME"
         }
         assertEquals(expectedCode, protocolError["code"]!!.jsonPrimitive.content)
-        if (!mismatchedRequest && (checkpointFails || ledgerFails))
-            assertEquals(detail, protocolError["safeMessage"]!!.jsonPrimitive.content)
-        assertEquals(if (mismatchedRequest) emptyList() else
-            listOf(sourceDirectory, sourceLedger.parent), paths)
+        val expectedMessage = when (expectedCode) {
+            "RESUME_ADMISSION_UNCONFIRMED" -> "Resume admission unavailable"
+            "RESUME_FILESYSTEM_UNSUPPORTED" -> detail
+            else -> "Resume is not supported"
+        }
+        assertEquals(expectedMessage, protocolError["safeMessage"]!!.jsonPrimitive.content)
+        assertEquals(if (mismatchedRequest || sourceFault != SourceFault.NONE)
+            emptyList() else listOf(sourceDirectory, sourceLedger.parent), paths)
         assertEquals(0, modelCalls)
         assertEquals(0, workspaceCalls)
+        assertEquals(1, normalSinkCalls)
         assertEquals(before, sourceInventory())
         assertFalse(Files.exists(sourceDirectory.resolve("resume.lock")))
+        assertFalse(Files.exists(realDirectory.resolve("resume.lock")))
         assertFalse(Files.exists(rejection.resolve("checkpoints")))
         val rejectionLedger = rejection.resolve("events.ledger")
         val events = DurableSessionEventLedger.inspect(rejectionLedger).events
@@ -332,7 +367,11 @@ class RuntimeTrustedCreatedAcceptedHandoffIntegrationTest : SessionCheckpointTes
             for (secret in listOf(privateCheckpoint, privateLedger, privateCause,
                     privateSuppressed, "raw private reason", "FileSystemException",
                     "IllegalStateException", "IllegalArgumentException",
-                    sourceDirectory.toString(), sourceLedger.toString(), "stackTrace"))
+                    "CheckpointUnconfirmed", "SessionResumeUnconfirmed",
+                    "NoSuchFileException", "CHECKPOINT_UNSAFE_DIRECTORY",
+                    "RESUME_LEDGER_IDENTITY_UNCONFIRMED", "suppressed",
+                    realDirectory.toString(), sourceDirectory.toString(),
+                    sourceLedger.toString(), "stackTrace"))
                 assertFalse(secret in surface, "Sensitive resume data leaked: " + secret)
         }
     }

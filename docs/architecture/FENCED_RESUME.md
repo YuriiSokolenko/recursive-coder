@@ -106,7 +106,8 @@ returned filesystem identities. No late worker can continue into
 admission. Offline integration coverage exercises both the real
 `admitWithFault` entry and the runtime adapter against a physical checkpoint
 and ledger, including each volume failure, dual failure, supported types,
-and a mismatched request; it checks source inventory/digests, sanitized
+a mismatched request, missing ledger, unsafe directory permissions and a
+symlink directory; it checks source inventory/digests, sanitized
 result, diagnostics, journal, and zero model/workspace calls. This is
 still a deny-only step, **not** the outstanding live-fenced execution E2E.
 
@@ -647,6 +648,13 @@ The Linux integration tier tests these failure boundaries offline:
 - Read-only pre-execution admission, read-tool authority, generation CAS,
   and changes to HEAD, policy, frozen inputs and unsafe execution state
 - Live ledger and stale callbacks; independent process lock and forced release
+- Trusted-store deny-only runtime preflight: checkpoint-only, ledger-only
+  and dual volume lookup failures, supported types, mismatched request,
+  missing ledger, unsafe permissions and symlink directory; exact sanitized
+  protocol denial, no source mutation or model/tool execution, and no
+  volume lookup after request binding or source identity refusal
+- Reentrant lease close refusal during fenced and nested publications,
+  exceptional callback cleanup and stale callback after successor admission
 - Anchor rollback, interrupted prepares, audit/fsync recovery and idempotent
   operator retries, including conflicting operator rejection
 - `reconciliationStatus` transitions from unaudited prepare to approved
