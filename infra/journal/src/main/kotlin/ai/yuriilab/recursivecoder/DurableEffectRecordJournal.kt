@@ -120,7 +120,7 @@ class DurableEffectRecordJournal private constructor(
     private var closed = false
 
     private fun writerUnavailableCode(): String =
-        if (pinPublicationUnconfirmed) "EFFECT_JOURNAL_PIN_PUBLICATION_UNCONFIRMED"
+        if (pinPublicationUnconfirmed) EffectJournalDiagnosticCodes.EFFECT_JOURNAL_PIN_PUBLICATION_UNCONFIRMED
         else "EFFECT_JOURNAL_WRITER_UNAVAILABLE"
 
     companion object {
@@ -155,7 +155,7 @@ class DurableEffectRecordJournal private constructor(
 
         private fun checkedPath(path: Path, workspaceRoot: Path): Path {
             val file = path.toAbsolutePath().normalize()
-            val dir = file.parent ?: refuse("EFFECT_JOURNAL_UNSAFE_PATH")
+            val dir = file.parent ?: refuse(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_UNSAFE_PATH)
             try {
                 val workspace = workspaceRoot.toRealPath()
                 if (!Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS) ||
@@ -163,13 +163,13 @@ class DurableEffectRecordJournal private constructor(
                     workspace.startsWith(dir) ||
                     Files.getPosixFilePermissions(dir, LinkOption.NOFOLLOW_LINKS) !=
                         privatePermissions)
-                    refuse("EFFECT_JOURNAL_UNSAFE_PATH")
+                    refuse(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_UNSAFE_PATH)
                 LinuxCheckpointOwner.requireMatchingUid(
                     Files.getAttribute(dir, "unix:uid", LinkOption.NOFOLLOW_LINKS),
                     LinuxCheckpointOwner.effectiveUid())
             } catch (e: Exception) {
                 if (e is EffectJournalStorageUnconfirmed) throw e
-                throw EffectJournalStorageUnconfirmed("EFFECT_JOURNAL_UNSAFE_PATH", e)
+                throw EffectJournalStorageUnconfirmed(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_UNSAFE_PATH, e)
             }
             return file
         }
@@ -188,11 +188,11 @@ class DurableEffectRecordJournal private constructor(
 
         private fun acquire(file: Path, create: Boolean): Pair<FileChannel, FileLock> {
             val lockFile = lockPath(file)
-            if (!heldLocks.add(lockFile)) refuse("EFFECT_JOURNAL_BUSY")
+            if (!heldLocks.add(lockFile)) refuse(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_BUSY)
             var channel: FileChannel? = null
             try {
                 if (Files.isSymbolicLink(lockFile))
-                    refuse("EFFECT_JOURNAL_UNSAFE_LOCK")
+                    refuse(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_UNSAFE_LOCK)
                 channel = if (create)
                     FileChannel.open(lockFile, setOf<java.nio.file.OpenOption>(
                         StandardOpenOption.CREATE, StandardOpenOption.WRITE,
@@ -204,10 +204,10 @@ class DurableEffectRecordJournal private constructor(
                 // Never chmod existing lock inodes: verify their original mode.
                 if (Files.getPosixFilePermissions(lockFile, LinkOption.NOFOLLOW_LINKS) !=
                     filePermissions)
-                    refuse("EFFECT_JOURNAL_UNSAFE_LOCK")
+                    refuse(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_UNSAFE_LOCK)
                 val held = try { channel.tryLock() }
                     catch (_: OverlappingFileLockException) { null }
-                    ?: refuse("EFFECT_JOURNAL_BUSY")
+                    ?: refuse(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_BUSY)
                 return channel to held
             } catch (e: Exception) {
                 try { channel?.close() } catch (close: Exception) { e.addSuppressed(close) }
@@ -260,13 +260,13 @@ class DurableEffectRecordJournal private constructor(
             val identity = record.identity
             if (!validIdentity(identity) || identity.sessionId != header.sessionId ||
                 identity.fenceGeneration != header.fenceGeneration)
-                refuse("EFFECT_JOURNAL_INVALID_RECORD")
+                refuse(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_INVALID_RECORD)
             if (record is EffectRecord.Committed &&
                 !digestPattern.matches(record.observedStateSha256))
-                refuse("EFFECT_JOURNAL_INVALID_RECORD")
+                refuse(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_INVALID_RECORD)
             if (record is EffectRecord.Unconfirmed &&
                 !ToolAuthorizationPolicy.validHostIdentifier(record.code))
-                refuse("EFFECT_JOURNAL_INVALID_RECORD")
+                refuse(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_INVALID_RECORD)
             val last = latest[identity.operationId]
             if (last != null && last.identity != identity)
                 refuse("EFFECT_JOURNAL_REUSED_OPERATION")
@@ -294,18 +294,18 @@ class DurableEffectRecordJournal private constructor(
             try {
                 val obj = Json.parseToJsonElement(
                     bytes.toString(StandardCharsets.UTF_8)) as? JsonObject
-                    ?: refuse("EFFECT_JOURNAL_GENESIS_INVALID")
+                    ?: refuse(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_GENESIS_INVALID)
                 fun string(key: String): String {
                     val value = obj[key] as? JsonPrimitive
-                        ?: refuse("EFFECT_JOURNAL_GENESIS_INVALID")
-                    if (!value.isString) refuse("EFFECT_JOURNAL_GENESIS_INVALID")
+                        ?: refuse(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_GENESIS_INVALID)
+                    if (!value.isString) refuse(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_GENESIS_INVALID)
                     return value.content
                 }
                 if (string(PayloadFields.TYPE) != GENESIS_TYPE)
-                    refuse("EFFECT_JOURNAL_GENESIS_INVALID")
+                    refuse(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_GENESIS_INVALID)
                 val generation = (obj[PayloadFields.FENCE_GENERATION] as? JsonPrimitive)
                     ?.takeUnless { it.isString }?.longOrNull
-                    ?: refuse("EFFECT_JOURNAL_GENESIS_INVALID")
+                    ?: refuse(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_GENESIS_INVALID)
                 val header = EffectJournalHeader(string(PayloadFields.SESSION_ID), generation,
                     string(PayloadFields.ADMITTED_CHECKPOINT_SHA256),
                     string(PayloadFields.TOOL_AUTHORITY_SHA256))
@@ -314,11 +314,11 @@ class DurableEffectRecordJournal private constructor(
                     !digestPattern.matches(header.admittedCheckpointSha256) ||
                     !digestPattern.matches(header.toolAuthoritySha256) ||
                     !bytes.contentEquals(headerPayload(header)))
-                    refuse("EFFECT_JOURNAL_GENESIS_INVALID")
+                    refuse(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_GENESIS_INVALID)
                 return header
             } catch (e: Exception) {
                 if (e is EffectJournalStorageUnconfirmed) throw e
-                throw EffectJournalStorageUnconfirmed("EFFECT_JOURNAL_GENESIS_INVALID", e)
+                throw EffectJournalStorageUnconfirmed(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_GENESIS_INVALID, e)
             }
         }
 
@@ -351,19 +351,19 @@ class DurableEffectRecordJournal private constructor(
             try {
                 val obj = Json.parseToJsonElement(
                     bytes.toString(StandardCharsets.UTF_8)) as? JsonObject
-                    ?: refuse("EFFECT_JOURNAL_RECORD_CORRUPT")
+                    ?: refuse(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_RECORD_CORRUPT)
                 fun string(name: String): String {
                     val value = obj[name] as? JsonPrimitive
-                        ?: refuse("EFFECT_JOURNAL_RECORD_CORRUPT")
-                    if (!value.isString) refuse("EFFECT_JOURNAL_RECORD_CORRUPT")
+                        ?: refuse(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_RECORD_CORRUPT)
+                    if (!value.isString) refuse(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_RECORD_CORRUPT)
                     return value.content
                 }
                 val seq = (obj[PayloadFields.SEQUENCE] as? JsonPrimitive)?.longOrNull
-                if (seq != sequence) refuse("EFFECT_JOURNAL_RECORD_CORRUPT")
+                if (seq != sequence) refuse(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_RECORD_CORRUPT)
                 val generation = (obj[PayloadFields.FENCE_GENERATION] as? JsonPrimitive)?.longOrNull
-                    ?: refuse("EFFECT_JOURNAL_RECORD_CORRUPT")
+                    ?: refuse(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_RECORD_CORRUPT)
                 val kind = EffectKind.entries.firstOrNull { it.name == string(PayloadFields.KIND) }
-                    ?: refuse("EFFECT_JOURNAL_RECORD_CORRUPT")
+                    ?: refuse(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_RECORD_CORRUPT)
                 val id = EffectIdentity(string(PayloadFields.SESSION_ID), string(PayloadFields.OPERATION_ID),
                     generation, kind, string(PayloadFields.INPUT_SHA256))
                 val record = when (string(PayloadFields.STATE)) {
@@ -372,14 +372,14 @@ class DurableEffectRecordJournal private constructor(
                     EffectRecordStates.COMMITTED -> EffectRecord.Committed(id,
                         string(PayloadFields.OBSERVED_STATE_SHA256))
                     EffectRecordStates.UNCONFIRMED -> EffectRecord.Unconfirmed(id, string(PayloadFields.CODE))
-                    else -> refuse("EFFECT_JOURNAL_RECORD_CORRUPT")
+                    else -> refuse(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_RECORD_CORRUPT)
                 }
                 if (!bytes.contentEquals(payload(sequence, record)))
-                    refuse("EFFECT_JOURNAL_RECORD_CORRUPT")
+                    refuse(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_RECORD_CORRUPT)
                 return record
             } catch (e: Exception) {
                 if (e is EffectJournalStorageUnconfirmed) throw e
-                throw EffectJournalStorageUnconfirmed("EFFECT_JOURNAL_RECORD_CORRUPT", e)
+                throw EffectJournalStorageUnconfirmed(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_RECORD_CORRUPT, e)
             }
         }
 
@@ -387,7 +387,7 @@ class DurableEffectRecordJournal private constructor(
             val buf = ByteBuffer.wrap(bytes)
             while (buf.hasRemaining()) {
                 if (channel.write(buf) <= 0)
-                    refuse("EFFECT_JOURNAL_APPEND_UNCONFIRMED")
+                    refuse(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_APPEND_UNCONFIRMED)
             }
         }
 
@@ -398,13 +398,13 @@ class DurableEffectRecordJournal private constructor(
         ): DurableEffectRecordJournal {
             val file = checkedPath(path, workspaceRoot)
             if (!ToolAuthorizationPolicy.validHostIdentifier(sessionId))
-                refuse("EFFECT_JOURNAL_CONTEXT_MISMATCH")
+                refuse(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_CONTEXT_MISMATCH)
             val derived = checkedKey(hostKey)
             try {
                 return lease.publishIfCurrent {
                     val admittedSession = lease.admittedSessionId()
                     if (sessionId != admittedSession)
-                        refuse("EFFECT_JOURNAL_CONTEXT_MISMATCH")
+                        refuse(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_CONTEXT_MISMATCH)
                     val header = EffectJournalHeader(
                         admittedSession, lease.generation,
                         lease.admittedCheckpointSha256, lease.toolAuthoritySha256)
@@ -420,7 +420,7 @@ class DurableEffectRecordJournal private constructor(
                         // if the actual mode is not the required owner-only 0600.
                         if (Files.getPosixFilePermissions(file, LinkOption.NOFOLLOW_LINKS) !=
                             filePermissions)
-                            refuse("EFFECT_JOURNAL_UNSAFE_PATH")
+                            refuse(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_UNSAFE_PATH)
                         val genesisPayload = headerPayload(header)
                         val genesisMac = tag(derived, file, ByteArray(32), genesisPayload)
                         val genesisFrame = ByteBuffer.allocate(36 + genesisPayload.size)
@@ -533,23 +533,23 @@ class DurableEffectRecordJournal private constructor(
                     if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS) ||
                         Files.getPosixFilePermissions(file, LinkOption.NOFOLLOW_LINKS) !=
                             filePermissions)
-                        refuse("EFFECT_JOURNAL_UNSAFE_PATH")
+                        refuse(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_UNSAFE_PATH)
                     FileChannel.open(file, StandardOpenOption.READ,
                         LinkOption.NOFOLLOW_LINKS).use { channel ->
                         val size = channel.size()
                         if (size < magic.size || size > MAX_FILE_BYTES ||
                             size > Int.MAX_VALUE)
-                            refuse("EFFECT_JOURNAL_SIZE_INVALID")
+                            refuse(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_SIZE_INVALID)
                         val all = ByteBuffer.allocate(size.toInt())
                         while (all.hasRemaining()) {
                             if (channel.read(all) <= 0)
-                                refuse("EFFECT_JOURNAL_TRUNCATED")
+                                refuse(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_TRUNCATED)
                         }
                         val bytes = all.array()
                         if (!bytes.copyOfRange(0, magic.size).contentEquals(magic))
                             refuse("EFFECT_JOURNAL_VERSION_INVALID")
                         if (bytes.size < magic.size + 36)
-                            refuse("EFFECT_JOURNAL_GENESIS_INVALID")
+                            refuse(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_GENESIS_INVALID)
 
                         // Genesis is an authenticated mandatory first frame;
                         // an empty effect stream still has a provable identity.
@@ -557,13 +557,13 @@ class DurableEffectRecordJournal private constructor(
                         val genesisLength = ByteBuffer.wrap(bytes, offset, 4).int
                         if (genesisLength !in 1..MAX_RECORD_BYTES ||
                             genesisLength > bytes.size - offset - 36)
-                            refuse("EFFECT_JOURNAL_GENESIS_INVALID")
+                            refuse(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_GENESIS_INVALID)
                         val genesisMac = bytes.copyOfRange(offset + 4, offset + 36)
                         val genesisBody = bytes.copyOfRange(offset + 36,
                             offset + 36 + genesisLength)
                         if (!MessageDigest.isEqual(genesisMac,
                                 tag(derived, file, ByteArray(32), genesisBody)))
-                            refuse("EFFECT_JOURNAL_AUTH_FAILED")
+                            refuse(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_AUTH_FAILED)
                         val header = decodeHeader(genesisBody)
                         if (header.sessionId != expectedSessionId ||
                             expectedFenceGeneration != null &&
@@ -572,7 +572,7 @@ class DurableEffectRecordJournal private constructor(
                                 header.admittedCheckpointSha256 != expectedCheckpointSha256 ||
                             expectedToolAuthoritySha256 != null &&
                                 header.toolAuthoritySha256 != expectedToolAuthoritySha256)
-                            refuse("EFFECT_JOURNAL_CONTEXT_MISMATCH")
+                            refuse(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_CONTEXT_MISMATCH)
                         offset += 36 + genesisLength
 
                         var previous = genesisMac
@@ -590,7 +590,7 @@ class DurableEffectRecordJournal private constructor(
                         }
                         while (offset < bytes.size) {
                             if (entries.size >= EffectJournalLimits.MAX_RECORDS)
-                                refuse("EFFECT_JOURNAL_SIZE_INVALID")
+                                refuse(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_SIZE_INVALID)
                             val remaining = bytes.size - offset
                             // A post-crash extended but unforced file may read
                             // back as zero blocks. Diagnostics only; zero bytes
@@ -607,7 +607,7 @@ class DurableEffectRecordJournal private constructor(
                             }
                             val length = ByteBuffer.wrap(bytes, offset, 4).int
                             if (length !in 1..MAX_RECORD_BYTES)
-                                refuse("EFFECT_JOURNAL_RECORD_CORRUPT")
+                                refuse(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_RECORD_CORRUPT)
                             if (length > remaining - 36) {
                                 tornTailOffset = offset.toLong()
                                 tailKind = EffectJournalTailKind.SHORT_FRAME
@@ -617,7 +617,7 @@ class DurableEffectRecordJournal private constructor(
                             val body = bytes.copyOfRange(offset + 36, offset + 36 + length)
                             val next = tag(derived, file, previous, body)
                             if (!MessageDigest.isEqual(mac, next))
-                                refuse("EFFECT_JOURNAL_AUTH_FAILED")
+                                refuse(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_AUTH_FAILED)
                             val record = decode(body, entries.size.toLong() + 1L)
                             checkedTransition(latest, record, header)
                             entries.add(EffectJournalEntry(entries.size.toLong() + 1L,
@@ -627,7 +627,7 @@ class DurableEffectRecordJournal private constructor(
                             offset += 36 + length
                         }
                         if (tornTailOffset != null && !allowTornTail)
-                            refuse("EFFECT_JOURNAL_TRUNCATED")
+                            refuse(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_TRUNCATED)
                         return VerifiedEffectRecordJournal(header, entries,
                             entries.size.toLong(), previous.toHex(), digest(bytes),
                             bytes.size.toLong(), offset.toLong(), tornTailOffset, tailKind)
@@ -662,14 +662,14 @@ class DurableEffectRecordJournal private constructor(
                 Files.readAttributes(path, BasicFileAttributes::class.java,
                     LinkOption.NOFOLLOW_LINKS).fileKey() != fileKey ||
                 channel.size() != channel.position())
-                throw EffectJournalStorageUnconfirmed("EFFECT_JOURNAL_PATH_CHANGED")
+                throw EffectJournalStorageUnconfirmed(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_PATH_CHANGED)
             val seq = entries.size.toLong() + 1L
             if (entries.size >= EffectJournalLimits.MAX_RECORDS)
-                throw EffectJournalStorageUnconfirmed("EFFECT_JOURNAL_SIZE_INVALID")
+                throw EffectJournalStorageUnconfirmed(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_SIZE_INVALID)
             val body = payload(seq, record)
             if (body.size !in 1..MAX_RECORD_BYTES ||
                 channel.position() + body.size + 36 > MAX_FILE_BYTES)
-                throw EffectJournalStorageUnconfirmed("EFFECT_JOURNAL_SIZE_INVALID")
+                throw EffectJournalStorageUnconfirmed(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_SIZE_INVALID)
             val mac = tag(key, path, previousMac, body)
             val frame = ByteBuffer.allocate(36 + body.size).putInt(body.size)
                 .put(mac).put(body).array()
@@ -680,7 +680,7 @@ class DurableEffectRecordJournal private constructor(
                 afterPhase("forced-before-ack")
             } catch (error: Throwable) {
                 poisoned = true
-                throw EffectJournalStorageUnconfirmed("EFFECT_JOURNAL_APPEND_UNCONFIRMED", error)
+                throw EffectJournalStorageUnconfirmed(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_APPEND_UNCONFIRMED, error)
             }
             previousMac = mac
             return@synchronized EffectJournalEntry(seq, record, mac.toHex())
@@ -718,12 +718,12 @@ class DurableEffectRecordJournal private constructor(
             header.fenceGeneration != currentLease.generation ||
             header.admittedCheckpointSha256 != currentLease.admittedCheckpointSha256 ||
             header.toolAuthoritySha256 != currentLease.toolAuthoritySha256)
-            throw EffectJournalStorageUnconfirmed("EFFECT_JOURNAL_CONTEXT_MISMATCH")
+            throw EffectJournalStorageUnconfirmed(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_CONTEXT_MISMATCH)
         if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) ||
             Files.readAttributes(path, BasicFileAttributes::class.java,
                 LinkOption.NOFOLLOW_LINKS).fileKey() != fileKey ||
             channel.size() != channel.position())
-            throw EffectJournalStorageUnconfirmed("EFFECT_JOURNAL_PATH_CHANGED")
+            throw EffectJournalStorageUnconfirmed(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_PATH_CHANGED)
         val pin = headPin()
         return CheckpointEffectJournalHead(header.sessionId, header.fenceGeneration,
             header.admittedCheckpointSha256, header.toolAuthoritySha256,
@@ -759,8 +759,8 @@ class DurableEffectRecordJournal private constructor(
         if (error != null)
             throw EffectJournalStorageUnconfirmed("EFFECT_JOURNAL_CLOSE_UNCONFIRMED", error)
         if (pinPublicationUnconfirmed)
-            throw EffectJournalStorageUnconfirmed("EFFECT_JOURNAL_PIN_PUBLICATION_UNCONFIRMED")
+            throw EffectJournalStorageUnconfirmed(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_PIN_PUBLICATION_UNCONFIRMED)
         if (poisoned)
-            throw EffectJournalStorageUnconfirmed("EFFECT_JOURNAL_APPEND_UNCONFIRMED")
+            throw EffectJournalStorageUnconfirmed(EffectJournalDiagnosticCodes.EFFECT_JOURNAL_APPEND_UNCONFIRMED)
     }
 }

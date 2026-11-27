@@ -557,6 +557,34 @@ class SessionCheckpointStoreIntegrationTest : SessionCheckpointTestFixture() {
         assertTrue(Files.exists(store().resolve("000000000001.rcp")))
     }
 
+    @Test fun missingWorkspaceRefusesBindingAndInspectionWithSameDiagnostic() {
+        val absent = context().copy(workspaceRoot = temp.resolve("missing-workspace"))
+        assertEquals("CHECKPOINT_WORKSPACE_INVALID",
+            assertFailsWith<CheckpointUnconfirmed> { absent.binding() }.code)
+        assertEquals("CHECKPOINT_WORKSPACE_INVALID",
+            assertFailsWith<CheckpointUnconfirmed> {
+                SessionCheckpointStore.inspect(store(), absent, ledger())
+            }.code)
+    }
+
+    @Test fun physicalHeaderAndSizeRefusalsDoNotFallBackToEarlierGeneration() {
+        createLedger()
+        val first = save(snapshot())
+        val second = save(snapshot(2, first.sha256), first.sha256)
+        val path = store().resolve("000000000002.rcp")
+        val original = Files.readAllBytes(path)
+        val invalidMagic = original.copyOf()
+        invalidMagic[0] = (invalidMagic[0].toInt() xor 1).toByte()
+        Files.write(path, invalidMagic)
+        assertEquals("CHECKPOINT_VERSION_UNSUPPORTED",
+            assertFailsWith<CheckpointUnconfirmed> { inspect() }.code)
+        Files.write(path, ByteArray(7 + 4 + 32 + 512 * 1024 + 1))
+        assertEquals("CHECKPOINT_SIZE_INVALID",
+            assertFailsWith<CheckpointUnconfirmed> { inspect() }.code)
+        Files.write(path, original)
+        assertEquals(second, inspect())
+    }
+
     @Test fun publishedTruncationAndHashTamperingNeverFallBackToPriorSnapshot() {
         createLedger()
         val first = save(snapshot())

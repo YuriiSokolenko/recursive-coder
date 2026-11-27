@@ -289,6 +289,103 @@ These remain excluded pinned literals, not independent new diagnostics.
 The stage artifact metadata allowlist in the pinned ledger likewise retains
 `artifactId` and `artifactSha256`.
 
+## #249 targeted diagnostic consolidation
+
+Implementation base: `492dd1e7dee322a672082cafd63f23176abe7a07` (dev). The #204 table above
+is a historical inventory, not a claim that those literals remain raw
+after this slice. The base scanner's literal and constant patterns were
+inspected; the exact trusted Python helper has not been executed in a
+real checkout by the implementer. Independent execution against the
+actual PR base and head is still required.
+
+Each migrated occurrence is a string-only replacement in its existing
+throw, refusal, comparison, or mapping branch. Checkpoint binding,
+codec and store share checkpoint-domain refusals; effect-journal
+creation, writer and authenticated reader share physical-journal
+refusals. These are internal owners in the journal module, not new
+Session Protocol fields or generic cross-module denial vocabulary.
+
+| Repeated diagnostic | Base raw occurrences | Disposition |
+| --- | ---: | --- |
+| `CHECKPOINT_WORKSPACE_INVALID` | 2 | `CheckpointDiagnosticCodes` |
+| `CHECKPOINT_PAYLOAD_INVALID` | 2 | `CheckpointDiagnosticCodes` |
+| `CHECKPOINT_VERSION_UNSUPPORTED` | 2 | `CheckpointDiagnosticCodes` |
+| `CHECKPOINT_UNSAFE_DIRECTORY` | 4 | `CheckpointDiagnosticCodes` |
+| `CHECKPOINT_UNSAFE_LOCK` | 3 | `CheckpointDiagnosticCodes` |
+| `CHECKPOINT_LEASE_RELEASE_UNCONFIRMED` | 3 | `CheckpointDiagnosticCodes` |
+| `CHECKPOINT_SIZE_INVALID` | 4 | `CheckpointDiagnosticCodes` |
+| `CHECKPOINT_TRUNCATED` | 3 | `CheckpointDiagnosticCodes` |
+| `CHECKPOINT_UNRECOGNIZED_ENTRY` | 2 | `CheckpointDiagnosticCodes` |
+| `CHECKPOINT_CHAIN_MISMATCH` | 2 | `CheckpointDiagnosticCodes` |
+| `CHECKPOINT_EFFECT_RECONCILIATION_FENCE_MISMATCH` | 9 | `CheckpointDiagnosticCodes` |
+| `CHECKPOINT_EFFECT_RECONCILIATION_SOURCE_MISMATCH` | 2 | `CheckpointDiagnosticCodes` |
+| `CHECKPOINT_EFFECT_HEAD_FENCE_MISMATCH` | 4 | `CheckpointDiagnosticCodes` |
+| `CHECKPOINT_JOURNAL_UNCONFIRMED` | 4 | `CheckpointDiagnosticCodes` |
+| `CHECKPOINT_LIVE_LEDGER_TOO_LARGE` | 2 | `CheckpointDiagnosticCodes` |
+| `CHECKPOINT_WRITE_UNCONFIRMED` | 4 | `CheckpointDiagnosticCodes` |
+| `CHECKPOINT_EFFECT_RECONCILIATION_UNVERIFIED` | 2 | `CheckpointDiagnosticCodes` |
+| `CHECKPOINT_STALE_GENERATION` | 3 | `CheckpointDiagnosticCodes` |
+| `CHECKPOINT_RESUME_ANCHOR_UNCONFIRMED` | 2 | `CheckpointDiagnosticCodes` |
+| `CHECKPOINT_RUNNING_BOUNDARY_CHANGED` | 2 | `CheckpointDiagnosticCodes` |
+| `CHECKPOINT_FENCED_LEDGER_ADVANCED` | 2 | `CheckpointDiagnosticCodes` |
+| `CHECKPOINT_MISSING` | 5 | `CheckpointDiagnosticCodes` |
+| `EFFECT_JOURNAL_PIN_PUBLICATION_UNCONFIRMED` | 2 | `EffectJournalDiagnosticCodes` |
+| `EFFECT_JOURNAL_UNSAFE_PATH` | 5 | `EffectJournalDiagnosticCodes` |
+| `EFFECT_JOURNAL_BUSY` | 2 | `EffectJournalDiagnosticCodes` |
+| `EFFECT_JOURNAL_UNSAFE_LOCK` | 2 | `EffectJournalDiagnosticCodes` |
+| `EFFECT_JOURNAL_INVALID_RECORD` | 3 | `EffectJournalDiagnosticCodes` |
+| `EFFECT_JOURNAL_GENESIS_INVALID` | 9 | `EffectJournalDiagnosticCodes` |
+| `EFFECT_JOURNAL_RECORD_CORRUPT` | 10 | `EffectJournalDiagnosticCodes` |
+| `EFFECT_JOURNAL_APPEND_UNCONFIRMED` | 3 | `EffectJournalDiagnosticCodes` |
+| `EFFECT_JOURNAL_CONTEXT_MISMATCH` | 4 | `EffectJournalDiagnosticCodes` |
+| `EFFECT_JOURNAL_SIZE_INVALID` | 4 | `EffectJournalDiagnosticCodes` |
+| `EFFECT_JOURNAL_TRUNCATED` | 2 | `EffectJournalDiagnosticCodes` |
+| `EFFECT_JOURNAL_AUTH_FAILED` | 2 | `EffectJournalDiagnosticCodes` |
+| `EFFECT_JOURNAL_PATH_CHANGED` | 2 | `EffectJournalDiagnosticCodes` |
+| `CHECKPOINT_LEASE_HELD` | 2 | Retained literal; shared with pinned ledger, #207 |
+
+The three same-meaning cross-file codes deliberately remain literal
+in both unpinned and pinned consumers. No competing owner or partial
+migration is introduced. Follow-up is the open independent C3 work
+[#207](https://github.com/YuriiSokolenko/recursive-coder/issues/207):
+
+| Code | Checkpoint store | Pinned ledger | Meaning |
+| --- | ---: | ---: | --- |
+| `CHECKPOINT_LEASE_HELD` | 2 | 1 | Checkpoint lock contention; ledger maps it to retryable reopen busy. |
+| `LEDGER_NOT_FENCED` | 1 | 3 | A fenced writer is required; checkpoint maps the ledger refusal to its own writer refusal. |
+| `LEDGER_REOPEN_CHECKPOINT_UNCONFIRMED` | 1 | 3 | Reopened ledger checkpoint publication is unconfirmed; checkpoint maps it to write unconfirmed. |
+
+The existing six owned-but-raw C3 diagnostic exclusions from #204
+remain unchanged: `LEDGER_CHECKPOINT_SIZE_EXCEEDED`,
+`LEDGER_REOPEN_CHECKPOINT_CAPACITY`,
+`RESUME_ADMISSION_UNCONFIRMED`, `RESUME_CHECKPOINT_CHANGED`,
+`RESUME_FILESYSTEM_UNSUPPORTED` and `RESUME_UNSAFE_BOUNDARY`.
+Their existing owners and raw pinned usages are not competing definitions.
+All six, and the shared ledger sites above, remain explicitly tracked by
+#207. No C3 file, approved hash, architecture gate, schema, dependency
+or persisted format is changed. The one-off `UNUSED_PARAMETER` suppression
+in the checkpoint source is a compiler diagnostic identifier, not a
+runtime refusal. Other single-producer refusal codes stay local.
+
+The new unit tests assert all 35 owner spellings independently.
+Existing literal behavior tests for checkpoint binding, payload,
+directory, stale generations, chain, lock, ledger evidence, publication,
+fenced advancement and anchor failures, and physical effect-journal
+authentication, corruption, contention, invalid records, context,
+paths, poisoned writers and truncation remain unchanged. Added
+integration tests independently assert missing workspace, physical
+checkpoint header and size refusals, and physical journal size and
+genesis refusals in both strict and diagnostic inspection. They check
+that valid evidence remains readable when the original bytes are
+restored. No persisted bytes, exception types, failure precedence,
+authorization or module dependencies are intentionally changed.
+
+Local Gradle and trusted-helper execution are unavailable in the
+implementation environment. The exact-head six CI jobs, independent
+trusted-base scanner and C3 verification, and owner approval of protected
+paths are required before merge. This slice neither closes #194 nor
+replaces #246.
+
 ## Trusted C3 boundary exclusion
 
 The architecture gate rejected changes to three SHA-256-pinned sources:

@@ -129,7 +129,7 @@ data class CheckpointHostContext(
 ) {
     fun binding(): CheckpointBinding {
         val canonical = try { workspaceRoot.toRealPath() }
-            catch (e: Exception) { throw CheckpointUnconfirmed("CHECKPOINT_WORKSPACE_INVALID", e) }
+            catch (e: Exception) { throw CheckpointUnconfirmed(CheckpointDiagnosticCodes.CHECKPOINT_WORKSPACE_INVALID, e) }
         return CheckpointBinding(policySha256,
             SessionCheckpointCodec.sha256(canonical.toString().toByteArray(StandardCharsets.UTF_8)),
             gitHead, gitBranch, gitBaselineSha256, graphId, graphGeneration, frozenInputsSha256)
@@ -239,7 +239,7 @@ object SessionCheckpointCodec {
         CheckpointTaskStates.BLOCKED, CheckpointTaskStates.RUNNING, CheckpointTaskStates.PAUSED,
         CheckpointTaskStates.SUCCEEDED, CheckpointTaskStates.FAILED,
         CheckpointTaskStates.NEEDS_ATTENTION, CheckpointTaskStates.CANCELLED)
-    private fun invalid(): Nothing = throw CheckpointUnconfirmed("CHECKPOINT_PAYLOAD_INVALID")
+    private fun invalid(): Nothing = throw CheckpointUnconfirmed(CheckpointDiagnosticCodes.CHECKPOINT_PAYLOAD_INVALID)
     private fun validId(id: String) = ToolAuthorizationPolicy.validHostIdentifier(id)
     private fun digest(value: String) = DIGEST.matches(value)
     private fun preExecutionOnly(s: SessionCheckpoint): Boolean =
@@ -472,7 +472,7 @@ object SessionCheckpointCodec {
             val version = long(root, RootFields.VERSION)
             if (version !in setOf(BASE_VERSION, EFFECT_HEAD_VERSION, RECONCILIATION_VERSION) ||
                 string(root, RootFields.KIND) != CHECKPOINT_KIND)
-                throw CheckpointUnconfirmed("CHECKPOINT_VERSION_UNSUPPORTED")
+                throw CheckpointUnconfirmed(CheckpointDiagnosticCodes.CHECKPOINT_VERSION_UNSUPPORTED)
             val keys = arrayOf(
                 RootFields.KIND, RootFields.VERSION, RootFields.SEQUENCE, RootFields.PREVIOUS_SHA256,
                 RootFields.BINDING, RootFields.SESSION_ID, RootFields.TRACE_ID, RootFields.PHASE,
@@ -560,7 +560,7 @@ object SessionCheckpointCodec {
         } catch (e: CheckpointUnconfirmed) {
             throw e
         } catch (e: Exception) {
-            throw CheckpointUnconfirmed("CHECKPOINT_PAYLOAD_INVALID", e)
+            throw CheckpointUnconfirmed(CheckpointDiagnosticCodes.CHECKPOINT_PAYLOAD_INVALID, e)
         }
     }
 }
@@ -592,7 +592,7 @@ internal object LinuxCheckpointOwner {
     fun requireMatchingUid(directoryUid: Any?, effectiveUid: Long?) {
         if (directoryUid !is Number || effectiveUid == null || effectiveUid < 0 ||
             directoryUid.toLong() != effectiveUid)
-            throw CheckpointUnconfirmed("CHECKPOINT_UNSAFE_DIRECTORY")
+            throw CheckpointUnconfirmed(CheckpointDiagnosticCodes.CHECKPOINT_UNSAFE_DIRECTORY)
     }
 }
 
@@ -617,11 +617,11 @@ object SessionCheckpointStore {
                                  effectiveUid: () -> Long?): Path {
         val dir = directory.toAbsolutePath().normalize()
         val root = try { workspace.toRealPath() }
-            catch (e: Exception) { throw CheckpointUnconfirmed("CHECKPOINT_WORKSPACE_INVALID", e) }
+            catch (e: Exception) { throw CheckpointUnconfirmed(CheckpointDiagnosticCodes.CHECKPOINT_WORKSPACE_INVALID, e) }
         try {
             if (!Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS) ||
                 dir.toRealPath() != dir || dir.startsWith(root) || root.startsWith(dir))
-                refuse("CHECKPOINT_UNSAFE_DIRECTORY")
+                refuse(CheckpointDiagnosticCodes.CHECKPOINT_UNSAFE_DIRECTORY)
             // Linux POSIX store: compare numeric owner with the effective UID,
             // never user.name or the real UID. Unknown identities fail closed.
             val attributes = Files.readAttributes(dir, PosixFileAttributes::class.java,
@@ -632,11 +632,11 @@ object SessionCheckpointStore {
                 Files.getAttribute(dir, "unix:uid", LinkOption.NOFOLLOW_LINKS),
                 effectiveUid())
             if (attributes.permissions() != ownerOnly)
-                refuse("CHECKPOINT_UNSAFE_DIRECTORY")
+                refuse(CheckpointDiagnosticCodes.CHECKPOINT_UNSAFE_DIRECTORY)
         } catch (e: CheckpointUnconfirmed) {
             throw e
         } catch (e: Exception) {
-            throw CheckpointUnconfirmed("CHECKPOINT_UNSAFE_DIRECTORY", e)
+            throw CheckpointUnconfirmed(CheckpointDiagnosticCodes.CHECKPOINT_UNSAFE_DIRECTORY, e)
         }
         return dir
     }
@@ -652,7 +652,7 @@ object SessionCheckpointStore {
         var lock: java.nio.channels.FileLock? = null
         var failure: Throwable? = null
         try {
-            if (Files.isSymbolicLink(lockPath)) refuse("CHECKPOINT_UNSAFE_LOCK")
+            if (Files.isSymbolicLink(lockPath)) refuse(CheckpointDiagnosticCodes.CHECKPOINT_UNSAFE_LOCK)
             owner = try {
                 if (create) FileChannel.open(lockPath, StandardOpenOption.CREATE,
                     StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)
@@ -671,15 +671,15 @@ object SessionCheckpointStore {
         } finally {
             try { lock?.release() } catch (e: Exception) {
                 if (failure != null) failure.addSuppressed(e)
-                else failure = CheckpointUnconfirmed("CHECKPOINT_LEASE_RELEASE_UNCONFIRMED", e)
+                else failure = CheckpointUnconfirmed(CheckpointDiagnosticCodes.CHECKPOINT_LEASE_RELEASE_UNCONFIRMED, e)
             }
             try { owner?.close() } catch (e: Exception) {
                 if (failure != null) failure.addSuppressed(e)
-                else failure = CheckpointUnconfirmed("CHECKPOINT_LEASE_RELEASE_UNCONFIRMED", e)
+                else failure = CheckpointUnconfirmed(CheckpointDiagnosticCodes.CHECKPOINT_LEASE_RELEASE_UNCONFIRMED, e)
             }
             heldLocks.remove(lockPath)
             if (failure is CheckpointUnconfirmed &&
-                (failure as CheckpointUnconfirmed).code == "CHECKPOINT_LEASE_RELEASE_UNCONFIRMED")
+                (failure as CheckpointUnconfirmed).code == CheckpointDiagnosticCodes.CHECKPOINT_LEASE_RELEASE_UNCONFIRMED)
                 throw failure
         }
     }
@@ -691,26 +691,26 @@ object SessionCheckpointStore {
         if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS))
             refuse("CHECKPOINT_UNSAFE_FILE")
         val maxSize = MAGIC.size + 4L + 32 + SessionCheckpointCodec.MAX_PAYLOAD
-        if (Files.size(file) > maxSize) refuse("CHECKPOINT_SIZE_INVALID")
+        if (Files.size(file) > maxSize) refuse(CheckpointDiagnosticCodes.CHECKPOINT_SIZE_INVALID)
         val data = FileChannel.open(file, StandardOpenOption.READ,
             LinkOption.NOFOLLOW_LINKS).use { channel ->
             val size = channel.size()
-            if (size > maxSize) refuse("CHECKPOINT_SIZE_INVALID")
-            if (size < MAGIC.size + 4 + 32) refuse("CHECKPOINT_TRUNCATED")
+            if (size > maxSize) refuse(CheckpointDiagnosticCodes.CHECKPOINT_SIZE_INVALID)
+            if (size < MAGIC.size + 4 + 32) refuse(CheckpointDiagnosticCodes.CHECKPOINT_TRUNCATED)
             val buffer = ByteBuffer.allocate(size.toInt())
             while (buffer.hasRemaining()) {
-                if (channel.read(buffer) <= 0) refuse("CHECKPOINT_TRUNCATED")
+                if (channel.read(buffer) <= 0) refuse(CheckpointDiagnosticCodes.CHECKPOINT_TRUNCATED)
             }
             buffer.flip()
             buffer
         }
         val header = ByteArray(MAGIC.size)
         data.get(header)
-        if (!header.contentEquals(MAGIC)) refuse("CHECKPOINT_VERSION_UNSUPPORTED")
+        if (!header.contentEquals(MAGIC)) refuse(CheckpointDiagnosticCodes.CHECKPOINT_VERSION_UNSUPPORTED)
         val length = data.int
         if (length !in 1..SessionCheckpointCodec.MAX_PAYLOAD ||
             data.remaining() != 32 + length)
-            refuse("CHECKPOINT_TRUNCATED")
+            refuse(CheckpointDiagnosticCodes.CHECKPOINT_TRUNCATED)
         val recordedDigest = ByteArray(32)
         data.get(recordedDigest)
         val payload = ByteArray(length)
@@ -776,11 +776,11 @@ object SessionCheckpointStore {
             when {
                 name == CHECKPOINT_LOCK_NAME -> {
                     if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS))
-                        refuse("CHECKPOINT_UNSAFE_LOCK")
+                        refuse(CheckpointDiagnosticCodes.CHECKPOINT_UNSAFE_LOCK)
                 }
                 name == RESUME_LOCK_NAME -> {
                     if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS))
-                        refuse("CHECKPOINT_UNSAFE_LOCK")
+                        refuse(CheckpointDiagnosticCodes.CHECKPOINT_UNSAFE_LOCK)
                 }
                 ResumeFenceStorage.NAME.matches(name) -> { /* Validated below. */ }
                 ResumeFenceStorage.TEMP.matches(name) -> { /* Unpublished fence temp. */ }
@@ -788,14 +788,14 @@ object SessionCheckpointStore {
                     // A killed preflight may leave a regular file/hard link.
                     // Read-only inspect ignores it; only admission deletes it.
                     if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS))
-                        refuse("CHECKPOINT_UNRECOGNIZED_ENTRY")
+                        refuse(CheckpointDiagnosticCodes.CHECKPOINT_UNRECOGNIZED_ENTRY)
                 }
                 NAMES.matches(name) -> snapshots.add(file)
                 TEMP_NAMES.matches(name) -> { /* Interrupted write; never a committed snapshot. */ }
-                else -> refuse("CHECKPOINT_UNRECOGNIZED_ENTRY")
+                else -> refuse(CheckpointDiagnosticCodes.CHECKPOINT_UNRECOGNIZED_ENTRY)
             }
         }
-        if (snapshots.size > MAX_GENERATIONS) refuse("CHECKPOINT_SIZE_INVALID")
+        if (snapshots.size > MAX_GENERATIONS) refuse(CheckpointDiagnosticCodes.CHECKPOINT_SIZE_INVALID)
         // Verify the complete fence chain first. Each pinned checkpoint
         // must name an actual committed issuing fence and an earlier
         // checkpoint from THIS verified chain, not self-authenticated
@@ -824,20 +824,20 @@ object SessionCheckpointStore {
                         (s.journalHeadSha256 != previous.snapshot.journalHeadSha256 ||
                             s.journalFileSha256 != previous.snapshot.journalFileSha256)) ||
                     !pinnedHeadTransition(previous, s))))
-                refuse("CHECKPOINT_CHAIN_MISMATCH")
+                refuse(CheckpointDiagnosticCodes.CHECKPOINT_CHAIN_MISMATCH)
             previous?.snapshot?.effectReconciliation?.let { transition ->
                 // A v3 -> ordinary successor is valid only AFTER generation
                 // N+1 commits a fence to the exact v3 checkpoint SHA.
                 val nextGeneration = transition.sourceFenceGeneration + 1L
                 if (latestFence == null || nextGeneration > latestFence.generation)
-                    refuse("CHECKPOINT_EFFECT_RECONCILIATION_FENCE_MISMATCH")
+                    refuse(CheckpointDiagnosticCodes.CHECKPOINT_EFFECT_RECONCILIATION_FENCE_MISMATCH)
                 val successor = try {
                     fencesByGeneration.getOrPut(nextGeneration) {
                         ResumeFenceStorage.atGeneration(directory, nextGeneration)
                     }
                 } catch (e: Exception) {
                     throw CheckpointUnconfirmed(
-                        "CHECKPOINT_EFFECT_RECONCILIATION_FENCE_MISMATCH", e)
+                        CheckpointDiagnosticCodes.CHECKPOINT_EFFECT_RECONCILIATION_FENCE_MISMATCH, e)
                 }
                 if (successor.checkpointSha256 != previous.sha256 ||
                     successor.generation != nextGeneration ||
@@ -847,11 +847,11 @@ object SessionCheckpointStore {
                     (s.effectJournalHead != null &&
                         s.effectJournalHead.fenceGeneration <=
                             transition.sourceFenceGeneration))
-                    refuse("CHECKPOINT_EFFECT_RECONCILIATION_FENCE_MISMATCH")
+                    refuse(CheckpointDiagnosticCodes.CHECKPOINT_EFFECT_RECONCILIATION_FENCE_MISMATCH)
             }
             s.effectReconciliation?.let { transition ->
                 if (transition.sourceCheckpointSha256 != previous?.sha256)
-                    refuse("CHECKPOINT_EFFECT_RECONCILIATION_SOURCE_MISMATCH")
+                    refuse(CheckpointDiagnosticCodes.CHECKPOINT_EFFECT_RECONCILIATION_SOURCE_MISMATCH)
                 val issuer = try {
                     fencesByGeneration.getOrPut(transition.sourceFenceGeneration) {
                         ResumeFenceStorage.atGeneration(directory,
@@ -859,7 +859,7 @@ object SessionCheckpointStore {
                     }
                 } catch (e: Exception) {
                     throw CheckpointUnconfirmed(
-                        "CHECKPOINT_EFFECT_RECONCILIATION_FENCE_MISMATCH", e)
+                        CheckpointDiagnosticCodes.CHECKPOINT_EFFECT_RECONCILIATION_FENCE_MISMATCH, e)
                 }
                 if (issuer.generation != transition.sourceFenceGeneration ||
                     issuer.sha256 != transition.sourceFenceSha256 ||
@@ -868,20 +868,20 @@ object SessionCheckpointStore {
                     issuer.policySha256 != s.binding.policySha256 ||
                     issuer.checkpointSha256 != transition.sourceHead.admittedCheckpointSha256 ||
                     issuer.toolAuthoritySha256 != transition.sourceHead.toolAuthoritySha256)
-                    refuse("CHECKPOINT_EFFECT_RECONCILIATION_FENCE_MISMATCH")
+                    refuse(CheckpointDiagnosticCodes.CHECKPOINT_EFFECT_RECONCILIATION_FENCE_MISMATCH)
             }
             s.effectJournalHead?.let { head ->
                 if (head.admittedCheckpointSha256 !in precedingCheckpointShas)
                     refuse("CHECKPOINT_EFFECT_HEAD_ADMISSION_MISMATCH")
                 if (latestFence == null ||
                     head.fenceGeneration > latestFence.generation)
-                    refuse("CHECKPOINT_EFFECT_HEAD_FENCE_MISMATCH")
+                    refuse(CheckpointDiagnosticCodes.CHECKPOINT_EFFECT_HEAD_FENCE_MISMATCH)
                 val issuer = try {
                     fencesByGeneration.getOrPut(head.fenceGeneration) {
                         ResumeFenceStorage.atGeneration(directory, head.fenceGeneration)
                     }
                 } catch (e: Exception) {
-                    throw CheckpointUnconfirmed("CHECKPOINT_EFFECT_HEAD_FENCE_MISMATCH", e)
+                    throw CheckpointUnconfirmed(CheckpointDiagnosticCodes.CHECKPOINT_EFFECT_HEAD_FENCE_MISMATCH, e)
                 }
                 if (issuer.generation != head.fenceGeneration ||
                     issuer.sessionId != head.sessionId ||
@@ -890,7 +890,7 @@ object SessionCheckpointStore {
                     issuer.policySha256 != s.binding.policySha256 ||
                     issuer.checkpointSha256 != head.admittedCheckpointSha256 ||
                     issuer.toolAuthoritySha256 != head.toolAuthoritySha256)
-                    refuse("CHECKPOINT_EFFECT_HEAD_FENCE_MISMATCH")
+                    refuse(CheckpointDiagnosticCodes.CHECKPOINT_EFFECT_HEAD_FENCE_MISMATCH)
             }
             result.add(current)
             precedingCheckpointShas.add(current.sha256)
@@ -911,7 +911,7 @@ object SessionCheckpointStore {
         // Historical heads may be older when a v3 reconciliation follows.
         result.lastOrNull()?.snapshot?.effectJournalHead?.let { head ->
             if (head.fenceGeneration != latestFence?.generation)
-                refuse("CHECKPOINT_EFFECT_HEAD_FENCE_MISMATCH")
+                refuse(CheckpointDiagnosticCodes.CHECKPOINT_EFFECT_HEAD_FENCE_MISMATCH)
         }
         // readOne() cannot decide whether v3 needs operator reconciliation:
         // that is a property of the independently committed fence history.
@@ -927,14 +927,14 @@ object SessionCheckpointStore {
                     }
                 } catch (e: Exception) {
                     throw CheckpointUnconfirmed(
-                        "CHECKPOINT_EFFECT_RECONCILIATION_FENCE_MISMATCH", e)
+                        CheckpointDiagnosticCodes.CHECKPOINT_EFFECT_RECONCILIATION_FENCE_MISMATCH, e)
                 }
                 if (committed.generation != generation ||
                     committed.checkpointSha256 != tail.sha256 ||
                     committed.sessionId != tail.snapshot.sessionId ||
                     committed.traceId != tail.snapshot.traceId ||
                     committed.policySha256 != tail.snapshot.binding.policySha256)
-                    refuse("CHECKPOINT_EFFECT_RECONCILIATION_FENCE_MISMATCH")
+                    refuse(CheckpointDiagnosticCodes.CHECKPOINT_EFFECT_RECONCILIATION_FENCE_MISMATCH)
                 result[result.lastIndex] = tail.copy(
                     reconciliationRequired =
                         tail.snapshot.hostAssertedUsage.any {
@@ -1028,7 +1028,7 @@ object SessionCheckpointStore {
         } catch (e: Exception) {
             // A corrupted or unexpected journal envelope is a typed refusal, never a
             // leaked NPE, ClassCastException or IllegalArgumentException.
-            throw CheckpointUnconfirmed("CHECKPOINT_JOURNAL_UNCONFIRMED", e)
+            throw CheckpointUnconfirmed(CheckpointDiagnosticCodes.CHECKPOINT_JOURNAL_UNCONFIRMED, e)
         }
     }
 
@@ -1043,7 +1043,7 @@ object SessionCheckpointStore {
         val file = path.toAbsolutePath().normalize()
         return try { DurableSessionEventLedger.inspect(file) }
             catch (e: SessionLedgerUnconfirmed) {
-                throw CheckpointUnconfirmed("CHECKPOINT_JOURNAL_UNCONFIRMED", e)
+                throw CheckpointUnconfirmed(CheckpointDiagnosticCodes.CHECKPOINT_JOURNAL_UNCONFIRMED, e)
             }
     }
 
@@ -1110,7 +1110,7 @@ object SessionCheckpointStore {
             }
         } catch (e: SessionLedgerUnconfirmed) {
             val code = if (e.code == DurableSessionEventLedger.LIVE_CHECKPOINT_SIZE_EXCEEDED_CODE)
-                "CHECKPOINT_LIVE_LEDGER_TOO_LARGE" else "CHECKPOINT_JOURNAL_UNCONFIRMED"
+                CheckpointDiagnosticCodes.CHECKPOINT_LIVE_LEDGER_TOO_LARGE else CheckpointDiagnosticCodes.CHECKPOINT_JOURNAL_UNCONFIRMED
             throw CheckpointUnconfirmed(code, e)
         }
 
@@ -1331,11 +1331,11 @@ object SessionCheckpointStore {
             } catch (e: SessionLedgerUnconfirmed) {
                 val code = when (e.code) {
                     DurableSessionEventLedger.LIVE_CHECKPOINT_SIZE_EXCEEDED_CODE ->
-                        "CHECKPOINT_LIVE_LEDGER_TOO_LARGE"
+                        CheckpointDiagnosticCodes.CHECKPOINT_LIVE_LEDGER_TOO_LARGE
                     "LEDGER_NOT_FENCED" -> "CHECKPOINT_WRITER_NOT_FENCED"
                     "LEDGER_REOPEN_CHECKPOINT_UNCONFIRMED" ->
-                        "CHECKPOINT_WRITE_UNCONFIRMED"
-                    else -> "CHECKPOINT_JOURNAL_UNCONFIRMED"
+                        CheckpointDiagnosticCodes.CHECKPOINT_WRITE_UNCONFIRMED
+                    else -> CheckpointDiagnosticCodes.CHECKPOINT_JOURNAL_UNCONFIRMED
                 }
                 throw CheckpointUnconfirmed(code, e)
             }
@@ -1364,7 +1364,7 @@ object SessionCheckpointStore {
             // v3 is a one-shot operator-only boundary. A normal save may
             // follow it, but cannot mint or copy an operator seal.
             if (snapshot.effectReconciliation != null)
-                refuse("CHECKPOINT_EFFECT_RECONCILIATION_UNVERIFIED")
+                refuse(CheckpointDiagnosticCodes.CHECKPOINT_EFFECT_RECONCILIATION_UNVERIFIED)
             previous?.snapshot?.effectReconciliation?.let { transition ->
                 // The invariant concerns the first fence after v3, not the
                 // latest fence: a later N+2 lease may be the first to save.
@@ -1373,22 +1373,22 @@ object SessionCheckpointStore {
                     ResumeFenceStorage.atGeneration(dir, generation)
                 } catch (e: Exception) {
                     throw CheckpointUnconfirmed(
-                        "CHECKPOINT_EFFECT_RECONCILIATION_FENCE_MISMATCH", e)
+                        CheckpointDiagnosticCodes.CHECKPOINT_EFFECT_RECONCILIATION_FENCE_MISMATCH, e)
                 }
                 if (successor.generation != generation ||
                     successor.checkpointSha256 != previous.sha256)
-                    refuse("CHECKPOINT_EFFECT_RECONCILIATION_FENCE_MISMATCH")
+                    refuse(CheckpointDiagnosticCodes.CHECKPOINT_EFFECT_RECONCILIATION_FENCE_MISMATCH)
             }
             if (!pinnedHeadTransition(previous, snapshot))
                 refuse("CHECKPOINT_EFFECT_HEAD_ROLLBACK")
             if (expectedPreviousSha256 != previous?.sha256 ||
                 snapshot.sequence != (previous?.snapshot?.sequence ?: 0L) + 1L ||
                 snapshot.previousSha256 != previous?.sha256)
-                refuse("CHECKPOINT_STALE_GENERATION")
+                refuse(CheckpointDiagnosticCodes.CHECKPOINT_STALE_GENERATION)
             val ledger = try { ledgerEvidence() }
             catch (e: SessionResumeUnconfirmed) {
                 if (fence == null)
-                    throw CheckpointUnconfirmed("CHECKPOINT_RESUME_ANCHOR_UNCONFIRMED", e)
+                    throw CheckpointUnconfirmed(CheckpointDiagnosticCodes.CHECKPOINT_RESUME_ANCHOR_UNCONFIRMED, e)
                 throw e
             }
             // RUNNING is a one-way execution-denied marker, not a normal
@@ -1398,7 +1398,7 @@ object SessionCheckpointStore {
             // Source and destination must both remain effect-free.
             if (fence != null && snapshot.phase == SessionPhaseVocabulary.runningWire) {
                 val source = previous?.snapshot
-                    ?: refuse("CHECKPOINT_RUNNING_BOUNDARY_CHANGED")
+                    ?: refuse(CheckpointDiagnosticCodes.CHECKPOINT_RUNNING_BOUNDARY_CHANGED)
                 if (source.phase != SessionPhaseVocabulary.acceptedWire ||
                     !PreExecutionSnapshotPolicy.safe(source) ||
                     source.effectJournalHead != null ||
@@ -1412,7 +1412,7 @@ object SessionCheckpointStore {
                         journalFileSha256 = ledger.fileSha256,
                         lastTrustedJournalOffset = ledger.lastTrustedOffset
                     ))
-                    refuse("CHECKPOINT_RUNNING_BOUNDARY_CHANGED")
+                    refuse(CheckpointDiagnosticCodes.CHECKPOINT_RUNNING_BOUNDARY_CHANGED)
             }
             if (requireCoveredPreExecutionPrefix) {
                 // Both fenced checkpoint APIs must use the exact same
@@ -1425,12 +1425,12 @@ object SessionCheckpointStore {
                 // were fsynced. Path-only saves may not bless a valid-looking
                 // but uncheckpointed tail after a crash or failed close.
                 val covered = previous?.snapshot
-                    ?: refuse("CHECKPOINT_FENCED_LEDGER_ADVANCED")
+                    ?: refuse(CheckpointDiagnosticCodes.CHECKPOINT_FENCED_LEDGER_ADVANCED)
                 if (covered.journalSequence != ledger.lastSequence ||
                     covered.journalHeadSha256 != ledger.headSha256 ||
                     covered.journalFileSha256 != ledger.fileSha256 ||
                     covered.lastTrustedJournalOffset != ledger.lastTrustedOffset)
-                    refuse("CHECKPOINT_FENCED_LEDGER_ADVANCED")
+                    refuse(CheckpointDiagnosticCodes.CHECKPOINT_FENCED_LEDGER_ADVANCED)
             }
             SessionCheckpointCodec.validate(snapshot)
             verify(snapshot, context, ledger)
@@ -1440,7 +1440,7 @@ object SessionCheckpointStore {
                     snapshot.traceId != previous.snapshot.traceId ||
                     snapshot.journalSequence < previous.snapshot.journalSequence ||
                     snapshot.lastTrustedJournalOffset < previous.snapshot.lastTrustedJournalOffset))
-                refuse("CHECKPOINT_CHAIN_MISMATCH")
+                refuse(CheckpointDiagnosticCodes.CHECKPOINT_CHAIN_MISMATCH)
             publishGeneration(dir, snapshot, afterPhase, onPublicationStarted)
         }
     }
@@ -1460,7 +1460,7 @@ object SessionCheckpointStore {
                 .put(MAGIC).putInt(payload.size).put(digest).put(payload).array()
             val destination = dir.resolve(checkpointName(snapshot.sequence))
             if (Files.exists(destination, LinkOption.NOFOLLOW_LINKS))
-                refuse("CHECKPOINT_STALE_GENERATION")
+                refuse(CheckpointDiagnosticCodes.CHECKPOINT_STALE_GENERATION)
             val temporary = dir.resolve(".pending-" + UUID.randomUUID().toString() + ".tmp")
             var writeFailure: Throwable? = null
             try {
@@ -1471,13 +1471,13 @@ object SessionCheckpointStore {
                     onPublicationStarted()
                     val bytes = ByteBuffer.wrap(frame)
                     while (bytes.hasRemaining()) {
-                        if (channel.write(bytes) <= 0) refuse("CHECKPOINT_WRITE_UNCONFIRMED")
+                        if (channel.write(bytes) <= 0) refuse(CheckpointDiagnosticCodes.CHECKPOINT_WRITE_UNCONFIRMED)
                     }
                     channel.force(true)
                 }
                 afterPhase("temp-synced")
                 if (Files.exists(destination, LinkOption.NOFOLLOW_LINKS))
-                    refuse("CHECKPOINT_STALE_GENERATION")
+                    refuse(CheckpointDiagnosticCodes.CHECKPOINT_STALE_GENERATION)
                 Files.move(temporary, destination, StandardCopyOption.ATOMIC_MOVE)
                 afterPhase("renamed")
                 // Fault-injection boundary: opening the directory succeeded,
@@ -1489,7 +1489,7 @@ object SessionCheckpointStore {
                 }
             } catch (e: Exception) {
                 val mapped = if (e is CheckpointUnconfirmed) e
-                    else CheckpointUnconfirmed("CHECKPOINT_WRITE_UNCONFIRMED", e)
+                    else CheckpointUnconfirmed(CheckpointDiagnosticCodes.CHECKPOINT_WRITE_UNCONFIRMED, e)
                 writeFailure = mapped
                 throw mapped
             } finally {
@@ -1504,7 +1504,7 @@ object SessionCheckpointStore {
             }
             val readback = readOne(destination)
             if (readback.snapshot != snapshot)
-                refuse("CHECKPOINT_WRITE_UNCONFIRMED")
+                refuse(CheckpointDiagnosticCodes.CHECKPOINT_WRITE_UNCONFIRMED)
             return readback
     }
 
@@ -1533,13 +1533,13 @@ object SessionCheckpointStore {
                 hostKey.size < 32)
                 throw SessionResumeUnconfirmed("RESUME_EFFECT_RECONCILIATION_DENIED")
             val all = readAll(dir)
-            val latest = all.lastOrNull() ?: refuse("CHECKPOINT_MISSING")
+            val latest = all.lastOrNull() ?: refuse(CheckpointDiagnosticCodes.CHECKPOINT_MISSING)
             val pending = latest.snapshot.effectReconciliation
             if (pending != null && latest.snapshot.effectJournalHead != null)
                 throw SessionResumeUnconfirmed("RESUME_EFFECT_RECONCILIATION_ALREADY_ADVANCED")
             val source = if (pending == null) latest
                 else all.getOrNull(all.lastIndex - 1)
-                    ?: refuse("CHECKPOINT_EFFECT_RECONCILIATION_SOURCE_MISMATCH")
+                    ?: refuse(CheckpointDiagnosticCodes.CHECKPOINT_EFFECT_RECONCILIATION_SOURCE_MISMATCH)
             val head = source.snapshot.effectJournalHead
                 ?: throw SessionResumeUnconfirmed("RESUME_EFFECT_RECONCILIATION_NO_PIN")
             val fence = ResumeFenceStorage.latest(dir)
@@ -1605,7 +1605,7 @@ object SessionCheckpointStore {
                 latest
             } else {
                 if (all.size >= MAX_GENERATIONS)
-                    refuse("CHECKPOINT_SIZE_INVALID")
+                    refuse(CheckpointDiagnosticCodes.CHECKPOINT_SIZE_INVALID)
                 val proposed = source.snapshot.copy(
                     sequence = source.snapshot.sequence + 1L,
                     previousSha256 = source.sha256,
@@ -1613,13 +1613,13 @@ object SessionCheckpointStore {
                     effectReconciliation = signed)
                 SessionCheckpointCodec.validate(proposed)
                 if (!pinnedHeadTransition(source, proposed))
-                    refuse("CHECKPOINT_EFFECT_RECONCILIATION_UNVERIFIED")
+                    refuse(CheckpointDiagnosticCodes.CHECKPOINT_EFFECT_RECONCILIATION_UNVERIFIED)
                 verify(proposed, context, ledger)
                 val published = publishGeneration(dir, proposed)
                 // Recheck the full chain under the same lock BEFORE a new fence
                 // may refer to this transition checkpoint.
                 val rebound = readAll(dir).lastOrNull()
-                    ?: refuse("CHECKPOINT_MISSING")
+                    ?: refuse(CheckpointDiagnosticCodes.CHECKPOINT_MISSING)
                 if (rebound.sha256 != published.sha256 ||
                     rebound.snapshot != published.snapshot)
                     refuse("CHECKPOINT_EFFECT_RECONCILIATION_UNCONFIRMED")
@@ -1647,7 +1647,7 @@ object SessionCheckpointStore {
         // requirement, before taking checkpoint.lock or verifying mutable state.
         ResumeLocalFileStorePolicy.requireSupportedPaths(dir, ledgerPath, fileStoreType)
         return withLease(dir, create = false) {
-            val latest = readAll(dir).lastOrNull() ?: refuse("CHECKPOINT_MISSING")
+            val latest = readAll(dir).lastOrNull() ?: refuse(CheckpointDiagnosticCodes.CHECKPOINT_MISSING)
             val ledger = inspectLedger(ledgerPath, context.workspaceRoot)
             verify(latest.snapshot, context, ledger)
             block(dir, latest, ledger)
@@ -1678,7 +1678,7 @@ object SessionCheckpointStore {
         val checked = checkedDirectory(directory, context.workspaceRoot,
             LinuxCheckpointOwner::effectiveUid)
         return withLease(checked, create = false) {
-            val current = readAll(checked).lastOrNull() ?: refuse("CHECKPOINT_MISSING")
+            val current = readAll(checked).lastOrNull() ?: refuse(CheckpointDiagnosticCodes.CHECKPOINT_MISSING)
             if (current.sha256 != admittedSha256 ||
                 current.snapshot.binding != context.binding() ||
                 current.reconciliationRequired)
@@ -1705,11 +1705,11 @@ object SessionCheckpointStore {
                 ledgerPath: Path, effectiveUid: () -> Long?): VerifiedSessionCheckpoint {
         val dir = checkedDirectory(directory, context.workspaceRoot, effectiveUid)
         return withLease(dir, create = false) {
-            val latest = readAll(dir).lastOrNull() ?: refuse("CHECKPOINT_MISSING")
+            val latest = readAll(dir).lastOrNull() ?: refuse(CheckpointDiagnosticCodes.CHECKPOINT_MISSING)
             verify(latest.snapshot, context, inspectLedger(ledgerPath, context.workspaceRoot))
             try { ResumeFenceAnchor.verify(ledgerPath, ResumeFenceStorage.latest(dir), dir) }
             catch (e: SessionResumeUnconfirmed) {
-                throw CheckpointUnconfirmed("CHECKPOINT_RESUME_ANCHOR_UNCONFIRMED", e)
+                throw CheckpointUnconfirmed(CheckpointDiagnosticCodes.CHECKPOINT_RESUME_ANCHOR_UNCONFIRMED, e)
             }
             latest
         }
