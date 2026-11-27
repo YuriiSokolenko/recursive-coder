@@ -204,13 +204,16 @@ class RuntimeTrustedCreatedAcceptedHandoffIntegrationTest : SessionCheckpointTes
     private enum class SourceFault { NONE, MISSING_LEDGER, UNSAFE_PERMISSIONS, SYMLINK }
 
     @Test fun trustedResumeMissingLedgerIsRedactedBeforeVolumeLookup() =
-        trustedResumeFilesystemBoundary(false, false, sourceFault = SourceFault.MISSING_LEDGER)
+        trustedResumeFilesystemBoundary(checkpointFails = false, ledgerFails = false,
+            sourceFault = SourceFault.MISSING_LEDGER)
 
     @Test fun trustedResumeUnsafeDirectoryPermissionsAreRedactedBeforeVolumeLookup() =
-        trustedResumeFilesystemBoundary(false, false, sourceFault = SourceFault.UNSAFE_PERMISSIONS)
+        trustedResumeFilesystemBoundary(checkpointFails = false, ledgerFails = false,
+            sourceFault = SourceFault.UNSAFE_PERMISSIONS)
 
     @Test fun trustedResumeSymlinkDirectoryIsRedactedBeforeVolumeLookup() =
-        trustedResumeFilesystemBoundary(false, false, sourceFault = SourceFault.SYMLINK)
+        trustedResumeFilesystemBoundary(checkpointFails = false, ledgerFails = false,
+            sourceFault = SourceFault.SYMLINK)
 
     @OptIn(ResumeOperatorOnlyApi::class, LedgerTestFaultInjection::class)
     private fun trustedResumeFilesystemBoundary(
@@ -313,6 +316,32 @@ class RuntimeTrustedCreatedAcceptedHandoffIntegrationTest : SessionCheckpointTes
                     it is FileSystemException && it.file == privateLedger
                 })
             assertEquals(before, sourceInventory())
+        }
+
+        if (sourceFault != SourceFault.NONE) {
+            // Prove which internal refusal occurred, independently of the
+            // runtime's deliberately collapsed protocol denial.
+            val sourceProbeCalls = mutableListOf<Path>()
+            fun checkSource() {
+                SessionResumeAdmission.checkFilesystemBeforeLease(
+                    sourceDirectory, hostContext, sourceLedger) { path ->
+                    sourceProbeCalls.add(path)
+                    lookup(path)
+                }
+            }
+            when (sourceFault) {
+                SourceFault.MISSING_LEDGER ->
+                    assertEquals("RESUME_LEDGER_IDENTITY_UNCONFIRMED",
+                        assertFailsWith<SessionResumeUnconfirmed> { checkSource() }.code)
+                SourceFault.UNSAFE_PERMISSIONS, SourceFault.SYMLINK ->
+                    assertEquals("CHECKPOINT_UNSAFE_DIRECTORY",
+                        assertFailsWith<CheckpointUnconfirmed> { checkSource() }.code)
+                SourceFault.NONE -> error("Expected source fault")
+            }
+            assertTrue(sourceProbeCalls.isEmpty())
+            assertEquals(before, sourceInventory())
+            assertFalse(Files.exists(sourceDirectory.resolve("resume.lock")))
+            assertFalse(Files.exists(realDirectory.resolve("resume.lock")))
         }
 
         val paths = mutableListOf<Path>()
