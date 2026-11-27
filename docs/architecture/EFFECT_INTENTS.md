@@ -305,144 +305,132 @@ Host-key authorization and register-write authorization must be isolated.
 
 ### Independent authority deployment (#241)
 
-The standalone adapter uses a dedicated, separately
-administered Linux authority host. A trusted host client invokes a
-fixed SSH forced command; no agent UID, workspace process, journal
-HMAC key, local backup or local snapshot administrator may administer
-that host, access its history HMAC key or replace its provisioned
-register. The service is first-party and self-hostable. No cloud
-provider or GitHub API is a runtime dependency.
+The standalone adapter uses a dedicated, separately administered Linux
+authority host. A trusted host client invokes a fixed SSH forced command; no
+agent UID, workspace process, journal HMAC key, local backup or local snapshot
+administrator may administer that host, access its history HMAC key or replace
+its provisioned register. The service is first-party and self-hostable. No
+cloud provider or GitHub API is a runtime dependency.
 
-The authority operator must provision a unique host/session/register/
-epoch tuple exactly once, retain an independent inventory of issued
-identities, and create two append-only histories on persistent storage
-outside the local rollback domain. Provisioning is an offline
-administrative operation, not a request endpoint. The never-initialized
-sentinel must exist in both histories before bootstrap; absence is
-never interpreted as permission to create a new register. The operator
-must never restore an older authority snapshot, recreate a register,
-rotate an epoch, remove append-only protection or reuse credentials
-after loss. A lost or inconsistent history is quarantined, not repaired
-by copying whichever replica is longer. Stop all publication and retain
-both logs, the marker, inventory and invocation diagnostics under the
-operator's control. For unavailability, restore connectivity only to
-the same independently authenticated service and keep uncertain
-invocations quarantined. Do not reinitialize or resume from readback.
-For suspected compromise, revoke the SSH principal and transport
-credentials; do not delete or rewrite history. A reviewed rotation
-procedure must preserve the same identity, immutable history and
-authenticated latestness. History-key rotation and release from
-quarantine are unsupported until the separately reviewed protocol in
-#248 exists.
-Administrative restore of an older authority snapshot is prohibited;
-if independently authenticated latestness cannot be proven, retire
-the register without replacement or epoch rotation.
+The authority operator must provision a unique host/session/register/ epoch
+tuple exactly once, retain an independent inventory of issued identities, and
+create two append-only histories on persistent storage outside the local
+rollback domain. Provisioning is an offline administrative operation, not a
+request endpoint. The never-initialized sentinel must exist in both histories
+before bootstrap; absence is never interpreted as permission to create a new
+register. The operator must never restore an older authority snapshot,
+recreate a register, rotate an epoch, remove append-only protection or reuse
+credentials after loss. A lost or inconsistent history is quarantined, not
+repaired by copying whichever replica is longer. Stop all publication and
+retain both logs, the marker, inventory and invocation diagnostics under the
+operator's control. For unavailability, restore connectivity only to the same
+independently authenticated service and keep uncertain invocations
+quarantined. Do not reinitialize or resume from readback. For suspected
+compromise, revoke the SSH principal and transport credentials; do not delete
+or rewrite history. A reviewed rotation procedure must preserve the same
+identity, immutable history and authenticated latestness. History-key rotation
+and release from quarantine are unsupported until the separately reviewed
+protocol in #248 exists. Administrative restore of an older authority snapshot
+is prohibited; if independently authenticated latestness cannot be proven,
+retire the register without replacement or epoch rotation.
 
 The implemented durability boundary is an exclusive interprocess lock,
-complete-history validation, exact CAS, append and force of both
-pre-existing logs before responding. A crash between the two forces
-may leave unequal logs; availability is sacrificed rather than
-guessing the committed state. Both logs are within the authority
-domain; duplication detects one-sided corruption or truncation, not
-coherent rollback of the authority itself. The authority operator
-and kernel/storage stack are trusted to enforce append-only retention,
-honor fsync and keep backups from rolling back the authoritative logs.
-A malicious authority administrator, compromised authority history
-HMAC key, coherent restore of both logs and their provisioning
-inventory, or dishonest storage durability are outside this model.
-Those events cannot be detected solely from the surviving bytes.
-The `coherentAuthorityDomainRollbackIsOutsideThreatModel` regression
-demonstrates that privileged truncation of both logs to a valid prefix
-is undetectable when append-only enforcement is deliberately disabled.
+complete-history validation, exact CAS, append and force of both pre-existing
+logs before responding. A crash between the two forces may leave unequal logs;
+availability is sacrificed rather than guessing the committed state. Both logs
+are within the authority domain; duplication detects one-sided corruption or
+truncation, not coherent rollback of the authority itself. The authority
+operator and kernel/storage stack are trusted to enforce append-only
+retention, honor fsync and keep backups from rolling back the authoritative
+logs. A malicious authority administrator, compromised authority history HMAC
+key, coherent restore of both logs and their provisioning inventory, or
+dishonest storage durability are outside this model. Those events cannot be
+detected solely from the surviving bytes. The
+`coherentAuthorityDomainRollbackIsOutsideThreatModel` regression demonstrates
+that privileged truncation of both logs to a valid prefix is undetectable when
+append-only enforcement is deliberately disabled.
 
-The `SshEffectAntiRollbackAuthority` client invokes a fixed, pinned
-OpenSSH forced command once per request. It authenticates canonical
-request and response envelopes with a dedicated 32-byte HMAC key,
-domain-separated from a distinct authority-only history HMAC key.
-The request contains a cryptographically random nonce, exact register,
-verb and canonical predecessor/proposal. The response includes the
-SHA-256 of the complete authenticated request and, for success, the
-exact proposed root digest. Reads return the complete authenticated
-history, revalidated by the client. No raw paths, secrets or exception
-payloads are returned. Transport failure, timeout or interruption
-returns an unconfirmed publication; no automatic retry or readback
-promotion is implemented. The host must quarantine the invocation even
-if a subsequent read finds the exact proposed root.
+The `SshEffectAntiRollbackAuthority` client invokes a fixed, pinned OpenSSH
+forced command once per request. It authenticates canonical request and
+response envelopes with a dedicated 32-byte HMAC key, domain-separated from a
+distinct authority-only history HMAC key. The request contains a
+cryptographically random nonce, exact register, verb and canonical
+predecessor/proposal. The response includes the SHA-256 of the complete
+authenticated request and, for success, the exact proposed root digest. Reads
+return the complete authenticated history, revalidated by the client. No raw
+paths, secrets or exception payloads are returned. Transport failure, timeout
+or interruption returns an unconfirmed publication; no automatic retry or
+readback promotion is implemented. The host must quarantine the invocation
+even if a subsequent read finds the exact proposed root.
 
-The operator deploys the JVM runtime and its dependencies on the
-authority host and configures a dedicated restricted SSH principal
-with a fixed `EffectAuthorityHostCommand` invocation. Disable shells,
-PTY, forwarding, alternate commands and other login methods for this
-principal; keep its authorized-keys configuration, JVM classpath,
-directories and server history key under independent administration.
-The client must pin the actual SSH host key, protect its private SSH
-key and transport key separately from the journal key and agent UID,
-and explicitly approve the independent deployment when connecting.
-There is no default endpoint, discovery, auto-provision or CLI wiring.
-The command and client are co-packaged in `:infra:journal` to reuse the
-existing host-only storage adapter boundary without adding a tenth
-product module or changing the dependency graph. The operator deploys
-the independently verified journal JAR and its runtime dependency
-closure on the separate host, not the agent CLI or its composition
-root. Co-packaging does not grant the agent access to remote keys or
-administration; no runtime registers or invokes the command. The
-authority host must use its own reviewed artifact installation.
+The operator deploys the JVM runtime and its dependencies on the authority
+host and configures a dedicated restricted SSH principal with a fixed
+`EffectAuthorityHostCommand` invocation. Disable shells, PTY, forwarding,
+alternate commands and other login methods for this principal; keep its
+authorized-keys configuration, JVM classpath, directories and server history
+key under independent administration. The client must pin the actual SSH host
+key, protect its private SSH key and transport key separately from the journal
+key and agent UID, and explicitly approve the independent deployment when
+connecting. There is no default endpoint, discovery, auto-provision or CLI
+wiring. The command and client are co-packaged in `:infra:journal` to reuse
+the existing host-only storage adapter boundary without adding a tenth product
+module or changing the dependency graph. The operator deploys the
+independently verified journal JAR and its runtime dependency closure on the
+separate host, not the agent CLI or its composition root. Co-packaging does
+not grant the agent access to remote keys or administration; no runtime
+registers or invokes the command. The authority host must use its own reviewed
+artifact installation.
 
-The command arguments, fixed by the operator rather than the client,
-are the mode, primary log path, mirror log path, lock/marker path,
-transport-key file, history-key file, host ID, session ID, register ID
-and epoch. Generate distinct random 32-byte binary keys out of band.
-After checking the independent identity inventory, run the offline
-`provision-never-initialized` mode once, in protected pre-existing
-directories. The command creates and forces the marker and both
-headers authenticated with the history HMAC key, plus a dedicated
-mutex file derived by adding `.mutex` to the marker path. All four
-use exclusive creation; the parent directories are forced. Partial
-provisioning is quarantined, never retried.
-Set Linux append-only attributes (`chattr +a`) on the marker and both
-logs,
-with permissions for the dedicated service principal to read and
-append but not administer attributes or directories. The mutex file
-must allow the service to acquire an exclusive lock, with no ability
-to replace it or its parent directory. The forced command uses only
-`serve-independent`; never expose provisioning over SSH. The service checks four regular, distinct, non-symlink files and
-the three required append-only attributes on every invocation. The
-operator must ensure the files reside on a local Linux filesystem supporting these
-attributes, interprocess locks and honest file/directory fsync, with
-persistent media and protected parent directories. The process does
-not attest those deployment assumptions or physical hardware.
+The command arguments, fixed by the operator rather than the client, are the
+mode, primary log path, mirror log path, lock/marker path, transport-key file,
+history-key file, host ID, session ID, register ID and epoch. Generate
+distinct random 32-byte binary keys out of band. After checking the
+independent identity inventory, run the offline `provision-never-initialized`
+mode once, in protected pre-existing directories. The command creates and
+forces the marker and both headers authenticated with the history HMAC key,
+plus a dedicated mutex file derived by adding `.mutex` to the marker path. All
+four use exclusive creation; the parent directories are forced. Partial
+provisioning is quarantined, never retried. Set Linux append-only attributes
+(`chattr +a`) on the marker and both logs, with permissions for the dedicated
+service principal to read and append but not administer attributes or
+directories. The mutex file must allow the service to acquire an exclusive
+lock, with no ability to replace it or its parent directory. The forced
+command uses only `serve-independent`; never expose provisioning over SSH. The
+service checks four regular, distinct, non-symlink files and the three
+required append-only attributes on every invocation. The operator must ensure
+the files reside on a local Linux filesystem supporting these attributes,
+interprocess locks and honest file/directory fsync, with persistent media and
+protected parent directories. The process does not attest those deployment
+assumptions or physical hardware.
 
-Under the exclusive dedicated mutex-file lock, the service compares
-both bounded logs byte-for-byte, verifies the HMAC-authenticated
-provisioning marker, headers and every canonical root, and validates
-the complete history. The mutex is never opened a second time inside
-its lock, because closing another descriptor for a POSIX-locked inode
-can release the process's lock. It forces the equal histories before
-authenticated read or comparison, then appends and forces each copy
-before acknowledging a successful transition. An absent provisioning marker or a verified
-zero-root history returns missing/reset on read. Divergent, unprotected,
-oversized or missing history files return unavailable; malformed or
-MAC-invalid equal histories return unauthenticated. Neither copy is
-selected for repair. Key files must be regular, owner-only, owned by
-the service user and opened without following the final symlink.
-The operator protects the parent directories against rename or
-replacement; the JVM does not attest the filesystem administrator.
-The finite 16 MiB log limit is fail closed; there is no pruning or
-rollover.
-A later authenticated read, including after process death before the
-second force, is not the lost invocation's acknowledgement.
+Under the exclusive dedicated mutex-file lock, the service compares both
+bounded logs byte-for-byte, verifies the HMAC-authenticated provisioning
+marker, headers and every canonical root, and validates the complete history.
+The mutex is never opened a second time inside its lock, because closing
+another descriptor for a POSIX-locked inode can release the process's lock. It
+forces the equal histories before authenticated read or comparison, then
+appends and forces each copy before acknowledging a successful transition. An
+absent provisioning marker or a verified zero-root history returns
+missing/reset on read. Divergent, unprotected, oversized or missing history
+files return unavailable; malformed or MAC-invalid equal histories return
+unauthenticated. Neither copy is selected for repair. Key files must be
+regular, owner-only, owned by the service user and opened without following
+the final symlink. The operator protects the parent directories against rename
+or replacement; the JVM does not attest the filesystem administrator. The
+finite 16 MiB log limit is fail closed; there is no pruning or rollover. A
+later authenticated read, including after process death before the second
+force, is not the lost invocation's acknowledgement.
 
-Offline conformance uses the same client exchange, wire codec, host
-handler, file locks and fsync path in independent JVM processes. It
-does not require SSH, privileged append-only attributes or a remote
-host in CI; the fixture invokes the real command parser and key loader
-with an internal fault seam that relaxes the attribute prerequisite.
-The production attribute guard has a negative test and the flag
-parser has positive, negative and malformed-output fixtures. This is not
-evidence of a physically independent or power-loss-tested deployment.
-Until the operator establishes and independently verifies those
-prerequisites, the adapter is not approved for live use. Physical
-checkpoint/fence/sidecar authentication and live Started publication
+Offline conformance uses the same client exchange, wire codec, host handler,
+file locks and fsync path in independent JVM processes. It does not require
+SSH, privileged append-only attributes or a remote host in CI; the fixture
+invokes the real command parser and key loader with an internal fault seam
+that relaxes the attribute prerequisite. The production attribute guard has a
+negative test and the flag parser has positive, negative and malformed-output
+fixtures. This is not evidence of a physically independent or
+power-loss-tested deployment. Until the operator establishes and independently
+verifies those prerequisites, the adapter is not approved for live use.
+Physical checkpoint/fence/sidecar authentication and live Started publication
 remain separate integration gates; no effect execution is enabled.
 
 ### Standalone authority contract (#239)
