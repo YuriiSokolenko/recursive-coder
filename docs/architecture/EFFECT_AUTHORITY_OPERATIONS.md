@@ -5,8 +5,10 @@ The standalone v1 adapter from #241 implements a single history HMAC key,
 a single transport HMAC key per invocation and a fixed SSH forced command.
 The tests accompanying this document exercise transport-key replacement
 against the real host parser and persistence path in local JVM processes.
-They do not implement the administrative protocol, independent witness,
-history-key rotation, actual SSH revocation or quarantine release.
+A separate qualification-only signed witness ledger and history-segment
+continuity verifier are implemented in :infra:journal. They are not wired
+to the v1 service. They do not implement remote witness deployment,
+actual SSH revocation or quarantine release.
 No runtime effect execution, live recovery or Started publication is enabled.
 
 ## Trust and continuity prerequisites
@@ -175,6 +177,37 @@ same service only when the complete continuity requirements hold. There is
 no implemented quarantine release API and no authorization to reclassify
 effects or resume execution.
 
+## Implemented qualification witness and segment verifier
+
+`AuthorityOperationsWitness` is an internal, standalone operator component.
+It stores canonical Ed25519-signed records in an existing independently
+administered append-only log, serializes exact witness-digest CAS with a
+dedicated mutex, validates the full signed chain and forces each append.
+The production-default attribute guard rejects unprotected witness logs;
+the offline fixture relaxes it. Enrollment requires a never-initialized
+marker and empty history. The operator must independently prevent
+re-enrollment and rollback of the witness log itself; no file API can
+prove that administrative property.
+
+`AuthorityOperationsHistory` checks both copies of each bounded segment,
+the exact marker, canonical full root chain and prior pinned byte prefixes.
+An old segment must match its previous signed pin exactly. A new segment
+header binds the preceding pin, final root and new history credential ID
+under the new HMAC key. Only the current segment uses the active HMAC key;
+the retired segment is authenticated by the independently signed exact
+byte commitment. Old bytes are never rewritten. A cutover cannot advance
+the root; publication requires exactly one valid successor. Frozen and
+prepared states cannot publish, and quarantine cannot transition to any
+active state. A stale witness CAS or torn signed record fails closed.
+
+The qualification component consumes independently collected byte images
+and operator evidence digests. It does not itself collect remote files,
+attest the operator, install or revoke SSH keys, create new segment files,
+or participate in the v1 service's publication acknowledgement. A signed
+VERIFIED record is qualification evidence only, never runtime admission.
+Tests exercise the component with an actual local signed log, but do not
+demonstrate an independent physical deployment.
+
 ## Required deployment evidence and acceptance matrix
 
 The following is a checklist for a separate, non-production qualification
@@ -189,8 +222,8 @@ storage; never use the live register or restore it for testing.
 | Distinct administration and independent enrollment | Real separate Linux host and witness, independent inventory, protected directories and principals, reviewed artifact and dependency closure | Not performed |
 | SSH client and host key rotation | Actual pinned connection, forced command only, denied old client and old host pin, no forwarding or lingering sessions | Not performed |
 | Transport MAC cutover | Same identity and byte-identical history, denied old MAC/replay/stale CAS, new-key positive CAS on qualification register | Local process regression only; exact-head CI pending |
-| History credential rotation | Implemented immutable segment transition, retained old bytes, full verification and revoked old write credential | Not implemented |
-| Latestness and quarantine | Independent witness continuity, coherent rollback, reset, wrong key, lost witness, administrative restore, retirement and interrupted cutover | Local adapter fault tests only; witness not implemented |
+| History credential rotation | Implemented immutable segment transition, retained old bytes, full verification and revoked old write credential | Qualification verifier and signed witness tests; physical segment deployment and revocation not implemented |
+| Latestness and quarantine | Independent witness continuity, coherent rollback, reset, wrong key, lost witness, administrative restore, retirement and interrupted cutover | Local signed witness and adapter fault tests only; independent witness deployment not performed |
 | Concurrency and crashes | In-flight old process drainage, competing new/stale clients, crash before/after every witness and cutover boundary, ambiguous publication denial | Local process regression only; distributed boundaries not implemented |
 | Append-only and durability | Actual positive Linux append-only enforcement, protected lock and directory identity, file/directory forces, controlled power interruption and restart on persistent hardware | Not performed |
 | Repository trust | All six exact-head CI jobs, independent strict review, explicit owner approval | Pending |
