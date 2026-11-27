@@ -303,6 +303,54 @@ and a state such as `START_BARRIER_COMMITTED` or
 reused operation IDs, forks, and non-successor generation transitions.
 Host-key authorization and register-write authorization must be isolated.
 
+### Independent authority deployment (#241)
+
+The proposed standalone deployment uses a dedicated, separately
+administered Linux authority host. A trusted host client invokes a
+fixed SSH forced command; no agent UID, workspace process, journal
+HMAC key, local backup or local snapshot administrator may administer
+that host, access its signing credential or replace its provisioned
+register. The service is first-party and self-hostable. No cloud
+provider or GitHub API is a runtime dependency.
+
+The authority operator must provision a unique host/session/register/
+epoch tuple exactly once, retain an independent inventory of issued
+identities, and create two append-only histories on persistent storage
+outside the local rollback domain. Provisioning is an offline
+administrative operation, not a request endpoint. The never-initialized
+sentinel must exist in both histories before bootstrap; absence is
+never interpreted as permission to create a new register. The operator
+must never restore an older authority snapshot, recreate a register,
+rotate an epoch, remove append-only protection or reuse credentials
+after loss. A lost or inconsistent history is quarantined, not repaired
+by copying whichever replica is longer. A credential rotation requires
+a separately reviewed procedure; it does not reset history.
+
+The intended durability boundary is an exclusive interprocess lock,
+complete-history validation, exact CAS, append and force of both
+pre-existing logs before responding. A crash between the two forces
+may leave unequal logs; availability is sacrificed rather than
+guessing the committed state. Both logs are within the authority
+domain; duplication detects one-sided corruption or truncation, not
+coherent rollback of the authority itself. The authority operator
+and kernel/storage stack are trusted to enforce append-only retention,
+honor fsync and keep backups from rolling back the authoritative logs.
+A malicious authority administrator, compromised authority signing
+credential, coherent restore of both logs and their provisioning
+inventory, or dishonest storage durability are outside this model.
+Those events cannot be detected solely from the surviving bytes.
+
+An authenticated fresh invocation must be bound to its operation,
+register, exact predecessor and proposed canonical digest; responses
+must be bound to that invocation, and authenticated reads must validate
+the complete history. The publication client must not retry, turn
+readback into acknowledgement, or expose credentials or raw exception
+details. SSH server identity and dedicated client authorization are
+deployment prerequisites. A deployment that cannot establish these
+prerequisites must stay disabled. Physical checkpoint/fence/sidecar
+authentication and live Started publication remain separate integration
+gates; no effect execution is enabled by this standalone slice.
+
 ### Standalone authority contract (#239)
 
 `HostEffectAntiRollbackAuthority` in `:core:contracts` defines the
