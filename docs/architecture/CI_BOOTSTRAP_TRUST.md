@@ -45,21 +45,8 @@ Removing `setup-gradle` also removes its dependency caching. CI intentionally us
 
 ## Bounded plugin-resolution retries (issue #230)
 
-The architecture, production-input and full JVM jobs run a Gradle `help`
-preflight before product tasks, with strict verification and no build cache.
-Architecture also preflights standalone build-logic. An explicitly recognized
-HTTP 429/5xx registry failure may retry twice, after 60 and 180 seconds.
-Verification diagnostics, mixed or unrecognized failure trees and other HTTP
-statuses stop without retry. Only explicitly allowlisted HTTPS registry hosts
-qualify. The preflight uses normal console output, not debug logging.
-The producer exercises a real Gradle classpath-resolution failure against a
-loopback HTTP fixture with a fresh Gradle home; the loopback URL itself must
-never qualify for production retry. The test substitutes only that fixture URL
-in the captured output to exercise the recognized registry grammar.
-The independent production verifier and installed CLI job are unchanged.
+The architecture, production-input and full JVM jobs run a Gradle `help` preflight before product tasks, with strict verification and no build cache. Architecture also preflights standalone build-logic. An explicitly recognized HTTP 429/5xx registry failure may retry twice, after 60 and 180 seconds. Verification diagnostics, mixed or unrecognized failure trees and other HTTP statuses stop without retry. Only explicitly allowlisted HTTPS registry hosts qualify. The preflight uses normal console output, not debug logging, and reports each attempt's exit code and elapsed seconds.
 
-Each job retains its own fresh dependency state. No Gradle dependency files
-or binary resolution metadata are transferred between jobs or runs. This
-preflight mitigates plugin-resolution failures only; it does not guarantee
-later dependency downloads or recovery from a sustained registry outage.
-Dependency-cache design and its separate trust requirements remain in #215.
+Root `help` can build included build-logic, including compilation. The classifier deliberately refuses task-execution failures, even if a registry error occurred while resolving a task's dependencies. That remaining gap is tracked in [#247](https://github.com/YuriiSokolenko/recursive-coder/issues/247). The `bytecode-build` job runs a real Gradle included-build plugin-resolution fixture with a fresh Gradle home against a loopback registry; the loopback URL itself must never qualify for production retry. The fixture normalizes only its registry URL in the captured output to exercise the classifier. A separate verbatim diagnostic excerpt from [incident #213](https://github.com/YuriiSokolenko/recursive-coder/actions/runs/45447915061/attempts/1) covers the actual Kotlin DSL plugin-resolution path.
+
+The independent production verifier and installed CLI job are unchanged. Each job retains its own fresh dependency state. No Gradle dependency files or binary resolution metadata are transferred between jobs or runs. This preflight mitigates recognized plugin-resolution failures only; it does not guarantee later dependency downloads or recovery from a sustained registry outage. Dependency-cache design and its separate trust requirements remain in #215.

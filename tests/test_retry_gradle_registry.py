@@ -40,15 +40,31 @@ class RegistryFailureFixture(unittest.TestCase):
                     root = Path(directory)
                     url = f"http://127.0.0.1:{server.server_port}"
                     (root / "settings.gradle").write_text(
+                        "pluginManagement { includeBuild('build-logic') }\n"
                         "rootProject.name = 'registry-fixture'\n", encoding="utf-8")
                     (root / "build.gradle").write_text(
+                        "plugins { id 'fixture.convention' }\n", encoding="utf-8")
+                    included = root / "build-logic"
+                    included.mkdir()
+                    (included / "settings.gradle").write_text(
+                        "rootProject.name = 'build-logic'\n", encoding="utf-8")
+                    (included / "build.gradle").write_text(
                         "buildscript {\n"
                         "  repositories { maven {\n"
+                        "    name = 'Fixture Registry'\n"
                         f"    url = uri('{url}')\n"
                         "    allowInsecureProtocol = true\n"
                         "  } }\n"
-                        "  dependencies { classpath 'fixture:absent-plugin:1.0' }\n"
-                        "}\n", encoding="utf-8")
+                        "  dependencies {\n"
+                        + "".join(f"    classpath 'fixture:absent-plugin-{n}:1.0'\n"
+                                  for n in range(6))
+                        + "  }\n"
+                        "}\n"
+                        "plugins { id 'java-gradle-plugin' }\n"
+                        "gradlePlugin { plugins { convention {\n"
+                        "  id = 'fixture.convention'\n"
+                        "  implementationClass = 'fixture.ConventionPlugin'\n"
+                        "} } }\n", encoding="utf-8")
                     result = subprocess.run(
                         [gradle, "--dependency-verification", "strict",
                          "--no-daemon", "--no-build-cache", "--max-workers=1",
@@ -63,6 +79,10 @@ class RegistryFailureFixture(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertTrue(requests, result.stdout)
         self.assertIn("Received status code 429", result.stdout)
+        self.assertIn("Error resolving plugin [id: 'fixture.convention']", result.stdout)
+        self.assertIn("A problem occurred configuring project ':build-logic'", result.stdout)
+        self.assertIn("is disabled due to earlier error below:", result.stdout)
+        self.assertRegex(result.stdout, r"There (?:is|are) \d+ more failures? with identical causes")
         self.assertFalse(retry.transient_failure(result.stdout), result.stdout)
         normalized = result.stdout.replace(url + "/", "https://repo.maven.apache.org/")
         self.assertNotEqual(normalized, result.stdout)

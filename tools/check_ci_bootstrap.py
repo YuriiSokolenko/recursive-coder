@@ -125,7 +125,7 @@ def audit_workflow(source: str) -> None:
 
 
 def audit_retry_command(source: str) -> None:
-    """Keep an independent literal oracle for the resolution-only command."""
+    """Pin the preflight argv, backoff and execution body to literal AST oracles."""
     expected = ast.parse("""
 def command(standalone: bool) -> list[str]:
     args = [
@@ -142,7 +142,41 @@ def command(standalone: bool) -> list[str]:
         if isinstance(node, ast.FunctionDef) and node.name == "command"
     ]
     if len(definitions) != 1 or ast.dump(definitions[0]) != ast.dump(expected):
-        raise AssertionError("Gradle plugin retry command must remain strict and resolution-only")
+        raise AssertionError("Gradle plugin retry command must remain strict and help-only")
+    module = ast.parse(source)
+    delays = [node for node in module.body if isinstance(node, ast.Assign)
+              and any(isinstance(target, ast.Name) and target.id == "DELAYS"
+                      for target in node.targets)]
+    if len(delays) != 1 or ast.dump(delays[0]) != ast.dump(ast.parse("DELAYS = (60, 180)").body[0]):
+        raise AssertionError("Gradle plugin retry backoff changed")
+    expected_runner = ast.parse("""
+def run_preflight(standalone: bool) -> int:
+    args = command(standalone)
+    for attempt, delay in enumerate((*DELAYS, None), 1):
+        started = time.monotonic()
+        result = subprocess.run(
+            args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, errors="replace", check=False,
+        )
+        print(result.stdout, end="", flush=True)
+        elapsed = time.monotonic() - started
+        print(f"Gradle plugin preflight attempt {attempt}: exit={result.returncode} "
+              f"elapsed={elapsed:.3f}s", flush=True)
+        if result.returncode == 0:
+            return 0
+        if result.returncode < 0:
+            return 1
+        if delay is None or not transient_failure(result.stdout):
+            return result.returncode
+        print(f"Transient registry response; retrying in {delay}s", flush=True)
+        time.sleep(delay)
+    raise AssertionError("Unreachable retry state")
+
+""").body[0]
+    runners = [node for node in module.body
+               if isinstance(node, ast.FunctionDef) and node.name == "run_preflight"]
+    if len(runners) != 1 or ast.dump(runners[0]) != ast.dump(expected_runner):
+        raise AssertionError("Gradle plugin retry execution body changed")
 
 
 def audit_gradlew_executable_mode() -> None:

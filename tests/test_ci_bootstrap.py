@@ -152,7 +152,22 @@ class CiBootstrapTrustTest(unittest.TestCase):
             with self.subTest(new=new):
                 mutated = source.replace(old, new, 1)
                 self.assertNotEqual(mutated, source)
-                with self.assertRaisesRegex(AssertionError, "strict and resolution-only"):
+                with self.assertRaisesRegex(AssertionError, "strict and help-only"):
+                    bootstrap.audit_retry_command(mutated)
+
+    def test_retry_runner_and_backoff_drift_rejected(self):
+        source = (ROOT / "tools/retry_gradle_plugins.py").read_text(encoding="utf-8")
+        for old, new, diagnostic in (
+            ("DELAYS = (60, 180)", "DELAYS = (1, 1, 1)", "backoff changed"),
+            ("args, stdout=subprocess.PIPE", "args + ['test'], stdout=subprocess.PIPE",
+             "execution body changed"),
+            ("enumerate((*DELAYS, None), 1)", "enumerate((*DELAYS, *DELAYS, None), 1)",
+             "execution body changed"),
+        ):
+            with self.subTest(new=new):
+                mutated = source.replace(old, new, 1)
+                self.assertNotEqual(mutated, source)
+                with self.assertRaisesRegex(AssertionError, diagnostic):
                     bootstrap.audit_retry_command(mutated)
 
     def test_dependency_cache_transport_rejected(self):

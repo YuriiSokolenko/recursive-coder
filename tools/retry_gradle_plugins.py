@@ -20,10 +20,15 @@ REGISTRY_INLINE = re.compile(
     re.I,
 )
 CAUSE = re.compile(r"^([ ]*)> (.+)$")
+PLUGIN_HEADLINE = re.compile(r"Error resolving plugin \[id: '[^'\r\n]+'(?:, version: '[^'\r\n]+')?\]")
+CONFIGURING = re.compile(r"A problem occurred (?:configuring|evaluating) .+\.")
 RESOLUTION_PARENT = re.compile(
-    r"(?:Could not resolve |Could not get resource |"
-    r"Could not download |Error resolving plugin ).+"
+    r"(?:Could not resolve |Could not get resource |Could not download ).+"
+    r"|A problem occurred configuring project '[^'\r\n]+'\."
+    r"|Repository [^:\r\n]+ is disabled due to earlier error below:"
 )
+IDENTICAL_CAUSES = re.compile(r"There (?:is 1 more failure|are [1-9][0-9]* more failures) with identical causes\.")
+REQUIRED_BY = re.compile(r"(?:buildscript of project '[^'\r\n]+'|project [^ \r\n]+)(?: > [^>\r\n]+)*")
 VERIFICATION = re.compile(
     r"verification failed|verification failure|checksum|verification metadata|"
     r"signature|not trusted|untrusted artifact",
@@ -55,23 +60,47 @@ def transient_failure(output: str) -> bool:
     section = re.split(r"(?m)^\* ", section, maxsplit=1)[0]
     nodes = []
     required_indent = None
+    required_entries = 0
+    headline = False
+    trailer = False
     for line in section.splitlines():
         if not line.strip():
             continue
         indent = len(line) - len(line.lstrip(" "))
         match = CAUSE.fullmatch(line)
-        if match:
-            required_indent = None
-            nodes.append((indent, match.group(2)))
-        elif re.fullmatch(r"A problem occurred (?:configuring|evaluating) .+\.", line):
-            if nodes:
+        if trailer:
+            return False
+        if required_indent is not None and not match:
+            if indent > required_indent and REQUIRED_BY.fullmatch(line.strip()):
+                required_entries += 1
+                continue
+            return False
+        if required_indent is not None:
+            if not required_entries:
                 return False
-        elif line.strip() == "Required by:" and nodes:
+            required_indent = None
+        if match:
+            message = match.group(2)
+            if IDENTICAL_CAUSES.fullmatch(message):
+                if indent != 0 or not nodes:
+                    return False
+                trailer = True
+                continue
+            if not headline:
+                return False
+            nodes.append((indent, message))
+        elif not headline and indent == 0 and (
+                PLUGIN_HEADLINE.fullmatch(line) or CONFIGURING.fullmatch(line)):
+            headline = True
+        elif (line.strip() == "Required by:" and nodes
+              and nodes[-1][1].startswith("Could not resolve ")
+              and indent > nodes[-1][0]):
             required_indent = indent
-        elif required_indent is not None and indent > required_indent:
-            continue
+            required_entries = 0
         else:
             return False
+    if required_indent is not None:
+        return False
     if not nodes:
         return False
     statuses = []
@@ -102,13 +131,15 @@ def transient_failure(output: str) -> bool:
 def run_preflight(standalone: bool) -> int:
     args = command(standalone)
     for attempt, delay in enumerate((*DELAYS, None), 1):
+        started = time.monotonic()
         result = subprocess.run(
             args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, errors="replace", check=False,
         )
         print(result.stdout, end="", flush=True)
-        print(f"Gradle plugin preflight attempt {attempt}: exit={result.returncode}",
-              flush=True)
+        elapsed = time.monotonic() - started
+        print(f"Gradle plugin preflight attempt {attempt}: exit={result.returncode} "
+              f"elapsed={elapsed:.3f}s", flush=True)
         if result.returncode == 0:
             return 0
         if result.returncode < 0:
