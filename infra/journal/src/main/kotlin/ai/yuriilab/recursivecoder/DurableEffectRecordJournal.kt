@@ -127,7 +127,6 @@ class DurableEffectRecordJournal private constructor(
         private val magic = "RCEFX1\n".toByteArray(StandardCharsets.US_ASCII)
         private const val MAX_RECORD_BYTES = 4096
         private const val MAX_FILE_BYTES = 32L * 1024 * 1024
-        // The checkpoint pin validates the same physical record sequence bound.
         private const val GENESIS_TYPE = "genesis"
 
         private object PayloadFields {
