@@ -128,7 +128,6 @@ class DurableEffectRecordJournal private constructor(
         private const val MAX_RECORD_BYTES = 4096
         private const val MAX_FILE_BYTES = 32L * 1024 * 1024
         // The checkpoint pin validates the same physical record sequence bound.
-        internal const val MAX_RECORDS = 100_000
         private const val GENESIS_TYPE = "genesis"
 
         private object PayloadFields {
@@ -591,7 +590,7 @@ class DurableEffectRecordJournal private constructor(
                                 zeroSuffixStart--
                         }
                         while (offset < bytes.size) {
-                            if (entries.size >= MAX_RECORDS)
+                            if (entries.size >= EffectJournalLimits.MAX_RECORDS)
                                 refuse("EFFECT_JOURNAL_SIZE_INVALID")
                             val remaining = bytes.size - offset
                             // A post-crash extended but unforced file may read
@@ -666,7 +665,7 @@ class DurableEffectRecordJournal private constructor(
                 channel.size() != channel.position())
                 throw EffectJournalStorageUnconfirmed("EFFECT_JOURNAL_PATH_CHANGED")
             val seq = entries.size.toLong() + 1L
-            if (entries.size >= MAX_RECORDS)
+            if (entries.size >= EffectJournalLimits.MAX_RECORDS)
                 throw EffectJournalStorageUnconfirmed("EFFECT_JOURNAL_SIZE_INVALID")
             val body = payload(seq, record)
             if (body.size !in 1..MAX_RECORD_BYTES ||

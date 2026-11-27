@@ -313,7 +313,7 @@ object SessionCheckpointCodec {
                 head.fenceGeneration <= 0L ||
                 !listOf(head.admittedCheckpointSha256, head.toolAuthoritySha256,
                     head.sidecarPathSha256, head.headMacSha256).all(::digest) ||
-                head.lastSequence !in 0L..DurableEffectRecordJournal.MAX_RECORDS.toLong() ||
+                head.lastSequence !in 0L..EffectJournalLimits.MAX_RECORDS.toLong() ||
                 // This slice only pins isolated pre-execution physical evidence.
                 !preExecutionOnly(s))
                 invalid()

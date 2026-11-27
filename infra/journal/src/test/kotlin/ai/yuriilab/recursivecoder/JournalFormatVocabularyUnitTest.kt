@@ -17,6 +17,10 @@ class JournalFormatVocabularyUnitTest {
         assertEquals("resume.lock", RESUME_LOCK_NAME)
     }
 
+    @Test fun effectJournalCapacityRemainsStable() {
+        assertEquals(100_000, EffectJournalLimits.MAX_RECORDS)
+    }
+
     @Test fun checkpointTaskStateSpellingsRemainStable() {
         assertEquals(listOf("created", "ready", "blocked", "running", "paused",
             "succeeded", "failed", "needs-attention", "cancelled"),

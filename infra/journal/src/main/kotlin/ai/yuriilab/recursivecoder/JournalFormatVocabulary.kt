@@ -21,6 +21,11 @@ internal object EffectRecordStates {
     const val UNCONFIRMED = "unconfirmed"
 }
 
+/** Physical effect-record capacity shared by the journal and checkpoint codec. */
+internal object EffectJournalLimits {
+    const val MAX_RECORDS = 100_000
+}
+
 internal const val CHECKPOINT_LOCK_NAME = "checkpoint.lock"
 internal const val RESUME_LOCK_NAME = "resume.lock"
 

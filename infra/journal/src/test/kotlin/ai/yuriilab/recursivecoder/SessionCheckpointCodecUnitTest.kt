@@ -252,7 +252,6 @@ class SessionCheckpointCodecUnitTest {
                 SessionCheckpointCodec.encode(s.copy(
                     effectJournalHead = head.copy(lastSequence = 100_001L)))
             }.code)
-        assertEquals(100_000, DurableEffectRecordJournal.MAX_RECORDS)
     }
 
     @Test fun checkpointClosedStateAndUsageSetsRemainCompatible() {
