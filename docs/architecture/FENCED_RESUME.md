@@ -77,11 +77,11 @@ Never blindly retry publication or treat a successful `inspect` as approval
 to resume model/tool work.
 
 This milestone does not solve #105 effect authority/reconciliation, runtime
-implementation of the fsync/shutdown watchdog contract, broader kill-boundary
-subprocess evidence, or the true live-fenced runtime `FileStore.type()`
-sanitized-denial E2E. Those remain
-gates for connecting real execution and for closing #104. Independently
-review the authenticated operator call boundary before production use.
+implementation of the fsync/shutdown watchdog contract, broader
+kill-boundary subprocess evidence, or the true live-fenced runtime
+`FileStore.type()` sanitized-denial E2E. Those remain gates for connecting
+real execution and for closing #104. Independently review the authenticated
+operator call boundary before production use.
 
 ## Deny-only runtime filesystem preflight (Draft PR #135)
 
@@ -669,17 +669,16 @@ The current operator-reconciliation requirement is intentional rather than
 a claim that policy-valid metadata-only tail adoption can never be designed.
 It remains out of #114 until [#117](https://github.com/YuriiSokolenko/recursive-coder/issues/117)
 proves a safe, generation-fenced adoption protocol. Integrity of the tail
-does not itself attest its fsync acknowledgement or absence of external effects.
-Each fenced publication's local `FileChannel.force(true)` executes while the
-resume lease monitor is held. Writer close has its own monitor and may also
-force the channel before releasing its writer lock. This has **no guaranteed
-latency bound**: a slow disk can delay `lease.close()`, competing fenced
-publications and shutdown.
-Host shutdown must not rely on a short deadline or attempt to retire the
-lease while an in-flight fenced fsync is still completing. This feature
-still does **not** enable arbitrary model/tool execution, general
-crash-resume or runtime/receipt publication without the remaining
-production gates.
+does not itself attest its fsync acknowledgement or absence of external
+effects. Each fenced publication's local `FileChannel.force(true)` executes
+while the resume lease monitor is held. Writer close has its own monitor and
+may also force the channel before releasing its writer lock. This has **no
+guaranteed latency bound**: a slow disk can delay `lease.close()`, competing
+fenced publications and shutdown. Host shutdown must not rely on a short
+deadline or attempt to retire the lease while an in-flight fenced fsync is
+still completing. This feature still does **not** enable arbitrary
+model/tool execution, general crash-resume or runtime/receipt publication
+without the remaining production gates.
 
 Legacy `inspect`/save paths adapt fence storage errors to the existing
 `CheckpointUnconfirmed` contract. A live stale callback remains a typed
