@@ -13,4 +13,10 @@ class StageVocabularyUnitTest {
         assertEquals(listOf("graphId", "stageRunId", "role", "parentGraphId", "childGraphId", "recursiveEvent", "roleEvent", "stageState", "grantTokens", "grantToolCalls", "spentTokens", "spentToolCalls", "delegatedTokens", "delegatedToolCalls", "budgetScopeGraphId"),
             listOf(StageEventMetadataFields.GRAPH_ID, StageEventMetadataFields.STAGE_RUN_ID, StageEventMetadataFields.ROLE, StageEventMetadataFields.PARENT_GRAPH_ID, StageEventMetadataFields.CHILD_GRAPH_ID, StageEventMetadataFields.RECURSIVE_EVENT, StageEventMetadataFields.ROLE_EVENT, StageEventMetadataFields.STAGE_STATE, StageEventMetadataFields.GRANT_TOKENS, StageEventMetadataFields.GRANT_TOOL_CALLS, StageEventMetadataFields.SPENT_TOKENS, StageEventMetadataFields.SPENT_TOOL_CALLS, StageEventMetadataFields.DELEGATED_TOKENS, StageEventMetadataFields.DELEGATED_TOOL_CALLS, StageEventMetadataFields.BUDGET_SCOPE_GRAPH_ID))
     }
+
+    @Test fun artifactEvidenceKeysRemainStable() {
+        assertEquals(listOf("artifactId", "artifactSha256"),
+            listOf(StageEventMetadataFields.ARTIFACT_ID,
+                StageEventMetadataFields.ARTIFACT_SHA256))
+    }
 }

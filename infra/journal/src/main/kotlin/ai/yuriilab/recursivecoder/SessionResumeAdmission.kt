@@ -98,12 +98,14 @@ internal object PreExecutionSnapshotPolicy {
     fun safe(snapshot: SessionCheckpoint): Boolean =
         snapshot.phase in setOf(
             SessionPhaseVocabulary.createdWire, SessionPhaseVocabulary.acceptedWire) &&
-            snapshot.taskState in setOf("created", "ready") &&
+            snapshot.taskState in setOf(CheckpointTaskStates.CREATED, CheckpointTaskStates.READY) &&
             snapshot.taskAttempt == 0 &&
             snapshot.acceptedArtifacts.isEmpty() &&
             snapshot.pendingEffects.isEmpty() &&
-            snapshot.children.all { it.state == "ready" } &&
-            snapshot.hostAssertedUsage.all { it.certainty == "known" && it.units == 0L }
+            snapshot.children.all { it.state == CheckpointChildStates.READY } &&
+            snapshot.hostAssertedUsage.all {
+                it.certainty == CheckpointUsageCertainty.KNOWN && it.units == 0L
+            }
 }
 
 /** Compile-time acknowledgement required at trusted operator recovery call sites. */

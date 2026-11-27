@@ -127,7 +127,22 @@ class DurableEffectRecordJournal private constructor(
         private val magic = "RCEFX1\n".toByteArray(StandardCharsets.US_ASCII)
         private const val MAX_RECORD_BYTES = 4096
         private const val MAX_FILE_BYTES = 32L * 1024 * 1024
-        private const val MAX_RECORDS = 100_000
+        private const val GENESIS_TYPE = "genesis"
+
+        private object PayloadFields {
+            const val TYPE = "type"
+            const val SESSION_ID = "sessionId"
+            const val FENCE_GENERATION = "fenceGeneration"
+            const val ADMITTED_CHECKPOINT_SHA256 = "admittedCheckpointSha256"
+            const val TOOL_AUTHORITY_SHA256 = "toolAuthoritySha256"
+            const val SEQUENCE = "sequence"
+            const val OPERATION_ID = "operationId"
+            const val KIND = "kind"
+            const val INPUT_SHA256 = "inputSha256"
+            const val STATE = "state"
+            const val OBSERVED_STATE_SHA256 = "observedStateSha256"
+            const val CODE = "code"
+        }
         private val digestPattern = Regex("[0-9a-f]{64}")
         private val heldLocks = ConcurrentHashMap.newKeySet<Path>()
         private val privatePermissions = setOf(PosixFilePermission.OWNER_READ,
@@ -268,11 +283,11 @@ class DurableEffectRecordJournal private constructor(
 
         private fun headerPayload(header: EffectJournalHeader): ByteArray =
             buildJsonObject {
-                put("type", "genesis")
-                put("sessionId", header.sessionId)
-                put("fenceGeneration", header.fenceGeneration)
-                put("admittedCheckpointSha256", header.admittedCheckpointSha256)
-                put("toolAuthoritySha256", header.toolAuthoritySha256)
+                put(PayloadFields.TYPE, GENESIS_TYPE)
+                put(PayloadFields.SESSION_ID, header.sessionId)
+                put(PayloadFields.FENCE_GENERATION, header.fenceGeneration)
+                put(PayloadFields.ADMITTED_CHECKPOINT_SHA256, header.admittedCheckpointSha256)
+                put(PayloadFields.TOOL_AUTHORITY_SHA256, header.toolAuthoritySha256)
             }.toString().toByteArray(StandardCharsets.UTF_8)
 
         private fun decodeHeader(bytes: ByteArray): EffectJournalHeader {
@@ -286,13 +301,14 @@ class DurableEffectRecordJournal private constructor(
                     if (!value.isString) refuse("EFFECT_JOURNAL_GENESIS_INVALID")
                     return value.content
                 }
-                if (string("type") != "genesis")
+                if (string(PayloadFields.TYPE) != GENESIS_TYPE)
                     refuse("EFFECT_JOURNAL_GENESIS_INVALID")
-                val generation = (obj["fenceGeneration"] as? JsonPrimitive)
+                val generation = (obj[PayloadFields.FENCE_GENERATION] as? JsonPrimitive)
                     ?.takeUnless { it.isString }?.longOrNull
                     ?: refuse("EFFECT_JOURNAL_GENESIS_INVALID")
-                val header = EffectJournalHeader(string("sessionId"), generation,
-                    string("admittedCheckpointSha256"), string("toolAuthoritySha256"))
+                val header = EffectJournalHeader(string(PayloadFields.SESSION_ID), generation,
+                    string(PayloadFields.ADMITTED_CHECKPOINT_SHA256),
+                    string(PayloadFields.TOOL_AUTHORITY_SHA256))
                 if (!ToolAuthorizationPolicy.validHostIdentifier(header.sessionId) ||
                     header.fenceGeneration <= 0L ||
                     !digestPattern.matches(header.admittedCheckpointSha256) ||
@@ -309,22 +325,22 @@ class DurableEffectRecordJournal private constructor(
         private fun payload(sequence: Long, record: EffectRecord): ByteArray {
             val id = record.identity
             val obj = buildJsonObject {
-                put("sequence", sequence)
-                put("sessionId", id.sessionId)
-                put("operationId", id.operationId)
-                put("fenceGeneration", id.fenceGeneration)
-                put("kind", id.kind.name)
-                put("inputSha256", id.inputSha256)
+                put(PayloadFields.SEQUENCE, sequence)
+                put(PayloadFields.SESSION_ID, id.sessionId)
+                put(PayloadFields.OPERATION_ID, id.operationId)
+                put(PayloadFields.FENCE_GENERATION, id.fenceGeneration)
+                put(PayloadFields.KIND, id.kind.name)
+                put(PayloadFields.INPUT_SHA256, id.inputSha256)
                 when (record) {
-                    is EffectRecord.Intent -> put("state", EffectRecordStates.INTENT)
-                    is EffectRecord.Started -> put("state", EffectRecordStates.STARTED)
+                    is EffectRecord.Intent -> put(PayloadFields.STATE, EffectRecordStates.INTENT)
+                    is EffectRecord.Started -> put(PayloadFields.STATE, EffectRecordStates.STARTED)
                     is EffectRecord.Committed -> {
-                        put("state", EffectRecordStates.COMMITTED)
-                        put("observedStateSha256", record.observedStateSha256)
+                        put(PayloadFields.STATE, EffectRecordStates.COMMITTED)
+                        put(PayloadFields.OBSERVED_STATE_SHA256, record.observedStateSha256)
                     }
                     is EffectRecord.Unconfirmed -> {
-                        put("state", EffectRecordStates.UNCONFIRMED)
-                        put("code", record.code)
+                        put(PayloadFields.STATE, EffectRecordStates.UNCONFIRMED)
+                        put(PayloadFields.CODE, record.code)
                     }
                 }
             }
@@ -342,19 +358,20 @@ class DurableEffectRecordJournal private constructor(
                     if (!value.isString) refuse("EFFECT_JOURNAL_RECORD_CORRUPT")
                     return value.content
                 }
-                val seq = (obj["sequence"] as? JsonPrimitive)?.longOrNull
+                val seq = (obj[PayloadFields.SEQUENCE] as? JsonPrimitive)?.longOrNull
                 if (seq != sequence) refuse("EFFECT_JOURNAL_RECORD_CORRUPT")
-                val generation = (obj["fenceGeneration"] as? JsonPrimitive)?.longOrNull
+                val generation = (obj[PayloadFields.FENCE_GENERATION] as? JsonPrimitive)?.longOrNull
                     ?: refuse("EFFECT_JOURNAL_RECORD_CORRUPT")
-                val kind = EffectKind.entries.firstOrNull { it.name == string("kind") }
+                val kind = EffectKind.entries.firstOrNull { it.name == string(PayloadFields.KIND) }
                     ?: refuse("EFFECT_JOURNAL_RECORD_CORRUPT")
-                val id = EffectIdentity(string("sessionId"), string("operationId"),
-                    generation, kind, string("inputSha256"))
-                val record = when (string("state")) {
+                val id = EffectIdentity(string(PayloadFields.SESSION_ID), string(PayloadFields.OPERATION_ID),
+                    generation, kind, string(PayloadFields.INPUT_SHA256))
+                val record = when (string(PayloadFields.STATE)) {
                     EffectRecordStates.INTENT -> EffectRecord.Intent(id)
                     EffectRecordStates.STARTED -> EffectRecord.Started(id)
-                    EffectRecordStates.COMMITTED -> EffectRecord.Committed(id, string("observedStateSha256"))
-                    EffectRecordStates.UNCONFIRMED -> EffectRecord.Unconfirmed(id, string("code"))
+                    EffectRecordStates.COMMITTED -> EffectRecord.Committed(id,
+                        string(PayloadFields.OBSERVED_STATE_SHA256))
+                    EffectRecordStates.UNCONFIRMED -> EffectRecord.Unconfirmed(id, string(PayloadFields.CODE))
                     else -> refuse("EFFECT_JOURNAL_RECORD_CORRUPT")
                 }
                 if (!bytes.contentEquals(payload(sequence, record)))
@@ -572,7 +589,7 @@ class DurableEffectRecordJournal private constructor(
                                 zeroSuffixStart--
                         }
                         while (offset < bytes.size) {
-                            if (entries.size >= MAX_RECORDS)
+                            if (entries.size >= EffectJournalLimits.MAX_RECORDS)
                                 refuse("EFFECT_JOURNAL_SIZE_INVALID")
                             val remaining = bytes.size - offset
                             // A post-crash extended but unforced file may read
@@ -647,7 +664,7 @@ class DurableEffectRecordJournal private constructor(
                 channel.size() != channel.position())
                 throw EffectJournalStorageUnconfirmed("EFFECT_JOURNAL_PATH_CHANGED")
             val seq = entries.size.toLong() + 1L
-            if (entries.size >= MAX_RECORDS)
+            if (entries.size >= EffectJournalLimits.MAX_RECORDS)
                 throw EffectJournalStorageUnconfirmed("EFFECT_JOURNAL_SIZE_INVALID")
             val body = payload(seq, record)
             if (body.size !in 1..MAX_RECORD_BYTES ||

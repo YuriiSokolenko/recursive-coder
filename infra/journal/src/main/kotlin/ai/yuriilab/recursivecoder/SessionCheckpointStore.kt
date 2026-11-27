@@ -139,6 +139,91 @@ data class CheckpointHostContext(
 /** Pure deterministic codec, with exact field sets and byte-for-byte canonicality. */
 object SessionCheckpointCodec {
     const val MAX_PAYLOAD = 512 * 1024
+
+    // Payload versions are independent of the physical RCCHK1 framing and protocol v1.
+    private const val BASE_VERSION = 1L
+    private const val EFFECT_HEAD_VERSION = 2L
+    private const val RECONCILIATION_VERSION = 3L
+
+    private object BindingFields {
+        const val POLICY_SHA256 = "policySha256"
+        const val WORKSPACE_IDENTITY_SHA256 = "workspaceIdentitySha256"
+        const val GIT_HEAD = "gitHead"
+        const val GIT_BRANCH = "gitBranch"
+        const val GIT_BASELINE_SHA256 = "gitBaselineSha256"
+        const val GRAPH_ID = "graphId"
+        const val GRAPH_GENERATION = "graphGeneration"
+        const val FROZEN_INPUTS_SHA256 = "frozenInputsSha256"
+    }
+
+    private object ChildFields {
+        const val ID = "id"
+        const val PARENT_ID = "parentId"
+        const val STATE = "state"
+    }
+
+    private object ArtifactFields {
+        const val ID = "id"
+        const val OWNER_ID = "ownerId"
+        const val SHA256 = "sha256"
+    }
+
+    private object UsageFields {
+        const val SCOPE_ID = "scopeId"
+        const val KIND = "kind"
+        const val CERTAINTY = "certainty"
+        const val UNITS = "units"
+    }
+
+    private object PendingEffectFields {
+        const val ID = "id"
+        const val CORRELATION_ID = "correlationId"
+        const val STATE = "state"
+    }
+
+    private object HeadFields {
+        const val SESSION_ID = "sessionId"
+        const val FENCE_GENERATION = "fenceGeneration"
+        const val ADMITTED_CHECKPOINT_SHA256 = "admittedCheckpointSha256"
+        const val TOOL_AUTHORITY_SHA256 = "toolAuthoritySha256"
+        const val SIDECAR_PATH_SHA256 = "sidecarPathSha256"
+        const val LAST_SEQUENCE = "lastSequence"
+        const val HEAD_MAC_SHA256 = "headMacSha256"
+    }
+
+    private object ReconciliationFields {
+        const val SOURCE_CHECKPOINT_SHA256 = "sourceCheckpointSha256"
+        const val SOURCE_FENCE_GENERATION = "sourceFenceGeneration"
+        const val SOURCE_FENCE_SHA256 = "sourceFenceSha256"
+        const val OPERATOR_ID = "operatorId"
+        const val HOST_SEAL_MAC_SHA256 = "hostSealMacSha256"
+        const val SOURCE_HEAD = "sourceHead"
+    }
+
+    private object RootFields {
+        const val KIND = "kind"
+        const val VERSION = "version"
+        const val SEQUENCE = "sequence"
+        const val PREVIOUS_SHA256 = "previousSha256"
+        const val BINDING = "binding"
+        const val SESSION_ID = "sessionId"
+        const val TRACE_ID = "traceId"
+        const val PHASE = "phase"
+        const val TASK_ID = "taskId"
+        const val TASK_ATTEMPT = "taskAttempt"
+        const val TASK_STATE = "taskState"
+        const val CHILDREN = "children"
+        const val ACCEPTED_ARTIFACTS = "acceptedArtifacts"
+        const val HOST_ASSERTED_USAGE = "hostAssertedUsage"
+        const val PENDING_EFFECTS = "pendingEffects"
+        const val JOURNAL_SEQUENCE = "journalSequence"
+        const val JOURNAL_HEAD_SHA256 = "journalHeadSha256"
+        const val JOURNAL_FILE_SHA256 = "journalFileSha256"
+        const val LAST_TRUSTED_JOURNAL_OFFSET = "lastTrustedJournalOffset"
+        const val EFFECT_JOURNAL_HEAD = "effectJournalHead"
+        const val EFFECT_RECONCILIATION = "effectReconciliation"
+    }
+
     private val DIGEST = Regex("[0-9a-f]{64}")
     private val GIT_HEAD = Regex("[0-9a-f]{40}([0-9a-f]{24})?")
     private val BRANCH = Regex("refs/heads/[A-Za-z0-9._/-]{1,200}")
@@ -146,15 +231,19 @@ object SessionCheckpointCodec {
     private val PHASES = SessionPhaseVocabulary.wires
     // Wire spellings mirror RecursiveNodeState and TaskState. Do not conflate
     // a recursive child with a queued task or invent recovery-only states.
-    private val CHILD_STATES = setOf("ready", "running", "succeeded", "failed",
-        "cancelled", "timed_out")
-    private val TASK_STATES = setOf("created", "ready", "blocked", "running",
-        "paused", "succeeded", "failed", "needs-attention", "cancelled")
+    private val CHILD_STATES = setOf(CheckpointChildStates.READY,
+        CheckpointChildStates.RUNNING, CheckpointChildStates.SUCCEEDED,
+        CheckpointChildStates.FAILED, CheckpointChildStates.CANCELLED,
+        CheckpointChildStates.TIMED_OUT)
+    private val TASK_STATES = setOf(CheckpointTaskStates.CREATED, CheckpointTaskStates.READY,
+        CheckpointTaskStates.BLOCKED, CheckpointTaskStates.RUNNING, CheckpointTaskStates.PAUSED,
+        CheckpointTaskStates.SUCCEEDED, CheckpointTaskStates.FAILED,
+        CheckpointTaskStates.NEEDS_ATTENTION, CheckpointTaskStates.CANCELLED)
     private fun invalid(): Nothing = throw CheckpointUnconfirmed("CHECKPOINT_PAYLOAD_INVALID")
     private fun validId(id: String) = ToolAuthorizationPolicy.validHostIdentifier(id)
     private fun digest(value: String) = DIGEST.matches(value)
     private fun preExecutionOnly(s: SessionCheckpoint): Boolean =
-        s.phase in setOf("created", "accepted") &&
+        s.phase in setOf(SessionPhaseVocabulary.createdWire, SessionPhaseVocabulary.acceptedWire) &&
             s.taskAttempt == 0 && s.pendingEffects.isEmpty()
 
     fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")
@@ -173,10 +262,12 @@ object SessionCheckpointCodec {
             !listOf(b.graphId, s.sessionId, s.traceId, s.taskId).all(::validId) ||
             s.phase !in PHASES || s.taskState !in TASK_STATES ||
             (s.phase in SessionPhaseVocabulary.terminalWires &&
-                s.taskState !in setOf("succeeded", "failed", "cancelled", "needs-attention")) ||
-            (s.phase == "succeeded" && (s.taskState != "succeeded" ||
-                s.pendingEffects.isNotEmpty() ||
-                s.hostAssertedUsage.any { it.certainty == "unknown" })) ||
+                s.taskState !in setOf(CheckpointTaskStates.SUCCEEDED, CheckpointTaskStates.FAILED,
+                    CheckpointTaskStates.CANCELLED, CheckpointTaskStates.NEEDS_ATTENTION)) ||
+            (s.phase == SessionPhaseVocabulary.succeededWire &&
+                (s.taskState != CheckpointTaskStates.SUCCEEDED ||
+                    s.pendingEffects.isNotEmpty() ||
+                    s.hostAssertedUsage.any { it.certainty == CheckpointUsageCertainty.UNKNOWN })) ||
             s.taskAttempt !in 0..1_000_000 ||
             s.journalSequence < 1 || s.lastTrustedJournalOffset < 7)
             invalid()
@@ -205,10 +296,11 @@ object SessionCheckpointCodec {
             invalid()
         if (s.hostAssertedUsage.any {
                 !validId(it.scopeId) || (it.scopeId !in known && it.scopeId != s.taskId) ||
-                    it.kind !in setOf("model", "tool") ||
-                    it.certainty !in setOf("known", "unknown") ||
-                    (it.certainty == "known" && (it.units == null || it.units < 0)) ||
-                    (it.certainty == "unknown" && it.units != null)
+                    it.kind !in setOf(CheckpointUsageKinds.MODEL, CheckpointUsageKinds.TOOL) ||
+                    it.certainty !in setOf(CheckpointUsageCertainty.KNOWN,
+                        CheckpointUsageCertainty.UNKNOWN) ||
+                    (it.certainty == CheckpointUsageCertainty.KNOWN && (it.units == null || it.units < 0)) ||
+                    (it.certainty == CheckpointUsageCertainty.UNKNOWN && it.units != null)
             } || s.hostAssertedUsage.map { it.scopeId to it.kind }.toSet().size != s.hostAssertedUsage.size)
             invalid()
         if (s.pendingEffects.any { !validId(it.id) || !validId(it.correlationId) ||
@@ -221,7 +313,7 @@ object SessionCheckpointCodec {
                 head.fenceGeneration <= 0L ||
                 !listOf(head.admittedCheckpointSha256, head.toolAuthoritySha256,
                     head.sidecarPathSha256, head.headMacSha256).all(::digest) ||
-                head.lastSequence !in 0L..100_000L ||
+                head.lastSequence !in 0L..EffectJournalLimits.MAX_RECORDS.toLong() ||
                 // This slice only pins isolated pre-execution physical evidence.
                 !preExecutionOnly(s))
                 invalid()
@@ -249,96 +341,97 @@ object SessionCheckpointCodec {
         validate(s)
         val b = s.binding
         val root = buildJsonObject {
-            put("kind", CHECKPOINT_KIND)
-            put("version", when {
-                s.effectReconciliation != null -> 3
-                s.effectJournalHead != null -> 2
-                else -> 1
+            put(RootFields.KIND, CHECKPOINT_KIND)
+            put(RootFields.VERSION, when {
+                s.effectReconciliation != null -> RECONCILIATION_VERSION
+                s.effectJournalHead != null -> EFFECT_HEAD_VERSION
+                else -> BASE_VERSION
             })
-            put("sequence", s.sequence)
-            put("previousSha256", s.previousSha256?.let(::JsonPrimitive) ?: JsonNull)
-            put("binding", buildJsonObject {
-                put("policySha256", b.policySha256)
-                put("workspaceIdentitySha256", b.workspaceIdentitySha256)
-                put("gitHead", b.gitHead)
-                put("gitBranch", b.gitBranch)
-                put("gitBaselineSha256", b.gitBaselineSha256)
-                put("graphId", b.graphId)
-                put("graphGeneration", b.graphGeneration)
-                put("frozenInputsSha256", b.frozenInputsSha256)
+            put(RootFields.SEQUENCE, s.sequence)
+            put(RootFields.PREVIOUS_SHA256, s.previousSha256?.let(::JsonPrimitive) ?: JsonNull)
+            put(RootFields.BINDING, buildJsonObject {
+                put(BindingFields.POLICY_SHA256, b.policySha256)
+                put(BindingFields.WORKSPACE_IDENTITY_SHA256, b.workspaceIdentitySha256)
+                put(BindingFields.GIT_HEAD, b.gitHead)
+                put(BindingFields.GIT_BRANCH, b.gitBranch)
+                put(BindingFields.GIT_BASELINE_SHA256, b.gitBaselineSha256)
+                put(BindingFields.GRAPH_ID, b.graphId)
+                put(BindingFields.GRAPH_GENERATION, b.graphGeneration)
+                put(BindingFields.FROZEN_INPUTS_SHA256, b.frozenInputsSha256)
             })
-            put("sessionId", s.sessionId)
-            put("traceId", s.traceId)
-            put("phase", s.phase)
-            put("taskId", s.taskId)
-            put("taskAttempt", s.taskAttempt)
-            put("taskState", s.taskState)
-            put("children", buildJsonArray {
+            put(RootFields.SESSION_ID, s.sessionId)
+            put(RootFields.TRACE_ID, s.traceId)
+            put(RootFields.PHASE, s.phase)
+            put(RootFields.TASK_ID, s.taskId)
+            put(RootFields.TASK_ATTEMPT, s.taskAttempt)
+            put(RootFields.TASK_STATE, s.taskState)
+            put(RootFields.CHILDREN, buildJsonArray {
                 s.children.sortedBy { it.id }.forEach { child ->
                     add(buildJsonObject {
-                        put("id", child.id); put("parentId", child.parentId)
-                        put("state", child.state)
+                        put(ChildFields.ID, child.id); put(ChildFields.PARENT_ID, child.parentId)
+                        put(ChildFields.STATE, child.state)
                     })
                 }
             })
-            put("acceptedArtifacts", buildJsonArray {
+            put(RootFields.ACCEPTED_ARTIFACTS, buildJsonArray {
                 s.acceptedArtifacts.sortedBy { it.id }.forEach { artifact ->
                     add(buildJsonObject {
-                        put("id", artifact.id); put("ownerId", artifact.ownerId)
-                        put("sha256", artifact.sha256)
+                        put(ArtifactFields.ID, artifact.id); put(ArtifactFields.OWNER_ID, artifact.ownerId)
+                        put(ArtifactFields.SHA256, artifact.sha256)
                     })
                 }
             })
-            put("hostAssertedUsage", buildJsonArray {
+            put(RootFields.HOST_ASSERTED_USAGE, buildJsonArray {
                 s.hostAssertedUsage.sortedWith(compareBy({ it.scopeId }, { it.kind })).forEach { usage ->
                     add(buildJsonObject {
-                        put("scopeId", usage.scopeId); put("kind", usage.kind)
-                        put("certainty", usage.certainty)
-                        put("units", usage.units?.let(::JsonPrimitive) ?: JsonNull)
+                        put(UsageFields.SCOPE_ID, usage.scopeId); put(UsageFields.KIND, usage.kind)
+                        put(UsageFields.CERTAINTY, usage.certainty)
+                        put(UsageFields.UNITS, usage.units?.let(::JsonPrimitive) ?: JsonNull)
                     })
                 }
             })
-            put("pendingEffects", buildJsonArray {
+            put(RootFields.PENDING_EFFECTS, buildJsonArray {
                 s.pendingEffects.sortedBy { it.id }.forEach { effect ->
                     add(buildJsonObject {
-                        put("id", effect.id); put("correlationId", effect.correlationId)
-                        put("state", effect.state)
+                        put(PendingEffectFields.ID, effect.id)
+                        put(PendingEffectFields.CORRELATION_ID, effect.correlationId)
+                        put(PendingEffectFields.STATE, effect.state)
                     })
                 }
             })
-            put("journalSequence", s.journalSequence)
-            put("journalHeadSha256", s.journalHeadSha256)
-            put("journalFileSha256", s.journalFileSha256)
-            put("lastTrustedJournalOffset", s.lastTrustedJournalOffset)
+            put(RootFields.JOURNAL_SEQUENCE, s.journalSequence)
+            put(RootFields.JOURNAL_HEAD_SHA256, s.journalHeadSha256)
+            put(RootFields.JOURNAL_FILE_SHA256, s.journalFileSha256)
+            put(RootFields.LAST_TRUSTED_JOURNAL_OFFSET, s.lastTrustedJournalOffset)
             if (s.effectReconciliation != null && s.effectJournalHead == null)
-                put("effectJournalHead", JsonNull)
+                put(RootFields.EFFECT_JOURNAL_HEAD, JsonNull)
             s.effectJournalHead?.let { head ->
-                put("effectJournalHead", buildJsonObject {
-                    put("sessionId", head.sessionId)
-                    put("fenceGeneration", head.fenceGeneration)
-                    put("admittedCheckpointSha256", head.admittedCheckpointSha256)
-                    put("toolAuthoritySha256", head.toolAuthoritySha256)
-                    put("sidecarPathSha256", head.sidecarPathSha256)
-                    put("lastSequence", head.lastSequence)
-                    put("headMacSha256", head.headMacSha256)
+                put(RootFields.EFFECT_JOURNAL_HEAD, buildJsonObject {
+                    put(HeadFields.SESSION_ID, head.sessionId)
+                    put(HeadFields.FENCE_GENERATION, head.fenceGeneration)
+                    put(HeadFields.ADMITTED_CHECKPOINT_SHA256, head.admittedCheckpointSha256)
+                    put(HeadFields.TOOL_AUTHORITY_SHA256, head.toolAuthoritySha256)
+                    put(HeadFields.SIDECAR_PATH_SHA256, head.sidecarPathSha256)
+                    put(HeadFields.LAST_SEQUENCE, head.lastSequence)
+                    put(HeadFields.HEAD_MAC_SHA256, head.headMacSha256)
                 })
             }
             s.effectReconciliation?.let { record ->
-                put("effectReconciliation", buildJsonObject {
-                    put("sourceCheckpointSha256", record.sourceCheckpointSha256)
-                    put("sourceFenceGeneration", record.sourceFenceGeneration)
-                    put("sourceFenceSha256", record.sourceFenceSha256)
-                    put("operatorId", record.operatorId)
-                    put("hostSealMacSha256", record.hostSealMacSha256)
-                    put("sourceHead", buildJsonObject {
+                put(RootFields.EFFECT_RECONCILIATION, buildJsonObject {
+                    put(ReconciliationFields.SOURCE_CHECKPOINT_SHA256, record.sourceCheckpointSha256)
+                    put(ReconciliationFields.SOURCE_FENCE_GENERATION, record.sourceFenceGeneration)
+                    put(ReconciliationFields.SOURCE_FENCE_SHA256, record.sourceFenceSha256)
+                    put(ReconciliationFields.OPERATOR_ID, record.operatorId)
+                    put(ReconciliationFields.HOST_SEAL_MAC_SHA256, record.hostSealMacSha256)
+                    put(ReconciliationFields.SOURCE_HEAD, buildJsonObject {
                         val head = record.sourceHead
-                        put("sessionId", head.sessionId)
-                        put("fenceGeneration", head.fenceGeneration)
-                        put("admittedCheckpointSha256", head.admittedCheckpointSha256)
-                        put("toolAuthoritySha256", head.toolAuthoritySha256)
-                        put("sidecarPathSha256", head.sidecarPathSha256)
-                        put("lastSequence", head.lastSequence)
-                        put("headMacSha256", head.headMacSha256)
+                        put(HeadFields.SESSION_ID, head.sessionId)
+                        put(HeadFields.FENCE_GENERATION, head.fenceGeneration)
+                        put(HeadFields.ADMITTED_CHECKPOINT_SHA256, head.admittedCheckpointSha256)
+                        put(HeadFields.TOOL_AUTHORITY_SHA256, head.toolAuthoritySha256)
+                        put(HeadFields.SIDECAR_PATH_SHA256, head.sidecarPathSha256)
+                        put(HeadFields.LAST_SEQUENCE, head.lastSequence)
+                        put(HeadFields.HEAD_MAC_SHA256, head.headMacSha256)
                     })
                 })
             }
@@ -376,78 +469,91 @@ object SessionCheckpointCodec {
                 .onUnmappableCharacter(CodingErrorAction.REPORT)
                 .decode(ByteBuffer.wrap(bytes)).toString()
             val root = obj(Json.parseToJsonElement(decoded))
-            val version = long(root, "version")
-            if (version !in setOf(1L, 2L, 3L) ||
-                string(root, "kind") != CHECKPOINT_KIND)
+            val version = long(root, RootFields.VERSION)
+            if (version !in setOf(BASE_VERSION, EFFECT_HEAD_VERSION, RECONCILIATION_VERSION) ||
+                string(root, RootFields.KIND) != CHECKPOINT_KIND)
                 throw CheckpointUnconfirmed("CHECKPOINT_VERSION_UNSUPPORTED")
-            val keys = arrayOf("kind", "version", "sequence", "previousSha256",
-                "binding", "sessionId", "traceId", "phase", "taskId", "taskAttempt",
-                "taskState", "children", "acceptedArtifacts", "hostAssertedUsage",
-                "pendingEffects", "journalSequence", "journalHeadSha256",
-                "journalFileSha256", "lastTrustedJournalOffset")
+            val keys = arrayOf(
+                RootFields.KIND, RootFields.VERSION, RootFields.SEQUENCE, RootFields.PREVIOUS_SHA256,
+                RootFields.BINDING, RootFields.SESSION_ID, RootFields.TRACE_ID, RootFields.PHASE,
+                RootFields.TASK_ID, RootFields.TASK_ATTEMPT, RootFields.TASK_STATE, RootFields.CHILDREN,
+                RootFields.ACCEPTED_ARTIFACTS, RootFields.HOST_ASSERTED_USAGE, RootFields.PENDING_EFFECTS,
+                RootFields.JOURNAL_SEQUENCE, RootFields.JOURNAL_HEAD_SHA256,
+                RootFields.JOURNAL_FILE_SHA256, RootFields.LAST_TRUSTED_JOURNAL_OFFSET)
             val o = when (version) {
-                1L -> fields(root, *keys)
-                2L -> fields(root, *keys, "effectJournalHead")
-                else -> fields(root, *keys, "effectJournalHead", "effectReconciliation")
+                BASE_VERSION -> fields(root, *keys)
+                EFFECT_HEAD_VERSION -> fields(root, *keys, RootFields.EFFECT_JOURNAL_HEAD)
+                else -> fields(root, *keys, RootFields.EFFECT_JOURNAL_HEAD, RootFields.EFFECT_RECONCILIATION)
             }
-            val b = fields(obj(o["binding"]), "policySha256", "workspaceIdentitySha256",
-                "gitHead", "gitBranch", "gitBaselineSha256", "graphId",
-                "graphGeneration", "frozenInputsSha256")
-            val binding = CheckpointBinding(string(b, "policySha256"),
-                string(b, "workspaceIdentitySha256"), string(b, "gitHead"),
-                string(b, "gitBranch"), string(b, "gitBaselineSha256"),
-                string(b, "graphId"), long(b, "graphGeneration"), string(b, "frozenInputsSha256"))
-            val children = array(o, "children").map {
-                val x = fields(obj(it), "id", "parentId", "state")
-                CheckpointChild(string(x, "id"), string(x, "parentId"), string(x, "state"))
+            val b = fields(obj(o[RootFields.BINDING]), BindingFields.POLICY_SHA256,
+                BindingFields.WORKSPACE_IDENTITY_SHA256, BindingFields.GIT_HEAD, BindingFields.GIT_BRANCH,
+                BindingFields.GIT_BASELINE_SHA256, BindingFields.GRAPH_ID,
+                BindingFields.GRAPH_GENERATION, BindingFields.FROZEN_INPUTS_SHA256)
+            val binding = CheckpointBinding(string(b, BindingFields.POLICY_SHA256),
+                string(b, BindingFields.WORKSPACE_IDENTITY_SHA256), string(b, BindingFields.GIT_HEAD),
+                string(b, BindingFields.GIT_BRANCH), string(b, BindingFields.GIT_BASELINE_SHA256),
+                string(b, BindingFields.GRAPH_ID), long(b, BindingFields.GRAPH_GENERATION),
+                string(b, BindingFields.FROZEN_INPUTS_SHA256))
+            val children = array(o, RootFields.CHILDREN).map {
+                val x = fields(obj(it), ChildFields.ID, ChildFields.PARENT_ID, ChildFields.STATE)
+                CheckpointChild(string(x, ChildFields.ID), string(x, ChildFields.PARENT_ID),
+                    string(x, ChildFields.STATE))
             }
-            val artifacts = array(o, "acceptedArtifacts").map {
-                val x = fields(obj(it), "id", "ownerId", "sha256")
-                CheckpointArtifact(string(x, "id"), string(x, "ownerId"), string(x, "sha256"))
+            val artifacts = array(o, RootFields.ACCEPTED_ARTIFACTS).map {
+                val x = fields(obj(it), ArtifactFields.ID, ArtifactFields.OWNER_ID, ArtifactFields.SHA256)
+                CheckpointArtifact(string(x, ArtifactFields.ID), string(x, ArtifactFields.OWNER_ID),
+                    string(x, ArtifactFields.SHA256))
             }
-            val usage = array(o, "hostAssertedUsage").map {
-                val x = fields(obj(it), "scopeId", "kind", "certainty", "units")
-                HostAssertedCheckpointUsage(string(x, "scopeId"), string(x, "kind"),
-                    string(x, "certainty"),
-                    if (x["units"] == JsonNull) null else long(x, "units"))
+            val usage = array(o, RootFields.HOST_ASSERTED_USAGE).map {
+                val x = fields(obj(it), UsageFields.SCOPE_ID, UsageFields.KIND, UsageFields.CERTAINTY,
+                    UsageFields.UNITS)
+                HostAssertedCheckpointUsage(string(x, UsageFields.SCOPE_ID), string(x, UsageFields.KIND),
+                    string(x, UsageFields.CERTAINTY),
+                    if (x[UsageFields.UNITS] == JsonNull) null else long(x, UsageFields.UNITS))
             }
-            val effects = array(o, "pendingEffects").map {
-                val x = fields(obj(it), "id", "correlationId", "state")
-                CheckpointEffect(string(x, "id"), string(x, "correlationId"), string(x, "state"))
+            val effects = array(o, RootFields.PENDING_EFFECTS).map {
+                val x = fields(obj(it), PendingEffectFields.ID, PendingEffectFields.CORRELATION_ID,
+                    PendingEffectFields.STATE)
+                CheckpointEffect(string(x, PendingEffectFields.ID),
+                    string(x, PendingEffectFields.CORRELATION_ID), string(x, PendingEffectFields.STATE))
             }
-            val attempt = long(o, "taskAttempt")
-            val eventSequence = long(o, "journalSequence")
+            val attempt = long(o, RootFields.TASK_ATTEMPT)
+            val eventSequence = long(o, RootFields.JOURNAL_SEQUENCE)
             if (attempt !in Int.MIN_VALUE..Int.MAX_VALUE ||
                 eventSequence !in Int.MIN_VALUE..Int.MAX_VALUE)
                 invalid()
             fun readHead(value: JsonElement?): CheckpointEffectJournalHead {
-                val h = fields(obj(value), "sessionId", "fenceGeneration",
-                    "admittedCheckpointSha256", "toolAuthoritySha256",
-                    "sidecarPathSha256", "lastSequence", "headMacSha256")
-                return CheckpointEffectJournalHead(string(h, "sessionId"),
-                    long(h, "fenceGeneration"), string(h, "admittedCheckpointSha256"),
-                    string(h, "toolAuthoritySha256"), string(h, "sidecarPathSha256"),
-                    long(h, "lastSequence"), string(h, "headMacSha256"))
+                val h = fields(obj(value), HeadFields.SESSION_ID, HeadFields.FENCE_GENERATION,
+                    HeadFields.ADMITTED_CHECKPOINT_SHA256, HeadFields.TOOL_AUTHORITY_SHA256,
+                    HeadFields.SIDECAR_PATH_SHA256, HeadFields.LAST_SEQUENCE, HeadFields.HEAD_MAC_SHA256)
+                return CheckpointEffectJournalHead(string(h, HeadFields.SESSION_ID),
+                    long(h, HeadFields.FENCE_GENERATION), string(h, HeadFields.ADMITTED_CHECKPOINT_SHA256),
+                    string(h, HeadFields.TOOL_AUTHORITY_SHA256), string(h, HeadFields.SIDECAR_PATH_SHA256),
+                    long(h, HeadFields.LAST_SEQUENCE), string(h, HeadFields.HEAD_MAC_SHA256))
             }
-            val head = if (version == 1L || (version == 3L &&
-                    o["effectJournalHead"] == JsonNull)) null
-                else readHead(o["effectJournalHead"])
-            val reconciliation = if (version == 3L) {
-                val rec = fields(obj(o["effectReconciliation"]),
-                    "sourceCheckpointSha256", "sourceFenceGeneration",
-                    "sourceFenceSha256", "operatorId", "hostSealMacSha256",
-                    "sourceHead")
-                CheckpointEffectReconciliation(string(rec, "sourceCheckpointSha256"),
-                    long(rec, "sourceFenceGeneration"),
-                    string(rec, "sourceFenceSha256"), readHead(rec["sourceHead"]),
-                    string(rec, "operatorId"), string(rec, "hostSealMacSha256"))
+            val head = if (version == BASE_VERSION || (version == RECONCILIATION_VERSION &&
+                    o[RootFields.EFFECT_JOURNAL_HEAD] == JsonNull)) null
+                else readHead(o[RootFields.EFFECT_JOURNAL_HEAD])
+            val reconciliation = if (version == RECONCILIATION_VERSION) {
+                val rec = fields(obj(o[RootFields.EFFECT_RECONCILIATION]),
+                    ReconciliationFields.SOURCE_CHECKPOINT_SHA256,
+                    ReconciliationFields.SOURCE_FENCE_GENERATION,
+                    ReconciliationFields.SOURCE_FENCE_SHA256, ReconciliationFields.OPERATOR_ID,
+                    ReconciliationFields.HOST_SEAL_MAC_SHA256, ReconciliationFields.SOURCE_HEAD)
+                CheckpointEffectReconciliation(string(rec, ReconciliationFields.SOURCE_CHECKPOINT_SHA256),
+                    long(rec, ReconciliationFields.SOURCE_FENCE_GENERATION),
+                    string(rec, ReconciliationFields.SOURCE_FENCE_SHA256),
+                    readHead(rec[ReconciliationFields.SOURCE_HEAD]),
+                    string(rec, ReconciliationFields.OPERATOR_ID),
+                    string(rec, ReconciliationFields.HOST_SEAL_MAC_SHA256))
             } else null
-            val s = SessionCheckpoint(long(o, "sequence"), nullableString(o, "previousSha256"),
-                binding, string(o, "sessionId"), string(o, "traceId"), string(o, "phase"),
-                string(o, "taskId"), attempt.toInt(), string(o, "taskState"),
+            val s = SessionCheckpoint(long(o, RootFields.SEQUENCE),
+                nullableString(o, RootFields.PREVIOUS_SHA256), binding,
+                string(o, RootFields.SESSION_ID), string(o, RootFields.TRACE_ID), string(o, RootFields.PHASE),
+                string(o, RootFields.TASK_ID), attempt.toInt(), string(o, RootFields.TASK_STATE),
                 children, artifacts, usage, effects, eventSequence.toInt(),
-                string(o, "journalHeadSha256"), string(o, "journalFileSha256"),
-                long(o, "lastTrustedJournalOffset"), head, reconciliation)
+                string(o, RootFields.JOURNAL_HEAD_SHA256), string(o, RootFields.JOURNAL_FILE_SHA256),
+                long(o, RootFields.LAST_TRUSTED_JOURNAL_OFFSET), head, reconciliation)
             if (!encode(s).contentEquals(bytes))
                 throw CheckpointUnconfirmed("CHECKPOINT_NONCANONICAL")
             return s
@@ -614,7 +720,7 @@ object SessionCheckpointStore {
             refuse("CHECKPOINT_HASH_MISMATCH")
         val checkpoint = SessionCheckpointCodec.decode(payload)
         return VerifiedSessionCheckpoint(checkpoint, SessionCheckpointCodec.sha256(payload),
-            checkpoint.hostAssertedUsage.any { it.certainty == "unknown" } ||
+            checkpoint.hostAssertedUsage.any { it.certainty == CheckpointUsageCertainty.UNKNOWN } ||
                 checkpoint.pendingEffects.isNotEmpty() ||
                 checkpoint.effectJournalHead != null ||
                 checkpoint.effectReconciliation != null)
@@ -832,7 +938,7 @@ object SessionCheckpointStore {
                 result[result.lastIndex] = tail.copy(
                     reconciliationRequired =
                         tail.snapshot.hostAssertedUsage.any {
-                            it.certainty == "unknown"
+                            it.certainty == CheckpointUsageCertainty.UNKNOWN
                         } || tail.snapshot.pendingEffects.isNotEmpty())
             }
         }
@@ -849,13 +955,14 @@ object SessionCheckpointStore {
             s.lastTrustedJournalOffset != ledger.lastTrustedOffset)
             refuse("CHECKPOINT_JOURNAL_MISMATCH")
         if (ledger.events.isEmpty() || ledger.events.any { event ->
-                event["sessionId"]?.jsonPrimitive?.content != s.sessionId ||
-                    event["traceId"]?.jsonPrimitive?.content != s.traceId
+                event[SessionEnvelopeFields.SESSION_ID]?.jsonPrimitive?.content != s.sessionId ||
+                    event[SessionEnvelopeFields.TRACE_ID]?.jsonPrimitive?.content != s.traceId
             }) refuse("CHECKPOINT_SESSION_MISMATCH")
         val graph = setOf(s.binding.graphId) + s.children.map { it.id }
         for (event in ledger.events) {
             val metadata = event[SessionEventFields.METADATA] as? JsonObject ?: continue
-            for (key in listOf(StageEventMetadataFields.GRAPH_ID, StageEventMetadataFields.PARENT_GRAPH_ID, StageEventMetadataFields.CHILD_GRAPH_ID)) {
+            for (key in listOf(StageEventMetadataFields.GRAPH_ID,
+                StageEventMetadataFields.PARENT_GRAPH_ID, StageEventMetadataFields.CHILD_GRAPH_ID)) {
                 val value = metadata[key]?.jsonPrimitive?.content ?: continue
                 if (value !in graph) refuse("CHECKPOINT_GRAPH_MISMATCH")
             }
@@ -868,11 +975,11 @@ object SessionCheckpointStore {
 
         // A missing usage entry cannot mean zero: first-party request/tool events
         // require an explicit known or unknown ledger entry in the snapshot.
-        val eventTypes = ledger.events.mapNotNull { it["type"]?.jsonPrimitive?.content }
+        val eventTypes = ledger.events.mapNotNull { it[SessionEventFields.TYPE]?.jsonPrimitive?.content }
         if (eventTypes.any { it.startsWith("llm.") } &&
-                s.hostAssertedUsage.none { it.kind == "model" } ||
+                s.hostAssertedUsage.none { it.kind == CheckpointUsageKinds.MODEL } ||
             eventTypes.any { it.startsWith("tool.") } &&
-                s.hostAssertedUsage.none { it.kind == "tool" })
+                s.hostAssertedUsage.none { it.kind == CheckpointUsageKinds.TOOL })
             refuse("CHECKPOINT_USAGE_UNCONFIRMED")
 
         // Multiple tool starts can share a request correlation. Count them per
@@ -880,7 +987,7 @@ object SessionCheckpointStore {
         // a single later completion must never clear two uncertain operations.
         fun toolKey(event: JsonObject): String {
             val actor = event[SessionEventFields.ACTOR] as? JsonObject
-            val execution = actor?.get("toolExecutionId")
+            val execution = actor?.get(SessionEventActorFields.TOOL_EXECUTION_ID)
             return if (execution == null || execution == JsonNull)
                 "correlation:" + event[SessionEventFields.CORRELATION_ID]!!.jsonPrimitive.content
             else "execution:" + execution.jsonPrimitive.content
@@ -906,10 +1013,13 @@ object SessionCheckpointStore {
         if (s.acceptedArtifacts.any { artifact ->
                 ledger.events.none { event ->
                     val m = event[SessionEventFields.METADATA] as? JsonObject
-                    event[SessionEventFields.STATUS]?.jsonPrimitive?.content == SessionEventStatuses.COMPLETED &&
-                        m?.get("artifactId")?.jsonPrimitive?.content == artifact.id &&
-                        m?.get("artifactSha256")?.jsonPrimitive?.content == artifact.sha256 &&
-                        (m?.get(StageEventMetadataFields.CHILD_GRAPH_ID) ?: m?.get(StageEventMetadataFields.GRAPH_ID))
+                    event[SessionEventFields.STATUS]?.jsonPrimitive?.content ==
+                        SessionEventStatuses.COMPLETED &&
+                        m?.get(StageEventMetadataFields.ARTIFACT_ID)?.jsonPrimitive?.content == artifact.id &&
+                        m?.get(StageEventMetadataFields.ARTIFACT_SHA256)?.jsonPrimitive?.content ==
+                            artifact.sha256 &&
+                        (m?.get(StageEventMetadataFields.CHILD_GRAPH_ID)
+                            ?: m?.get(StageEventMetadataFields.GRAPH_ID))
                             ?.jsonPrimitive?.content == artifact.ownerId
                 }
             }) refuse("CHECKPOINT_ARTIFACT_UNCONFIRMED")

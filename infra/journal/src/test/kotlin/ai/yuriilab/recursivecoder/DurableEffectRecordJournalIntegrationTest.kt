@@ -136,6 +136,36 @@ class DurableEffectRecordJournalIntegrationTest : SessionCheckpointTestFixture()
         assertTrue(verified.byteLength > 7L)
         assertEquals(64, verified.fileSha256.length)
         assertFalse(Files.isSymbolicLink(path()))
+
+        // Independent on-disk framing and exact JSON payload order.
+        val bytes = ByteBuffer.wrap(Files.readAllBytes(path()))
+        val magic = ByteArray(7)
+        bytes.get(magic)
+        assertContentEquals("RCEFX1\n".toByteArray(StandardCharsets.US_ASCII), magic)
+        fun nextPayload(): String {
+            val length = bytes.int
+            val mac = ByteArray(32)
+            bytes.get(mac)
+            val payload = ByteArray(length)
+            bytes.get(payload)
+            return payload.toString(StandardCharsets.UTF_8)
+        }
+        val expected = expectation()
+        val checkpoint = expected.admittedCheckpointSha256
+        val authority = expected.toolAuthoritySha256
+        assertEquals("""{"type":"genesis","sessionId":"sess-one","fenceGeneration":1,""" +
+            """"admittedCheckpointSha256":"$checkpoint","toolAuthoritySha256":"$authority"}""",
+            nextPayload())
+        val input = "a".repeat(64)
+        val observed = "b".repeat(64)
+        fun prefix(sequence: Int) =
+            """{"sequence":$sequence,"sessionId":"sess-one","operationId":"effect-one",""" +
+            """"fenceGeneration":1,"kind":"TRUSTED_WRITE","inputSha256":"$input","""
+        assertEquals(prefix(1) + """"state":"intent"}""", nextPayload())
+        assertEquals(prefix(2) + """"state":"started"}""", nextPayload())
+        assertEquals(prefix(3) + """"state":"committed","observedStateSha256":"$observed"}""",
+            nextPayload())
+        assertFalse(bytes.hasRemaining())
     }
 
 
@@ -534,5 +564,25 @@ class DurableEffectRecordJournalIntegrationTest : SessionCheckpointTestFixture()
             writer.close()
         }
         denied("EFFECT_JOURNAL_VERSION_INVALID") { inspectEffects() }
+    }
+
+    @Test fun authenticatedUnknownPhysicalRecordStateIsRejected() {
+        withLease { lease -> open(lease).use { } }
+        val payload = forgedIntent().toString(StandardCharsets.UTF_8)
+            .replace("\"state\":\"intent\"", "\"state\":\"future-state\"")
+        assertTrue(payload.contains("future-state"))
+        appendForgedFirstEffect(payload.toByteArray(StandardCharsets.UTF_8))
+        denied("EFFECT_JOURNAL_RECORD_CORRUPT") { inspectEffects() }
+        denied("EFFECT_JOURNAL_RECORD_CORRUPT") { inspectDiagnostic() }
+    }
+
+    @Test fun authenticatedUnknownPhysicalEffectKindIsRejected() {
+        withLease { lease -> open(lease).use { } }
+        val payload = forgedIntent().toString(StandardCharsets.UTF_8)
+            .replace("\"kind\":\"TRUSTED_WRITE\"", "\"kind\":\"FUTURE_KIND\"")
+        assertTrue(payload.contains("FUTURE_KIND"))
+        appendForgedFirstEffect(payload.toByteArray(StandardCharsets.UTF_8))
+        denied("EFFECT_JOURNAL_RECORD_CORRUPT") { inspectEffects() }
+        denied("EFFECT_JOURNAL_RECORD_CORRUPT") { inspectDiagnostic() }
     }
 }

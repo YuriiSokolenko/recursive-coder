@@ -41,11 +41,11 @@ object DurableCreatedAcceptedHandoff {
         fun text(field: String) = (event[field] as? JsonPrimitive)?.content
         return PreExecutionPhasePolicy.step(event, source.phase) ==
                 SessionPhaseVocabulary.acceptedWire &&
-            (event["sequence"] as? JsonPrimitive)?.intOrNull == next &&
-            text("sessionId") == source.sessionId &&
-            text("traceId") == source.traceId &&
-            text("eventId") == SessionEventJournal.eventId(source.sessionId, next) &&
-            text("causationId") ==
+            (event[SessionEventFields.SEQUENCE] as? JsonPrimitive)?.intOrNull == next &&
+            text(SessionEnvelopeFields.SESSION_ID) == source.sessionId &&
+            text(SessionEnvelopeFields.TRACE_ID) == source.traceId &&
+            text(SessionEventFields.EVENT_ID) == SessionEventJournal.eventId(source.sessionId, next) &&
+            text(SessionEventFields.CAUSATION_ID) ==
                 SessionEventJournal.eventId(source.sessionId, source.journalSequence) &&
             FencedGraphMetadataPolicy.permittedFencedGraphMetadata(
                 event, source.binding.graphId)
@@ -91,7 +91,7 @@ object DurableCreatedAcceptedHandoff {
                         phase = SessionPhaseVocabulary.acceptedWire,
                         // This pre-execution accepted edge is an admitted,
                         // unstarted task, not a running task (issue #105).
-                        taskState = "ready",
+                        taskState = CheckpointTaskStates.READY,
                         journalSequence = anchor.lastSequence,
                         journalHeadSha256 = anchor.headSha256,
                         journalFileSha256 = anchor.fileSha256,
