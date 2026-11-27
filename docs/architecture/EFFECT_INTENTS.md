@@ -312,7 +312,7 @@ administrator may administer that host, access its history HMAC key or replace
 its provisioned register. The service is first-party and self-hostable. No
 cloud provider or GitHub API is a runtime dependency.
 
-The authority operator must provision a unique host/session/register/ epoch
+The authority operator must provision a unique host/session/register/epoch
 tuple exactly once, retain an independent inventory of issued identities, and
 create two append-only histories on persistent storage outside the local
 rollback domain. Provisioning is an offline administrative operation, not a

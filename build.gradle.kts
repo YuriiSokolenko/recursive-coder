@@ -43,10 +43,10 @@ gradle.projectsEvaluated {
 }
 
 // Both gates examine compiled adapters, inherited methods and both JUnit reports.
-fun registerConformanceGuard(name: String, script: String) {
+fun registerConformanceGuard(name: String, script: String, purpose: String) {
     val guard = tasks.register<Exec>(name) {
         group = "verification"
-        description = "Require executed shared adapter conformance."
+        description = purpose
         workingDir(rootDir)
         commandLine("python3", script)
     }
@@ -72,5 +72,11 @@ fun registerConformanceGuard(name: String, script: String) {
     }
 }
 
-registerConformanceGuard("checkPreparationHostConformance", "tools/check_preparation_host_conformance.py")
-registerConformanceGuard("checkEffectAuthorityConformance", "tools/check_effect_authority_conformance.py")
+registerConformanceGuard(
+    "checkPreparationHostConformance", "tools/check_preparation_host_conformance.py",
+    "Require executed shared preparation host conformance for every production adapter."
+)
+registerConformanceGuard(
+    "checkEffectAuthorityConformance", "tools/check_effect_authority_conformance.py",
+    "Require executed shared effect authority conformance for every production adapter."
+)

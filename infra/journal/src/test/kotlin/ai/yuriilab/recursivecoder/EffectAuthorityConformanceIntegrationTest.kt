@@ -550,3 +550,67 @@ class AuthorityWireVocabularyUnitTest {
         assertFalse(AuthorityWire.appendOnlyFlags(null))
     }
 }
+
+/** Pure fixture values deliberately do not call the Linux filesystem. */
+@Tag("unit")
+class AuthorityKeyPolicyUnitTest {
+    private val owned = AuthorityKeyMetadata(1000, 0x8180, true, "device:inode")
+
+    @Test
+    fun parsesOnlyOneValidLinuxEffectiveUidWithMatchingFilesystemUid() {
+        assertEquals(1000L, AuthorityKeyPolicy.effectiveUid(listOf(
+            "Name: java", "Uid:\t42\t1000\t43\t1000", "Gid:\t9\t9\t9\t9"
+        )))
+        assertEquals(0L, AuthorityKeyPolicy.effectiveUid(listOf("Uid: 0 0 0 0")))
+        assertEquals(4294967294L, AuthorityKeyPolicy.effectiveUid(
+            listOf("Uid: 1 4294967294 1 4294967294")))
+        for (status in listOf(
+            emptyList(),
+            listOf("Uid: 1 2 3"),
+            listOf("Uid: 1 2 3 2 4"),
+            listOf("Uid: 1 2 3 2", "Uid: 1 2 3 2"),
+            listOf("Uid: 1 -2 3 -2"),
+            listOf("Uid: 1 +2 3 +2"),
+            listOf("Uid: 1 02 3 02"),
+            listOf("Uid: 1 4294967295 3 4294967295"),
+            listOf("Uid: 1 999999999999999999999 3 2"),
+            listOf("Uid: 1 invalid 3 2"),
+            listOf("Uid: 1 2 3 4"),
+            listOf("Uid:"),
+            listOf("Gid: 1 2 3 2")
+        )) assertEquals(null, AuthorityKeyPolicy.effectiveUid(status), status.toString())
+    }
+
+    @Test
+    fun acceptsOnlyOwnedRegularPrivateFileWithKnownIdentity() {
+        assertTrue(AuthorityKeyPolicy.accepts(owned, 1000))
+        assertTrue(AuthorityKeyPolicy.accepts(owned.copy(mode = 0x8100), 1000))
+        assertFalse(AuthorityKeyPolicy.accepts(owned.copy(ownerUid = 1001), 1000))
+        assertFalse(AuthorityKeyPolicy.accepts(owned, 1001))
+        assertFalse(AuthorityKeyPolicy.accepts(owned.copy(fileKey = null), 1000))
+        assertFalse(AuthorityKeyPolicy.accepts(owned.copy(regularFile = false), 1000))
+        assertFalse(AuthorityKeyPolicy.accepts(owned.copy(ownerUid = -1), -1))
+        assertFalse(AuthorityKeyPolicy.accepts(owned.copy(ownerUid = 4294967295L), 4294967295L))
+        for (mode in listOf(0x81A0, 0x8184, 0x81C0, 0x8080, 0x8980, 0x8580, 0x8380)) {
+            assertFalse(AuthorityKeyPolicy.accepts(owned.copy(mode = mode), 1000), mode.toString(16))
+        }
+    }
+
+    @Test
+    fun rejectsBeforeAfterIdentityOwnershipPermissionAndTypeChanges() {
+        assertTrue(AuthorityKeyPolicy.samePrivateFile(owned, owned.copy(), 1000))
+        val changed = listOf(
+            owned.copy(fileKey = "device:replacement"),
+            owned.copy(fileKey = null),
+            owned.copy(ownerUid = 1001),
+            owned.copy(mode = 0x8100), // Still private but changed during read.
+            owned.copy(mode = 0x8184),
+            owned.copy(regularFile = false)
+        )
+        for (metadata in changed) {
+            assertFalse(AuthorityKeyPolicy.samePrivateFile(owned, metadata, 1000))
+            assertFalse(AuthorityKeyPolicy.samePrivateFile(metadata, owned, 1000))
+        }
+        assertFalse(AuthorityKeyPolicy.samePrivateFile(owned, owned, 1001))
+    }
+}

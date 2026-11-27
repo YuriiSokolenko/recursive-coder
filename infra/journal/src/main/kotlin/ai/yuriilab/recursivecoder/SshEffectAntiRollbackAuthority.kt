@@ -1,14 +1,11 @@
 package ai.yuriilab.recursivecoder
 
-import com.sun.security.auth.module.UnixSystem
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
-import java.nio.file.attribute.PosixFileAttributes
-import java.nio.file.attribute.PosixFilePermission
 import java.nio.file.StandardOpenOption.APPEND
 import java.nio.file.StandardOpenOption.CREATE_NEW
 import java.nio.file.StandardOpenOption.READ
@@ -179,6 +176,48 @@ internal enum class AuthorityFaultPoint(val wireValue: String) {
     AFTER_BOTH("after-both")
 }
 
+/** Immutable metadata snapshot; no filesystem capability or secret bytes. */
+internal data class AuthorityKeyMetadata(
+    val ownerUid: Long,
+    val mode: Int,
+    val regularFile: Boolean,
+    val fileKey: Any?
+)
+
+/** Pure decisions shared by the Linux key reader and independent unit fixtures. */
+internal object AuthorityKeyPolicy {
+    private const val MAX_UID = 4_294_967_294L
+    private const val PERMISSION_MASK = 0xFFF
+    private const val OWNER_READ = 0x100
+    private const val OWNER_READ_WRITE = 0x180
+
+    /**
+     * Linux procfs exposes real, effective, saved-set and filesystem UIDs.
+     * Require a single well-formed line and equal effective/filesystem UIDs
+     * so the file-access identity cannot differ from the checked identity.
+     */
+    fun effectiveUid(status: List<String>): Long? {
+        val line = status.singleOrNull { it.startsWith("Uid:") } ?: return null
+        val fields = line.removePrefix("Uid:").trim().split(Regex("[ \\t]+"))
+        if (fields.size != 4) return null
+        val uids = fields.map { field ->
+            if (!field.matches(Regex("0|[1-9][0-9]{0,9}"))) return null
+            field.toLongOrNull()?.takeIf { it in 0..MAX_UID } ?: return null
+        }
+        return uids[1].takeIf { it == uids[3] }
+    }
+
+    fun accepts(metadata: AuthorityKeyMetadata, currentUid: Long): Boolean =
+        currentUid in 0..MAX_UID && metadata.ownerUid == currentUid &&
+            metadata.regularFile && metadata.fileKey != null &&
+            (metadata.mode and PERMISSION_MASK) in setOf(OWNER_READ, OWNER_READ_WRITE)
+
+    fun samePrivateFile(before: AuthorityKeyMetadata, after: AuthorityKeyMetadata,
+                        currentUid: Long): Boolean =
+        accepts(before, currentUid) && accepts(after, currentUid) &&
+            before.fileKey == after.fileKey && before.mode == after.mode
+}
+
 internal object AuthorityWire {
     const val ABSENT = "-"
     const val LIMIT = 16 * 1024 * 1024
@@ -192,25 +231,30 @@ internal object AuthorityWire {
     fun hex(bytes: ByteArray): String = HexFormat.of().formatHex(bytes)
     fun hash(bytes: ByteArray): String = hex(MessageDigest.getInstance("SHA-256").digest(bytes))
     fun key(path: Path): ByteArray {
-        fun attributes(): PosixFileAttributes {
-            val attrs = Files.readAttributes(path, PosixFileAttributes::class.java, NOFOLLOW_LINKS)
-            val uid = (Files.getAttribute(path, "unix:uid", NOFOLLOW_LINKS) as Number).toLong()
-            require(attrs.isRegularFile && uid == UnixSystem().uid && attrs.fileKey() != null)
-            val allowed = setOf(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE)
-            require(PosixFilePermission.OWNER_READ in attrs.permissions() &&
-                allowed.containsAll(attrs.permissions()))
-            return attrs
+        fun attributes(): AuthorityKeyMetadata {
+            // Read all decision fields in one no-follow Unix attribute lookup.
+            val attrs = Files.readAttributes(path,
+                "unix:uid,mode,isRegularFile,fileKey", NOFOLLOW_LINKS)
+            return AuthorityKeyMetadata(
+                (attrs.getValue("uid") as Int).toUInt().toLong(),
+                attrs.getValue("mode") as Int,
+                attrs.getValue("isRegularFile") as Boolean,
+                attrs["fileKey"]
+            )
         }
+        val currentUid = checkNotNull(AuthorityKeyPolicy.effectiveUid(
+            Files.readAllLines(Path.of("/proc/self/status"), Charsets.US_ASCII)
+        ))
         // The operator must protect parent directories from rename/replacement.
         // Never follow the final path, even if swapped after the metadata check.
         val before = attributes()
+        require(AuthorityKeyPolicy.accepts(before, currentUid))
         return FileChannel.open(path, READ, NOFOLLOW_LINKS).use { channel ->
             require(channel.size() == 32L)
             val bytes = ByteBuffer.allocate(33)
             while (bytes.hasRemaining() && channel.read(bytes) != -1) { /* bounded read */ }
             require(bytes.position() == 32 && channel.size() == 32L)
-            val after = attributes()
-            require(before.fileKey() == after.fileKey() && before.permissions() == after.permissions())
+            require(AuthorityKeyPolicy.samePrivateFile(before, attributes(), currentUid))
             bytes.array().copyOf(32)
         }
     }
