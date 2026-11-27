@@ -42,13 +42,14 @@ internal data class AuthorityOperationsRecord(
     val segments: List<AuthoritySegmentPin>,
     val rootVersion: Long,
     val rootSha256: String,
+    val historyKeyProof: String,
     val evidenceSha256: String
 ) {
     fun canonical(register: EffectAuthorityRegister): String = listOf(
         "recursive-coder/authority-operations-witness/v1", AuthorityWire.identity(register),
         generation.toString(), predecessor, phase.name, credentials.values().joinToString(","),
         markerSha256, segments.joinToString(",") { it.token() }, rootVersion.toString(),
-        rootSha256, evidenceSha256
+        rootSha256, historyKeyProof, evidenceSha256
     ).joinToString("\n")
 
     fun digest(register: EffectAuthorityRegister) =
@@ -60,6 +61,8 @@ internal data class AuthorityHistoryImage(val marker: ByteArray, val segments: L
 
 internal object AuthorityOperationsHistory {
     private const val SEGMENT = "recursive-coder/authority-history-segment/v1"
+    private const val KEY_PROOF = "recursive-coder/authority-history-key-proof/v1"
+    private const val MAX_SEGMENTS = 128
     private val sha256 = Regex("[0-9a-f]{64}")
     internal fun isDigest(value: String) = sha256.matches(value)
 
@@ -93,15 +96,17 @@ internal object AuthorityOperationsHistory {
     }
 
     data class Measurement(val marker: String, val pins: List<AuthoritySegmentPin>,
-                           val version: Long, val root: String)
+                           val version: Long, val root: String, val keyProof: String)
 
     fun measure(register: EffectAuthorityRegister, previous: AuthorityOperationsRecord?,
                 activeCredential: String, key: ByteArray, image: AuthorityHistoryImage,
                 newSegment: Boolean): Measurement {
-        require(key.size == 32 && isDigest(activeCredential))
+        val activeKey = key.copyOf()
+        require(activeKey.size == 32 && isDigest(activeCredential))
+        val keyProof = AuthorityWire.hash(AuthorityWire.pack(activeKey, KEY_PROOF, AuthorityWire.identity(register)))
         val priorPins = previous?.segments.orEmpty()
         val count = if (previous == null) 1 else priorPins.size + if (newSegment) 1 else 0
-        require(image.segments.size == count)
+        require(count in 1..MAX_SEGMENTS && image.segments.size == count)
         val marker = image.marker.copyOf()
         val markerDigest = AuthorityWire.hash(marker)
         if (previous != null) require(previous.markerSha256 == markerDigest)
@@ -124,9 +129,13 @@ internal object AuthorityOperationsHistory {
             val header = if (index == 0) AuthorityWire.identity(register) else headerValue(
                 register, pins.last(), roots.lastOrNull()?.let { checkNotNull(EffectAuthorityPolicy.digest(it)) }
                     ?: AuthorityWire.ABSENT, credential)
-            fun payload(line: String, domain: String): String = if (active)
-                checkNotNull(AuthorityWire.unpack(key, domain, line.toByteArray(Charsets.US_ASCII)))
-            else sealedPayload(line)
+            fun payload(line: String, domain: String): String {
+                if (!active) return sealedPayload(line)
+                val packet = line.toByteArray(Charsets.US_ASCII)
+                val value = checkNotNull(AuthorityWire.unpack(activeKey, domain, packet))
+                require(AuthorityWire.pack(activeKey, domain, value).contentEquals(packet))
+                return value
+            }
             require(payload(parts.first(), headerDomain) == header)
             if (index == 0) {
                 require(marker.contentEquals((parts.first() + "\n").toByteArray(Charsets.US_ASCII)))
@@ -140,7 +149,8 @@ internal object AuthorityOperationsHistory {
         }
         require(roots.isEmpty() || AuthorityWire.validHistory(roots, register))
         return Measurement(markerDigest, pins.toList(), roots.size.toLong(),
-            roots.lastOrNull()?.let { checkNotNull(EffectAuthorityPolicy.digest(it)) } ?: AuthorityWire.ABSENT)
+            roots.lastOrNull()?.let { checkNotNull(EffectAuthorityPolicy.digest(it)) } ?: AuthorityWire.ABSENT,
+            keyProof)
     }
 }
 
@@ -161,6 +171,12 @@ internal class AuthorityOperationsWitness(
     private val verifier: PublicKey,
     private val requireAppendOnly: Boolean = true
 ) {
+    init {
+        require(listOf(register.hostId, register.sessionId, register.registerId)
+            .all(ToolAuthorizationPolicy::validHostIdentifier) &&
+            AuthorityOperationsHistory.isDigest(register.epoch))
+    }
+
     private fun storage() {
         require(Files.isRegularFile(log, NOFOLLOW_LINKS) && Files.isRegularFile(mutex, NOFOLLOW_LINKS))
         require(!Files.isSameFile(log, mutex))
@@ -176,7 +192,7 @@ internal class AuthorityOperationsWitness(
 
     private fun parse(text: String): AuthorityOperationsRecord {
         val f = text.split('\n')
-        require(f.size == 11 && f[1] == AuthorityWire.identity(register))
+        require(f.size == 12 && f[1] == AuthorityWire.identity(register))
         val c = f[5].split(',')
         require(c.size == 4)
         val pins = f[7].split(',').map {
@@ -185,12 +201,13 @@ internal class AuthorityOperationsWitness(
             AuthoritySegmentPin(p[0], p[1].toInt(), p[2])
         }
         val record = AuthorityOperationsRecord(f[2].toLong(), f[3], AuthorityOperationsPhase.valueOf(f[4]),
-            AuthorityCredentialIds(c[0], c[1], c[2], c[3]), f[6], pins, f[8].toLong(), f[9], f[10])
+            AuthorityCredentialIds(c[0], c[1], c[2], c[3]), f[6], pins, f[8].toLong(), f[9], f[10], f[11])
         require(record.canonical(register) == text)
         require(record.credentials.values().all(AuthorityOperationsHistory::isDigest) &&
             record.credentials.values().distinct().size == 4 &&
             AuthorityOperationsHistory.isDigest(record.markerSha256) &&
             AuthorityOperationsHistory.isDigest(record.evidenceSha256) &&
+            AuthorityOperationsHistory.isDigest(record.historyKeyProof) &&
             record.segments.all { it.length in 1..AuthorityWire.LIMIT &&
                 AuthorityOperationsHistory.isDigest(it.credentialId) &&
                 AuthorityOperationsHistory.isDigest(it.sha256) } &&
@@ -281,6 +298,10 @@ internal class AuthorityOperationsWitness(
             AuthorityOperationsPhase.RETIRED -> require(sameHistory)
         }
         if (next.phase != AuthorityOperationsPhase.PREPARED) require(next.credentials == old.credentials)
+        val rotated = next.phase == AuthorityOperationsPhase.CUTOVER &&
+            old.segments.last().credentialId != next.segments.last().credentialId
+        if (rotated) require(records.none { it.historyKeyProof == next.historyKeyProof })
+        else require(next.historyKeyProof == old.historyKeyProof)
     }
 
     private fun <T> locked(action: () -> T): T {
@@ -310,7 +331,7 @@ internal class AuthorityOperationsWitness(
             require(image == null && activeHistoryKey == null)
             val prior = checkNotNull(old)
             AuthorityOperationsHistory.Measurement(prior.markerSha256, prior.segments, prior.rootVersion,
-                prior.rootSha256)
+                prior.rootSha256, prior.historyKeyProof)
         } else {
             val newSegment = phase == AuthorityOperationsPhase.CUTOVER &&
                 old?.segments?.last()?.credentialId != credentials.history
@@ -321,7 +342,7 @@ internal class AuthorityOperationsWitness(
         }
         val next = AuthorityOperationsRecord(records.size.toLong() + 1L, expected ?: AuthorityWire.ABSENT,
             phase, credentials, measurement.marker, measurement.pins, measurement.version, measurement.root,
-            evidenceSha256)
+            measurement.keyProof, evidenceSha256)
         val canonical = next.canonical(register)
         parse(canonical)
         checkTransition(records, next)

@@ -195,7 +195,12 @@ An old segment must match its previous signed pin exactly. A new segment
 header binds the preceding pin, final root and new history credential ID
 under the new HMAC key. Only the current segment uses the active HMAC key;
 the retired segment is authenticated by the independently signed exact
-byte commitment. Old bytes are never rewritten. A cutover cannot advance
+byte commitment. A domain-separated proof of possession binds the active
+history key to the witness; merely relabeling an old 32-byte random key is
+rejected. The proof is not the credential ID or the secret itself. The
+aggregate history and witness log are bounded at 16 MiB and there are at
+most 128 segments; exhaustion fails closed. Old bytes are never rewritten.
+A cutover cannot advance
 the root; publication requires exactly one valid successor. Frozen and
 prepared states cannot publish, and quarantine cannot transition to any
 active state. A stale witness CAS or torn signed record fails closed.

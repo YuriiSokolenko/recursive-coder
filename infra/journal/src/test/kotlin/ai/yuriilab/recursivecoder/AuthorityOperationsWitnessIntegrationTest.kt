@@ -62,6 +62,11 @@ class AuthorityOperationsWitnessIntegrationTest {
         val header = AuthorityOperationsHistory.successorHeader(register, prepared.segments.last(),
             prepared.rootSha256, newIds.history, newKey)
         assertFails { advance(w, prepared, AuthorityOperationsPhase.CUTOVER, newIds, image(original, header), oldKey) }
+        val relabeledOldKey = AuthorityOperationsHistory.successorHeader(register, prepared.segments.last(),
+            prepared.rootSha256, newIds.history, oldKey)
+        assertFails {
+            advance(w, prepared, AuthorityOperationsPhase.CUTOVER, newIds, image(original, relabeledOldKey), oldKey)
+        }
         val cutover = advance(w, prepared, AuthorityOperationsPhase.CUTOVER, newIds, image(original, header), newKey)
         val verified = advance(w, cutover, AuthorityOperationsPhase.VERIFIED, newIds, image(original, header), newKey)
         assertEquals(published.rootSha256, verified.rootSha256)
