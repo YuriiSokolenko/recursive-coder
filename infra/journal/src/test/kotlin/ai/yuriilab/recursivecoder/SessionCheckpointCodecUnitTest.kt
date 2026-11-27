@@ -38,7 +38,6 @@ class SessionCheckpointCodecUnitTest {
         lastTrustedJournalOffset = 2048
     )
 
-
     // Independent literal field order and spellings, not the production codec.
     private fun goldenV1(): String =
         """{"kind":"host-checkpoint","version":1,"sequence":1,"previousSha256":null,""" +
@@ -129,6 +128,7 @@ class SessionCheckpointCodecUnitTest {
     }
 
     @Test fun phaseVocabularyIsDerivedFromActualSessionLifecycle() {
+        assertEquals("succeeded", SessionPhaseVocabulary.succeededWire)
         assertEquals(setOf("created", "accepted", "running", "cancelled",
             "succeeded", "rejected", "failed"), SessionPhaseVocabulary.wires)
         assertEquals(setOf("succeeded", "rejected", "failed"),
@@ -213,13 +213,17 @@ class SessionCheckpointCodecUnitTest {
         assertContentEquals(v1.toByteArray(StandardCharsets.UTF_8),
             SessionCheckpointCodec.encode(s))
         val head = CheckpointEffectJournalHead("sess-one", 1L, a, b, c, 0L, a)
-        val headJson = """{"sessionId":"sess-one","fenceGeneration":1,"admittedCheckpointSha256":"$a","toolAuthoritySha256":"$b","sidecarPathSha256":"$c","lastSequence":0,"headMacSha256":"$a"}"""
+        val headJson = """{"sessionId":"sess-one","fenceGeneration":1,""" +
+            """"admittedCheckpointSha256":"$a","toolAuthoritySha256":"$b",""" +
+            """"sidecarPathSha256":"$c","lastSequence":0,"headMacSha256":"$a"}"""
         val v2 = v1.replace("\"version\":1", "\"version\":2").dropLast(1) +
             ",\"effectJournalHead\":$headJson}"
         assertContentEquals(v2.toByteArray(StandardCharsets.UTF_8),
             SessionCheckpointCodec.encode(s.copy(effectJournalHead = head)))
         val record = CheckpointEffectReconciliation(a, 1L, b, head, "operator-one", c)
-        val recordJson = """{"sourceCheckpointSha256":"$a","sourceFenceGeneration":1,"sourceFenceSha256":"$b","operatorId":"operator-one","hostSealMacSha256":"$c","sourceHead":$headJson}"""
+        val recordJson = """{"sourceCheckpointSha256":"$a","sourceFenceGeneration":1,""" +
+            """"sourceFenceSha256":"$b","operatorId":"operator-one",""" +
+            """"hostSealMacSha256":"$c","sourceHead":$headJson}"""
         val v3 = v1.replace("\"version\":1", "\"version\":3").dropLast(1) +
             ",\"effectJournalHead\":null,\"effectReconciliation\":$recordJson}"
         val encoded = SessionCheckpointCodec.encode(s.copy(effectReconciliation = record))
@@ -249,5 +253,39 @@ class SessionCheckpointCodecUnitTest {
                     effectJournalHead = head.copy(lastSequence = 100_001L)))
             }.code)
         assertEquals(100_000, DurableEffectRecordJournal.MAX_RECORDS)
+    }
+
+    @Test fun checkpointClosedStateAndUsageSetsRemainCompatible() {
+        val s = snapshot()
+        for (state in listOf("created", "ready", "blocked", "running", "paused",
+                "succeeded", "failed", "needs-attention", "cancelled")) {
+            assertEquals(state, SessionCheckpointCodec.decode(
+                SessionCheckpointCodec.encode(s.copy(taskState = state))).taskState)
+        }
+        for (state in RecursiveNodeState.entries.map { it.name.lowercase() }) {
+            val candidate = s.copy(children = listOf(
+                CheckpointChild("child-a", "graph-root", state)))
+            assertEquals(state, SessionCheckpointCodec.decode(
+                SessionCheckpointCodec.encode(candidate)).children.single().state)
+        }
+        for (kind in listOf("model", "tool")) {
+            for ((certainty, units) in listOf("known" to 1L, "unknown" to null)) {
+                val usage = HostAssertedCheckpointUsage("task-one", kind, certainty, units)
+                assertEquals(listOf(usage), SessionCheckpointCodec.decode(
+                    SessionCheckpointCodec.encode(s.copy(
+                        hostAssertedUsage = listOf(usage)))).hostAssertedUsage)
+            }
+        }
+        val invalid = listOf(s.copy(taskState = "future-state"),
+            s.copy(children = listOf(CheckpointChild("child-a", "graph-root", "paused"))),
+            s.copy(hostAssertedUsage = listOf(
+                HostAssertedCheckpointUsage("task-one", "future-kind", "known", 1))),
+            s.copy(hostAssertedUsage = listOf(
+                HostAssertedCheckpointUsage("task-one", "model", "future-certainty", null))))
+        for (candidate in invalid) {
+            assertEquals("CHECKPOINT_PAYLOAD_INVALID", assertFailsWith<CheckpointUnconfirmed> {
+                SessionCheckpointCodec.encode(candidate)
+            }.code)
+        }
     }
 }

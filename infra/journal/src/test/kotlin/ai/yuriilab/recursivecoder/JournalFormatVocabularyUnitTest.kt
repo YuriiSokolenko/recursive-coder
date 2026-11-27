@@ -16,4 +16,30 @@ class JournalFormatVocabularyUnitTest {
         assertEquals("checkpoint.lock", CHECKPOINT_LOCK_NAME)
         assertEquals("resume.lock", RESUME_LOCK_NAME)
     }
+
+    @Test fun checkpointTaskStateSpellingsRemainStable() {
+        assertEquals(listOf("created", "ready", "blocked", "running", "paused",
+            "succeeded", "failed", "needs-attention", "cancelled"),
+            listOf(CheckpointTaskStates.CREATED, CheckpointTaskStates.READY,
+                CheckpointTaskStates.BLOCKED, CheckpointTaskStates.RUNNING,
+                CheckpointTaskStates.PAUSED, CheckpointTaskStates.SUCCEEDED,
+                CheckpointTaskStates.FAILED, CheckpointTaskStates.NEEDS_ATTENTION,
+                CheckpointTaskStates.CANCELLED))
+    }
+
+    @Test fun checkpointChildStateSpellingsMatchRecursiveNodeState() {
+        val wires = setOf(CheckpointChildStates.READY, CheckpointChildStates.RUNNING,
+            CheckpointChildStates.SUCCEEDED, CheckpointChildStates.FAILED,
+            CheckpointChildStates.CANCELLED, CheckpointChildStates.TIMED_OUT)
+        assertEquals(setOf("ready", "running", "succeeded", "failed",
+            "cancelled", "timed_out"), wires)
+        assertEquals(RecursiveNodeState.entries.map { it.name.lowercase() }.toSet(), wires)
+    }
+
+    @Test fun checkpointUsageVocabularyRemainsStable() {
+        assertEquals(listOf("model", "tool"),
+            listOf(CheckpointUsageKinds.MODEL, CheckpointUsageKinds.TOOL))
+        assertEquals(listOf("known", "unknown"),
+            listOf(CheckpointUsageCertainty.KNOWN, CheckpointUsageCertainty.UNKNOWN))
+    }
 }

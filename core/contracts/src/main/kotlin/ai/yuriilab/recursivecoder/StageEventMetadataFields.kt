@@ -17,4 +17,6 @@ object StageEventMetadataFields {
     const val DELEGATED_TOKENS = "delegatedTokens"
     const val DELEGATED_TOOL_CALLS = "delegatedToolCalls"
     const val BUDGET_SCOPE_GRAPH_ID = "budgetScopeGraphId"
+    const val ARTIFACT_ID = "artifactId"
+    const val ARTIFACT_SHA256 = "artifactSha256"
 }

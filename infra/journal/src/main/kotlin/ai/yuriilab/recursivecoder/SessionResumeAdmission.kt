@@ -103,7 +103,9 @@ internal object PreExecutionSnapshotPolicy {
             snapshot.acceptedArtifacts.isEmpty() &&
             snapshot.pendingEffects.isEmpty() &&
             snapshot.children.all { it.state == CheckpointChildStates.READY } &&
-            snapshot.hostAssertedUsage.all { it.certainty == CheckpointUsageCertainty.KNOWN && it.units == 0L }
+            snapshot.hostAssertedUsage.all {
+                it.certainty == CheckpointUsageCertainty.KNOWN && it.units == 0L
+            }
 }
 
 /** Compile-time acknowledgement required at trusted operator recovery call sites. */

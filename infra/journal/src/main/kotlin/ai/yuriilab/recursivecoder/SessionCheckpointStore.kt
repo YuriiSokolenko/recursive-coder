@@ -231,11 +231,14 @@ object SessionCheckpointCodec {
     private val PHASES = SessionPhaseVocabulary.wires
     // Wire spellings mirror RecursiveNodeState and TaskState. Do not conflate
     // a recursive child with a queued task or invent recovery-only states.
-    private val CHILD_STATES = setOf(CheckpointChildStates.READY, "running", "succeeded", "failed",
-        "cancelled", "timed_out")
+    private val CHILD_STATES = setOf(CheckpointChildStates.READY,
+        CheckpointChildStates.RUNNING, CheckpointChildStates.SUCCEEDED,
+        CheckpointChildStates.FAILED, CheckpointChildStates.CANCELLED,
+        CheckpointChildStates.TIMED_OUT)
     private val TASK_STATES = setOf(CheckpointTaskStates.CREATED, CheckpointTaskStates.READY,
-        "blocked", "running", "paused", CheckpointTaskStates.SUCCEEDED,
-        "failed", "needs-attention", "cancelled")
+        CheckpointTaskStates.BLOCKED, CheckpointTaskStates.RUNNING, CheckpointTaskStates.PAUSED,
+        CheckpointTaskStates.SUCCEEDED, CheckpointTaskStates.FAILED,
+        CheckpointTaskStates.NEEDS_ATTENTION, CheckpointTaskStates.CANCELLED)
     private fun invalid(): Nothing = throw CheckpointUnconfirmed("CHECKPOINT_PAYLOAD_INVALID")
     private fun validId(id: String) = ToolAuthorizationPolicy.validHostIdentifier(id)
     private fun digest(value: String) = DIGEST.matches(value)
@@ -259,10 +262,12 @@ object SessionCheckpointCodec {
             !listOf(b.graphId, s.sessionId, s.traceId, s.taskId).all(::validId) ||
             s.phase !in PHASES || s.taskState !in TASK_STATES ||
             (s.phase in SessionPhaseVocabulary.terminalWires &&
-                s.taskState !in setOf(CheckpointTaskStates.SUCCEEDED, "failed", "cancelled", "needs-attention")) ||
-            (s.phase == "succeeded" && (s.taskState != CheckpointTaskStates.SUCCEEDED ||
-                s.pendingEffects.isNotEmpty() ||
-                s.hostAssertedUsage.any { it.certainty == CheckpointUsageCertainty.UNKNOWN })) ||
+                s.taskState !in setOf(CheckpointTaskStates.SUCCEEDED, CheckpointTaskStates.FAILED,
+                    CheckpointTaskStates.CANCELLED, CheckpointTaskStates.NEEDS_ATTENTION)) ||
+            (s.phase == SessionPhaseVocabulary.succeededWire &&
+                (s.taskState != CheckpointTaskStates.SUCCEEDED ||
+                    s.pendingEffects.isNotEmpty() ||
+                    s.hostAssertedUsage.any { it.certainty == CheckpointUsageCertainty.UNKNOWN })) ||
             s.taskAttempt !in 0..1_000_000 ||
             s.journalSequence < 1 || s.lastTrustedJournalOffset < 7)
             invalid()
@@ -291,8 +296,9 @@ object SessionCheckpointCodec {
             invalid()
         if (s.hostAssertedUsage.any {
                 !validId(it.scopeId) || (it.scopeId !in known && it.scopeId != s.taskId) ||
-                    it.kind !in setOf("model", "tool") ||
-                    it.certainty !in setOf(CheckpointUsageCertainty.KNOWN, CheckpointUsageCertainty.UNKNOWN) ||
+                    it.kind !in setOf(CheckpointUsageKinds.MODEL, CheckpointUsageKinds.TOOL) ||
+                    it.certainty !in setOf(CheckpointUsageCertainty.KNOWN,
+                        CheckpointUsageCertainty.UNKNOWN) ||
                     (it.certainty == CheckpointUsageCertainty.KNOWN && (it.units == null || it.units < 0)) ||
                     (it.certainty == CheckpointUsageCertainty.UNKNOWN && it.units != null)
             } || s.hostAssertedUsage.map { it.scopeId to it.kind }.toSet().size != s.hostAssertedUsage.size)
@@ -387,7 +393,8 @@ object SessionCheckpointCodec {
             put(RootFields.PENDING_EFFECTS, buildJsonArray {
                 s.pendingEffects.sortedBy { it.id }.forEach { effect ->
                     add(buildJsonObject {
-                        put(PendingEffectFields.ID, effect.id); put(PendingEffectFields.CORRELATION_ID, effect.correlationId)
+                        put(PendingEffectFields.ID, effect.id)
+                        put(PendingEffectFields.CORRELATION_ID, effect.correlationId)
                         put(PendingEffectFields.STATE, effect.state)
                     })
                 }
@@ -466,9 +473,12 @@ object SessionCheckpointCodec {
             if (version !in setOf(BASE_VERSION, EFFECT_HEAD_VERSION, RECONCILIATION_VERSION) ||
                 string(root, RootFields.KIND) != CHECKPOINT_KIND)
                 throw CheckpointUnconfirmed("CHECKPOINT_VERSION_UNSUPPORTED")
-            val keys = arrayOf(RootFields.KIND, RootFields.VERSION, RootFields.SEQUENCE, RootFields.PREVIOUS_SHA256,
-                RootFields.BINDING, RootFields.SESSION_ID, RootFields.TRACE_ID, RootFields.PHASE, RootFields.TASK_ID, RootFields.TASK_ATTEMPT,
-                RootFields.TASK_STATE, RootFields.CHILDREN, RootFields.ACCEPTED_ARTIFACTS, RootFields.HOST_ASSERTED_USAGE,
+            val keys = arrayOf(RootFields.KIND, RootFields.VERSION, RootFields.SEQUENCE,
+                RootFields.PREVIOUS_SHA256,
+                RootFields.BINDING, RootFields.SESSION_ID, RootFields.TRACE_ID, RootFields.PHASE,
+                    RootFields.TASK_ID, RootFields.TASK_ATTEMPT,
+                RootFields.TASK_STATE, RootFields.CHILDREN, RootFields.ACCEPTED_ARTIFACTS,
+                    RootFields.HOST_ASSERTED_USAGE,
                 RootFields.PENDING_EFFECTS, RootFields.JOURNAL_SEQUENCE, RootFields.JOURNAL_HEAD_SHA256,
                 RootFields.JOURNAL_FILE_SHA256, RootFields.LAST_TRUSTED_JOURNAL_OFFSET)
             val o = when (version) {
@@ -476,30 +486,38 @@ object SessionCheckpointCodec {
                 EFFECT_HEAD_VERSION -> fields(root, *keys, RootFields.EFFECT_JOURNAL_HEAD)
                 else -> fields(root, *keys, RootFields.EFFECT_JOURNAL_HEAD, RootFields.EFFECT_RECONCILIATION)
             }
-            val b = fields(obj(o[RootFields.BINDING]), BindingFields.POLICY_SHA256, BindingFields.WORKSPACE_IDENTITY_SHA256,
-                BindingFields.GIT_HEAD, BindingFields.GIT_BRANCH, BindingFields.GIT_BASELINE_SHA256, BindingFields.GRAPH_ID,
+            val b = fields(obj(o[RootFields.BINDING]), BindingFields.POLICY_SHA256,
+                BindingFields.WORKSPACE_IDENTITY_SHA256,
+                BindingFields.GIT_HEAD, BindingFields.GIT_BRANCH, BindingFields.GIT_BASELINE_SHA256,
+                    BindingFields.GRAPH_ID,
                 BindingFields.GRAPH_GENERATION, BindingFields.FROZEN_INPUTS_SHA256)
             val binding = CheckpointBinding(string(b, BindingFields.POLICY_SHA256),
                 string(b, BindingFields.WORKSPACE_IDENTITY_SHA256), string(b, BindingFields.GIT_HEAD),
                 string(b, BindingFields.GIT_BRANCH), string(b, BindingFields.GIT_BASELINE_SHA256),
-                string(b, BindingFields.GRAPH_ID), long(b, BindingFields.GRAPH_GENERATION), string(b, BindingFields.FROZEN_INPUTS_SHA256))
+                string(b, BindingFields.GRAPH_ID), long(b, BindingFields.GRAPH_GENERATION), string(b,
+                    BindingFields.FROZEN_INPUTS_SHA256))
             val children = array(o, RootFields.CHILDREN).map {
                 val x = fields(obj(it), ChildFields.ID, ChildFields.PARENT_ID, ChildFields.STATE)
-                CheckpointChild(string(x, ChildFields.ID), string(x, ChildFields.PARENT_ID), string(x, ChildFields.STATE))
+                CheckpointChild(string(x, ChildFields.ID), string(x, ChildFields.PARENT_ID), string(x,
+                    ChildFields.STATE))
             }
             val artifacts = array(o, RootFields.ACCEPTED_ARTIFACTS).map {
                 val x = fields(obj(it), ArtifactFields.ID, ArtifactFields.OWNER_ID, ArtifactFields.SHA256)
-                CheckpointArtifact(string(x, ArtifactFields.ID), string(x, ArtifactFields.OWNER_ID), string(x, ArtifactFields.SHA256))
+                CheckpointArtifact(string(x, ArtifactFields.ID), string(x, ArtifactFields.OWNER_ID),
+                    string(x, ArtifactFields.SHA256))
             }
             val usage = array(o, RootFields.HOST_ASSERTED_USAGE).map {
-                val x = fields(obj(it), UsageFields.SCOPE_ID, UsageFields.KIND, UsageFields.CERTAINTY, UsageFields.UNITS)
+                val x = fields(obj(it), UsageFields.SCOPE_ID, UsageFields.KIND, UsageFields.CERTAINTY,
+                    UsageFields.UNITS)
                 HostAssertedCheckpointUsage(string(x, UsageFields.SCOPE_ID), string(x, UsageFields.KIND),
                     string(x, UsageFields.CERTAINTY),
                     if (x[UsageFields.UNITS] == JsonNull) null else long(x, UsageFields.UNITS))
             }
             val effects = array(o, RootFields.PENDING_EFFECTS).map {
-                val x = fields(obj(it), PendingEffectFields.ID, PendingEffectFields.CORRELATION_ID, PendingEffectFields.STATE)
-                CheckpointEffect(string(x, PendingEffectFields.ID), string(x, PendingEffectFields.CORRELATION_ID), string(x, PendingEffectFields.STATE))
+                val x = fields(obj(it), PendingEffectFields.ID, PendingEffectFields.CORRELATION_ID,
+                    PendingEffectFields.STATE)
+                CheckpointEffect(string(x, PendingEffectFields.ID), string(x,
+                    PendingEffectFields.CORRELATION_ID), string(x, PendingEffectFields.STATE))
             }
             val attempt = long(o, RootFields.TASK_ATTEMPT)
             val eventSequence = long(o, RootFields.JOURNAL_SEQUENCE)
@@ -520,16 +538,22 @@ object SessionCheckpointCodec {
                 else readHead(o[RootFields.EFFECT_JOURNAL_HEAD])
             val reconciliation = if (version == RECONCILIATION_VERSION) {
                 val rec = fields(obj(o[RootFields.EFFECT_RECONCILIATION]),
-                    ReconciliationFields.SOURCE_CHECKPOINT_SHA256, ReconciliationFields.SOURCE_FENCE_GENERATION,
-                    ReconciliationFields.SOURCE_FENCE_SHA256, ReconciliationFields.OPERATOR_ID, ReconciliationFields.HOST_SEAL_MAC_SHA256,
+                    ReconciliationFields.SOURCE_CHECKPOINT_SHA256,
+                        ReconciliationFields.SOURCE_FENCE_GENERATION,
+                    ReconciliationFields.SOURCE_FENCE_SHA256, ReconciliationFields.OPERATOR_ID,
+                        ReconciliationFields.HOST_SEAL_MAC_SHA256,
                     ReconciliationFields.SOURCE_HEAD)
                 CheckpointEffectReconciliation(string(rec, ReconciliationFields.SOURCE_CHECKPOINT_SHA256),
                     long(rec, ReconciliationFields.SOURCE_FENCE_GENERATION),
-                    string(rec, ReconciliationFields.SOURCE_FENCE_SHA256), readHead(rec[ReconciliationFields.SOURCE_HEAD]),
-                    string(rec, ReconciliationFields.OPERATOR_ID), string(rec, ReconciliationFields.HOST_SEAL_MAC_SHA256))
+                    string(rec, ReconciliationFields.SOURCE_FENCE_SHA256),
+                        readHead(rec[ReconciliationFields.SOURCE_HEAD]),
+                    string(rec, ReconciliationFields.OPERATOR_ID), string(rec,
+                        ReconciliationFields.HOST_SEAL_MAC_SHA256))
             } else null
-            val s = SessionCheckpoint(long(o, RootFields.SEQUENCE), nullableString(o, RootFields.PREVIOUS_SHA256),
-                binding, string(o, RootFields.SESSION_ID), string(o, RootFields.TRACE_ID), string(o, RootFields.PHASE),
+            val s = SessionCheckpoint(long(o, RootFields.SEQUENCE), nullableString(o,
+                RootFields.PREVIOUS_SHA256),
+                binding, string(o, RootFields.SESSION_ID), string(o, RootFields.TRACE_ID), string(o,
+                    RootFields.PHASE),
                 string(o, RootFields.TASK_ID), attempt.toInt(), string(o, RootFields.TASK_STATE),
                 children, artifacts, usage, effects, eventSequence.toInt(),
                 string(o, RootFields.JOURNAL_HEAD_SHA256), string(o, RootFields.JOURNAL_FILE_SHA256),
@@ -935,13 +959,14 @@ object SessionCheckpointStore {
             s.lastTrustedJournalOffset != ledger.lastTrustedOffset)
             refuse("CHECKPOINT_JOURNAL_MISMATCH")
         if (ledger.events.isEmpty() || ledger.events.any { event ->
-                event["sessionId"]?.jsonPrimitive?.content != s.sessionId ||
-                    event["traceId"]?.jsonPrimitive?.content != s.traceId
+                event[SessionEnvelopeFields.SESSION_ID]?.jsonPrimitive?.content != s.sessionId ||
+                    event[SessionEnvelopeFields.TRACE_ID]?.jsonPrimitive?.content != s.traceId
             }) refuse("CHECKPOINT_SESSION_MISMATCH")
         val graph = setOf(s.binding.graphId) + s.children.map { it.id }
         for (event in ledger.events) {
             val metadata = event[SessionEventFields.METADATA] as? JsonObject ?: continue
-            for (key in listOf(StageEventMetadataFields.GRAPH_ID, StageEventMetadataFields.PARENT_GRAPH_ID, StageEventMetadataFields.CHILD_GRAPH_ID)) {
+            for (key in listOf(StageEventMetadataFields.GRAPH_ID,
+                StageEventMetadataFields.PARENT_GRAPH_ID, StageEventMetadataFields.CHILD_GRAPH_ID)) {
                 val value = metadata[key]?.jsonPrimitive?.content ?: continue
                 if (value !in graph) refuse("CHECKPOINT_GRAPH_MISMATCH")
             }
@@ -954,11 +979,11 @@ object SessionCheckpointStore {
 
         // A missing usage entry cannot mean zero: first-party request/tool events
         // require an explicit known or unknown ledger entry in the snapshot.
-        val eventTypes = ledger.events.mapNotNull { it["type"]?.jsonPrimitive?.content }
+        val eventTypes = ledger.events.mapNotNull { it[SessionEventFields.TYPE]?.jsonPrimitive?.content }
         if (eventTypes.any { it.startsWith("llm.") } &&
-                s.hostAssertedUsage.none { it.kind == "model" } ||
+                s.hostAssertedUsage.none { it.kind == CheckpointUsageKinds.MODEL } ||
             eventTypes.any { it.startsWith("tool.") } &&
-                s.hostAssertedUsage.none { it.kind == "tool" })
+                s.hostAssertedUsage.none { it.kind == CheckpointUsageKinds.TOOL })
             refuse("CHECKPOINT_USAGE_UNCONFIRMED")
 
         // Multiple tool starts can share a request correlation. Count them per
@@ -966,7 +991,7 @@ object SessionCheckpointStore {
         // a single later completion must never clear two uncertain operations.
         fun toolKey(event: JsonObject): String {
             val actor = event[SessionEventFields.ACTOR] as? JsonObject
-            val execution = actor?.get("toolExecutionId")
+            val execution = actor?.get(SessionEventActorFields.TOOL_EXECUTION_ID)
             return if (execution == null || execution == JsonNull)
                 "correlation:" + event[SessionEventFields.CORRELATION_ID]!!.jsonPrimitive.content
             else "execution:" + execution.jsonPrimitive.content
@@ -992,10 +1017,13 @@ object SessionCheckpointStore {
         if (s.acceptedArtifacts.any { artifact ->
                 ledger.events.none { event ->
                     val m = event[SessionEventFields.METADATA] as? JsonObject
-                    event[SessionEventFields.STATUS]?.jsonPrimitive?.content == SessionEventStatuses.COMPLETED &&
-                        m?.get("artifactId")?.jsonPrimitive?.content == artifact.id &&
-                        m?.get("artifactSha256")?.jsonPrimitive?.content == artifact.sha256 &&
-                        (m?.get(StageEventMetadataFields.CHILD_GRAPH_ID) ?: m?.get(StageEventMetadataFields.GRAPH_ID))
+                    event[SessionEventFields.STATUS]?.jsonPrimitive?.content ==
+                        SessionEventStatuses.COMPLETED &&
+                        m?.get(StageEventMetadataFields.ARTIFACT_ID)?.jsonPrimitive?.content == artifact.id &&
+                        m?.get(StageEventMetadataFields.ARTIFACT_SHA256)?.jsonPrimitive?.content ==
+                            artifact.sha256 &&
+                        (m?.get(StageEventMetadataFields.CHILD_GRAPH_ID)
+                            ?: m?.get(StageEventMetadataFields.GRAPH_ID))
                             ?.jsonPrimitive?.content == artifact.ownerId
                 }
             }) refuse("CHECKPOINT_ARTIFACT_UNCONFIRMED")

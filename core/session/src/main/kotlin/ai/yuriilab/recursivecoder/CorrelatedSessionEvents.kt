@@ -139,8 +139,8 @@ class CorrelatedPreparationSessionEvents(
                 put(StageEventMetadataFields.STAGE_RUN_ID, event.correlation.stageRunId.value)
                 put("kind", event.kind.name)
                 put(StageEventMetadataFields.STAGE_STATE, event.state.name)
-                event.artifactId?.let { put("artifactId", it.value) }
-                event.sha256?.let { put("artifactSha256", it) }
+                event.artifactId?.let { put(StageEventMetadataFields.ARTIFACT_ID, it.value) }
+                event.sha256?.let { put(StageEventMetadataFields.ARTIFACT_SHA256, it) }
                 event.approval?.let { put("approval", it.name) }
                 event.code?.let { put("code", it) }
             })

@@ -17,7 +17,7 @@ or any child complete solely because this branch exists.
 | #201 | `SessionDenialCodes`, `ModelDenialCodes`, `ToolDenialCodes`, `WorkspaceDenialCodes`, `StageDenialCodes` in shared contracts. Reuse common code strings across admission, adapters and stage coordinators. | Local-only codes and human-readable messages stay at the producer. Same-spelled errors across unrelated contexts require separate semantic review; not all repository diagnostics have been migrated. |
 | #202 | `TaskPriority`, `TaskSchedulerConcurrency`, `TaskWireFields`, `TaskTransitionWireFields` in tasks; task policy, use case, facade and CLI. All durable snapshot keys/version are private to TaskStore and independent of CLI fields. Existing TaskState and SessionOutcome codecs are retained. | Public taskId and private snapshot id differ by design. Task counter zero, invocation minimum and overflow protection are different invariants; #193 behavior remains unchanged. |
 | #203 | `StageEventMetadataFields` in contracts; correlated stage/recursive event emitters and pre-execution phase policy. Installed offline check identity is local to CLI; child-origin validation reuses StageKind. | StageRoleLimits, graph limits and typed decisions are already owned. Do not unify stage/role or graph/session states by spelling. Additional stage diagnostics and adapter-local plan fields still need a targeted audit. |
-| #204 | `JournalFormatVocabulary` in journal; effect metadata and state keys reused by physical effect journal, effect envelope policy and evidence verifier. Fence/anchor/audit markers remain private to their codecs. Anchor bound reuses existing ResumeFenceStorage.MAX_FENCES. Lock names are internal to journal. | Do not merge unrelated ledger and effect record capacities, magic headers, cryptographic domains, HMAC inputs or wire versions merely because values coincide. Checkpoint task-state allowlist stays local: no journal dependency on tasks. More codec-local field candidates remain for review. |
+| #204 | `JournalFormatVocabulary` in journal; effect metadata and state keys reused by physical effect journal, effect envelope policy and evidence verifier. Fence/anchor/audit markers remain private to their codecs. Anchor bound reuses existing ResumeFenceStorage.MAX_FENCES. Lock names are internal to journal. | Do not merge unrelated ledger and effect record capacities, magic headers, cryptographic domains, HMAC inputs or wire versions merely because values coincide. Checkpoint task-state allowlist stays local: no journal dependency on tasks. See the targeted completion audit below. |
 | #205 | Gradle JVM convention uses local source-set name and e2e tag; Python test-tier, JUnit evidence and CI bootstrap guards reuse their own local constants. | CI YAML and verification metadata, independent Python tests and standalone JavaScript schema checks remain literal or independently specified. Do not import product constants into external verifiers. |
 
 ## #197 targeted completion audit
@@ -117,7 +117,6 @@ Reviewed `TaskPolicy.kt` (including TaskState, Task, TaskQueue and transition po
 
 Verification requires the full CI matrix; this audit does not close #194.
 
-
 ## #204 targeted completion audit
 
 Reviewed the journal production sources on dev at
@@ -129,7 +128,7 @@ projections and protocol events.
 | --- | --- |
 | `DurableEffectRecordJournal`, `JournalFormatVocabulary`, `EffectJournalContracts` | The physical codec owns its JSON keys, genesis discriminator and 100,000-record limit. The checkpoint pin uses that same limit; the session ledger's equal capacity is independent. Effect kinds and records remain typed; effect state wire names are already shared with evidence projections. |
 | `SessionCheckpointStore` | The checkpoint codec owns v1/v2/v3 payload versions and grouped JSON field sets. Physical RCCHK1 framing and Session Protocol v1 are independent. The two embedded effect heads share the same head schema. Session phase values reuse the existing lifecycle vocabulary where exposed. |
-| `SessionResumeAdmission`, `DurableCreatedAcceptedHandoff` | Share checkpoint-local task readiness and usage certainty with the codec. Child readiness is distinct from task readiness. Other checkpoint task and child allowlist values remain explicit; no dependency on tasks or automatic expansion of accepted states. |
+| `SessionResumeAdmission`, `DurableCreatedAcceptedHandoff` | Share complete checkpoint-local task, child and usage vocabulary with the codec. Child readiness is distinct from task readiness; no dependency on tasks or automatic expansion of accepted states. Child drift is checked against RecursiveNodeState; task cross-module oracle is tracked by #246. |
 | `DurableRuntimeCreatedAcceptedHost`, `JsonlEventSink` | C1 event emission and validation reuse Session Protocol request/envelope/event fields and statuses. JSONL remains a projection, not a physical ledger format. |
 | `CheckpointBoundHostEffectEvidenceVerifier`, `EffectEvidenceEnvelopePolicy` | Existing effect metadata keys, effect record states, typed effect kinds and session event pairs are already reused. The reserved effect prefix, diagnostic codes, exact key allowlists and event/record order remain unchanged. |
 | `ResumeFenceAnchor`, `ResumeRuntimeFilesystemPreflight`, `ResumeDenialCodes` | Fence, anchor and audit markers and storage paths remain format-local. The existing fence maximum and lock names already have shared owners. Filesystem type names, probe prefixes and refusal diagnostics are distinct from persisted record vocabulary. |
@@ -138,9 +137,13 @@ projections and protocol events.
 
 Other equal values are not automatically shared: physical file size and frame
 limits, checkpoint collection bounds, digest widths and domain-specific
-state names remain local. The checkpoint success phase spelling remains
-literal because the public phase adapter does not expose that individual
-value; a terminal outcome is not a substitute. Independent fixtures, literal
+state names remain local. The checkpoint success phase reuses
+`SessionPhaseVocabulary.succeededWire` with a literal drift assertion;
+a terminal outcome is not a substitute. The checkpoint usage checks retain
+literal `llm.` and `tool.` namespace prefixes: these are family predicates,
+not individual event identifiers or checkpoint usage-kind names.
+The producer and verifier share stage artifact metadata keys through
+`StageEventMetadataFields`; C3 ledger allowlist entries remain pinned. Independent fixtures, literal
 negative inputs, authorization checks and rejection order remain intact.
 
 New tests pin checkpoint version discrimination, embedded head field order
@@ -150,6 +153,71 @@ HMAC, ledger, fence, checkpoint and projection tests are retained.
 
 No local Gradle execution is claimed. Full CI is required before merge.
 This audit does not close #194.
+
+### Diagnostic inventory and exclusions
+
+The following repeated diagnostic literals are existing format-local
+refusals, not new protocol vocabulary. They remain literal in this
+format-field refactoring: their storage, authentication, validation and
+recovery decisions are not being consolidated as part of #204. The broader
+diagnostic vocabulary audit is tracked under #201 and #218.
+Counts below are source occurrences, excluding constant definitions, using
+the trusted base scanner's UPPER_SNAKE literal pattern.
+
+| File | Diagnostic | Count |
+| --- | --- | ---: |
+| `SessionCheckpointStore` | `CHECKPOINT_WORKSPACE_INVALID` | 2 |
+| `SessionCheckpointStore` | `CHECKPOINT_PAYLOAD_INVALID` | 2 |
+| `SessionCheckpointStore` | `CHECKPOINT_VERSION_UNSUPPORTED` | 2 |
+| `SessionCheckpointStore` | `CHECKPOINT_UNSAFE_DIRECTORY` | 4 |
+| `SessionCheckpointStore` | `CHECKPOINT_LEASE_HELD` | 2 |
+| `SessionCheckpointStore` | `CHECKPOINT_UNSAFE_LOCK` | 3 |
+| `SessionCheckpointStore` | `CHECKPOINT_LEASE_RELEASE_UNCONFIRMED` | 3 |
+| `SessionCheckpointStore` | `CHECKPOINT_SIZE_INVALID` | 4 |
+| `SessionCheckpointStore` | `CHECKPOINT_TRUNCATED` | 3 |
+| `SessionCheckpointStore` | `CHECKPOINT_UNRECOGNIZED_ENTRY` | 2 |
+| `SessionCheckpointStore` | `CHECKPOINT_CHAIN_MISMATCH` | 2 |
+| `SessionCheckpointStore` | `CHECKPOINT_EFFECT_RECONCILIATION_FENCE_MISMATCH` | 9 |
+| `SessionCheckpointStore` | `CHECKPOINT_EFFECT_RECONCILIATION_SOURCE_MISMATCH` | 2 |
+| `SessionCheckpointStore` | `CHECKPOINT_EFFECT_HEAD_FENCE_MISMATCH` | 4 |
+| `SessionCheckpointStore` | `CHECKPOINT_JOURNAL_UNCONFIRMED` | 4 |
+| `SessionCheckpointStore` | `CHECKPOINT_LIVE_LEDGER_TOO_LARGE` | 2 |
+| `SessionCheckpointStore` | `CHECKPOINT_WRITE_UNCONFIRMED` | 4 |
+| `SessionCheckpointStore` | `CHECKPOINT_EFFECT_RECONCILIATION_UNVERIFIED` | 2 |
+| `SessionCheckpointStore` | `CHECKPOINT_STALE_GENERATION` | 3 |
+| `SessionCheckpointStore` | `CHECKPOINT_RESUME_ANCHOR_UNCONFIRMED` | 2 |
+| `SessionCheckpointStore` | `CHECKPOINT_RUNNING_BOUNDARY_CHANGED` | 2 |
+| `SessionCheckpointStore` | `CHECKPOINT_FENCED_LEDGER_ADVANCED` | 2 |
+| `SessionCheckpointStore` | `CHECKPOINT_MISSING` | 5 |
+| `DurableEffectRecordJournal` | `EFFECT_JOURNAL_PIN_PUBLICATION_UNCONFIRMED` | 2 |
+| `DurableEffectRecordJournal` | `EFFECT_JOURNAL_UNSAFE_PATH` | 5 |
+| `DurableEffectRecordJournal` | `EFFECT_JOURNAL_BUSY` | 2 |
+| `DurableEffectRecordJournal` | `EFFECT_JOURNAL_UNSAFE_LOCK` | 2 |
+| `DurableEffectRecordJournal` | `EFFECT_JOURNAL_INVALID_RECORD` | 3 |
+| `DurableEffectRecordJournal` | `EFFECT_JOURNAL_GENESIS_INVALID` | 9 |
+| `DurableEffectRecordJournal` | `EFFECT_JOURNAL_RECORD_CORRUPT` | 10 |
+| `DurableEffectRecordJournal` | `EFFECT_JOURNAL_APPEND_UNCONFIRMED` | 3 |
+| `DurableEffectRecordJournal` | `EFFECT_JOURNAL_CONTEXT_MISMATCH` | 4 |
+| `DurableEffectRecordJournal` | `EFFECT_JOURNAL_SIZE_INVALID` | 4 |
+| `DurableEffectRecordJournal` | `EFFECT_JOURNAL_TRUNCATED` | 2 |
+| `DurableEffectRecordJournal` | `EFFECT_JOURNAL_AUTH_FAILED` | 2 |
+| `DurableEffectRecordJournal` | `EFFECT_JOURNAL_PATH_CHANGED` | 2 |
+
+Three cross-file codes are shared with the C3-pinned ledger:
+`CHECKPOINT_LEASE_HELD` (checkpoint lock contention),
+`LEDGER_NOT_FENCED` (absence of a fenced ledger writer), and
+`LEDGER_REOPEN_CHECKPOINT_UNCONFIRMED` (reopened ledger/checkpoint
+binding cannot be confirmed). Keep the existing literal spellings and
+their same-meaning sites until a separately authorized C3 migration;
+do not create competing owners or refresh pins in this slice.
+
+Owned-but-raw C3 exclusions reported by the base scanner:
+`LEDGER_CHECKPOINT_SIZE_EXCEEDED`, `LEDGER_REOPEN_CHECKPOINT_CAPACITY`,
+`RESUME_ADMISSION_UNCONFIRMED`, `RESUME_CHECKPOINT_CHANGED`,
+`RESUME_FILESYSTEM_UNSUPPORTED`, and `RESUME_UNSAFE_BOUNDARY`.
+These remain excluded pinned literals, not independent new diagnostics.
+The stage artifact metadata allowlist in the pinned ledger likewise retains
+`artifactId` and `artifactSha256`.
 
 ## Trusted C3 boundary exclusion
 
@@ -195,7 +263,7 @@ all unrelated diagnostics, numbers, or cross-language tooling have been audited.
 
 ## Review follow-up
 
-The explicit event metadata keys in `SessionCheckpointStore`, C1 event emission
+The shared stage event metadata keys in `SessionCheckpointStore`, C1 event emission
 in `DurableRuntimeCreatedAcceptedHost`, stage readiness in `StageGraphPolicy`
 and `RecursiveGraphScheduler`, and sandbox denials in
 `LinuxStageGitBaselineReconciler` use their vocabulary owners. Checkpoint

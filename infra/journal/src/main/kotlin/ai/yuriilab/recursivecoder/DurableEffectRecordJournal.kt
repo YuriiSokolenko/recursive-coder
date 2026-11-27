@@ -309,7 +309,8 @@ class DurableEffectRecordJournal private constructor(
                     ?.takeUnless { it.isString }?.longOrNull
                     ?: refuse("EFFECT_JOURNAL_GENESIS_INVALID")
                 val header = EffectJournalHeader(string(PayloadFields.SESSION_ID), generation,
-                    string(PayloadFields.ADMITTED_CHECKPOINT_SHA256), string(PayloadFields.TOOL_AUTHORITY_SHA256))
+                    string(PayloadFields.ADMITTED_CHECKPOINT_SHA256),
+                    string(PayloadFields.TOOL_AUTHORITY_SHA256))
                 if (!ToolAuthorizationPolicy.validHostIdentifier(header.sessionId) ||
                     header.fenceGeneration <= 0L ||
                     !digestPattern.matches(header.admittedCheckpointSha256) ||
@@ -370,7 +371,8 @@ class DurableEffectRecordJournal private constructor(
                 val record = when (string(PayloadFields.STATE)) {
                     EffectRecordStates.INTENT -> EffectRecord.Intent(id)
                     EffectRecordStates.STARTED -> EffectRecord.Started(id)
-                    EffectRecordStates.COMMITTED -> EffectRecord.Committed(id, string(PayloadFields.OBSERVED_STATE_SHA256))
+                    EffectRecordStates.COMMITTED -> EffectRecord.Committed(id,
+                        string(PayloadFields.OBSERVED_STATE_SHA256))
                     EffectRecordStates.UNCONFIRMED -> EffectRecord.Unconfirmed(id, string(PayloadFields.CODE))
                     else -> refuse("EFFECT_JOURNAL_RECORD_CORRUPT")
                 }
