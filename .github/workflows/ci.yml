@@ -106,17 +106,18 @@ jobs:
               raise SystemExit("Test tier regression fixtures must all run and pass without skips")
           print(f"Verified {result.testsRun} passing test tier regression fixtures (0 skips)")
           PY
-      - name: Reject missing or unexecuted preparation host conformance
+      - name: Reject missing or unexecuted adapter conformance
         run: |
           python3 - <<'PY'
           import unittest
-          suite = unittest.defaultTestLoader.discover("tests", pattern="test_preparation_host_conformance.py")
-          expected = suite.countTestCases()
-          if not expected:
-              raise SystemExit("Preparation host gate regressions must be discovered")
-          result = unittest.TextTestRunner(verbosity=2).run(suite)
-          if result.skipped or not result.wasSuccessful() or result.testsRun != expected:
-              raise SystemExit("Preparation host gate regressions must all pass without skips")
+          for pattern in ("test_preparation_host_conformance.py", "test_effect_authority_conformance.py"):
+              suite = unittest.defaultTestLoader.discover("tests", pattern=pattern)
+              expected = suite.countTestCases()
+              if not expected:
+                  raise SystemExit(f"{pattern}: gate regressions must be discovered")
+              result = unittest.TextTestRunner(verbosity=2).run(suite)
+              if result.skipped or not result.wasSuccessful() or result.testsRun != expected:
+                  raise SystemExit(f"{pattern}: gate regressions must all pass without skips")
           PY
       - name: Ensure the pure unit suite actually executed
         run: |
@@ -342,7 +343,7 @@ jobs:
       - name: Run full JVM and sandbox tests only after the bytecode gate
         env:
           CI: 'true'
-        run: ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache test integrationTest e2eTest checkPreparationHostConformance --stacktrace
+        run: ./gradlew --dependency-verification strict --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g --no-build-cache test integrationTest e2eTest checkPreparationHostConformance checkEffectAuthorityConformance --stacktrace
       - name: Assert per-module JUnit execution evidence
         run: python3 -I tools/check_junit_evidence.py --root .
       - name: Confirm sandbox integration test was not skipped

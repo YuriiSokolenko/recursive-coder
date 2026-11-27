@@ -42,31 +42,41 @@ gradle.projectsEvaluated {
     }
 }
 
-// Preparation conformance covers actual compiled adapters, inherited contract
-// methods and fresh JUnit reports from both required JVM test tasks.
-val preparationHostGuard = tasks.register<Exec>("checkPreparationHostConformance") {
-    group = "verification"
-    description = "Require executed shared preparation host conformance for every production adapter."
-    workingDir(rootDir)
-    commandLine("python3", "tools/check_preparation_host_conformance.py")
-}
-gradle.projectsEvaluated {
-    rootProject.subprojects.filter { it.plugins.hasPlugin("java") }.sortedBy { it.path }
-        .forEach { module ->
-            val sourceSets = module.extensions.getByType<org.gradle.api.tasks.SourceSetContainer>()
-            preparationHostGuard.configure {
-                sourceSets.filter { it.name in setOf("main", "test", "testFixtures") }
-                    .forEach { sourceSet ->
-                        dependsOn(module.tasks.named(sourceSet.classesTaskName))
-                        sourceSet.output.classesDirs.files.sortedBy { it.absolutePath }.forEach { dir ->
-                            args("--classes", "${module.path}|${sourceSet.name}|${dir.absolutePath}")
+// Both gates examine compiled adapters, inherited methods and both JUnit reports.
+fun registerConformanceGuard(name: String, script: String, purpose: String) {
+    val guard = tasks.register<Exec>(name) {
+        group = "verification"
+        description = purpose
+        workingDir(rootDir)
+        commandLine("python3", script)
+    }
+    gradle.projectsEvaluated {
+        rootProject.subprojects.filter { it.plugins.hasPlugin("java") }.sortedBy { it.path }
+            .forEach { module ->
+                val sourceSets = module.extensions.getByType<org.gradle.api.tasks.SourceSetContainer>()
+                guard.configure {
+                    sourceSets.filter { it.name in setOf("main", "test", "testFixtures") }
+                        .forEach { sourceSet ->
+                            dependsOn(module.tasks.named(sourceSet.classesTaskName))
+                            sourceSet.output.classesDirs.files.sortedBy { it.absolutePath }.forEach { dir ->
+                                args("--classes", "${module.path}|${sourceSet.name}|${dir.absolutePath}")
+                            }
                         }
+                    listOf("test", "integrationTest").forEach { tier ->
+                        val testTask = module.tasks.named<org.gradle.api.tasks.testing.Test>(tier)
+                        dependsOn(testTask)
+                        args("--reports", "${module.path}|$tier|${testTask.get().reports.junitXml.outputLocation.get().asFile.absolutePath}")
                     }
-                listOf("test", "integrationTest").forEach { tier ->
-                    val testTask = module.tasks.named<org.gradle.api.tasks.testing.Test>(tier)
-                    dependsOn(testTask)
-                    args("--reports", "${module.path}|$tier|${testTask.get().reports.junitXml.outputLocation.get().asFile.absolutePath}")
                 }
             }
-        }
+    }
 }
+
+registerConformanceGuard(
+    "checkPreparationHostConformance", "tools/check_preparation_host_conformance.py",
+    "Require executed shared preparation host conformance for every production adapter."
+)
+registerConformanceGuard(
+    "checkEffectAuthorityConformance", "tools/check_effect_authority_conformance.py",
+    "Require executed shared effect authority conformance for every production adapter."
+)
