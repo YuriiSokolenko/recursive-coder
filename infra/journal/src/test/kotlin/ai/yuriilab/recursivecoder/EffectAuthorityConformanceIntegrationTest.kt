@@ -157,7 +157,7 @@ abstract class EffectAuthorityAdapterContract {
             start.countDown()
             val outcomes = futures.map { it.get(30, TimeUnit.SECONDS) }
             val winner = outcomes.indexOfFirst { it is EffectAuthorityPublication.DurableAcknowledgement }
-            assertTrue(winner >= 0)
+            assertTrue(winner >= 0, "No durable winner: $outcomes")
             acknowledge(outcomes[winner], roots[winner])
             refuse(outcomes[1 - winner], EffectAuthorityRefusal.STALE_PREDECESSOR)
             latest(roots[winner])
@@ -546,6 +546,7 @@ class AuthorityWireVocabularyUnitTest {
         assertFalse(AuthorityWire.appendOnlyFlags("--------------e------- /authority/log"))
         assertFalse(AuthorityWire.appendOnlyFlags("a /authority/log"))
         assertFalse(AuthorityWire.appendOnlyFlags("garbage containing a"))
+        assertFalse(AuthorityWire.appendOnlyFlags("a-------------e------- /authority/log"))
         assertFalse(AuthorityWire.appendOnlyFlags(null))
     }
 }

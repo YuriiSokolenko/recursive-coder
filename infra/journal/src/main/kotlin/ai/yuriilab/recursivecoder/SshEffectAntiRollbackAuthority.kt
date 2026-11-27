@@ -1,5 +1,6 @@
 package ai.yuriilab.recursivecoder
 
+import com.sun.security.auth.module.UnixSystem
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
@@ -193,10 +194,8 @@ internal object AuthorityWire {
     fun key(path: Path): ByteArray {
         fun attributes(): PosixFileAttributes {
             val attrs = Files.readAttributes(path, PosixFileAttributes::class.java, NOFOLLOW_LINKS)
-            val owner = path.fileSystem.userPrincipalLookupService.lookupPrincipalByName(
-                System.getProperty("user.name")
-            )
-            require(attrs.isRegularFile && attrs.owner() == owner && attrs.fileKey() != null)
+            val uid = (Files.getAttribute(path, "unix:uid", NOFOLLOW_LINKS) as Number).toLong()
+            require(attrs.isRegularFile && uid == UnixSystem().uid && attrs.fileKey() != null)
             val allowed = setOf(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE)
             require(PosixFilePermission.OWNER_READ in attrs.permissions() &&
                 allowed.containsAll(attrs.permissions()))
@@ -219,7 +218,8 @@ internal object AuthorityWire {
     fun appendOnlyFlags(line: String?): Boolean {
         val match = line?.let { Regex("^([A-Za-z-]{16,32})[ \\t]+.+$").matchEntire(it) }
             ?: return false
-        return 'a' in match.groupValues[1]
+        val flags = match.groupValues[1]
+        return flags[5] == 'a' && flags.count { it == 'a' } == 1
     }
 
     fun identity(r: EffectAuthorityRegister): String = encoder.encodeToString(

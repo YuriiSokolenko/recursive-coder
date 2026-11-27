@@ -332,7 +332,8 @@ For suspected compromise, revoke the SSH principal and transport
 credentials; do not delete or rewrite history. A reviewed rotation
 procedure must preserve the same identity, immutable history and
 authenticated latestness. History-key rotation and release from
-quarantine are unsupported until a separately reviewed protocol exists.
+quarantine are unsupported until the separately reviewed protocol in
+#248 exists.
 Administrative restore of an older authority snapshot is prohibited;
 if independently authenticated latestness cannot be proven, retire
 the register without replacement or epoch rotation.
@@ -396,15 +397,16 @@ After checking the independent identity inventory, run the offline
 directories. The command creates and forces the marker and both
 headers authenticated with the history HMAC key, plus a dedicated
 mutex file derived by adding `.mutex` to the marker path. All four
-use exclusive creation; the parent directories are forced. Partial provisioning is quarantined, never retried.
-Set Linux append-only attributes (`chattr +a`) on all three files,
+use exclusive creation; the parent directories are forced. Partial
+provisioning is quarantined, never retried.
+Set Linux append-only attributes (`chattr +a`) on the marker and both
+logs,
 with permissions for the dedicated service principal to read and
 append but not administer attributes or directories. The mutex file
 must allow the service to acquire an exclusive lock, with no ability
-to replace it or its parent directory. The forced
-command uses only `serve-independent`; never expose provisioning over
-SSH. The service checks regular, distinct, non-symlink files and their
-append-only attributes on every invocation. The operator must ensure
+to replace it or its parent directory. The forced command uses only `serve-independent`; never expose provisioning over
+SSH. The service checks four regular, distinct, non-symlink files and
+the three required append-only attributes on every invocation. The operator must ensure
 the files reside on a local Linux filesystem supporting these
 attributes, interprocess locks and honest file/directory fsync, with
 persistent media and protected parent directories. The process does
@@ -415,8 +417,8 @@ both bounded logs byte-for-byte, verifies the HMAC-authenticated
 provisioning marker, headers and every canonical root, and validates
 the complete history. The mutex is never opened a second time inside
 its lock, because closing another descriptor for a POSIX-locked inode
-can release the process's lock. It forces the equal histories before authenticated read or
-comparison, then appends and forces each copy before acknowledging a
+can release the process's lock. It forces the equal histories before
+authenticated read or comparison, then appends and forces each copy before acknowledging a
 successful transition. An absent provisioning marker or a verified
 zero-root history returns missing/reset on read. Divergent, unprotected,
 oversized or missing history files return unavailable; malformed or
@@ -424,8 +426,9 @@ MAC-invalid equal histories return unauthenticated. Neither copy is
 selected for repair. Key files must be regular, owner-only, owned by
 the service user and opened without following the final symlink.
 The operator protects the parent directories against rename or
-replacement; the JVM does not attest the filesystem administrator. The finite
-16 MiB log limit is fail closed; there is no pruning or rollover.
+replacement; the JVM does not attest the filesystem administrator.
+The finite 16 MiB log limit is fail closed; there is no pruning or
+rollover.
 A later authenticated read, including after process death before the
 second force, is not the lost invocation's acknowledgement.
 
