@@ -11,7 +11,7 @@
 | `:infra:model` | Offline FakeModel and optional OpenAI-compatible HTTP adapter | `:core:contracts` |
 | `:infra:workspace` | Workspace Manager, restricted Git, trusted write/check runtime, LinuxStageToolSessionOpener and host-only LinuxStageGitBaselineReconciler (not a production receipt authority) | `:core:contracts` |
 | `:infra:task-store` | Durable tasks.json snapshot, file locks and atomic replacement | `:core:tasks`, `:core:contracts` |
-| `:infra:journal` | JSONL sink, opt-in fsynced event ledger, immutable journal-bound checkpoints and [pre-execution fenced admission](FENCED_RESUME.md); no CLI resume | `:core:session`, `:core:contracts` |
+| `:infra:journal` | JSONL sink, opt-in fsynced event ledger, immutable journal-bound checkpoints and [pre-execution fenced admission](FENCED_RESUME.md); standalone [independent authority SSH client and host command](EFFECT_INTENTS.md#independent-authority-deployment-241); no CLI resume or effect execution | `:core:session`, `:core:contracts` |
 | `:app:cli` | Clikt CLI/Koin composition plus opt-in `LinuxFiveRoleWorkflowHost`: trusted receipt authority, reviewer CAS and Git handoffs (selected only by explicit fake-only `workflow --enable-stage-writes`) | all eight libraries |
 
 ```text

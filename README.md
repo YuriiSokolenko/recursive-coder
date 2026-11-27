@@ -32,7 +32,7 @@ Recursive Coder itself owns its tasks and sessions. Git can manage source worksp
 
 The current foundation uses Kotlin 2.4.21, JDK 21, Gradle 9.8.2, Koin 4.2.2 (CLI composition root only), and Session Protocol `1.0`. Core modules do not depend on Koog, HTTP adapters or Koin.
 
-The Gradle build has **nine product modules**: `:agent:runtime`, `:core:contracts`, `:core:session`, `:core:tasks`, `:infra:model`, `:infra:workspace`, `:infra:task-store`, `:infra:journal`, and the only executable module, `:app:cli`. `build-logic` is an included build, not a product module. See [Gradle module ownership](docs/architecture/MODULES.md). For changes to Gradle plugins or dependencies, follow the [SHA-256 verification and manual checksum review procedure](docs/dependency-verification.md).
+The Gradle build has **nine product modules**: `:agent:runtime`, `:core:contracts`, `:core:session`, `:core:tasks`, `:infra:model`, `:infra:workspace`, `:infra:task-store`, `:infra:journal`, and the CLI composition module, `:app:cli`. The standalone authority command is packaged in `:infra:journal` but is not wired into the CLI. `build-logic` is an included build, not a product module. See [Gradle module ownership](docs/architecture/MODULES.md). For changes to Gradle plugins or dependencies, follow the [SHA-256 verification and manual checksum review procedure](docs/dependency-verification.md).
 
 The installed distribution remains at `build/install/recursive-coder/bin/recursive-coder`, preserving the existing CLI smoke-test path.
 
@@ -63,7 +63,7 @@ With Gradle 9.8.2 and JDK 21 installed:
 - [Durable event ledger and fenced pre-execution reopen (#102 / #114)](docs/architecture/DURABLE_EVENT_LEDGER.md)
 - [Host-owned atomic session checkpoints (#103)](docs/architecture/SESSION_CHECKPOINTS.md)
 - [Fenced admission and recovery boundaries (#104)](docs/architecture/FENCED_RESUME.md)
-- [Effect recovery contracts and host-only authenticated record journal (#105)](docs/architecture/EFFECT_INTENTS.md)
+- [Effect recovery contracts, authenticated journal and standalone independent authority (#105)](docs/architecture/EFFECT_INTENTS.md)
 - [Trusted durable created-to-accepted handoff (#104, opt-in)](docs/architecture/DURABLE_CREATED_ACCEPTED_HANDOFF.md)
 - [First executable CLI session](docs/architecture/FIRST_SESSION.md)
 - [Native Task Manager and local scheduling](docs/architecture/TASK_MANAGER.md)
