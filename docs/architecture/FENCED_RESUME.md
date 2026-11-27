@@ -76,8 +76,8 @@ fully authenticated RCLDG1 history. This is still not execution authority:
 Never blindly retry publication or treat a successful `inspect` as approval
 to resume model/tool work.
 
-This milestone does not solve #105 effect authority/reconciliation, long-held
-fsync/shutdown watchdog semantics, kill-boundary subprocess evidence, or the
+This milestone does not solve #105 effect authority/reconciliation, runtime implementation of the
+fsync/shutdown watchdog contract, broader kill-boundary subprocess evidence, or the
 true live-fenced runtime `FileStore.type()` sanitized-denial E2E. Those remain
 gates for connecting real execution and for closing #104. Independently
 review the authenticated operator call boundary before production use.
@@ -366,6 +366,160 @@ There is no in-place rotation or safe implicit truncation. A crash releases
 the OS lease but not its durable generation, so the next process must provide
 the observed current generation as its CAS precondition.
 
+## Fenced publication cancellation and stalled durability (#237)
+
+### Host-owned contract (runtime integration pending)
+
+The current adapters are synchronous. They expose neither a cancellation
+transition nor a nonblocking publication-status accessor. The following
+contract constrains the future host runtime (#106); it does not imply that
+the CLI, scheduler or resume entry point implements these transitions today.
+
+Keep three independent dimensions: caller intent (running, cancellation
+requested, or shutdown requested); publication outcome (not started,
+active, acknowledged, or unconfirmed); and lease ownership (held, retiring,
+released, or release unconfirmed). Cancellation and shutdown requests are
+monotonic for that invocation. The host must stop admitting new work and
+scheduling new publications on cancellation. It must serialize that decision
+with the start of any authorized publication; a cancellation flag checked
+before entering the guard alone does not close the race. A publication
+already authorized under the current lease may still finish, even if its
+original caller no longer waits for the result.
+
+A future watchdog must observe host-owned intent, active-operation identity,
+generation, start time and recorded completion without entering the lease
+or writer monitors or acquiring filesystem locks. It may report a deadline
+overrun or an outstanding publication, not that the kernel write failed,
+succeeded or stopped. A stale observation must be identified as such.
+This observer cannot retire the lease, acknowledge a frame, mint a new
+generation, open a replacement writer or grant external effect authority.
+This requires a separately reviewed host implementation and race tests;
+the existing deny-only preflight worker is not a publication watchdog.
+
+Only the publication owner may report its actual adapter result. Successful
+append acknowledgement requires force and the in-memory commit transition;
+successful checkpoint acknowledgement requires file force, atomic rename,
+directory force, verified readback and the writer's checkpoint acknowledgement.
+An acknowledged append is not an acknowledged checkpoint. The result
+must remain distinguishable from caller cancellation; if the caller has
+gone away, the host still needs the recorded physical outcome. A timeout,
+thread interrupt, successful readback, or lack of an acknowledgement alone
+cannot prove that no bytes or effects were written. In particular a
+checksum-valid tail is not a receipt.
+
+| Event or outcome | Acknowledgement | Lease ownership | New admission and reconciliation |
+| --- | --- | --- | --- |
+| Cancellation wins before publication starts | No new acknowledgement | Held until orderly writer close and lease retirement | Fresh admission only after confirmed release and verification of the already covered prefix; reconcile any earlier uncertain work |
+| Cancellation during active write or force | Pending; do not synthesize a denial receipt or success | Held; retirement waits | No successor; await actual outcome |
+| Adapter returns success | Only that operation acknowledged | Held until required checkpoint and writer close, then retirement | Fresh CAS after confirmed release, matching checkpoint and safe boundary; an uncovered append is not eligible |
+| Refusal or exception proven before any physical publication | No new acknowledgement | Held until orderly cleanup | Fresh admission after confirmed release and verified covered prefix, unless authority or earlier evidence is uncertain |
+| Exception after writing starts, before or during file force | Unconfirmed | Held through guard exit and writer cleanup | No blind retry; reconcile physical tail, checkpoint and any external effects |
+| Exception after file force, before acknowledgement | Unconfirmed even if bytes are readable | Held through guard exit and writer cleanup | Same reconciliation requirement; no implicit tail adoption |
+| Checkpoint renamed, directory force or subsequent acknowledgement unconfirmed | Unconfirmed even if C2/C3 is visible | Held through guard exit and writer cleanup | Preserve both generations and tail; reconcile before any further admission, never retry stale expected hash |
+| Shutdown deadline expires or caller stops waiting | Pending or last recorded result, not a new acknowledgement | Held or retiring; not released by deadline | No successor while ownership is held or uncertain |
+| Lease release throws | No new publication acknowledgement | Release unconfirmed; JVM reservation retained | Stop; independently verify ownership and durable evidence before reconciliation or new work |
+| Process death | No assumed acknowledgement for interrupted operation | OS lock is released only when process actually exits | Fresh CAS and complete durable verification after confirming prior owner is gone; reconcile unknown effects, refuse uncovered or unsafe boundaries |
+
+For the current metadata-only APIs, a fresh admission may mechanically
+accept a fully valid, covered pre-execution checkpoint after an ambiguous
+publication and release. This is not proof that the original operation was
+acknowledged. The trusted host must enforce the reconciliation restriction
+above; the adapters do not persist a runtime cancellation/shutdown state.
+An uncovered tail refuses with `CHECKPOINT_JOURNAL_MISMATCH` or
+`CHECKPOINT_JOURNAL_UNCONFIRMED`; a path-only save must not cover it.
+The genesis-only effect reconciliation API is not a general tail repair.
+The one-way running marker remains inadmissible.
+
+For normal shutdown, stop dispatch, let an authorized publication finish,
+cover any acknowledged append using the same live fenced writer if its
+outcome remains known and policy permits, close the writer, then retire
+the lease outside the publication callback. If the write or checkpoint
+is uncertain, quarantine the writer and preserve evidence; do not
+automatically retry or emit a terminal success. The host may report
+incomplete shutdown and escalate to the operator. Do not asynchronously
+close the writer channel or release the OS lock to break a stalled force.
+There is no promised bound on local filesystem calls, JVM monitor waits,
+writer close (which can itself call force), OS lock release or process exit.
+Even a kill request is not proof of exit or of absent effects.
+No bounded graceful shutdown guarantee is made.
+
+### Actual guards and lock ordering
+
+- Admission checks both filesystem types and source identity before the
+  JVM resume reservation and OS tryLock; filesystem checks can themselves
+  block. While the reservation or OS lock is held, a competing admission
+  that reaches it refuses `RESUME_LEASE_HELD`. It cannot mint a successor.
+  Admission then holds checkpoint.lock during verified closed-ledger
+  inspection and durable fence/anchor publication.
+- `appendFenced` and the trusted running-boundary append enter the lease
+  monitor (which rechecks the live fence, anchor and inode), then the
+  ledger writer monitor. Frame write, local force, acknowledgement and
+  phase/sequence update occur inside both monitors. The writer retains its
+  independent ledger OS lock until close. The before-force and
+  forced-before-ack seams do not release either monitor. Failure unwinds
+  the guard and revokes or poisons the writer as appropriate; a late
+  callback must revalidate the lease before any write.
+- `saveFromOpenLedgerFenced` enters the same lease monitor, then the live
+  writer monitor via the committed-anchor callback, then checkpoint.lock.
+  The anchor check, physical checkpoint write, file and directory force,
+  readback, and writer acknowledgement are serialized against retirement.
+  A failed write that started latches checkpoint publication uncertainty;
+  close reports `LEDGER_REOPEN_CHECKPOINT_UNCONFIRMED`. The path-based
+  `saveFenced` uses the lease monitor, checkpoint.lock and nonblocking
+  closed-ledger inspection, and cannot adopt an uncovered tail.
+- Host-only `DurableEffectRecordJournal` creation uses the lease monitor
+  across sidecar OS lock acquisition, genesis write and file/directory
+  force. Append uses lease then effect-writer monitor across transition
+  validation, frame write, file force and entry/MAC acknowledgement.
+  The effect-writer OS lock remains held until close.
+  `saveEffectHeadFenced` takes lease then effect-writer monitor to capture
+  the live authenticated head; it releases that writer monitor before
+  checkpoint.lock and closed-ledger inspection, but retains the lease
+  monitor throughout publication and any uncertainty latch. This excludes
+  competing fenced appends; host ordering must also exclude premature
+  effect-writer close. A poisoned sidecar or unconfirmed pin is not effect
+  execution authority, and its bytes do not prove whether an external
+  effect happened. #105 still owns reconciliation and execution authority.
+- Writer close takes only its writer monitor, not the lease monitor;
+  normal host ordering is writer close before lease close. Same-thread
+  reentrant lease close refuses before mutating ownership; cross-thread
+  close waits for the guard. The reopen path can take the ledger OS lock
+  before re-entering the lease monitor, as described above. File-lock
+  tryLock avoids waiting for another OS lock; it does not bound the
+  filesystem calls around lock acquisition. Do not introduce blocking
+  file-lock acquisition or a writer-to-lease monitor edge without a new
+  ordering audit.
+
+No fsync is moved outside its authority guard. A future implementation
+that bounds the caller's wait must not equate detaching the caller with
+releasing the guard or OS lease. Changing the atomic fencing mechanism
+requires separate review. No new execution or replay boundary is enabled.
+
+### Verification scope
+
+The existing Linux integration fixtures exercise real durable ledger and
+checkpoint adapters, with bounded per-invocation barriers at record-written,
+forced-before-ack, temp-synced and before-directory-fsync. The append race
+observes both retirement and a competing retry waiting on the actual lease
+monitor; a bounded caller observation leaves the append outstanding and
+a competing admission refused. Successful completion and injected failures
+before force and after force are distinguished, with literal refusals,
+exact bytes, sequence and checkpoint evidence, and rejection of a stale
+callback and successor admission with an uncovered tail. The checkpoint
+tests pause and fail before rename and after rename but before directory
+force, assert no competing admission or checkpoint lock acquisition,
+and verify typed uncertainty and legacy fallback refusal. Readback after
+rename is explicitly not an acknowledgement. Existing process-kill and
+independent-JVM CAS tests remain unchanged.
+
+These tests simulate a stalled durability boundary, not a hung kernel
+fsync. They observe current adapter behavior, not a production cancellation
+signal or watchdog. The production host state machine, admission gating
+on cancellation, nonblocking watchdog observation, shutdown supervision
+and broader kill matrix remain follow-ups in #106/#107. The real runtime
+fenced filesystem refusal E2E and #105 effect execution authority remain
+separate gates for #104.
+
 ## Refusals and limits
 
 Typed `SessionResumeUnconfirmed` codes distinguish live lease, invalid
@@ -487,8 +641,9 @@ a claim that policy-valid metadata-only tail adoption can never be designed.
 It remains out of #114 until [#117](https://github.com/YuriiSokolenko/recursive-coder/issues/117)
 proves a safe, generation-fenced adoption protocol. Integrity of the tail
 does not itself attest its fsync acknowledgement or absence of external effects.
-Each local `FileChannel.force(true)` executes while the resume lease
-monitor is held. This has **no guaranteed latency bound**: a slow disk
+Each fenced publication's local `FileChannel.force(true)` executes while the
+resume lease monitor is held. Writer close has its own monitor and may also
+force the channel before releasing its writer lock. This has **no guaranteed latency bound**: a slow disk
 can delay `lease.close()`, competing fenced publications and shutdown.
 Host shutdown must not rely on a short deadline or attempt to retire the
 lease while an in-flight fenced fsync is still completing. This feature
@@ -655,6 +810,9 @@ The Linux integration tier tests these failure boundaries offline:
   volume lookup after request binding or source identity refusal
 - Reentrant lease close refusal during fenced and nested publications,
   exceptional callback cleanup and stale callback after successor admission
+- Stalled fenced append and checkpoint durability seams, competing admission
+  and publication refusal, delayed retirement, and unconfirmed outcomes
+  (see the #237 contract and verification scope above)
 - Anchor rollback, interrupted prepares, audit/fsync recovery and idempotent
   operator retries, including conflicting operator rejection
 - `reconciliationStatus` transitions from unaudited prepare to approved
