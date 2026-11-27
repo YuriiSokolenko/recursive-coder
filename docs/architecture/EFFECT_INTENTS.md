@@ -329,8 +329,9 @@ quarantined. Do not reinitialize or resume from readback. For suspected
 compromise, revoke the SSH principal and transport credentials; do not delete
 or rewrite history. A reviewed rotation procedure must preserve the same
 identity, immutable history and authenticated latestness. History-key rotation
-and release from quarantine are unsupported until the separately reviewed
-protocol in #248 exists. Administrative restore of an older authority snapshot
+and release from quarantine remain unsupported. The proposed
+[credential rotation and quarantine protocol](EFFECT_AUTHORITY_OPERATIONS.md)
+tracks the remaining implementation and deployment evidence in #248. Administrative restore of an older authority snapshot
 is prohibited; if independently authenticated latestness cannot be proven,
 retire the register without replacement or epoch rotation.
 
