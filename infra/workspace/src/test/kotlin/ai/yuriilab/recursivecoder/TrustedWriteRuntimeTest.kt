@@ -106,6 +106,39 @@ class TrustedWriteRuntimeTest {
         }
     }
 
+    @Test fun decodedWriteOperationsRetainRuntimeAuthorityAndAuditIdentities() {
+        val f = fixture()
+        val audits = mutableListOf<Pair<String, String?>>()
+        open(f, audit = { _, tool, denied -> audits += tool to denied }).use { runtime ->
+            val forbidden = TrustedWriteToolSchema.decode(
+                """{"operations":[{"op":"create","path":"src/main/.env","content":"denied"}]}"""
+            )
+            assertEquals("PROTECTED_PATH", runtime.apply(forbidden).deniedCode)
+            assertFalse(Files.exists(f.root.resolve("src/main/.env")))
+            val immutable = TrustedWriteToolSchema.decode(
+                """{"operations":[{"op":"delete","path":"src/test/FeatureTest.kt","expectedSha256":"${f.approved.getValue("src/test/FeatureTest.kt")}"}]}"""
+            )
+            assertEquals("ROLE_NOT_AUTHORIZED", runtime.apply(immutable).deniedCode)
+            assertEquals("fun testValue() = 1\n", Files.readString(f.root.resolve("src/test/FeatureTest.kt")))
+
+            val operations = TrustedWriteToolSchema.decode(
+                """{"operations":[{"op":"create","path":"src/main/New.kt","content":"fun newValue() = 3\n"},{"op":"edit","path":"src/main/Feature.kt","expectedSha256":"${sha("fun value() = 1\n")}","content":"fun value() = 2\n"},{"op":"delete","path":"src/main/Delete.kt","expectedSha256":"${sha("fun removeMe() = 1\n")}"}]}"""
+            )
+            assertIs<WriteOperation.Create>(operations[0])
+            assertIs<WriteOperation.Edit>(operations[1])
+            assertIs<WriteOperation.Delete>(operations[2])
+            val result = runtime.apply(operations)
+            assertTrue(result.permitted, result.deniedCode)
+            assertEquals("fun newValue() = 3\n", Files.readString(f.root.resolve("src/main/New.kt")))
+            assertEquals("fun value() = 2\n", Files.readString(f.root.resolve("src/main/Feature.kt")))
+            assertFalse(Files.exists(f.root.resolve("src/main/Delete.kt")))
+            assertTrue(runtime.runCheck("git_diff_check").passed)
+            assertEquals("CHECK_NOT_ALLOWLISTED", runtime.runCheck("git_diff").deniedCode)
+            assertEquals(listOf("write" to "PROTECTED_PATH", "write" to "ROLE_NOT_AUTHORIZED",
+                "write" to null, "run_check" to null, "run_check" to "CHECK_NOT_ALLOWLISTED"), audits)
+        }
+    }
+
     @Test fun eachRoleCanOnlyWriteToItsOwnedAreaAndReviewerIsReadOnly() {
         val cases = listOf(
             EngineeringRole.SDD to "specs/Next.md",
@@ -539,6 +572,10 @@ class TrustedWriteToolSchemaTest {
             """{"operations":[{"op":"create","path":"src/main/A.kt","content":4}]}""",
             """{"operations":[{"op":"delete","path":"src/main/A.kt","expectedSha256":"bad"}]}""",
             """{"operations":[{"op":"run","path":"src/main/A.kt"}]}""",
+            """{"operations":[{"op":"READ","path":"src/main/A.kt"}]}""",
+            """{"operations":[{"op":"read_task","path":"src/main/A.kt"}]}""",
+            """{"operations":[{"op":"git_diff_check","path":"src/main/A.kt"}]}""",
+            """{"operations":[{"op":"CREATE","path":"src/main/A.kt","content":"ok"}]}""",
             """{"operations":[],"claimedToolId":"tool-1"}""",
             """{"operations":[{"op":"create","path":"x","content":"a"},{"op":"delete","path":"x","expectedSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}"""
         )

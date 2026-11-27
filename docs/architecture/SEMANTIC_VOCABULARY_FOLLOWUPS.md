@@ -20,6 +20,55 @@ or any child complete solely because this branch exists.
 | #204 | `JournalFormatVocabulary` in journal; effect metadata and state keys reused by physical effect journal, effect envelope policy and evidence verifier. Fence/anchor/audit markers remain private to their codecs. Anchor bound reuses existing ResumeFenceStorage.MAX_FENCES. Lock names are internal to journal. | Do not merge unrelated ledger and effect record capacities, magic headers, cryptographic domains, HMAC inputs or wire versions merely because values coincide. Checkpoint task-state allowlist stays local: no journal dependency on tasks. See the targeted completion audit below. |
 | #205 | Gradle JVM convention uses local source-set name and e2e tag; Python test-tier, JUnit evidence and CI bootstrap guards reuse their own local constants. | CI YAML and verification metadata, independent Python tests and standalone JavaScript schema checks remain literal or independently specified. Do not import product constants into external verifiers. |
 
+## #200 targeted completion audit
+
+Reviewed `WorkspaceContracts.kt`, `ToolAuthorizationPolicy.kt`,
+`SessionRequest.kt`, `SessionPolicy.kt`, `WorkspaceManager.kt`,
+`TrustedWriteToolSchema.kt`, `TrustedWriteRuntime.kt`,
+`StageToolExecutionContracts.kt`, `LinuxStageToolSessionOpener.kt`,
+`RunPreparationStageUseCase.kt`, `RunDeveloperStageUseCase.kt`,
+`RunFiveRoleWorkflowUseCase.kt`, `TaskRequestMapper.kt`, `TaskCli.kt`,
+`Main.kt`, `InstalledRecursiveWorkflow.kt`, `LinuxFiveRoleWorkflowHost.kt`,
+`WritableWorkflowCli.kt`, `KoogStageRoleExecutor.kt`, `ModelGateway.kt`
+and the C3-pinned `SessionRuntime.kt`.
+
+- PR #206 already centralized all six read-tool identities in
+  `WorkspaceToolNames`, both request modes in `ToolPolicyModes`, and the
+  fixed host check ID in `StageCheckIds`. The sealed workspace tool
+  variants, explicit read allowlist, request parser, session admission,
+  workspace opening/dispatch and stage check consumers reuse those owners.
+  The fixed check ID is not the workspace Git diff tool. The installed
+  offline check ID remains CLI-local (see #203).
+- `SessionRequest` validates both mode spellings but preserves opaque tool
+  names; session admission separately requires read-only mode, a read
+  grant, no read denial and no writable/immutable inputs. Workspace opening
+  additionally rejects unknown allowed tools. Per-call denial wins over
+  allowance; the model-facing HTTP tool `read_task` is never a workspace
+  grant. The HTTP declaration, response check and model instruction now
+  share the existing private adapter constant without changing prompt bytes.
+- Trusted write schema operation discriminators and fields are local to
+  the decoder; `WriteOperationKind` is a typed authorization fact, not a
+  wire codec. The stage adapter maps typed `StageWrite` variants into
+  typed runtime operations without granting authority. The developer
+  proposal prompt's create/edit labels describe a different, host-selected
+  target format. The runtime's write/run_check audit names are private;
+  Git command verbs, CLI list subcommand, and prose are distinct.
+  No new constants module, schema, dependency, permission or C3 change.
+- Independent literal checks retain the six workspace names, two modes,
+  and fixed check ID. The schema integration test compares the mode enum
+  against the checked-in v1 schema, round-trips independently authored
+  request JSON, and rejects invalid mode spellings while retaining opaque
+  tool strings. Pure admission tests pin the narrower workspace opening
+  gate and deny precedence. The existing write authorization matrices
+  remain literal. New Linux integration coverage decodes all three write
+  operations, verifies their actual effects and protected/role refusals,
+  and checks literal audit identities and fixed-check versus workspace
+  tool separation. Unknown operation strings remain rejected by the
+  decoder; model/schema acceptance alone never grants runtime permission.
+
+Validation of this completion slice requires all six CI jobs on the exact
+candidate head and independent review; no local Gradle pass is claimed.
+
 ## #197 targeted completion audit
 
 Reviewed the current dev versions of `ModelContracts.kt` (including

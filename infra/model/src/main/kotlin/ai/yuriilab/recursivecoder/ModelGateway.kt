@@ -234,7 +234,7 @@ class OpenAICompatibleGateway(
             add(buildJsonObject {
                 put("role", "system")
                 put("content", if (observed == null)
-                    "Call read_task exactly once for the supplied path. Do not invent tool results."
+                    "Call $READ_TASK_MODEL_TOOL exactly once for the supplied path. Do not invent tool results."
                 else "Return only a JSON object with bytes and sha256 exactly matching the trusted observation.")
             })
             add(buildJsonObject {

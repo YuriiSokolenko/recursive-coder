@@ -6,6 +6,7 @@ import kotlinx.serialization.json.*
 import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /** The independent, checked-in v1 schema is the oracle; no schema generation from Kotlin. */
@@ -40,6 +41,47 @@ class SessionVocabularySchemaIntegrationTest {
         assertEquals(properties("Resume").keys, setOf(SessionResumeFields.FENCE_GENERATION, SessionResumeFields.MODE, "checkpoint"), "Resume fields")
         assertEquals(properties("ArtifactRef").keys, setOf(SessionArtifactReferenceFields.PATH, SessionArtifactReferenceFields.SHA256), "ArtifactRef fields")
         assertEquals(enumValues(properties("Resume").getValue("mode")), setOf(SessionResumeModes.FRESH, SessionResumeModes.RESUME))
+    }
+
+    @Test fun toolPolicyModesMatchSchemaAndRequestParsingPreservesOpaqueToolNames() {
+        val modes = enumValues(properties("ToolPolicy").getValue("mode"))
+        assertEquals(setOf("read-only", "scoped-write"), modes)
+        assertEquals(modes, setOf(ToolPolicyModes.READ_ONLY, ToolPolicyModes.SCOPED_WRITE))
+
+        // Use the independently maintained v1 example. Only relocate absolute paths
+        // so this test does not depend on a POSIX root or actual workspace contents.
+        val examples = Json.parseToJsonElement(
+            Files.readString(schema.resolveSibling("session-v1.examples.json"))
+        ).jsonObject
+        fun relocate(value: JsonElement): JsonElement = when (value) {
+            is JsonObject -> JsonObject(value.mapValues { relocate(it.value) })
+            is JsonArray -> JsonArray(value.map { relocate(it) })
+            is JsonPrimitive -> if (value.isString && value.content.startsWith("/tmp/recursive-coder/"))
+                JsonPrimitive(schema.parent.resolve(value.content.removePrefix("/tmp/recursive-coder/")).toString())
+            else value
+        }
+        val example = relocate(examples.getValue("freshRequest")).jsonObject
+        val policy = example.getValue("toolPolicy").jsonObject
+        val opaqueNames = listOf("read", "read_task", "future-tool")
+        fun request(mode: String): JsonObject = JsonObject(example + ("toolPolicy" to
+            JsonObject(policy + mapOf(
+                "mode" to JsonPrimitive(mode),
+                "allowedTools" to JsonArray(opaqueNames.map { JsonPrimitive(it) })
+            ))))
+        for (mode in listOf("read-only", "scoped-write")) {
+            val wire = request(mode)
+            val parsed = SessionRequest.parse(wire.toString())
+            assertEquals(mode, parsed.policy.textAt("mode"))
+            assertEquals(opaqueNames, parsed.policy.stringsAt("allowedTools"))
+            assertEquals(wire, SessionRequest.parse(parsed.raw.toString()).raw)
+        }
+        for (mode in listOf("", "READ_ONLY", "read_only", "read-write", "scoped-write ", "unknown")) {
+            val failure = assertFailsWith<Refused>(mode) {
+                SessionRequest.parse(request(mode).toString())
+            }
+            assertEquals("INVALID_SESSION_REQUEST", failure.code)
+            assertEquals("Invalid tool mode", failure.explanation)
+        }
     }
 
     @Test fun eventFieldsAndVocabularyMatchSchema() {
