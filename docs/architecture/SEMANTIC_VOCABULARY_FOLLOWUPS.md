@@ -143,8 +143,9 @@ a terminal outcome is not a substitute. The checkpoint usage checks retain
 literal `llm.` and `tool.` namespace prefixes: these are family predicates,
 not individual event identifiers or checkpoint usage-kind names.
 The producer and verifier share stage artifact metadata keys through
-`StageEventMetadataFields`; C3 ledger allowlist entries remain pinned. Independent fixtures, literal
-negative inputs, authorization checks and rejection order remain intact.
+`StageEventMetadataFields`; C3 ledger allowlist entries remain pinned.
+Independent fixtures, literal negative inputs, authorization checks and
+rejection order remain intact.
 
 New tests pin checkpoint version discrimination, embedded head field order
 and the physical record capacity boundary. MAC-valid forged records with
@@ -159,8 +160,8 @@ This audit does not close #194.
 The following repeated diagnostic literals are existing format-local
 refusals, not new protocol vocabulary. They remain literal in this
 format-field refactoring: their storage, authentication, validation and
-recovery decisions are not being consolidated as part of #204. The broader
-diagnostic vocabulary audit is tracked under #201 and #218.
+recovery decisions are not being consolidated as part of #204. The deferred
+journal and checkpoint diagnostic consolidation is tracked by #249.
 Counts below are source occurrences, excluding constant definitions, using
 the trusted base scanner's UPPER_SNAKE literal pattern.
 
@@ -208,7 +209,7 @@ Three cross-file codes are shared with the C3-pinned ledger:
 `LEDGER_NOT_FENCED` (absence of a fenced ledger writer), and
 `LEDGER_REOPEN_CHECKPOINT_UNCONFIRMED` (reopened ledger/checkpoint
 binding cannot be confirmed). Keep the existing literal spellings and
-their same-meaning sites until a separately authorized C3 migration;
+their same-meaning sites until a separately authorized C3 migration (#249);
 do not create competing owners or refresh pins in this slice.
 
 Owned-but-raw C3 exclusions reported by the base scanner:

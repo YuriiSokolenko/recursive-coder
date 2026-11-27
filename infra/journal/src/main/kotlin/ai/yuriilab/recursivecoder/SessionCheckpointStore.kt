@@ -473,13 +473,12 @@ object SessionCheckpointCodec {
             if (version !in setOf(BASE_VERSION, EFFECT_HEAD_VERSION, RECONCILIATION_VERSION) ||
                 string(root, RootFields.KIND) != CHECKPOINT_KIND)
                 throw CheckpointUnconfirmed("CHECKPOINT_VERSION_UNSUPPORTED")
-            val keys = arrayOf(RootFields.KIND, RootFields.VERSION, RootFields.SEQUENCE,
-                RootFields.PREVIOUS_SHA256,
+            val keys = arrayOf(
+                RootFields.KIND, RootFields.VERSION, RootFields.SEQUENCE, RootFields.PREVIOUS_SHA256,
                 RootFields.BINDING, RootFields.SESSION_ID, RootFields.TRACE_ID, RootFields.PHASE,
-                    RootFields.TASK_ID, RootFields.TASK_ATTEMPT,
-                RootFields.TASK_STATE, RootFields.CHILDREN, RootFields.ACCEPTED_ARTIFACTS,
-                    RootFields.HOST_ASSERTED_USAGE,
-                RootFields.PENDING_EFFECTS, RootFields.JOURNAL_SEQUENCE, RootFields.JOURNAL_HEAD_SHA256,
+                RootFields.TASK_ID, RootFields.TASK_ATTEMPT, RootFields.TASK_STATE, RootFields.CHILDREN,
+                RootFields.ACCEPTED_ARTIFACTS, RootFields.HOST_ASSERTED_USAGE, RootFields.PENDING_EFFECTS,
+                RootFields.JOURNAL_SEQUENCE, RootFields.JOURNAL_HEAD_SHA256,
                 RootFields.JOURNAL_FILE_SHA256, RootFields.LAST_TRUSTED_JOURNAL_OFFSET)
             val o = when (version) {
                 BASE_VERSION -> fields(root, *keys)
@@ -487,19 +486,18 @@ object SessionCheckpointCodec {
                 else -> fields(root, *keys, RootFields.EFFECT_JOURNAL_HEAD, RootFields.EFFECT_RECONCILIATION)
             }
             val b = fields(obj(o[RootFields.BINDING]), BindingFields.POLICY_SHA256,
-                BindingFields.WORKSPACE_IDENTITY_SHA256,
-                BindingFields.GIT_HEAD, BindingFields.GIT_BRANCH, BindingFields.GIT_BASELINE_SHA256,
-                    BindingFields.GRAPH_ID,
+                BindingFields.WORKSPACE_IDENTITY_SHA256, BindingFields.GIT_HEAD, BindingFields.GIT_BRANCH,
+                BindingFields.GIT_BASELINE_SHA256, BindingFields.GRAPH_ID,
                 BindingFields.GRAPH_GENERATION, BindingFields.FROZEN_INPUTS_SHA256)
             val binding = CheckpointBinding(string(b, BindingFields.POLICY_SHA256),
                 string(b, BindingFields.WORKSPACE_IDENTITY_SHA256), string(b, BindingFields.GIT_HEAD),
                 string(b, BindingFields.GIT_BRANCH), string(b, BindingFields.GIT_BASELINE_SHA256),
-                string(b, BindingFields.GRAPH_ID), long(b, BindingFields.GRAPH_GENERATION), string(b,
-                    BindingFields.FROZEN_INPUTS_SHA256))
+                string(b, BindingFields.GRAPH_ID), long(b, BindingFields.GRAPH_GENERATION),
+                string(b, BindingFields.FROZEN_INPUTS_SHA256))
             val children = array(o, RootFields.CHILDREN).map {
                 val x = fields(obj(it), ChildFields.ID, ChildFields.PARENT_ID, ChildFields.STATE)
-                CheckpointChild(string(x, ChildFields.ID), string(x, ChildFields.PARENT_ID), string(x,
-                    ChildFields.STATE))
+                CheckpointChild(string(x, ChildFields.ID), string(x, ChildFields.PARENT_ID),
+                    string(x, ChildFields.STATE))
             }
             val artifacts = array(o, RootFields.ACCEPTED_ARTIFACTS).map {
                 val x = fields(obj(it), ArtifactFields.ID, ArtifactFields.OWNER_ID, ArtifactFields.SHA256)
@@ -516,8 +514,8 @@ object SessionCheckpointCodec {
             val effects = array(o, RootFields.PENDING_EFFECTS).map {
                 val x = fields(obj(it), PendingEffectFields.ID, PendingEffectFields.CORRELATION_ID,
                     PendingEffectFields.STATE)
-                CheckpointEffect(string(x, PendingEffectFields.ID), string(x,
-                    PendingEffectFields.CORRELATION_ID), string(x, PendingEffectFields.STATE))
+                CheckpointEffect(string(x, PendingEffectFields.ID),
+                    string(x, PendingEffectFields.CORRELATION_ID), string(x, PendingEffectFields.STATE))
             }
             val attempt = long(o, RootFields.TASK_ATTEMPT)
             val eventSequence = long(o, RootFields.JOURNAL_SEQUENCE)
@@ -539,21 +537,19 @@ object SessionCheckpointCodec {
             val reconciliation = if (version == RECONCILIATION_VERSION) {
                 val rec = fields(obj(o[RootFields.EFFECT_RECONCILIATION]),
                     ReconciliationFields.SOURCE_CHECKPOINT_SHA256,
-                        ReconciliationFields.SOURCE_FENCE_GENERATION,
+                    ReconciliationFields.SOURCE_FENCE_GENERATION,
                     ReconciliationFields.SOURCE_FENCE_SHA256, ReconciliationFields.OPERATOR_ID,
-                        ReconciliationFields.HOST_SEAL_MAC_SHA256,
-                    ReconciliationFields.SOURCE_HEAD)
+                    ReconciliationFields.HOST_SEAL_MAC_SHA256, ReconciliationFields.SOURCE_HEAD)
                 CheckpointEffectReconciliation(string(rec, ReconciliationFields.SOURCE_CHECKPOINT_SHA256),
                     long(rec, ReconciliationFields.SOURCE_FENCE_GENERATION),
                     string(rec, ReconciliationFields.SOURCE_FENCE_SHA256),
-                        readHead(rec[ReconciliationFields.SOURCE_HEAD]),
-                    string(rec, ReconciliationFields.OPERATOR_ID), string(rec,
-                        ReconciliationFields.HOST_SEAL_MAC_SHA256))
+                    readHead(rec[ReconciliationFields.SOURCE_HEAD]),
+                    string(rec, ReconciliationFields.OPERATOR_ID),
+                    string(rec, ReconciliationFields.HOST_SEAL_MAC_SHA256))
             } else null
-            val s = SessionCheckpoint(long(o, RootFields.SEQUENCE), nullableString(o,
-                RootFields.PREVIOUS_SHA256),
-                binding, string(o, RootFields.SESSION_ID), string(o, RootFields.TRACE_ID), string(o,
-                    RootFields.PHASE),
+            val s = SessionCheckpoint(long(o, RootFields.SEQUENCE),
+                nullableString(o, RootFields.PREVIOUS_SHA256), binding,
+                string(o, RootFields.SESSION_ID), string(o, RootFields.TRACE_ID), string(o, RootFields.PHASE),
                 string(o, RootFields.TASK_ID), attempt.toInt(), string(o, RootFields.TASK_STATE),
                 children, artifacts, usage, effects, eventSequence.toInt(),
                 string(o, RootFields.JOURNAL_HEAD_SHA256), string(o, RootFields.JOURNAL_FILE_SHA256),
