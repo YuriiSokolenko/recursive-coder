@@ -49,7 +49,7 @@ class SessionVocabularySchemaIntegrationTest {
         assertEquals(modes, setOf(ToolPolicyModes.READ_ONLY, ToolPolicyModes.SCOPED_WRITE))
 
         // Use the independently maintained v1 example. Only relocate absolute paths
-        // so this test does not depend on a POSIX root or actual workspace contents.
+        // so the parser's absolute-path check is portable.
         val examples = Json.parseToJsonElement(
             Files.readString(schema.resolveSibling("session-v1.examples.json"))
         ).jsonObject

@@ -32,6 +32,10 @@ Reviewed `WorkspaceContracts.kt`, `ToolAuthorizationPolicy.kt`,
 `WritableWorkflowCli.kt`, `KoogStageRoleExecutor.kt`, `ModelGateway.kt`
 and the C3-pinned `SessionRuntime.kt`.
 
+Changed in this slice: `ModelGateway.kt`, `SessionVocabularySchemaIntegrationTest.kt`,
+`SessionPolicyCoverageUnitTest.kt`, `TrustedWriteRuntimeTest.kt` and this inventory
+(`SEMANTIC_VOCABULARY_FOLLOWUPS.md`).
+
 - PR #206 already centralized all six read-tool identities in
   `WorkspaceToolNames`, both request modes in `ToolPolicyModes`, and the
   fixed host check ID in `StageCheckIds`. The sealed workspace tool
@@ -62,7 +66,8 @@ and the C3-pinned `SessionRuntime.kt`.
   gate and deny precedence. The existing write authorization matrices
   remain literal. New Linux integration coverage decodes all three write
   operations, verifies their actual effects and protected/role refusals,
-  and checks literal audit identities and fixed-check versus workspace
+  and checks the complete ordered start/terminal audit sequence with
+  literal tool IDs, names and denial codes, plus fixed-check versus workspace
   tool separation. Unknown operation strings remain rejected by the
   decoder; model/schema acceptance alone never grants runtime permission.
 
@@ -396,8 +401,12 @@ and event fields, event kinds/statuses, workspace tool names/modes, diagnostic
 codes, task state codec/priority, stage vocabulary and journal evidence/fence
 values. A schema-backed integration test compares actual vocabulary constants with
 canonical v1 properties and enums; literal unit tests remain independent change
-detectors. Existing parser, admission, authorization, lifecycle, E2E and persistence
-tests are unchanged. The changes intend to preserve serialized values, field
+detectors. The original cumulative follow-up preserved existing parser, admission,
+authorization, lifecycle, E2E and persistence tests. The #200 completion slice
+adds coverage to `SessionVocabularySchemaIntegrationTest`,
+`SessionPolicyCoverageUnitTest`, `TrustedWriteRuntimeTest` and
+`TrustedWriteToolSchemaTest`, extending the decoder's negative fixtures without
+removing existing cases. The changes intend to preserve serialized values, field
 order, digest inputs, denial order, unknown-value rejection and module dependencies.
 
 No local full Gradle/CI execution is claimed. Require all architecture, pure-unit,

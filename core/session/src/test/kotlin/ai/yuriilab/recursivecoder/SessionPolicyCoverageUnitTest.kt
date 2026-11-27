@@ -112,8 +112,9 @@ class SessionPolicyCoverageUnitTest {
         }
         for (tool in listOf("read_task", "git_diff_check", "run_check", "write", "READ", "unknown")) {
             assertEquals(denied, SessionAdmissionPolicy.decide(base.copy(allowedTools = setOf(tool))), tool)
-            // Session admission checks the mandatory read grant; workspace opening
-            // separately rejects an unknown extra grant, even if read is present.
+            // Session admission checks the mandatory read grant. The pure policy
+            // applied by WorkspaceManager.open separately rejects unknown extra grants.
+            // WorkspaceManagerTest covers the adapter boundary.
             val allowed = setOf("read", tool)
             assertEquals(AdmissionDecision.Accepted,
                 SessionAdmissionPolicy.decide(base.copy(allowedTools = allowed)), tool)

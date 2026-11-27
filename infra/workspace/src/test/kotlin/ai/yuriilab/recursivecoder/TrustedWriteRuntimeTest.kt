@@ -108,17 +108,17 @@ class TrustedWriteRuntimeTest {
 
     @Test fun decodedWriteOperationsRetainRuntimeAuthorityAndAuditIdentities() {
         val f = fixture()
-        val audits = mutableListOf<Pair<String, String?>>()
-        open(f, audit = { _, tool, denied -> audits += tool to denied }).use { runtime ->
+        val audits = mutableListOf<Triple<String, String, String?>>()
+        open(f, audit = { id, tool, denied -> audits += Triple(id, tool, denied) }).use { runtime ->
             val forbidden = TrustedWriteToolSchema.decode(
                 """{"operations":[{"op":"create","path":"src/main/.env","content":"denied"}]}"""
             )
             assertEquals("PROTECTED_PATH", runtime.apply(forbidden).deniedCode)
             assertFalse(Files.exists(f.root.resolve("src/main/.env")))
-            val immutable = TrustedWriteToolSchema.decode(
+            val otherRoleArea = TrustedWriteToolSchema.decode(
                 """{"operations":[{"op":"delete","path":"src/test/FeatureTest.kt","expectedSha256":"${f.approved.getValue("src/test/FeatureTest.kt")}"}]}"""
             )
-            assertEquals("ROLE_NOT_AUTHORIZED", runtime.apply(immutable).deniedCode)
+            assertEquals("ROLE_NOT_AUTHORIZED", runtime.apply(otherRoleArea).deniedCode)
             assertEquals("fun testValue() = 1\n", Files.readString(f.root.resolve("src/test/FeatureTest.kt")))
 
             val operations = TrustedWriteToolSchema.decode(
@@ -134,8 +134,20 @@ class TrustedWriteRuntimeTest {
             assertFalse(Files.exists(f.root.resolve("src/main/Delete.kt")))
             assertTrue(runtime.runCheck("git_diff_check").passed)
             assertEquals("CHECK_NOT_ALLOWLISTED", runtime.runCheck("git_diff").deniedCode)
-            assertEquals(listOf("write" to "PROTECTED_PATH", "write" to "ROLE_NOT_AUTHORIZED",
-                "write" to null, "run_check" to null, "run_check" to "CHECK_NOT_ALLOWLISTED"), audits)
+            // Each call emits a start record and a terminal record under the same ID.
+            val expected: List<Triple<String, String, String?>> = listOf(
+                Triple("tool-issue8-session-1", "write", null),
+                Triple("tool-issue8-session-1", "write", "PROTECTED_PATH"),
+                Triple("tool-issue8-session-2", "write", null),
+                Triple("tool-issue8-session-2", "write", "ROLE_NOT_AUTHORIZED"),
+                Triple("tool-issue8-session-3", "write", null),
+                Triple("tool-issue8-session-3", "write", null),
+                Triple("tool-issue8-session-4", "run_check", null),
+                Triple("tool-issue8-session-4", "run_check", null),
+                Triple("tool-issue8-session-5", "run_check", null),
+                Triple("tool-issue8-session-5", "run_check", "CHECK_NOT_ALLOWLISTED")
+            )
+            assertEquals(expected, audits)
         }
     }
 
