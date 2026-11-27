@@ -221,6 +221,24 @@ class DurableEffectRecordJournalIntegrationTest : SessionCheckpointTestFixture()
         denied("EFFECT_JOURNAL_INVALID_RECORD") { inspectEffects() }
     }
 
+    @Test fun invalidPhysicalSizeAndGenesisFailClosedBeforeRecordReplay() {
+        withLease { lease -> open(lease).use { it.append(intent()) } }
+        val original = Files.readAllBytes(path())
+        Files.write(path(), ByteArray(0), StandardOpenOption.TRUNCATE_EXISTING)
+        denied("EFFECT_JOURNAL_SIZE_INVALID") { inspectEffects() }
+        denied("EFFECT_JOURNAL_SIZE_INVALID") { inspectDiagnostic() }
+        Files.write(path(), original.copyOf(7), StandardOpenOption.TRUNCATE_EXISTING)
+        denied("EFFECT_JOURNAL_GENESIS_INVALID") { inspectEffects() }
+        denied("EFFECT_JOURNAL_GENESIS_INVALID") { inspectDiagnostic() }
+        val invalidLength = original.copyOf()
+        ByteBuffer.wrap(invalidLength, 7, 4).putInt(0)
+        Files.write(path(), invalidLength, StandardOpenOption.TRUNCATE_EXISTING)
+        denied("EFFECT_JOURNAL_GENESIS_INVALID") { inspectEffects() }
+        denied("EFFECT_JOURNAL_GENESIS_INVALID") { inspectDiagnostic() }
+        Files.write(path(), original, StandardOpenOption.TRUNCATE_EXISTING)
+        assertEquals(1L, inspectEffects().lastSequence)
+    }
+
     @Test fun invalidFrameLengthRefusesWithoutTreatingItAsAuthenticatedTail() {
         withLease { lease -> open(lease).use { it.append(intent()) } }
         val bytes = Files.readAllBytes(path())
