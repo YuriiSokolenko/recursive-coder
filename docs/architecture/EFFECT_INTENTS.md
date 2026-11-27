@@ -404,10 +404,10 @@ logs,
 with permissions for the dedicated service principal to read and
 append but not administer attributes or directories. The mutex file
 must allow the service to acquire an exclusive lock, with no ability
-to replace it or its parent directory. The forced command uses only `serve-independent`; never expose provisioning over
-SSH. The service checks four regular, distinct, non-symlink files and
-the three required append-only attributes on every invocation. The operator must ensure
-the files reside on a local Linux filesystem supporting these
+to replace it or its parent directory. The forced command uses only
+`serve-independent`; never expose provisioning over SSH. The service checks four regular, distinct, non-symlink files and
+the three required append-only attributes on every invocation. The
+operator must ensure the files reside on a local Linux filesystem supporting these
 attributes, interprocess locks and honest file/directory fsync, with
 persistent media and protected parent directories. The process does
 not attest those deployment assumptions or physical hardware.
@@ -418,8 +418,8 @@ provisioning marker, headers and every canonical root, and validates
 the complete history. The mutex is never opened a second time inside
 its lock, because closing another descriptor for a POSIX-locked inode
 can release the process's lock. It forces the equal histories before
-authenticated read or comparison, then appends and forces each copy before acknowledging a
-successful transition. An absent provisioning marker or a verified
+authenticated read or comparison, then appends and forces each copy
+before acknowledging a successful transition. An absent provisioning marker or a verified
 zero-root history returns missing/reset on read. Divergent, unprotected,
 oversized or missing history files return unavailable; malformed or
 MAC-invalid equal histories return unauthenticated. Neither copy is
