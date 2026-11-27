@@ -289,21 +289,21 @@ internal class InstalledRecursiveWorkflow(
             journal?.append(SessionEventKinds.SESSION_ERROR, SessionEventStatuses.FAILED,
                 correlationId = attempt.admitted.requestId,
                 extra = buildJsonObject {
-                    put("childResourceAudit", auditType)
-                    put("origin", kind.name)
-                    put("code", code)
-                    put("observedTokens", observed.tokens)
-                    put("observedToolCalls", observed.toolCalls)
+                    put(StageEventMetadataFields.CHILD_RESOURCE_AUDIT, auditType)
+                    put(StageEventMetadataFields.ORIGIN, kind.name)
+                    put(StageEventMetadataFields.CODE, code)
+                    put(StageEventMetadataFields.OBSERVED_TOKENS, observed.tokens)
+                    put(StageEventMetadataFields.OBSERVED_TOOL_CALLS, observed.toolCalls)
                     put(StageEventMetadataFields.GRANT_TOKENS, reserved.tokens)
                     put(StageEventMetadataFields.GRANT_TOOL_CALLS, reserved.toolCalls)
-                    put("accountedTokens", accounted.tokens)
-                    put("accountedToolCalls", accounted.toolCalls)
-                    put("usageUncertain", attempt.meter.hasUncertainUsage())
-                    put("physicalCompleted", attempt.physicalCompleted)
+                    put(StageEventMetadataFields.ACCOUNTED_TOKENS, accounted.tokens)
+                    put(StageEventMetadataFields.ACCOUNTED_TOOL_CALLS, accounted.toolCalls)
+                    put(StageEventMetadataFields.USAGE_UNCERTAIN, attempt.meter.hasUncertainUsage())
+                    put(StageEventMetadataFields.PHYSICAL_COMPLETED, attempt.physicalCompleted)
                     // True means a successful measured scheduler charge was
                     // already recorded before a later integration failure.
                     // Never sum this audit as another charge.
-                    put("schedulerChargeRecorded", attempt.schedulerCharged)
+                    put(StageEventMetadataFields.SCHEDULER_CHARGE_RECORDED, attempt.schedulerCharged)
                 })
         } catch (_: Exception) {
             // Preserve the original failure code. A failed journal append
@@ -663,9 +663,9 @@ internal class InstalledRecursiveWorkflow(
                         correlationId = stopped.origin?.let { attempts[it] }?.admitted?.requestId
                             ?: second.admitted.requestId,
                         extra = buildJsonObject {
-                            put("recursiveStopCode", stopped.code)
-                            put("origin", stopped.origin?.name ?: "BOTH")
-                            put("requiresReconciliation", true)
+                            put(StageEventMetadataFields.RECURSIVE_STOP_CODE, stopped.code)
+                            put(StageEventMetadataFields.ORIGIN, stopped.origin?.name ?: "BOTH")
+                            put(StageEventMetadataFields.REQUIRES_RECONCILIATION, true)
                         })
                 } catch (_: Exception) {
                     // EventSinkFailure is finalized as unconfirmed by the CLI;

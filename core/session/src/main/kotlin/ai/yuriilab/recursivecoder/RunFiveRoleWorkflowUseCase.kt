@@ -154,10 +154,7 @@ class RunFiveRoleWorkflowUseCase(
         ) = reviewer.execute(command, roleEvents, events)
     }, host)
 
-    private val order = listOf(
-        StageKind.SDD, StageKind.ATDD, StageKind.TDD, StageKind.DEVELOP,
-        StageKind.REVIEW
-    )
+    private val order = FiveRoleWorkflowStages.order
 
     suspend fun execute(
         plan: FiveRoleWorkflowPlan,

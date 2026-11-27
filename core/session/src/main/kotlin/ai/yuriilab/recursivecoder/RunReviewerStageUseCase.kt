@@ -93,24 +93,25 @@ class RunReviewerStageUseCase(
         manifestSha: String): ReviewerDecisionRecord? {
         val root = try { Json.parseToJsonElement(text) as? JsonObject }
             catch (_: Exception) { null } ?: return null
-        if (root.keys != setOf("verdict", "code", "scope", "evidence")) return null
+        if (root.keys != setOf(ReviewerProposalFields.VERDICT, ReviewerProposalFields.CODE,
+                ReviewerProposalFields.SCOPE, ReviewerProposalFields.EVIDENCE)) return null
         fun string(key: String): String? = (root[key] as? JsonPrimitive)
             ?.takeIf { it.isString }?.content
-        val verdict = when (string("verdict")) {
+        val verdict = when (string(ReviewerProposalFields.VERDICT)) {
             ReviewerDisposition.ACCEPT.name -> ReviewerDisposition.ACCEPT
             ReviewerDisposition.REJECT.name -> ReviewerDisposition.REJECT
             ReviewerDisposition.NEEDS_HUMAN.name -> ReviewerDisposition.NEEDS_HUMAN
             else -> return null
         }
-        val scope = when (string("scope")) {
+        val scope = when (string(ReviewerProposalFields.SCOPE)) {
             ReviewerCorrectionScope.NONE.name -> ReviewerCorrectionScope.NONE
             ReviewerCorrectionScope.IMPLEMENTATION_ONLY.name -> ReviewerCorrectionScope.IMPLEMENTATION_ONLY
             ReviewerCorrectionScope.FROZEN_INPUTS.name -> ReviewerCorrectionScope.FROZEN_INPUTS
             else -> return null
         }
-        val code = string("code") ?: return null
+        val code = string(ReviewerProposalFields.CODE) ?: return null
         if (!ReviewerVerdictPolicy.isAllowed(verdict, code, scope)) return null
-        val values = root["evidence"] as? JsonArray ?: return null
+        val values = root[ReviewerProposalFields.EVIDENCE] as? JsonArray ?: return null
         if (values.isEmpty() || values.size > 32) return null
         val refs = values.map {
             (it as? JsonPrimitive)?.takeIf { value -> value.isString }?.content
@@ -252,8 +253,11 @@ class RunReviewerStageUseCase(
                 append(command.instruction)
                 append("\n\nYou are an independent, read-only Reviewer.")
                 append(" Return ONLY a JSON object with exactly these keys:")
-                append(" verdict (string), code (string), scope (string),")
-                append(" evidence (array of trusted evidence-ID strings).")
+                append(" ").append(ReviewerProposalFields.VERDICT).append(" (string), ")
+                append(ReviewerProposalFields.CODE).append(" (string), ")
+                append(ReviewerProposalFields.SCOPE).append(" (string),")
+                append(" ").append(ReviewerProposalFields.EVIDENCE)
+                    .append(" (array of trusted evidence-ID strings).")
                 append(" Choose exactly one allowed verdict/code/scope triple: ")
                 append(ReviewerVerdictPolicy.allowedCombinations()
                     .joinToString("; ") { (verdict, code, scope) ->
@@ -262,9 +266,9 @@ class RunReviewerStageUseCase(
                 append(".")
                 append(" Evidence IDs must be prefixed: ")
                 append(ReviewerEvidenceReferences.CHECK_PREFIX)
-                append("<verified-check id>, ")
+                append("<${ReviewerPromptEvidenceTags.CHECK} id>, ")
                 append(ReviewerEvidenceReferences.WRITE_PREFIX)
-                append("<verified-write id>, or ")
+                append("<${ReviewerPromptEvidenceTags.WRITE} id>, or ")
                 append(ReviewerEvidenceReferences.FILE_PREFIX)
                 append("<changed-file path>.")
                 append(" Copy the tag ID/path with its prefix; never use bare IDs.")
@@ -291,11 +295,11 @@ class RunReviewerStageUseCase(
                     append("\n</changed-file>")
                 }
                 checks.forEach {
-                    append("\n<verified-check id=\"").append(escaped(it.checkId))
+                    append("\n<${ReviewerPromptEvidenceTags.CHECK} id=\"").append(escaped(it.checkId))
                         .append("\" receipt=\"").append(escaped(requireNotNull(it.toolId)))
                         .append("\" />")
                 }
-                append("\n<verified-write id=\"").append(escaped(evidence.writeToolId))
+                append("\n<${ReviewerPromptEvidenceTags.WRITE} id=\"").append(escaped(evidence.writeToolId))
                     .append("\" />")
                 lease.handoff.history.takeLast(32).forEach {
                     append("\n<history stage=\"").append(escaped(it.correlation.stageRunId.value))

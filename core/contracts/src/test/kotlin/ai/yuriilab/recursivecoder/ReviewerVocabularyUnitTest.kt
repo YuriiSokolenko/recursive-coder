@@ -6,6 +6,18 @@ import kotlin.test.assertEquals
 
 @Tag("unit")
 class ReviewerVocabularyUnitTest {
+    @Test fun proposalFieldsAndEvidenceGrammarRemainStable() {
+        assertEquals("verdict", ReviewerProposalFields.VERDICT)
+        assertEquals("code", ReviewerProposalFields.CODE)
+        assertEquals("scope", ReviewerProposalFields.SCOPE)
+        assertEquals("evidence", ReviewerProposalFields.EVIDENCE)
+        assertEquals("verified-check", ReviewerPromptEvidenceTags.CHECK)
+        assertEquals("verified-write", ReviewerPromptEvidenceTags.WRITE)
+        assertEquals("check:", ReviewerEvidenceReferences.CHECK_PREFIX)
+        assertEquals("write:", ReviewerEvidenceReferences.WRITE_PREFIX)
+        assertEquals("file:", ReviewerEvidenceReferences.FILE_PREFIX)
+    }
+
     @Test fun reasonCodesRetainWireSpelling() {
         assertEquals(setOf("OK", "IMPLEMENTATION_DEFECT", "FROZEN_ARTIFACT_CHANGE", "EVIDENCE_MISSING", "CHECK_FAILED", "OTHER_REQUIRES_HUMAN"),
             ReviewerReasonCode.entries.map { it.wire }.toSet())

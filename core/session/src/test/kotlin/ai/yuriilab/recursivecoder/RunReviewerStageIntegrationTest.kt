@@ -466,6 +466,29 @@ class RunReviewerStageIntegrationTest {
         assertNull(host.committedDecision)
     }
 
+    @Test fun unknownProposalVocabularyFailsClosed() = runBlocking {
+        val valid = """{"verdict":"ACCEPT","code":"OK","scope":"NONE","evidence":["check:git_diff_check","check:offline","write:write-77"]}"""
+        val invalid = listOf(
+            valid.replace("ACCEPT", "FUTURE_VERDICT"),
+            valid.replace("NONE", "FUTURE_SCOPE"),
+            valid.replace("OK", "FUTURE_REASON"),
+            valid.replace("\"evidence\"", "\"futureField\""),
+            valid.replace("\"verdict\"", "\"Verdict\""),
+            valid.dropLast(1) + ""","futureField":1}""",
+            valid.replace(""""scope":"NONE",""", "")
+        )
+        for (response in invalid) {
+            val host = FakeHost()
+            val model = FakeModel().apply { this.response = response }
+            val result = run(host, model)
+            assertEquals("INVALID_REVIEW_RESPONSE",
+                assertIs<ReviewerStageOutcome.Failed>(result.outcome).code)
+            assertEquals(model.usage, result.usage)
+            assertNull(host.committedDecision)
+            assertEquals(StageState.FAILED, host.graph.stages.last().state)
+        }
+    }
+
     @Test fun definitiveHostDenialLeavesNoFalseAcceptance() = runBlocking {
         val host = FakeHost().apply { refuseFinish = true }
         val events = mutableListOf<ReviewerDecisionRecord>()

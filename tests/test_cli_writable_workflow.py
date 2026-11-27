@@ -312,6 +312,51 @@ class InstalledWritableWorkflowTest(unittest.TestCase):
                                  "INVALID_WORKFLOW_CONFIGURATION")
         self.assertEqual(self.original_head, self.git("rev-parse", "HEAD"))
 
+    def test_unknown_plan_and_child_fields_fail_closed(self):
+        original = self.recursive_fixture()
+        original_approval = json.loads(self.approval_path.read_text())
+        locations = ("plan", "limits", "workspace", "check", "artifact",
+                     "developerTarget", "SDD", "DEVELOP", "approval")
+        for location in locations:
+            with self.subTest(location=location):
+                plan = json.loads(json.dumps(original))
+                approval = json.loads(json.dumps(original_approval))
+                target = {
+                    "plan": plan,
+                    "limits": plan["limits"],
+                    "workspace": plan["workspace"],
+                    "check": plan["check"],
+                    "artifact": plan["artifacts"]["SDD"],
+                    "developerTarget": plan["developerTargets"][0],
+                    "SDD": plan["recursiveChildren"]["SDD"],
+                    "DEVELOP": plan["recursiveChildren"]["DEVELOP"],
+                    "approval": approval,
+                }[location]
+                target["futureField"] = 1
+                self.plan_path.write_text(json.dumps(plan, separators=(",", ":")))
+                approval["planSha256"] = sha(self.plan_path.read_bytes())
+                self.approval_path.write_text(json.dumps(approval))
+                result = self.authorized()
+                self.assertEqual(result.returncode, 2,
+                                 result.stderr + result.stdout)
+                self.assertEqual(json.loads(result.stdout)["code"],
+                                 "INVALID_WORKFLOW_CONFIGURATION")
+                self.assertEqual(self.original_head, self.git("rev-parse", "HEAD"))
+                for name in ("child-sdd", "child-develop"):
+                    child = self.base / name
+                    self.assertFalse((child / "specs/FeatureFull.md").exists())
+                    self.assertFalse(
+                        (child / "src/main/FeatureFullManifest.xml").exists())
+                    self.assertEqual(
+                        self.original_head,
+                        subprocess.check_output(
+                            ["/usr/bin/git", "-C", str(child), "rev-parse", "HEAD"],
+                            text=True, timeout=20).strip())
+                self.assertFalse((self.repo / "specs/FeatureFull.md").exists())
+                self.assertEqual(
+                    OLD, (self.repo / "src/main/FeatureFull.kt").read_text())
+                self.assertFalse(Path(plan["eventsPath"]).exists())
+
     def test_live_provider_configuration_is_not_a_workflow_feature(self):
         plan = self.recursive_fixture()
         plan["model"] = {

@@ -6,6 +6,43 @@ import kotlin.test.assertEquals
 
 @Tag("unit")
 class StageVocabularyUnitTest {
+    @Test fun fiveRoleOrderAndSharedMetadataRemainStable() {
+        assertEquals(listOf("SDD", "ATDD", "TDD", "DEVELOP", "REVIEW"),
+            FiveRoleWorkflowStages.order.map { it.name })
+        assertEquals("origin", StageEventMetadataFields.ORIGIN)
+        assertEquals("requestId", StageEventMetadataFields.REQUEST_ID)
+        assertEquals("code", StageEventMetadataFields.CODE)
+        assertEquals(16_384, StageRoleLimits.MAX_INSTRUCTION_BYTES)
+        assertEquals(32_768, StageRoleLimits.MAX_PROPOSAL_BYTES)
+        assertEquals(512, RecursiveGraphPolicy.MAX_TOTAL_CHILDREN)
+    }
+
+    @Test fun reviewAndChildAuditMetadataKeysRemainStable() {
+        assertEquals("kind", StageEventMetadataFields.KIND)
+        assertEquals("approval", StageEventMetadataFields.APPROVAL)
+        assertEquals("verdict", StageEventMetadataFields.VERDICT)
+        assertEquals("reasonCode", StageEventMetadataFields.REASON_CODE)
+        assertEquals("scope", StageEventMetadataFields.SCOPE)
+        assertEquals("reviewedSha256", StageEventMetadataFields.REVIEWED_SHA256)
+        assertEquals("evidenceCount", StageEventMetadataFields.EVIDENCE_COUNT)
+        assertEquals("childResourceAudit", StageEventMetadataFields.CHILD_RESOURCE_AUDIT)
+        assertEquals("observedTokens", StageEventMetadataFields.OBSERVED_TOKENS)
+        assertEquals("observedToolCalls", StageEventMetadataFields.OBSERVED_TOOL_CALLS)
+        assertEquals("accountedTokens", StageEventMetadataFields.ACCOUNTED_TOKENS)
+        assertEquals("accountedToolCalls", StageEventMetadataFields.ACCOUNTED_TOOL_CALLS)
+        assertEquals("usageUncertain", StageEventMetadataFields.USAGE_UNCERTAIN)
+        assertEquals("physicalCompleted", StageEventMetadataFields.PHYSICAL_COMPLETED)
+        assertEquals("schedulerChargeRecorded", StageEventMetadataFields.SCHEDULER_CHARGE_RECORDED)
+        assertEquals("recursiveStopCode", StageEventMetadataFields.RECURSIVE_STOP_CODE)
+        assertEquals("requiresReconciliation", StageEventMetadataFields.REQUIRES_RECONCILIATION)
+    }
+
+    @Test fun sessionUsageEventMetadataKeysRemainStable() {
+        assertEquals("modelRequests", SessionUsageEventMetadataFields.MODEL_REQUESTS)
+        assertEquals("inputTokens", SessionUsageEventMetadataFields.INPUT_TOKENS)
+        assertEquals("outputTokens", SessionUsageEventMetadataFields.OUTPUT_TOKENS)
+    }
+
     @Test fun stageNamesAndMetadataKeysRemainStable() {
         assertEquals(listOf("SDD", "ATDD", "TDD", "DEVELOP", "REVIEW"), StageKind.entries.map { it.name })
         assertEquals(listOf("SDD", "ATDD", "TDD", "DEVELOPER", "REVIEWER"),
