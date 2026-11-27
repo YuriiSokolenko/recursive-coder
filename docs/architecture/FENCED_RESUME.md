@@ -311,6 +311,12 @@ Generation 257 refuses `RESUME_FENCE_LIMIT`; there is no automatic rotation.
 5. The host must wrap each short trusted state/receipt commit in
    `lease.publishIfCurrent { ... }`, which serializes validation and the
    publication with lease retirement, preventing a check-to-commit race.
+   JVM monitors are reentrant: same-thread `close()` inside any active
+   publication (including nested publications) refuses with
+   `RESUME_LEASE_PUBLICATION_ACTIVE` before changing the lease state.
+   Other threads still wait for the outermost publication; exceptions
+   unwind the guard and allow subsequent retirement. A host must close the
+   writer before closing the lease, outside publication callbacks.
    `lease.assertCurrent()` is a non-publishing status guard, **not** an
    atomic commit guard. Callback checks re-read only the fence and anchor head
    files; admission and snapshot inspection still verify the complete chain.
