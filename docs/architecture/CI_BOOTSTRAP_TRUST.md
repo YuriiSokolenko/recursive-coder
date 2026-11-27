@@ -42,3 +42,24 @@ As checked on 2026-11-22, [the active `dev` ruleset](https://github.com/YuriiSok
 Every checkout must set `persist-credentials: false`, enforced by an offline negative-tested drift check. The audit deliberately rejects alternative/flow-style `uses:` references: reviewers must inspect any new action shape or reusable workflow before adapting the checker. Major-version action comments are human-readable hints, not authority; updating an action pin requires verifying the target GitHub commit, changing the workflow SHA and version comment, updating `APPROVED_ACTIONS` and exercising the negative tests. The audit accepts `# v7` or `# v7.0.1`-style comments but compares them against the explicitly reviewed value in its allowlist, so dependency bots cannot silently authorize a new version.
 
 Removing `setup-gradle` also removes its dependency caching. CI intentionally uses a fresh Gradle download and dependency state in each hosted job; that increases network traffic and run time in exchange for a smaller bootstrap/cache trust surface. Keep dependency-verification checks enabled. Any Gradle version upgrade requires an independently reviewed new distribution checksum and a clean six-job run.
+
+## Bounded plugin-resolution retries (issue #230)
+
+The architecture, production-input and full JVM jobs run a Gradle `help`
+preflight before product tasks, with strict verification and no build cache.
+Architecture also preflights standalone build-logic. An explicitly recognized
+HTTP 429/5xx registry failure may retry twice, after 60 and 180 seconds.
+Verification diagnostics, mixed or unrecognized failure trees and other HTTP
+statuses stop without retry. Only explicitly allowlisted HTTPS registry hosts
+qualify. The preflight uses normal console output, not debug logging.
+The producer exercises a real Gradle classpath-resolution failure against a
+loopback HTTP fixture with a fresh Gradle home; the loopback URL itself must
+never qualify for production retry. The test substitutes only that fixture URL
+in the captured output to exercise the recognized registry grammar.
+The independent production verifier and installed CLI job are unchanged.
+
+Each job retains its own fresh dependency state. No Gradle dependency files
+or binary resolution metadata are transferred between jobs or runs. This
+preflight mitigates plugin-resolution failures only; it does not guarantee
+later dependency downloads or recovery from a sustained registry outage.
+Dependency-cache design and its separate trust requirements remain in #215.

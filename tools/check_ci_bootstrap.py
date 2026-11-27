@@ -7,6 +7,7 @@ the archive's downloaded checksum sidecar is deliberately not trusted.
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import os
 from pathlib import Path
@@ -92,6 +93,57 @@ def audit_workflow(source: str) -> None:
     if source.count("tools/check_ci_bootstrap.py --audit") != len(REQUIRED_JOBS):
         raise AssertionError("All CI jobs must audit pinned actions and Gradle bootstrap")
 
+    # The retry entry point has no arbitrary task argument. Pin its call sites
+    # and position; the independent verifier must not use it.
+    retry = "      - name: Resolve Gradle plugins with bounded registry retry\n" \
+        "        run: python3 -I tools/retry_gradle_plugins.py\n"
+    standalone = "      - name: Resolve standalone build-logic plugins with bounded registry retry\n" \
+        "        run: python3 -I tools/retry_gradle_plugins.py --standalone\n"
+    retry_targets = {
+        "architecture": "Verify architecture, root check and pure unit tests",
+        "bytecode-build": "Compile and install production artifacts without test execution",
+        "kotlin": "Run full JVM and sandbox tests only after the bytecode gate",
+    }
+    sections = re.split(r"(?m)^  ([a-z][a-z0-9-]*):\s*$", jobs_section[1])
+    job_sources = dict(zip(sections[1::2], sections[2::2]))
+    for job, target in retry_targets.items():
+        expected = retry + (standalone if job == "architecture" else "")
+        expected += f"      - name: {target}\n"
+        section = job_sources[job]
+        if (section.count(expected) != 1 or section.index(INSTALL) > section.index(expected)):
+            raise AssertionError(f"Missing or misplaced Gradle plugin retry in {job}")
+    if source.count("tools/retry_gradle_plugins.py") != 4:
+        raise AssertionError("Unexpected Gradle plugin retry invocation")
+    if any(marker in source for marker in ("caches/modules-2", "metadata-2.", "actions/cache@")):
+        raise AssertionError("Gradle dependency cache transport is prohibited")
+    fixture = "      - name: Test real Gradle registry failure\n" \
+        "        run: python3 -I -m unittest discover -s tests -p 'test_retry_gradle_registry.py' -v\n"
+    if (job_sources["bytecode-build"].count(fixture) != 1
+            or source.count("test_retry_gradle_registry.py") != 1
+            or job_sources["bytecode-build"].index(INSTALL) > job_sources["bytecode-build"].index(fixture)):
+        raise AssertionError("Missing or misplaced verified Gradle registry fixture")
+
+
+def audit_retry_command(source: str) -> None:
+    """Keep an independent literal oracle for the resolution-only command."""
+    expected = ast.parse("""
+def command(standalone: bool) -> list[str]:
+    args = [
+        "./gradlew", "--dependency-verification", "strict", "--no-daemon",
+        "--no-build-cache", "--max-workers=1",
+        "-Dorg.gradle.jvmargs=-Xmx1g", "--console=plain",
+    ]
+    if standalone:
+        args += ["-p", "build-logic"]
+    return [*args, "help"]
+""").body[0]
+    definitions = [
+        node for node in ast.parse(source).body
+        if isinstance(node, ast.FunctionDef) and node.name == "command"
+    ]
+    if len(definitions) != 1 or ast.dump(definitions[0]) != ast.dump(expected):
+        raise AssertionError("Gradle plugin retry command must remain strict and resolution-only")
+
 
 def audit_gradlew_executable_mode() -> None:
     """Require the tracked launcher to retain its Git executable bit.
@@ -117,6 +169,7 @@ def audit_repository() -> None:
         raise AssertionError("Unexpected additional/reusable workflow; review and pin before accepting")
     audit_gradlew_executable_mode()
     audit_workflow(workflows[0].read_text(encoding="utf-8"))
+    audit_retry_command((ROOT / "tools/retry_gradle_plugins.py").read_text(encoding="utf-8"))
     print("PASS: six hosted CI jobs and 21 immutable reviewed action references")
 
 
