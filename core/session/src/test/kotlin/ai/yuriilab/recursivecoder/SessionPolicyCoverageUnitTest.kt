@@ -104,6 +104,31 @@ class SessionPolicyCoverageUnitTest {
         }
     }
 
+    @Test fun protocolToolVocabularyDoesNotGrantWorkspaceAuthority() {
+        val base = admitted()
+        val denied = AdmissionDecision.Denied(AdmissionDenial.TOOL_POLICY)
+        for (mode in listOf("scoped-write", "unknown", "READ_ONLY", "read-only ")) {
+            assertEquals(denied, SessionAdmissionPolicy.decide(base.copy(toolPolicyMode = mode)), mode)
+        }
+        for (tool in listOf("read_task", "git_diff_check", "run_check", "write", "READ", "unknown")) {
+            assertEquals(denied, SessionAdmissionPolicy.decide(base.copy(allowedTools = setOf(tool))), tool)
+            // Session admission checks the mandatory read grant. The pure policy
+            // applied by WorkspaceManager.open separately rejects unknown extra grants.
+            // WorkspaceManagerTest covers the adapter boundary.
+            val allowed = setOf("read", tool)
+            assertEquals(AdmissionDecision.Accepted,
+                SessionAdmissionPolicy.decide(base.copy(allowedTools = allowed)), tool)
+            assertEquals("UNSUPPORTED_TOOL_POLICY", ToolAuthorizationPolicy.admitReadOnlyPolicy(
+                ReadPolicyFacts("read-only", allowed, false, false)).deniedCode, tool)
+            assertEquals("TOOL_NOT_AUTHORIZED", ToolAuthorizationPolicy.authorizeRead(
+                ReadAuthorizationFacts(tool, allowed, emptySet())).deniedCode, tool)
+        }
+        assertEquals(denied, SessionAdmissionPolicy.decide(
+            base.copy(allowedTools = setOf("read", "list"), deniedTools = setOf("read"))))
+        assertEquals("READ_NOT_AUTHORIZED", ToolAuthorizationPolicy.authorizeRead(
+            ReadAuthorizationFacts("read", setOf("read", "list"), setOf("read"), taskAdmission = true)).deniedCode)
+    }
+
     @Test fun schedulerAttemptMustBePositive() {
         val scheduler = admitted().copy(invocationSource = "scheduler")
         // Protocol v1 requires a positive integer; no upper retry limit is declared.
