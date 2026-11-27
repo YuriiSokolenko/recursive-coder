@@ -125,6 +125,27 @@ class GradlePluginRetryTest(unittest.TestCase):
                 self.assertFalse(retry.transient_failure(mutated))
                 self.assertEqual(self.execute([(1, "", mutated)])[:3], (1, 1, []))
 
+    def test_full_included_build_output_from_ci(self):
+        # Full real console output from run 46008211118, job 140536685099.
+        captured = (Path(__file__).parent / "fixtures/gradle_retry/included_build_429.txt").read_text()
+        loopback = "http://127.0.0.1:44081/"
+        self.assertEqual(captured.count("Received status code 429"), 6)
+        self.assertFalse(retry.transient_failure(captured), captured)
+        normalized = captured.replace(loopback, "https://repo.maven.apache.org/")
+        self.assertNotEqual(normalized, captured)
+        self.assertTrue(retry.transient_failure(normalized), normalized)
+        self.assertEqual(self.execute([(1, "", normalized), (0, "BUILD SUCCESSFUL", "")])[:3],
+                         (0, 2, [mock.call(60)]))
+        for mixed in (
+            normalized.replace("Received status code 429", "Received status code 403", 1),
+            normalized.replace("Could not GET 'https://repo.maven.apache.org/",
+                               "Could not GET 'https://unapproved.example/", 1),
+            normalized.replace("BUILD FAILED in 7s", "Dependency verification failed"),
+        ):
+            with self.subTest(mixed=mixed):
+                self.assertNotEqual(mixed, normalized)
+                self.assertFalse(retry.transient_failure(mixed), mixed)
+
     def test_inline_registry_status(self):
         inline = TRANSIENT.replace(".\n      > Received", ". Received")
         self.assertNotEqual(inline, TRANSIENT)

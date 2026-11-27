@@ -81,8 +81,11 @@ class RegistryFailureFixture(unittest.TestCase):
         self.assertIn("Received status code 429", result.stdout)
         self.assertIn("Error resolving plugin [id: 'fixture.convention']", result.stdout)
         self.assertIn("A problem occurred configuring project ':build-logic'", result.stdout)
-        self.assertIn("is disabled due to earlier error below:", result.stdout)
-        self.assertRegex(result.stdout, r"There (?:is|are) \d+ more failures? with identical causes")
+        # Gradle can emit separate sibling resolution failures instead of a
+        # disabled-repository parent and identical-cause summary (incident #213).
+        for n in range(6):
+            self.assertIn(f"Could not resolve fixture:absent-plugin-{n}:1.0.", result.stdout)
+        self.assertIn("Required by:", result.stdout)
         self.assertFalse(retry.transient_failure(result.stdout), result.stdout)
         normalized = result.stdout.replace(url + "/", "https://repo.maven.apache.org/")
         self.assertNotEqual(normalized, result.stdout)

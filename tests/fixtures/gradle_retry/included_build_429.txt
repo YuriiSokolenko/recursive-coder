@@ -1,0 +1,72 @@
+
+Welcome to Gradle 9.8.2!
+
+Here are the highlights of this release:
+ - Java 27 support
+ - Maven mirror settings reuse
+ - Linked problem locations in build output
+
+For more details see https://docs.gradle.org/9.8.2/release-notes.html
+
+To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/9.8.2/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+Daemon will be stopped at the end of the build 
+
+FAILURE: Build failed with an exception.
+
+* Where:
+Build file '/tmp/tmpqz3bsydo/build.gradle' line: 1
+
+* What went wrong:
+Error resolving plugin [id: 'fixture.convention']
+> A problem occurred configuring project ':build-logic'.
+   > Could not resolve all artifacts for configuration 'classpath'.
+      > Could not resolve fixture:absent-plugin-0:1.0.
+        Required by:
+            buildscript of project ':build-logic'
+         > Could not resolve fixture:absent-plugin-0:1.0.
+            > Could not get resource 'http://127.0.0.1:44081/fixture/absent-plugin-0/1.0/absent-plugin-0-1.0.pom'.
+               > Could not GET 'http://127.0.0.1:44081/fixture/absent-plugin-0/1.0/absent-plugin-0-1.0.pom'.
+                  > Received status code 429 from server: Too Many Requests
+      > Could not resolve fixture:absent-plugin-1:1.0.
+        Required by:
+            buildscript of project ':build-logic'
+         > Could not resolve fixture:absent-plugin-1:1.0.
+            > Could not get resource 'http://127.0.0.1:44081/fixture/absent-plugin-1/1.0/absent-plugin-1-1.0.pom'.
+               > Could not GET 'http://127.0.0.1:44081/fixture/absent-plugin-1/1.0/absent-plugin-1-1.0.pom'.
+                  > Received status code 429 from server: Too Many Requests
+      > Could not resolve fixture:absent-plugin-2:1.0.
+        Required by:
+            buildscript of project ':build-logic'
+         > Could not resolve fixture:absent-plugin-2:1.0.
+            > Could not get resource 'http://127.0.0.1:44081/fixture/absent-plugin-2/1.0/absent-plugin-2-1.0.pom'.
+               > Could not GET 'http://127.0.0.1:44081/fixture/absent-plugin-2/1.0/absent-plugin-2-1.0.pom'.
+                  > Received status code 429 from server: Too Many Requests
+      > Could not resolve fixture:absent-plugin-3:1.0.
+        Required by:
+            buildscript of project ':build-logic'
+         > Could not resolve fixture:absent-plugin-3:1.0.
+            > Could not get resource 'http://127.0.0.1:44081/fixture/absent-plugin-3/1.0/absent-plugin-3-1.0.pom'.
+               > Could not GET 'http://127.0.0.1:44081/fixture/absent-plugin-3/1.0/absent-plugin-3-1.0.pom'.
+                  > Received status code 429 from server: Too Many Requests
+      > Could not resolve fixture:absent-plugin-4:1.0.
+        Required by:
+            buildscript of project ':build-logic'
+         > Could not resolve fixture:absent-plugin-4:1.0.
+            > Could not get resource 'http://127.0.0.1:44081/fixture/absent-plugin-4/1.0/absent-plugin-4-1.0.pom'.
+               > Could not GET 'http://127.0.0.1:44081/fixture/absent-plugin-4/1.0/absent-plugin-4-1.0.pom'.
+                  > Received status code 429 from server: Too Many Requests
+      > Could not resolve fixture:absent-plugin-5:1.0.
+        Required by:
+            buildscript of project ':build-logic'
+         > Could not resolve fixture:absent-plugin-5:1.0.
+            > Could not get resource 'http://127.0.0.1:44081/fixture/absent-plugin-5/1.0/absent-plugin-5-1.0.pom'.
+               > Could not GET 'http://127.0.0.1:44081/fixture/absent-plugin-5/1.0/absent-plugin-5-1.0.pom'.
+                  > Received status code 429 from server: Too Many Requests
+
+* Try:
+> Run with --stacktrace option to get the stack trace.
+> Run with --info or --debug option to get more log output.
+> Run with --scan to get full insights from a Build Scan (powered by Develocity).
+> Get more help at https://help.gradle.org.
+
+BUILD FAILED in 7s
