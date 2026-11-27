@@ -14,13 +14,11 @@ import java.nio.file.Path
  */
 @ResumeOperatorOnlyApi
 class ResumeRuntimeFilesystemPreflight private constructor(
-    private val fileStoreType: (Path) -> String
+    private val checkFilesystem: (SessionRequest) -> Unit
 ) : SessionResumePreflight {
     override fun deny(request: SessionRequest): SessionResumePreflightDenial =
         try {
-            ResumeLocalFileStorePolicy.requireSupportedPaths(
-                request.output("checkpointDir"), request.output("eventsPath"),
-                fileStoreType)
+            checkFilesystem(request)
             SessionResumePreflightDenial.NotEnabled
         } catch (failure: SessionResumeUnconfirmed) {
             if (failure.code != ResumeDenialCodes.RESUME_FILESYSTEM_UNSUPPORTED)
@@ -41,12 +39,51 @@ class ResumeRuntimeFilesystemPreflight private constructor(
 
     companion object {
         fun production(): ResumeRuntimeFilesystemPreflight =
-            ResumeRuntimeFilesystemPreflight(ResumeLocalFileStorePolicy.systemType)
+            outputProbe(ResumeLocalFileStorePolicy.systemType)
+
+        private fun outputProbe(fileStoreType: (Path) -> String):
+            ResumeRuntimeFilesystemPreflight = ResumeRuntimeFilesystemPreflight { request ->
+            ResumeLocalFileStorePolicy.requireSupportedPaths(
+                request.output(SessionOutputFields.CHECKPOINT_DIR),
+                request.output(SessionOutputFields.EVENTS_PATH), fileStoreType)
+        }
+
+        /**
+         * Opt-in diagnostic for a single independently authorized host request
+         * and its existing durable source store, not its new rejection outputs.
+         * The host must bind the request and paths before exposing this port.
+         * Only the read-only pre-lock stage runs on the bounded probe worker.
+         * Even a successful check MUST NOT mint a lease or authorize execution.
+         */
+        fun forTrustedStore(
+            expectedRequest: SessionRequest, directory: Path,
+            context: CheckpointHostContext, ledgerPath: Path
+        ): ResumeRuntimeFilesystemPreflight = trustedStoreProbe(
+            expectedRequest, directory, context, ledgerPath,
+            ResumeLocalFileStorePolicy.systemType)
+
+        private fun trustedStoreProbe(
+            expectedRequest: SessionRequest, directory: Path,
+            context: CheckpointHostContext, ledgerPath: Path,
+            fileStoreType: (Path) -> String
+        ): ResumeRuntimeFilesystemPreflight = ResumeRuntimeFilesystemPreflight { request ->
+            // Compare only. Never select the source paths from request data.
+            check(request.raw == expectedRequest.raw)
+            SessionResumeAdmission.checkFilesystemBeforeLease(
+                directory, context, ledgerPath, fileStoreType)
+        }
 
         /** Per-invocation CI fault seam: never configure from model input. */
         @LedgerTestFaultInjection
         internal fun withFault(fileStoreType: (Path) -> String):
-            ResumeRuntimeFilesystemPreflight =
-            ResumeRuntimeFilesystemPreflight(fileStoreType)
+            ResumeRuntimeFilesystemPreflight = outputProbe(fileStoreType)
+
+        @LedgerTestFaultInjection
+        internal fun forTrustedStoreWithFault(
+            expectedRequest: SessionRequest, directory: Path,
+            context: CheckpointHostContext, ledgerPath: Path,
+            fileStoreType: (Path) -> String
+        ): ResumeRuntimeFilesystemPreflight = trustedStoreProbe(
+            expectedRequest, directory, context, ledgerPath, fileStoreType)
     }
 }

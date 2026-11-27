@@ -93,6 +93,23 @@ entirely, so even a stuck opt-in lookup cannot change this code.
 A successful probe also returns `UNSUPPORTED_RESUME`: no success case
 creates resume authority.
 
+An explicit `forTrustedStore` host binding can instead diagnose the actual
+existing checkpoint directory and durable source ledger. The host must
+independently authorize and bind one exact request and the source paths;
+the request cannot select the store. A mismatched request returns
+`RESUME_ADMISSION_UNCONFIRMED` without probing it. The source ledger must
+be separate from the fresh rejection outputs. This adapter shares the
+actual admission's read-only pre-lock filesystem stage (ledger file
+identity, checked checkpoint directory and both volume types). It does
+not run the authority/CAS checks or acquire a lease, and discards the
+returned filesystem identities. No late worker can continue into
+admission. Offline integration coverage exercises both the real
+`admitWithFault` entry and the runtime adapter against a physical checkpoint
+and ledger, including each volume failure, dual failure, supported types,
+and a mismatched request; it checks source inventory/digests, sanitized
+result, diagnostics, journal, and zero model/workspace calls. This is
+still a deny-only step, **not** the outstanding live-fenced execution E2E.
+
 The Session Protocol v1 rejection order remains **protocol -> invocation ->
 resume**, before capabilities/model/tool policy/budget. A resume request with
 invalid later fields still returns `UNSUPPORTED_RESUME` on the default

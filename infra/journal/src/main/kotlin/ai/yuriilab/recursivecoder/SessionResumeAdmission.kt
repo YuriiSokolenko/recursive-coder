@@ -437,6 +437,22 @@ object SessionResumeAdmission {
         }
     }
 
+    /**
+     * The actual pre-lock filesystem stage of fenced admission. This is
+     * deliberately read-only: even a successful return is not authorization.
+     * A diagnostic worker may call it on a trusted host's existing store,
+     * but must never continue into admit() or reuse the returned identity.
+     */
+    internal fun checkFilesystemBeforeLease(
+        directory: Path, context: CheckpointHostContext, ledgerPath: Path,
+        fileStoreType: (Path) -> String
+    ): Pair<Path, String> {
+        val ledgerKey = ledgerFileKey(ledgerPath)
+        val dir = SessionCheckpointStore.checkedAdmissionDirectory(directory, context)
+        ResumeLocalFileStorePolicy.requireSupportedPaths(dir, ledgerPath, fileStoreType)
+        return dir to ledgerKey
+    }
+
     fun currentGeneration(directory: Path, context: CheckpointHostContext,
                           ledgerPath: Path): Long =
         currentGenerationChecked(directory, context, ledgerPath, ResumeLocalFileStorePolicy.systemType)
@@ -634,12 +650,11 @@ object SessionResumeAdmission {
         val authoritySha256 = ResumeReadAuthority.fingerprint(context, attestation.readPolicyFacts)
         if (!attestation.externalActionsReconciled)
             fail("RESUME_EXTERNAL_EFFECTS_UNCONFIRMED")
-        val ledgerKeyBeforeInspect = ledgerFileKey(ledgerPath)
-        val dir = SessionCheckpointStore.checkedAdmissionDirectory(directory, context)
         // This early pre-lock check is intentionally repeated inside
         // withAdmissionEvidence under resume.lock. Never remove the first one:
         // unsupported mounts must not cause resume.lock creation or fence changes.
-        ResumeLocalFileStorePolicy.requireSupportedPaths(dir, ledgerPath, fileStoreType)
+        val (dir, ledgerKeyBeforeInspect) = checkFilesystemBeforeLease(
+            directory, context, ledgerPath, fileStoreType)
         val lockPath = dir.resolve(RESUME_LOCK_NAME)
         if (!heldLocks.add(lockPath)) fail(SessionResumeAdmissionDiagnosticCodes.RESUME_LEASE_HELD)
         var owner: FileChannel? = null
