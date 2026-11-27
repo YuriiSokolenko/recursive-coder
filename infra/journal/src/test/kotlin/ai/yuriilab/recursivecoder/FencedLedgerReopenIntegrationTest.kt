@@ -17,6 +17,8 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.FutureTask
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.CancellationException
+import java.nio.channels.ClosedByInterruptException
 import kotlinx.serialization.json.*
 import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
@@ -198,7 +200,10 @@ class FencedLedgerReopenIntegrationTest : SessionCheckpointTestFixture() {
             }
         }
         val worker = testWorker("fenced-checkpoint", publication)
-        try {
+        return withCleanup({
+            release.countDown()
+            joinWorkers(worker)
+        }) {
             worker.start()
             assertTrue(entered.await(15, TimeUnit.SECONDS))
             assertFalse(publication.isDone)
@@ -224,11 +229,7 @@ class FencedLedgerReopenIntegrationTest : SessionCheckpointTestFixture() {
             if (c2Bytes != null) assertContentEquals(c2Bytes, Files.readAllBytes(c2))
             assertContentEquals(c1Bytes, Files.readAllBytes(c1))
             assertContentEquals(ledgerBytes, Files.readAllBytes(ledger()))
-            return error
-        } finally {
-            release.countDown()
-            worker.join(15000)
-            assertFalse(worker.isAlive, "Checkpoint worker did not exit")
+            error
         }
     }
 
@@ -236,17 +237,16 @@ class FencedLedgerReopenIntegrationTest : SessionCheckpointTestFixture() {
     fun fencedSaveAfterRenameFailureReportsUnconfirmedNotMissingCheckpoint() {
         val first = createPreExecutionCheckpoint()
         SessionResumeAdmission.admit(store(), context(), ledger(), resumeAttestation()).use { lease ->
-            val writer = DurableSessionEventLedger.reopenForAppend(
-                ledger(), workspace(), store(), context(), lease)
-            writer.appendFenced(event(2, "req-two", "completed",
-                buildJsonObject { put("graphId", "graph-root") }, "checkpoint.saved"))
-            val evidence = writer.withCommittedCheckpointAnchor { it }
-            val second = first.snapshot.copy(sequence = 2L, previousSha256 = first.sha256,
-                journalSequence = evidence.lastSequence,
-                journalHeadSha256 = evidence.headSha256,
-                journalFileSha256 = evidence.fileSha256,
-                lastTrustedJournalOffset = evidence.lastTrustedOffset)
-            try {
+            DurableSessionEventLedger.reopenForAppend(
+                ledger(), workspace(), store(), context(), lease).use { writer ->
+                writer.appendFenced(event(2, "req-two", "completed",
+                    buildJsonObject { put("graphId", "graph-root") }, "checkpoint.saved"))
+                val evidence = writer.withCommittedCheckpointAnchor { it }
+                val second = first.snapshot.copy(sequence = 2L, previousSha256 = first.sha256,
+                    journalSequence = evidence.lastSequence,
+                    journalHeadSha256 = evidence.headSha256,
+                    journalFileSha256 = evidence.fileSha256,
+                    lastTrustedJournalOffset = evidence.lastTrustedOffset)
                 failStalledCheckpoint(lease, writer, first, second,
                     "before-directory-fsync", renamed = true)
                 assertEquals("CHECKPOINT_WRITE_UNCONFIRMED",
@@ -254,18 +254,17 @@ class FencedLedgerReopenIntegrationTest : SessionCheckpointTestFixture() {
                         SessionCheckpointStore.saveFromOpenLedgerFenced(
                             lease, store(), context(), writer, second, first.sha256)
                     }.code)
-            } finally {
                 assertEquals("LEDGER_REOPEN_CHECKPOINT_UNCONFIRMED",
                     assertFailsWith<SessionLedgerUnconfirmed> { writer.close() }.code)
+                // C2 did become visible, but the writer must never turn that
+                // observation into a claim that the failed fsync was acknowledged.
+                assertEquals(second, inspect().snapshot)
+                assertEquals("CHECKPOINT_STALE_GENERATION",
+                    assertFailsWith<CheckpointUnconfirmed> {
+                        SessionCheckpointStore.saveFenced(
+                            lease, store(), context(), ledger(), second, first.sha256)
+                    }.code)
             }
-            // C2 did become visible, but the writer must never turn that
-            // observation into a claim that the failed fsync was acknowledged.
-            assertEquals(second, inspect().snapshot)
-            assertEquals("CHECKPOINT_STALE_GENERATION",
-                assertFailsWith<CheckpointUnconfirmed> {
-                    SessionCheckpointStore.saveFenced(
-                        lease, store(), context(), ledger(), second, first.sha256)
-                }.code)
         }
     }
 
@@ -331,34 +330,32 @@ class FencedLedgerReopenIntegrationTest : SessionCheckpointTestFixture() {
     fun fencedSaveBeforeRenameFailureAlsoRequiresExplicitReconciliation() {
         val first = createPreExecutionCheckpoint()
         SessionResumeAdmission.admit(store(), context(), ledger(), resumeAttestation()).use { lease ->
-            val writer = DurableSessionEventLedger.reopenForAppend(
-                ledger(), workspace(), store(), context(), lease)
-            writer.appendFenced(event(2, "req-two", "completed",
-                buildJsonObject { put("graphId", "graph-root") }, "checkpoint.saved"))
-            val evidence = writer.withCommittedCheckpointAnchor { it }
-            val second = first.snapshot.copy(sequence = 2L, previousSha256 = first.sha256,
-                journalSequence = evidence.lastSequence,
-                journalHeadSha256 = evidence.headSha256,
-                journalFileSha256 = evidence.fileSha256,
-                lastTrustedJournalOffset = evidence.lastTrustedOffset)
-            try {
+            DurableSessionEventLedger.reopenForAppend(
+                ledger(), workspace(), store(), context(), lease).use { writer ->
+                writer.appendFenced(event(2, "req-two", "completed",
+                    buildJsonObject { put("graphId", "graph-root") }, "checkpoint.saved"))
+                val evidence = writer.withCommittedCheckpointAnchor { it }
+                val second = first.snapshot.copy(sequence = 2L, previousSha256 = first.sha256,
+                    journalSequence = evidence.lastSequence,
+                    journalHeadSha256 = evidence.headSha256,
+                    journalFileSha256 = evidence.fileSha256,
+                    lastTrustedJournalOffset = evidence.lastTrustedOffset)
                 failStalledCheckpoint(lease, writer, first, second,
                     "temp-synced", renamed = false)
-            } finally {
                 assertEquals("LEDGER_REOPEN_CHECKPOINT_UNCONFIRMED",
                     assertFailsWith<SessionLedgerUnconfirmed> { writer.close() }.code)
+                val tail = Files.readAllBytes(ledger())
+                assertEquals(2, DurableSessionEventLedger.inspect(ledger()).lastSequence)
+                assertEquals("CHECKPOINT_FENCED_LEDGER_ADVANCED",
+                    assertFailsWith<CheckpointUnconfirmed> {
+                        SessionCheckpointStore.saveFenced(
+                            lease, store(), context(), ledger(), second, first.sha256)
+                    }.code)
+                assertFalse(Files.exists(store().resolve("000000000002.rcp")))
+                assertEquals("CHECKPOINT_JOURNAL_MISMATCH",
+                    assertFailsWith<CheckpointUnconfirmed> { inspect() }.code)
+                assertContentEquals(tail, Files.readAllBytes(ledger()))
             }
-            val tail = Files.readAllBytes(ledger())
-            assertEquals(2, DurableSessionEventLedger.inspect(ledger()).lastSequence)
-            assertEquals("CHECKPOINT_FENCED_LEDGER_ADVANCED",
-                assertFailsWith<CheckpointUnconfirmed> {
-                    SessionCheckpointStore.saveFenced(
-                        lease, store(), context(), ledger(), second, first.sha256)
-                }.code)
-            assertFalse(Files.exists(store().resolve("000000000002.rcp")))
-            assertEquals("CHECKPOINT_JOURNAL_MISMATCH",
-                assertFailsWith<CheckpointUnconfirmed> { inspect() }.code)
-            assertContentEquals(tail, Files.readAllBytes(ledger()))
         }
         assertEquals("CHECKPOINT_JOURNAL_MISMATCH",
             assertFailsWith<CheckpointUnconfirmed> {
@@ -1185,7 +1182,7 @@ class FencedLedgerReopenIntegrationTest : SessionCheckpointTestFixture() {
         val beans = java.lang.management.ManagementFactory.getThreadMXBean()
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15)
         while (System.nanoTime() < deadline) {
-            val info = beans.getThreadInfo(thread.id)
+            val info = beans.getThreadInfo(thread.threadId())
             if (info?.threadState == Thread.State.BLOCKED &&
                 info.lockInfo?.identityHashCode == System.identityHashCode(lease) &&
                 info.lockInfo?.className == SessionResumeLease::class.java.name) return
@@ -1193,6 +1190,21 @@ class FencedLedgerReopenIntegrationTest : SessionCheckpointTestFixture() {
             Thread.sleep(1)
         }
         fail("Worker did not wait on the lease monitor: " + thread.name)
+    }
+
+    private fun awaitFutureWait(thread: Thread) {
+        val beans = java.lang.management.ManagementFactory.getThreadMXBean()
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15)
+        while (System.nanoTime() < deadline) {
+            val info = beans.getThreadInfo(thread.threadId(), 20)
+            if (info?.threadState == Thread.State.WAITING &&
+                info.stackTrace.any {
+                    it.className == FutureTask::class.java.name && it.methodName == "get"
+                }) return
+            assertTrue(thread.isAlive, "Caller exited before waiting on publication")
+            Thread.sleep(1)
+        }
+        fail("Caller did not wait on publication future")
     }
 
     private fun testWorker(name: String, task: FutureTask<*>): Thread =
@@ -1206,147 +1218,252 @@ class FencedLedgerReopenIntegrationTest : SessionCheckpointTestFixture() {
             error.cause
         }
 
-    @Test @Timeout(90)
+    // Preserve the original test failure and attempt every cleanup action.
+    private fun <T> withCleanup(cleanup: () -> Unit, body: () -> T): T {
+        var primary: Throwable? = null
+        try {
+            return body()
+        } catch (error: Throwable) {
+            primary = error
+            throw error
+        } finally {
+            try {
+                cleanup()
+            } catch (error: Throwable) {
+                if (primary == null) throw error
+                if (primary !== error) primary.addSuppressed(error)
+            }
+        }
+    }
+
+    private fun joinWorkers(vararg workers: Thread) {
+        var failure: Throwable? = null
+        for (worker in workers) {
+            try {
+                worker.join(15000)
+                if (worker.isAlive)
+                    throw IllegalStateException("Worker did not exit: " + worker.name)
+            } catch (error: Throwable) {
+                if (failure == null) failure = error else failure.addSuppressed(error)
+            }
+        }
+        failure?.let { throw it }
+    }
+
+    // Reuse the existing crash/restart child and its real admission adapter.
+    private fun assertIndependentAdmissionHeld() {
+        val output = temp.resolve("stalled-admission-output.log")
+        val java = Path.of(System.getProperty("java.home"), "bin", "java").toString()
+        val child = ProcessBuilder(java, "-cp", childJavaClasspath(),
+            FencedReopenCrashWorker::class.java.name, "probe-admission",
+            store().toString(), workspace().toString(), ledger().toString(),
+            temp.resolve("unused-probe-marker").toString())
+            .redirectErrorStream(true).redirectOutput(output.toFile()).start()
+        withCleanup({
+            if (child.isAlive) child.destroyForcibly()
+            if (!child.waitFor(15, TimeUnit.SECONDS))
+                throw IllegalStateException("Admission probe did not exit")
+        }) {
+            assertTrue(child.waitFor(15, TimeUnit.SECONDS), "Admission probe hung")
+            assertEquals(0, child.exitValue(), Files.readString(output))
+            assertEquals("DENIED:RESUME_LEASE_HELD", Files.readString(output).trim())
+        }
+    }
+
+    @Test @Timeout(120)
     fun retiredLeaseWaitsForInFlightFencedAppendThenRejectsLateCallback() {
-        assertStalledAppendRetirement("record-written", false)
+        assertStalledAppend("record-written", "success", retire = true)
     }
 
-    @Test @Timeout(90)
+    @Test @Timeout(120)
     fun stalledAppendBeforeForceFailsWithoutAcknowledgement() {
-        assertStalledAppendRetirement("record-written", true)
+        assertStalledAppend("record-written", "failure", retire = true)
     }
 
-    @Test @Timeout(90)
+    @Test @Timeout(120)
     fun stalledAppendAfterForceFailsWithoutAcknowledgement() {
-        assertStalledAppendRetirement("forced-before-ack", true)
+        assertStalledAppend("forced-before-ack", "failure", retire = true)
     }
 
-    private fun assertStalledAppendRetirement(phase: String, injectFailure: Boolean) {
+    @Test @Timeout(120)
+    fun stalledAppendRejectsCompetingRetryAfterSuccess() {
+        assertStalledAppend("record-written", "success", retire = false)
+    }
+
+    @Test @Timeout(120)
+    fun stalledAppendRejectsCompetingRetryAfterFailure() {
+        assertStalledAppend("forced-before-ack", "failure", retire = false)
+    }
+
+    @Test @Timeout(120)
+    fun interruptedPublicationEntersRealForceWithInterruptSet() {
+        assertStalledAppend("record-written", "interrupt", retire = true)
+    }
+
+    private fun assertStalledAppend(phase: String, outcome: String, retire: Boolean) {
         val first = createPreExecutionCheckpoint()
         val checkpointFile = store().resolve("000000000001.rcp")
         val checkpointBytes = Files.readAllBytes(checkpointFile)
         val original = Files.readAllBytes(ledger())
-        val lease = SessionResumeAdmission.admit(
-            store(), context(), ledger(), resumeAttestation())
-        val writer = DurableSessionEventLedger.reopenForAppend(
-            ledger(), workspace(), store(), context(), lease)
-        val frame = event(2, "req-two", "completed",
-            buildJsonObject { put("graphId", "graph-root") }, "checkpoint.saved")
-        val entered = CountDownLatch(1)
-        val release = CountDownLatch(1)
-        val publicationFinished = CountDownLatch(1)
-        val injected = IllegalStateException("fixture failure at " + phase)
-        val publication = FutureTask<Unit> {
-            try {
-                writer.appendFencedWithFault(frame) { observed ->
-                    if (observed == phase) {
-                        entered.countDown()
-                        check(release.await(30, TimeUnit.SECONDS))
-                        if (injectFailure) throw injected
+        SessionResumeAdmission.admit(
+            store(), context(), ledger(), resumeAttestation()).use { lease ->
+            DurableSessionEventLedger.reopenForAppend(
+                ledger(), workspace(), store(), context(), lease).use { writer ->
+                val frame = event(2, "req-two", "completed",
+                    buildJsonObject { put("graphId", "graph-root") }, "checkpoint.saved")
+                val entered = CountDownLatch(1)
+                val release = CountDownLatch(1)
+                val interruptSeen = CountDownLatch(1)
+                val injected = IllegalStateException("fixture failure at " + phase)
+                val publication = FutureTask<Unit> {
+                    writer.appendFencedWithFault(frame) { observed ->
+                        if (observed == phase) {
+                            entered.countDown()
+                            if (outcome == "interrupt") {
+                                try {
+                                    check(release.await(60, TimeUnit.SECONDS))
+                                    error("Expected publication interrupt")
+                                } catch (_: InterruptedException) {
+                                    // Hold the guard until the test observes the
+                                    // interrupt, then enter real force with the
+                                    // flag set. No injected I/O exception.
+                                    interruptSeen.countDown()
+                                    try {
+                                        check(release.await(60, TimeUnit.SECONDS))
+                                    } finally {
+                                        Thread.currentThread().interrupt()
+                                    }
+                                }
+                            } else {
+                                check(release.await(60, TimeUnit.SECONDS))
+                                if (outcome == "failure") throw injected
+                            }
+                        }
                     }
                 }
-            } finally {
-                publicationFinished.countDown()
-            }
-        }
-        val retirement = FutureTask<Unit> { lease.close() }
-        // A competing retry of the same valid frame must never write twice.
-        // After the barrier either close or the retry may win the monitor.
-        val retry = FutureTask<Unit> { writer.appendFenced(frame) }
-        val publishing = testWorker("fenced-append", publication)
-        val closing = testWorker("lease-retirement", retirement)
-        val competing = testWorker("competing-append", retry)
-        val workers = listOf(publishing, closing, competing)
-        try {
-            publishing.start()
-            assertTrue(entered.await(15, TimeUnit.SECONDS))
-            val blockedBytes = Files.readAllBytes(ledger())
-            assertTrue(blockedBytes.size > original.size)
-            assertContentEquals(original, blockedBytes.copyOf(original.size))
-            assertEquals(original.size + frameBytes(frame), blockedBytes.size)
-            closing.start()
-            competing.start()
-            awaitLeaseMonitorWait(closing, lease)
-            awaitLeaseMonitorWait(competing, lease)
-            // A caller's bounded observation expires; it does not interrupt
-            // the publication, acknowledge it or release the resume lease.
-            assertFalse(publicationFinished.await(100, TimeUnit.MILLISECONDS))
-            assertFalse(publication.isDone)
-            assertFalse(retirement.isDone)
-            assertFalse(retry.isDone)
-            assertEquals("RESUME_LEASE_HELD",
-                assertFailsWith<SessionResumeUnconfirmed> {
-                    SessionResumeAdmission.admit(
-                        store(), context(), ledger(), resumeAttestation(1)).use { }
-                }.code)
-            assertFalse(Files.exists(store().resolve("resume-000000000002.rcf")))
-            assertContentEquals(blockedBytes, Files.readAllBytes(ledger()))
-            assertContentEquals(checkpointBytes, Files.readAllBytes(checkpointFile))
+                // Only ONE competing operation is started in each case.
+                val contender = FutureTask<Unit> {
+                    if (retire) lease.close() else writer.appendFenced(frame)
+                }
+                val publishing = testWorker("fenced-append", publication)
+                val competing = testWorker("fenced-contender", contender)
+                // Cancellation of a real waiting caller is separate from
+                // interrupting the physical publication thread.
+                val observerEntered = CountDownLatch(1)
+                val observerExited = CountDownLatch(1)
+                val observerInterrupted = CountDownLatch(1)
+                val observer = FutureTask<Unit> {
+                    observerEntered.countDown()
+                    try {
+                        publication.get()
+                    } catch (error: InterruptedException) {
+                        observerInterrupted.countDown()
+                        throw error
+                    } finally {
+                        observerExited.countDown()
+                    }
+                }
+                val observing = testWorker("waiting-caller", observer)
+                withCleanup({
+                    release.countDown()
+                    observer.cancel(true)
+                    joinWorkers(publishing, competing, observing)
+                }) {
+                    publishing.start()
+                    assertTrue(entered.await(15, TimeUnit.SECONDS))
+                    val blockedBytes = Files.readAllBytes(ledger())
+                    assertContentEquals(original, blockedBytes.copyOf(original.size))
+                    assertEquals(original.size + frameBytes(frame), blockedBytes.size)
+                    competing.start()
+                    awaitLeaseMonitorWait(competing, lease)
+                    observing.start()
+                    assertTrue(observerEntered.await(15, TimeUnit.SECONDS))
+                    awaitFutureWait(observing)
+                    assertTrue(observer.cancel(true))
+                    assertTrue(observerInterrupted.await(15, TimeUnit.SECONDS))
+                    assertTrue(observerExited.await(15, TimeUnit.SECONDS))
+                    assertFailsWith<CancellationException> { observer.get() }
+                    if (outcome == "interrupt") {
+                        publishing.interrupt()
+                        assertTrue(interruptSeen.await(15, TimeUnit.SECONDS))
+                    }
+                    assertFalse(publication.isDone)
+                    assertFalse(contender.isDone)
+                    assertEquals("RESUME_LEASE_HELD",
+                        assertFailsWith<SessionResumeUnconfirmed> {
+                            SessionResumeAdmission.admit(
+                                store(), context(), ledger(), resumeAttestation(1)).use { }
+                        }.code)
+                    // A separate JVM bypasses the in-process reservation and
+                    // reaches the real OS resume.lock tryLock.
+                    assertIndependentAdmissionHeld()
+                    assertFalse(publication.isDone)
+                    assertFalse(contender.isDone)
+                    assertFalse(Files.exists(store().resolve("resume-000000000002.rcf")))
+                    assertContentEquals(blockedBytes, Files.readAllBytes(ledger()))
+                    assertContentEquals(checkpointBytes, Files.readAllBytes(checkpointFile))
 
-            release.countDown()
-            val appendFailure = failureOf(publication)
-            if (!injectFailure) {
-                assertNull(appendFailure)
-            } else if (phase == "record-written") {
-                assertSame(injected, appendFailure)
-            } else {
-                val error = assertIs<SessionLedgerUnconfirmed>(appendFailure)
-                assertEquals("LEDGER_SYNC_UNCONFIRMED", error.code)
-                assertSame(injected, error.cause)
-            }
-            assertNull(failureOf(retirement))
-            val retryFailure = failureOf(retry)
-            when (retryFailure) {
-                is SessionResumeUnconfirmed ->
-                    assertEquals("RESUME_FENCE_STALE_WRITER", retryFailure.code)
-                is SessionLedgerUnconfirmed -> assertEquals(
-                    if (injectFailure) "LEDGER_REOPEN_WRITER_POISONED"
-                    else "LEDGER_EVENT_VERSION_OR_SEQUENCE", retryFailure.code)
-                else -> fail("Competing retry was not refused", retryFailure)
-            }
-            assertEquals("RESUME_FENCE_STALE_WRITER",
-                assertFailsWith<SessionResumeUnconfirmed> {
-                    writer.appendFenced(event(3, "req-three", "completed",
-                        buildJsonObject { put("graphId", "graph-root") },
-                        "checkpoint.saved"))
-                }.code)
-            val close = assertFailsWith<SessionLedgerUnconfirmed> { writer.close() }
-            if (injectFailure) {
-                assertEquals("LEDGER_UNACKNOWLEDGED_APPEND", close.code)
-            } else {
-                assertEquals("LEDGER_REOPEN_WRITER_POISONED", close.code)
-                assertTrue(close.suppressed.any {
-                    (it as? SessionLedgerUnconfirmed)?.code ==
-                        "LEDGER_REOPEN_CHECKPOINT_REQUIRED"
-                })
-            }
-            // Physical readback is evidence of bytes, not acknowledgement.
-            assertContentEquals(blockedBytes, Files.readAllBytes(ledger()))
-            val tail = DurableSessionEventLedger.inspect(ledger())
-            assertEquals(2, tail.lastSequence)
-            assertEquals(frame, tail.events.last())
-            assertEquals(blockedBytes.size.toLong(), tail.lastTrustedOffset)
-            assertEquals(1, first.snapshot.journalSequence)
-            assertContentEquals(checkpointBytes, Files.readAllBytes(checkpointFile))
-            assertFalse(Files.exists(store().resolve("000000000002.rcp")))
-            assertEquals("CHECKPOINT_JOURNAL_MISMATCH",
-                assertFailsWith<CheckpointUnconfirmed> {
-                    SessionResumeAdmission.admit(
-                        store(), context(), ledger(), resumeAttestation(1)).use { }
-                }.code)
-            assertFalse(Files.exists(store().resolve("resume-000000000002.rcf")))
-            assertContentEquals(blockedBytes, Files.readAllBytes(ledger()))
-        } finally {
-            release.countDown()
-            workers.forEach { it.join(15000) }
-            // Do not wait on a regressed monitor in the cleanup path.
-            assertTrue(workers.none { it.isAlive }, "Publication workers did not exit")
-            try {
-                // Expected typed close outcomes are asserted above; on an
-                // earlier assertion failure, still release all fixture locks.
-                runCatching { writer.close() }
-            } finally {
-                lease.close()
+                    release.countDown()
+                    val appendFailure = failureOf(publication)
+                    when (outcome) {
+                        "success" -> assertNull(appendFailure)
+                        "interrupt" -> {
+                            val error = assertIs<SessionLedgerUnconfirmed>(appendFailure)
+                            assertEquals("LEDGER_SYNC_UNCONFIRMED", error.code)
+                            assertIs<ClosedByInterruptException>(error.cause)
+                        }
+                        else -> if (phase == "record-written") {
+                            assertSame(injected, appendFailure)
+                        } else {
+                            val error = assertIs<SessionLedgerUnconfirmed>(appendFailure)
+                            assertEquals("LEDGER_SYNC_UNCONFIRMED", error.code)
+                            assertSame(injected, error.cause)
+                        }
+                    }
+                    val contenderFailure = failureOf(contender)
+                    if (retire) {
+                        assertNull(contenderFailure)
+                        assertEquals("RESUME_FENCE_STALE_WRITER",
+                            assertFailsWith<SessionResumeUnconfirmed> {
+                                writer.appendFenced(frame)
+                            }.code)
+                    } else {
+                        assertEquals(
+                            if (outcome == "success") "LEDGER_EVENT_VERSION_OR_SEQUENCE"
+                            else "LEDGER_REOPEN_WRITER_POISONED",
+                            assertIs<SessionLedgerUnconfirmed>(contenderFailure).code)
+                        lease.assertCurrent()
+                    }
+                    val close = assertFailsWith<SessionLedgerUnconfirmed> { writer.close() }
+                    if (outcome != "success") {
+                        assertEquals("LEDGER_UNACKNOWLEDGED_APPEND", close.code)
+                    } else if (retire) {
+                        assertEquals("LEDGER_REOPEN_WRITER_POISONED", close.code)
+                        assertTrue(close.suppressed.any {
+                            (it as? SessionLedgerUnconfirmed)?.code ==
+                                "LEDGER_REOPEN_CHECKPOINT_REQUIRED"
+                        })
+                    } else {
+                        assertEquals("LEDGER_REOPEN_CHECKPOINT_REQUIRED", close.code)
+                    }
+                    lease.close()
+                    // Physical readback is evidence of bytes, not acknowledgement.
+                    assertContentEquals(blockedBytes, Files.readAllBytes(ledger()))
+                    val tail = DurableSessionEventLedger.inspect(ledger())
+                    assertEquals(2, tail.lastSequence)
+                    assertEquals(frame, tail.events.last())
+                    assertEquals(blockedBytes.size.toLong(), tail.lastTrustedOffset)
+                    assertEquals(1, first.snapshot.journalSequence)
+                    assertContentEquals(checkpointBytes, Files.readAllBytes(checkpointFile))
+                    assertFalse(Files.exists(store().resolve("000000000002.rcp")))
+                    assertEquals("CHECKPOINT_JOURNAL_MISMATCH",
+                        assertFailsWith<CheckpointUnconfirmed> {
+                            SessionResumeAdmission.admit(
+                                store(), context(), ledger(), resumeAttestation(1)).use { }
+                        }.code)
+                    assertFalse(Files.exists(store().resolve("resume-000000000002.rcf")))
+                    assertContentEquals(blockedBytes, Files.readAllBytes(ledger()))
+                }
             }
         }
     }
@@ -1751,9 +1868,21 @@ internal object FencedReopenCrashWorker {
             "graph-root", 5L, "d".repeat(64))
         val policy = ReadPolicyFacts("read-only",
             ToolAuthorizationPolicy.knownReadTools, false, false)
-        val expected = if (phase == "restart") 1L else 0L
+        val expected = if (phase in setOf("restart", "probe-admission")) 1L else 0L
         val attestation = ResumeHostAttestation(expected, policy,
             externalActionsReconciled = true)
+
+        if (phase == "probe-admission") {
+            try {
+                SessionResumeAdmission.admit(directory, context, ledger, attestation).use {
+                    error("Unsafe successor admission during stalled publication")
+                }
+            } catch (error: SessionResumeUnconfirmed) {
+                check(error.code == "RESUME_LEASE_HELD")
+                println("DENIED:" + error.code)
+            }
+            return
+        }
 
         if (phase == "restart") {
             check(DurableSessionEventLedger.inspect(ledger).lastSequence == 2)

@@ -76,9 +76,10 @@ fully authenticated RCLDG1 history. This is still not execution authority:
 Never blindly retry publication or treat a successful `inspect` as approval
 to resume model/tool work.
 
-This milestone does not solve #105 effect authority/reconciliation, runtime implementation of the
-fsync/shutdown watchdog contract, broader kill-boundary subprocess evidence, or the
-true live-fenced runtime `FileStore.type()` sanitized-denial E2E. Those remain
+This milestone does not solve #105 effect authority/reconciliation, runtime
+implementation of the fsync/shutdown watchdog contract, broader kill-boundary
+subprocess evidence, or the true live-fenced runtime `FileStore.type()`
+sanitized-denial E2E. Those remain
 gates for connecting real execution and for closing #104. Independently
 review the authenticated operator call boundary before production use.
 
@@ -407,6 +408,30 @@ thread interrupt, successful readback, or lack of an acknowledgement alone
 cannot prove that no bytes or effects were written. In particular a
 checksum-valid tail is not a receipt.
 
+Cancel the waiting caller, not the physical publication worker. A future
+host must not propagate coroutine cancellation by interrupting a thread
+that owns an active publication, including via `Future.cancel(true)`,
+`shutdownNow()` or an interrupting timeout. JVM `FileChannel` is an
+interruptible channel: interrupting the publication thread while in or
+entering force can close its data channel and fail the write. The resume
+lock is a separate channel; an interrupted data operation is not proof of
+lease release. Monitor entry itself is not interruptible. If interruption
+does occur, treat the physical outcome as unconfirmed unless the adapter
+has independently returned a confirmed acknowledgement; stop publication,
+preserve the original failure and interrupt status where applicable,
+and perform ordered cleanup and reconciliation. Never infer cancellation
+of physical I/O from the cancelled future's state.
+
+In the existing fenced append adapter, a failure at the record-written
+seam before force can escape as the original untyped throwable, while
+failure inside force or its pre-acknowledgement path is wrapped as
+`LEDGER_SYNC_UNCONFIRMED`. Except for proven non-mutating refusals
+(e.g. input/phase validation or known unavailable-writer state), the host
+must treat any thrown failure from an attempted append conservatively as
+unconfirmed, not require a typed caller exception. The pending physical
+frame is reported on close as `LEDGER_UNACKNOWLEDGED_APPEND`; that
+diagnostic does not prove the absence of bytes or effects.
+
 | Event or outcome | Acknowledgement | Lease ownership | New admission and reconciliation |
 | --- | --- | --- | --- |
 | Cancellation wins before publication starts | No new acknowledgement | Held until orderly writer close and lease retirement | Fresh admission only after confirmed release and verification of the already covered prefix; reconcile any earlier uncertain work |
@@ -499,18 +524,22 @@ requires separate review. No new execution or replay boundary is enabled.
 
 The existing Linux integration fixtures exercise real durable ledger and
 checkpoint adapters, with bounded per-invocation barriers at record-written,
-forced-before-ack, temp-synced and before-directory-fsync. The append race
-observes both retirement and a competing retry waiting on the actual lease
-monitor; a bounded caller observation leaves the append outstanding and
-a competing admission refused. Successful completion and injected failures
-before force and after force are distinguished, with literal refusals,
-exact bytes, sequence and checkpoint evidence, and rejection of a stale
-callback and successor admission with an uncovered tail. The checkpoint
-tests pause and fail before rename and after rename but before directory
-force, assert no competing admission or checkpoint lock acquisition,
-and verify typed uncertainty and legacy fallback refusal. Readback after
-rename is explicitly not an acknowledgement. Existing process-kill and
-independent-JVM CAS tests remain unchanged.
+forced-before-ack, temp-synced and before-directory-fsync. Separate append
+cases observe retirement or a competing retry waiting on the actual lease
+monitor, not an unspecified monitor handoff race. A waiting caller's
+future is cancelled with interruption without cancelling the publication
+future. A distinct case interrupts the publication worker at record-written,
+holds the guard for observation, then restores the interrupt flag before
+entering actual file force; the adapter reports sync uncertainty caused by
+a closed-by-interrupt channel. Both same-JVM and independent-JVM admission
+attempts are refused while append publication is stalled, including after
+the interrupt request. Success and failures before/after force are
+distinguished with exact bytes, sequence, checkpoint evidence, typed close
+diagnostics and stale callback/uncovered-tail refusals. The checkpoint tests
+pause and fail before rename and after rename before directory force; they
+assert same-JVM resume and checkpoint lock contention, typed uncertainty
+and legacy fallback refusal. Readback is not acknowledgement. Existing
+process-kill and independent-JVM CAS scenarios remain unchanged.
 
 These tests simulate a stalled durability boundary, not a hung kernel
 fsync. They observe current adapter behavior, not a production cancellation
@@ -643,8 +672,9 @@ proves a safe, generation-fenced adoption protocol. Integrity of the tail
 does not itself attest its fsync acknowledgement or absence of external effects.
 Each fenced publication's local `FileChannel.force(true)` executes while the
 resume lease monitor is held. Writer close has its own monitor and may also
-force the channel before releasing its writer lock. This has **no guaranteed latency bound**: a slow disk
-can delay `lease.close()`, competing fenced publications and shutdown.
+force the channel before releasing its writer lock. This has **no guaranteed
+latency bound**: a slow disk can delay `lease.close()`, competing fenced
+publications and shutdown.
 Host shutdown must not rely on a short deadline or attempt to retire the
 lease while an in-flight fenced fsync is still completing. This feature
 still does **not** enable arbitrary model/tool execution, general
