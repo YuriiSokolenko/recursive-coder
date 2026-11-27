@@ -46,6 +46,23 @@ object ReviewerVerdictPolicy {
         ReviewerCorrectionScope>> = allowed.toSet()
 }
 
+/** Keys of the strict model-authored Reviewer proposal, not event metadata. */
+object ReviewerProposalFields {
+    const val VERDICT = "verdict"
+    const val CODE = "code"
+    const val SCOPE = "scope"
+    const val EVIDENCE = "evidence"
+}
+
+/**
+ * Trusted evidence tags written into the Reviewer prompt by
+ * RunReviewerStageUseCase and parsed by the installed offline fixture.
+ */
+object ReviewerPromptEvidenceTags {
+    const val CHECK = "verified-check"
+    const val WRITE = "verified-write"
+}
+
 /** Exact evidence reference prefixes accepted at the finish gate. */
 object ReviewerEvidenceReferences {
     const val CHECK_PREFIX = "check:"

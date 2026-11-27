@@ -43,6 +43,13 @@ enum class StageKind(
     REVIEW(EngineeringRole.REVIEWER, StageArtifactKind.entries.toSet(), null)
 }
 
+/** Fixed five-role workflow order, independent of future enum additions. */
+object FiveRoleWorkflowStages {
+    val order: List<StageKind>
+        get() = listOf(StageKind.SDD, StageKind.ATDD, StageKind.TDD,
+            StageKind.DEVELOP, StageKind.REVIEW)
+}
+
 enum class StageState { CREATED, READY, RUNNING, ACCEPTED, REJECTED, FAILED, CANCELLED }
 enum class StageGraphState { CREATED, RUNNING, SUCCEEDED, FAILED, CANCELLED }
 enum class ArtifactApproval { DRAFT, ACCEPTED, REJECTED }

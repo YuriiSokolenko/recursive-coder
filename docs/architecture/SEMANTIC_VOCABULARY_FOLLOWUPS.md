@@ -16,7 +16,7 @@ or any child complete solely because this branch exists.
 | #200 | `WorkspaceToolNames`, `ToolPolicyModes`, `StageCheckIds`; workspace contracts, authorization and admission, stage use cases, installed root and child hosts. Trusted write/check audit names and HTTP model tool name are private to their adapters. | Git command arguments, write operation schema and model-facing read_task are separate from workspace read policy. Do not widen tool authority. |
 | #201 | `SessionDenialCodes`, `ModelDenialCodes`, `ToolDenialCodes`, `WorkspaceDenialCodes`, `StageDenialCodes` in shared contracts. Reuse common code strings across admission, adapters and stage coordinators. | Local-only codes and human-readable messages stay at the producer. Same-spelled errors across unrelated contexts require separate semantic review; not all repository diagnostics have been migrated. |
 | #202 | `TaskPriority`, `TaskSchedulerConcurrency`, `TaskWireFields`, `TaskTransitionWireFields` in tasks; task policy, use case, facade and CLI. All durable snapshot keys/version are private to TaskStore and independent of CLI fields. Existing TaskState and SessionOutcome codecs are retained. | Public taskId and private snapshot id differ by design. Task counter zero, invocation minimum and overflow protection are different invariants; #193 behavior remains unchanged. |
-| #203 | `StageEventMetadataFields` in contracts; correlated stage/recursive event emitters and pre-execution phase policy. Installed offline check identity is local to CLI; child-origin validation reuses StageKind. | StageRoleLimits, graph limits and typed decisions are already owned. Do not unify stage/role or graph/session states by spelling. Additional stage diagnostics and adapter-local plan fields still need a targeted audit. |
+| #203 | `StageEventMetadataFields` in contracts; correlated stage/recursive event emitters and pre-execution phase policy. Installed offline check identity is local to CLI; child-origin validation reuses StageKind. | StageRoleLimits, graph limits and typed decisions are already owned. Do not unify stage/role or graph/session states by spelling. See the targeted #203 audit below for proposal, event and installed configuration ownership and C3 exclusions. |
 | #204 | `JournalFormatVocabulary` in journal; effect metadata and state keys reused by physical effect journal, effect envelope policy and evidence verifier. Fence/anchor/audit markers remain private to their codecs. Anchor bound reuses existing ResumeFenceStorage.MAX_FENCES. Lock names are internal to journal. | Do not merge unrelated ledger and effect record capacities, magic headers, cryptographic domains, HMAC inputs or wire versions merely because values coincide. Checkpoint task-state allowlist stays local: no journal dependency on tasks. See the targeted completion audit below. |
 | #205 | Gradle JVM convention uses local source-set name and e2e tag; Python test-tier, JUnit evidence and CI bootstrap guards reuse their own local constants. | CI YAML and verification metadata, independent Python tests and standalone JavaScript schema checks remain literal or independently specified. Do not import product constants into external verifiers. |
 
@@ -116,6 +116,75 @@ Reviewed `TaskPolicy.kt` (including TaskState, Task, TaskQueue and transition po
   The existing #193 counter, priority, fairness and scheduler tests are retained.
 
 Verification requires the full CI matrix; this audit does not close #194.
+
+## #203 targeted completion audit
+
+Reviewed against dev at `373a7c826950a8b40c3604f218d5c8e7f75e79ff`.
+This slice retains the existing stage and recursive domain contracts and
+consolidates the remaining shared proposal, event and installed offline
+configuration vocabulary identified in the following targeted source audit.
+
+| Reviewed files | Ownership and disposition |
+| --- | --- |
+| `StageGraphContracts`, `StageGraphPolicy`, `StageRoleExecutionContracts`, `StageRoleLimits`, `StageToolExecutionContracts`, `ToolAuthorizationPolicy` | Stage/role/artifact/state enums and typed decisions remain distinct. Explicit five-role order is shared by the coordinator and installed CLI; it is not derived from future enum entries. Existing role limits, graph validation, tool authority and explicit policy sets remain unchanged. |
+| `PreparationStageFinishPolicy`, `PreparationStageHostContracts`, `RunPreparationStageUseCase`, `RunDeveloperStageUseCase`, `RunFiveRoleWorkflowUseCase` | Preparation approval and stage state are separate typed decisions; existing instruction/proposal limits remain authoritative. Developer proposal fields and operation prose are local to the decoder/prompt, not workspace tool or protocol fields. |
+| `ReviewerStageContracts`, `RunReviewerStageUseCase` | Reviewer proposal keys and trusted prompt evidence tags are shared with the fake installed producer; existing evidence prefixes, disposition/scope and reason codes are reused. Explicit decode and CAS allowlists remain independent of enum membership. The evidence count, displayed history count, configured reviewer-repair retry ceiling and host failed-write retry ceiling are separate limits, not one generic 32. |
+| `RecursiveGraphPolicy`, `RecursiveChildIntegrationPolicy`, `RecursiveGraphScheduler`, `RecursiveChildIntegrationHost`, `RunTwoOriginRecursiveChildrenUseCase` | Existing graph/child identity constructors, global child cap, node states, typed decisions and per-origin grant accounting remain authoritative. Hash inputs, ID prefixes, budget arithmetic, dependency rules and scheduling/authorization checks are unchanged. |
+| `CorrelatedSessionEvents`, `PreExecutionPhasePolicy`, `InstalledRecursiveWorkflow`, `InstalledChildRuntimeGrants`, `SessionCheckpointStore`, `DurableSessionEventLedger`, `SessionRuntime`, `SessionResultMapper` | Stage event metadata owns origin, request ID, code, artifact identity/digest, preparation and Reviewer fields, and child audit fields. Session usage event metadata has its own owner. These keys are admitted to durable event storage by the pinned ledger; the checkpoint evidence reader shares the artifact metadata owner. See pinned exclusions below. Envelope, proposal, CLI result and result usage fields remain separate. The BOTH origin sentinel is local to multi-origin reporting. Child identity derivations, attested bytes, grants and audit meanings are retained. |
+| `WritableWorkflowCli`, `LinuxFiveRoleWorkflowHost`, `CompositionRoot` | Installed plan and approval field groups are private to the CLI. Root and child checkout fields share their local owner; artifact and Developer target paths, root and child token/tool limits, and plan/approval versions are distinct. Child token overrides and default child grant use the same existing range. Local isolation marker and repeated CLI outcome labels are shared. The explicit installed origin and host admission sets are unchanged. |
+| `KoogStageRoleExecutor` | Uses EngineeringRole and StageRoleLimits directly. Koog strategy/prompt IDs, provider usage and role prompt prose are adapter-local, not shared stage ID constructors. No new execution or model authority. |
+
+### #203 event metadata ownership and C3 exclusions
+
+The unpinned producers and consumers share the following exact metadata keys.
+Every corresponding raw allowlist entry in the C3-pinned
+`DurableSessionEventLedger` remains intentionally unchanged:
+
+| Owner and unpinned sites | Exact durable metadata keys excluded from the pinned ledger migration |
+| --- | --- |
+| `StageEventMetadataFields`: recursive/role events, installed audit | `origin`, `requestId`, `code` |
+| `StageEventMetadataFields`: preparation events and checkpoint evidence reader | `artifactId`, `artifactSha256` (both); `kind`, `approval` (preparation only) |
+| `StageEventMetadataFields`: Reviewer events | `verdict`, `reasonCode`, `scope`, `reviewedSha256`, `evidenceCount` |
+| `StageEventMetadataFields`: installed child audit and recursive stop | `childResourceAudit`, `observedTokens`, `observedToolCalls`, `accountedTokens`, `accountedToolCalls`, `usageUncertain`, `physicalCompleted`, `schedulerChargeRecorded`, `recursiveStopCode`, `requiresReconciliation` |
+| `SessionUsageEventMetadataFields`: role events | `modelRequests`, `inputTokens`, `outputTokens` |
+
+The pinned `SessionRuntime` also retains its raw event metadata
+`inputTokens` and `outputTokens`. These are additional C3 exclusions;
+the same spellings in `SessionResultMapper` are independent result usage
+fields, not event metadata, and belong to the result-envelope audit.
+Reviewer event `verdict` and `scope` are independent of the model-facing
+`ReviewerProposalFields`. No other raw metadata keys remain in the two
+touched emitters; the pinned ledger's explicit key categories, membership,
+types and validation are unchanged. Migrate the listed pinned references
+only under the independent C3 review tracked by [#207](https://github.com/YuriiSokolenko/recursive-coder/issues/207).
+Do not refresh approved hashes as part of #203.
+
+The journal diagnostic and denial codes in `SessionCheckpointStore` are outside
+the #203 scope: the 23 repeated codes and the three codes shared with the
+C3-pinned `DurableSessionEventLedger` remain unchanged. The shared codes are
+`CHECKPOINT_LEASE_HELD`, `LEDGER_NOT_FENCED` and
+`LEDGER_REOPEN_CHECKPOINT_UNCONFIRMED`. Their journal-domain audit was
+recorded in #204 (merged); consolidation is now tracked by
+[#249](https://github.com/YuriiSokolenko/recursive-coder/issues/249).
+Migration of pinned ledger references also requires independent C3 review
+under #207. The checkpoint artifact metadata owner and its use in the
+checkpoint reader are already integrated by #204 and remain unchanged.
+
+Existing independent literal stage/role, Reviewer decision matrix, scheduler,
+correlated events, and installed workflow tests remain intact. New literal
+tests pin the shared order, stage bounds, metadata, proposal keys and evidence
+grammar. Reviewer integration exercises unknown verdict, scope, reason and
+field spellings, extra and missing fields. Installed CLI E2E rejects unknown
+fields at plan, approval, workspace, check, artifact, Developer target, limits
+and both child decode sites. Literal event assertions and existing checkpoint
+positive/negative evidence fixtures independently pin artifact identity/digest.
+The artifact key unit oracle introduced by #204 is retained without duplication.
+The existing installed success path exercises the real fake proposal producer
+and Reviewer decoder with literal expected outcomes. There is no general
+stage-graph wire codec to round-trip. Plan/approval are decode-only;
+the independent Python producer remains literal. No schema, durable format,
+dependency or authority changes are intended. Full CI is required; #194
+remains open.
 
 ## #204 targeted completion audit
 

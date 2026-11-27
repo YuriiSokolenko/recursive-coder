@@ -61,7 +61,7 @@ class CorrelatedRecursiveSessionEvents(
                 put(StageEventMetadataFields.RECURSIVE_EVENT, event.kind.name)
                 put(StageEventMetadataFields.GRAPH_ID, event.graphId.value)
                 put(StageEventMetadataFields.STAGE_RUN_ID, event.stageRunId.value)
-                put("origin", event.origin.name)
+                put(StageEventMetadataFields.ORIGIN, event.origin.name)
                 put(StageEventMetadataFields.ROLE, event.origin.role.name)
                 // Graph scope is not a host-issued budget correlation identifier.
                 put(StageEventMetadataFields.BUDGET_SCOPE_GRAPH_ID, event.graphId.value)
@@ -73,8 +73,8 @@ class CorrelatedRecursiveSessionEvents(
                 put(StageEventMetadataFields.DELEGATED_TOOL_CALLS, event.delegated.toolCalls)
                 put(StageEventMetadataFields.PARENT_GRAPH_ID, event.parentGraphId?.value?.let(::JsonPrimitive) ?: JsonNull)
                 put(StageEventMetadataFields.CHILD_GRAPH_ID, event.childGraphId?.value?.let(::JsonPrimitive) ?: JsonNull)
-                put("requestId", event.requestId?.let(::JsonPrimitive) ?: JsonNull)
-                event.code?.let { put("code", it) }
+                put(StageEventMetadataFields.REQUEST_ID, event.requestId?.let(::JsonPrimitive) ?: JsonNull)
+                event.code?.let { put(StageEventMetadataFields.CODE, it) }
             })
     }
 }
@@ -104,11 +104,11 @@ class CorrelatedRoleSessionEvents(
                 put(StageEventMetadataFields.GRAPH_ID, event.correlation.graphId.value)
                 put(StageEventMetadataFields.STAGE_RUN_ID, event.correlation.stageRunId.value)
                 put(StageEventMetadataFields.ROLE, event.role.name)
-                put("requestId", event.correlation.requestId)
-                put("modelRequests", event.usage.modelRequests)
-                event.usage.inputTokens?.let { put("inputTokens", it) }
-                event.usage.outputTokens?.let { put("outputTokens", it) }
-                event.code?.let { put("code", it) }
+                put(StageEventMetadataFields.REQUEST_ID, event.correlation.requestId)
+                put(SessionUsageEventMetadataFields.MODEL_REQUESTS, event.usage.modelRequests)
+                event.usage.inputTokens?.let { put(SessionUsageEventMetadataFields.INPUT_TOKENS, it) }
+                event.usage.outputTokens?.let { put(SessionUsageEventMetadataFields.OUTPUT_TOKENS, it) }
+                event.code?.let { put(StageEventMetadataFields.CODE, it) }
             }
         )
     }
@@ -137,12 +137,12 @@ class CorrelatedPreparationSessionEvents(
             correlationId = event.correlation.requestId,
             extra = buildJsonObject {
                 put(StageEventMetadataFields.STAGE_RUN_ID, event.correlation.stageRunId.value)
-                put("kind", event.kind.name)
+                put(StageEventMetadataFields.KIND, event.kind.name)
                 put(StageEventMetadataFields.STAGE_STATE, event.state.name)
                 event.artifactId?.let { put(StageEventMetadataFields.ARTIFACT_ID, it.value) }
                 event.sha256?.let { put(StageEventMetadataFields.ARTIFACT_SHA256, it) }
-                event.approval?.let { put("approval", it.name) }
-                event.code?.let { put("code", it) }
+                event.approval?.let { put(StageEventMetadataFields.APPROVAL, it.name) }
+                event.code?.let { put(StageEventMetadataFields.CODE, it) }
             })
     }
 }
@@ -157,11 +157,11 @@ class CorrelatedReviewerSessionEvents(
             extra = buildJsonObject {
                 put(StageEventMetadataFields.STAGE_RUN_ID, decision.correlation.stageRunId.value)
                 put(StageEventMetadataFields.ROLE, EngineeringRole.REVIEWER.name)
-                put("verdict", decision.verdict.name)
-                put("reasonCode", decision.reasonCode)
-                put("scope", decision.scope.name)
-                put("reviewedSha256", decision.reviewedManifestSha256)
-                put("evidenceCount", decision.evidenceIds.size)
+                put(StageEventMetadataFields.VERDICT, decision.verdict.name)
+                put(StageEventMetadataFields.REASON_CODE, decision.reasonCode)
+                put(StageEventMetadataFields.SCOPE, decision.scope.name)
+                put(StageEventMetadataFields.REVIEWED_SHA256, decision.reviewedManifestSha256)
+                put(StageEventMetadataFields.EVIDENCE_COUNT, decision.evidenceIds.size)
             })
     }
 }

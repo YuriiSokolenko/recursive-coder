@@ -80,6 +80,18 @@ class CorrelatedSessionEventsIntegrationTest {
             sink.events[1]["actor"]!!.jsonObject["childSessionId"])
         assertFalse(sink.events[0]["metadata"]!!.jsonObject.containsKey("inputTokens"))
         assertFalse(sink.events[0]["metadata"]!!.jsonObject.containsKey("outputTokens"))
+        val preparation = sink.events[2]["metadata"]!!.jsonObject
+        assertEquals("artifact-79", preparation["artifactId"]!!.jsonPrimitive.content)
+        assertEquals("b".repeat(64), preparation["artifactSha256"]!!.jsonPrimitive.content)
+        assertEquals("SDD", preparation["kind"]!!.jsonPrimitive.content)
+        assertEquals("ACCEPTED", preparation["approval"]!!.jsonPrimitive.content)
+        val review = sink.events[3]["metadata"]!!.jsonObject
+        assertEquals("OK", review["reasonCode"]!!.jsonPrimitive.content)
+        assertEquals("NONE", review["scope"]!!.jsonPrimitive.content)
+        assertEquals("c".repeat(64), review["reviewedSha256"]!!.jsonPrimitive.content)
+        assertEquals("2", review["evidenceCount"]!!.jsonPrimitive.content)
+        assertEquals("1",
+            sink.events[0]["metadata"]!!.jsonObject["modelRequests"]!!.jsonPrimitive.content)
         assertEquals("ACCEPT",
             sink.events[3]["metadata"]!!.jsonObject["verdict"]!!.jsonPrimitive.content)
         for (event in sink.events) {
