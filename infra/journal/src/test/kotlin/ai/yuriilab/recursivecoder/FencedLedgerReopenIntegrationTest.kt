@@ -1026,6 +1026,88 @@ class FencedLedgerReopenIntegrationTest : SessionCheckpointTestFixture() {
         }
     }
 
+    @Test fun reentrantCloseCannotRetireLeaseDuringFencedAppend() {
+        val first = createPreExecutionCheckpoint()
+        val retired = SessionResumeAdmission.admit(
+            store(), context(), ledger(), resumeAttestation())
+        retired.use { lease ->
+            DurableSessionEventLedger.reopenForAppend(
+                ledger(), workspace(), store(), context(), lease).use { writer ->
+                var reached = false
+                writer.appendFencedWithFault(fencedTransition(2, "created", "accepted")) { phase ->
+                    if (phase == "record-written") {
+                        reached = true
+                        lease.publishIfCurrent {
+                            assertEquals("RESUME_LEASE_PUBLICATION_ACTIVE",
+                                assertFailsWith<SessionResumeUnconfirmed> {
+                                    lease.close()
+                                }.code)
+                        }
+                        // The nested callback must not clear the outer guard.
+                        assertEquals("RESUME_LEASE_PUBLICATION_ACTIVE",
+                            assertFailsWith<SessionResumeUnconfirmed> {
+                                lease.close()
+                            }.code)
+                        assertEquals("RESUME_LEASE_HELD",
+                            assertFailsWith<SessionResumeUnconfirmed> {
+                                SessionResumeAdmission.admit(
+                                    store(), context(), ledger(), resumeAttestation(1))
+                            }.code)
+                        lease.assertCurrent()
+                    }
+                }
+                assertTrue(reached)
+                val anchor = writer.withCommittedCheckpointAnchor { it }
+                assertEquals(2, anchor.lastSequence)
+                val next = first.snapshot.copy(
+                    sequence = 2L, previousSha256 = first.sha256,
+                    phase = "accepted", taskState = "ready",
+                    journalSequence = anchor.lastSequence,
+                    journalHeadSha256 = anchor.headSha256,
+                    journalFileSha256 = anchor.fileSha256,
+                    lastTrustedJournalOffset = anchor.lastTrustedOffset)
+                SessionCheckpointStore.saveFromOpenLedgerFenced(
+                    lease, store(), context(), writer, next, first.sha256)
+            }
+        }
+        val second = inspect()
+        assertEquals("accepted", second.snapshot.phase)
+        assertEquals(2, second.snapshot.journalSequence)
+        assertEquals(1L, SessionResumeAdmission.currentGeneration(
+            store(), context(), ledger()))
+        SessionResumeAdmission.admit(store(), context(), ledger(),
+            resumeAttestation(1)).use { successor ->
+            assertEquals(2L, successor.generation)
+            var stalePublished = false
+            assertEquals("RESUME_FENCE_STALE_WRITER",
+                assertFailsWith<SessionResumeUnconfirmed> {
+                    retired.publishIfCurrent { stalePublished = true }
+                }.code)
+            assertFalse(stalePublished)
+            successor.assertCurrent()
+        }
+        assertEquals(second, inspect())
+    }
+
+    @Test fun exceptionalPublicationDoesNotLeaveLeaseUnclosable() {
+        createPreExecutionCheckpoint()
+        val lease = SessionResumeAdmission.admit(
+            store(), context(), ledger(), resumeAttestation())
+        lease.use {
+            val failure = IllegalStateException("fixture publication failure")
+            assertSame(failure, assertFailsWith<IllegalStateException> {
+                lease.publishIfCurrent {
+                    lease.publishIfCurrent { throw failure }
+                }
+            })
+            lease.assertCurrent()
+        }
+        SessionResumeAdmission.admit(store(), context(), ledger(),
+            resumeAttestation(1)).use { successor ->
+            assertEquals(2L, successor.generation)
+        }
+    }
+
     @Test fun retiredLeaseWaitsForInFlightFencedAppendThenRejectsLateCallback() {
         createPreExecutionCheckpoint()
         val lease = SessionResumeAdmission.admit(

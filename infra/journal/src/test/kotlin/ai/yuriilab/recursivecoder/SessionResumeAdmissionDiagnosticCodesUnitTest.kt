@@ -15,5 +15,7 @@ class SessionResumeAdmissionDiagnosticCodesUnitTest {
         assertEquals("RESUME_LEDGER_IDENTITY_UNCONFIRMED", SessionResumeAdmissionDiagnosticCodes.RESUME_LEDGER_IDENTITY_UNCONFIRMED)
         assertEquals("RESUME_EFFECT_RECONCILIATION_INVALID", SessionResumeAdmissionDiagnosticCodes.RESUME_EFFECT_RECONCILIATION_INVALID)
         assertEquals("RESUME_LEASE_HELD", SessionResumeAdmissionDiagnosticCodes.RESUME_LEASE_HELD)
+        assertEquals("RESUME_LEASE_PUBLICATION_ACTIVE",
+            SessionResumeAdmissionDiagnosticCodes.RESUME_LEASE_PUBLICATION_ACTIVE)
     }
 }

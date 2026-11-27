@@ -93,6 +93,24 @@ entirely, so even a stuck opt-in lookup cannot change this code.
 A successful probe also returns `UNSUPPORTED_RESUME`: no success case
 creates resume authority.
 
+An explicit `forTrustedStore` host binding can instead diagnose the actual
+existing checkpoint directory and durable source ledger. The host must
+independently authorize and bind one exact request and the source paths;
+the request cannot select the store. A mismatched request returns
+`RESUME_ADMISSION_UNCONFIRMED` without probing it. The source ledger must
+be separate from the fresh rejection outputs. This adapter shares the
+actual admission's read-only pre-lock filesystem stage (ledger file
+identity, checked checkpoint directory and both volume types). It does
+not run the authority/CAS checks or acquire a lease, and discards the
+returned filesystem identities. No late worker can continue into
+admission. Offline integration coverage exercises both the real
+`admitWithFault` entry and the runtime adapter against a physical checkpoint
+and ledger, including each volume failure, dual failure, supported types,
+a mismatched request, missing ledger, unsafe directory permissions and a
+symlink directory; it checks source inventory/digests, sanitized
+result, diagnostics, journal, and zero model/workspace calls. This is
+still a deny-only step, **not** the outstanding live-fenced execution E2E.
+
 The Session Protocol v1 rejection order remains **protocol -> invocation ->
 resume**, before capabilities/model/tool policy/budget. A resume request with
 invalid later fields still returns `UNSUPPORTED_RESUME` on the default
@@ -294,6 +312,12 @@ Generation 257 refuses `RESUME_FENCE_LIMIT`; there is no automatic rotation.
 5. The host must wrap each short trusted state/receipt commit in
    `lease.publishIfCurrent { ... }`, which serializes validation and the
    publication with lease retirement, preventing a check-to-commit race.
+   JVM monitors are reentrant: same-thread `close()` inside any active
+   publication (including nested publications) refuses with
+   `RESUME_LEASE_PUBLICATION_ACTIVE` before changing the lease state.
+   Other threads still wait for the outermost publication; exceptions
+   unwind the guard and allow subsequent retirement. A host must close the
+   writer before closing the lease, outside publication callbacks.
    `lease.assertCurrent()` is a non-publishing status guard, **not** an
    atomic commit guard. Callback checks re-read only the fence and anchor head
    files; admission and snapshot inspection still verify the complete chain.
@@ -624,6 +648,13 @@ The Linux integration tier tests these failure boundaries offline:
 - Read-only pre-execution admission, read-tool authority, generation CAS,
   and changes to HEAD, policy, frozen inputs and unsafe execution state
 - Live ledger and stale callbacks; independent process lock and forced release
+- Trusted-store deny-only runtime preflight: checkpoint-only, ledger-only
+  and dual volume lookup failures, supported types, mismatched request,
+  missing ledger, unsafe permissions and symlink directory; exact sanitized
+  protocol denial, no source mutation or model/tool execution, and no
+  volume lookup after request binding or source identity refusal
+- Reentrant lease close refusal during fenced and nested publications,
+  exceptional callback cleanup and stale callback after successor admission
 - Anchor rollback, interrupted prepares, audit/fsync recovery and idempotent
   operator retries, including conflicting operator rejection
 - `reconciliationStatus` transitions from unaudited prepare to approved

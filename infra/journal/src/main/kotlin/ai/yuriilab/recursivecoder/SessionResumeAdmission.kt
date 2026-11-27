@@ -343,6 +343,9 @@ class SessionResumeLease internal constructor(
     private val onClosed: (Path) -> Unit
 ) : AutoCloseable {
     @Volatile private var closed = false
+    // Accessed only under this monitor. Nested publications must restore
+    // the outer state rather than clear it when their callback returns.
+    private var publishing = false
 
     @Synchronized internal fun requireCurrent(current: ResumeFenceRecord,
                                               expectedDirectory: Path) {
@@ -395,11 +398,24 @@ class SessionResumeLease internal constructor(
      */
     @Synchronized fun <T> publishIfCurrent(publication: () -> T): T {
         assertCurrent()
-        return publication()
+        val outerPublication = publishing
+        publishing = true
+        try {
+            return publication()
+        } finally {
+            publishing = outerPublication
+        }
     }
 
     @Synchronized override fun close() {
         if (closed) return
+        // JVM monitors are reentrant: a callback on this thread could
+        // otherwise release the OS lock while its publication is active.
+        // Refuse before changing state; another thread still waits for
+        // the entire outer publication to leave the monitor.
+        if (publishing)
+            throw SessionResumeUnconfirmed(
+                SessionResumeAdmissionDiagnosticCodes.RESUME_LEASE_PUBLICATION_ACTIVE)
         closed = true
         var failure: Exception? = null
         try { lock.release() } catch (e: Exception) { failure = e }
@@ -435,6 +451,22 @@ object SessionResumeAdmission {
         } catch (e: Exception) {
             throw SessionResumeUnconfirmed(SessionResumeAdmissionDiagnosticCodes.RESUME_LEDGER_IDENTITY_UNCONFIRMED, e)
         }
+    }
+
+    /**
+     * The actual pre-lock filesystem stage of fenced admission. This is
+     * deliberately read-only: even a successful return is not authorization.
+     * A diagnostic worker may call it on a trusted host's existing store,
+     * but must never continue into admit() or reuse the returned identity.
+     */
+    internal fun checkFilesystemBeforeLease(
+        directory: Path, context: CheckpointHostContext, ledgerPath: Path,
+        fileStoreType: (Path) -> String
+    ): Pair<Path, String> {
+        val ledgerKey = ledgerFileKey(ledgerPath)
+        val dir = SessionCheckpointStore.checkedAdmissionDirectory(directory, context)
+        ResumeLocalFileStorePolicy.requireSupportedPaths(dir, ledgerPath, fileStoreType)
+        return dir to ledgerKey
     }
 
     fun currentGeneration(directory: Path, context: CheckpointHostContext,
@@ -634,12 +666,11 @@ object SessionResumeAdmission {
         val authoritySha256 = ResumeReadAuthority.fingerprint(context, attestation.readPolicyFacts)
         if (!attestation.externalActionsReconciled)
             fail("RESUME_EXTERNAL_EFFECTS_UNCONFIRMED")
-        val ledgerKeyBeforeInspect = ledgerFileKey(ledgerPath)
-        val dir = SessionCheckpointStore.checkedAdmissionDirectory(directory, context)
         // This early pre-lock check is intentionally repeated inside
         // withAdmissionEvidence under resume.lock. Never remove the first one:
         // unsupported mounts must not cause resume.lock creation or fence changes.
-        ResumeLocalFileStorePolicy.requireSupportedPaths(dir, ledgerPath, fileStoreType)
+        val (dir, ledgerKeyBeforeInspect) = checkFilesystemBeforeLease(
+            directory, context, ledgerPath, fileStoreType)
         val lockPath = dir.resolve(RESUME_LOCK_NAME)
         if (!heldLocks.add(lockPath)) fail(SessionResumeAdmissionDiagnosticCodes.RESUME_LEASE_HELD)
         var owner: FileChannel? = null
@@ -756,4 +787,5 @@ internal object SessionResumeAdmissionDiagnosticCodes {
     const val RESUME_LEDGER_IDENTITY_UNCONFIRMED = "RESUME_LEDGER_IDENTITY_UNCONFIRMED"
     const val RESUME_EFFECT_RECONCILIATION_INVALID = "RESUME_EFFECT_RECONCILIATION_INVALID"
     const val RESUME_LEASE_HELD = "RESUME_LEASE_HELD"
+    const val RESUME_LEASE_PUBLICATION_ACTIVE = "RESUME_LEASE_PUBLICATION_ACTIVE"
 }
